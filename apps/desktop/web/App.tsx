@@ -1496,6 +1496,53 @@ export function App() {
     clearTerminalSurface();
   }
 
+  async function toggleSelectedSessionYolo() {
+    // The CLIs read their auto-approve flag at process start, so changing the
+    // setting on a live session means terminate + relaunch with --resume +
+    // the new flag. The adapter contract handles the right flag per CLI
+    // (Cortex `--yolo`, Claude `--dangerously-skip-permissions`, Codex
+    // `--dangerously-bypass-approvals-and-sandbox`). If the session has no
+    // live binding we just update the override and the next launch picks it
+    // up.
+    if (!selectedSession) return;
+    const current = selectedSession.dangerousModeOverride ?? shell.workspace.defaultDangerousMode;
+    const next = !current;
+    const binding = sessionTerminalBindingsRef.current[selectedSession.id];
+    if (binding) {
+      const confirmed = window.confirm(
+        `Restart this session with auto-approve ${next ? 'on' : 'off'}? The current ${agentLabel(selectedSession.agentKind)} process will terminate and resume with the new mode.`,
+      );
+      if (!confirmed) return;
+    }
+
+    setBusy(true);
+    try {
+      if (binding) {
+        await invoke('terminate_session', { terminalId: binding.terminalId }).catch(error => {
+          writeLog(`Restart terminate failed: ${errorMessage(error)}`);
+        });
+      }
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_session_dangerous_mode', {
+        request: { sessionId: selectedSession.id, dangerousModeOverride: next },
+      });
+      setShell(snapshot);
+      const updated = snapshot.sessions.find(s => s.id === selectedSession.id);
+      writeLog(`Auto-approve ${next ? 'on' : 'off'} for ${selectedSession.title}.`);
+      if (updated && binding) {
+        // Relaunch through the same path as a tab-click: launchRuntimeSession
+        // rebuilds the spawn spec from the persisted session, which now sees
+        // the updated override and will include the right dangerous flag.
+        void launchRuntimeSession(updated).catch(error => {
+          writeLog(`Restart with new auto-approve failed: ${errorMessage(error)}`);
+        });
+      }
+    } catch (error) {
+      writeLog(`Toggle auto-approve failed: ${errorMessage(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function setSessionTabVisibility(session: ShellSession, tabVisible: boolean) {
     const snapshot = await invoke<WorkspaceShellSnapshot>('update_session_tab_visibility', {
       request: { shellSessionId: session.id, tabVisible },
@@ -1825,10 +1872,22 @@ export function App() {
                 </div>
 
                 <div className={topControlsClass} data-testid="terminal-controls">
-                  <div className={autoApproveChipClass({ warn: effectiveDangerousMode })} data-testid="auto-approve-chip" title="Auto approval / YOLO state for the selected session">
+                  <button
+                    type="button"
+                    className={autoApproveChipClass({ warn: effectiveDangerousMode })}
+                    data-testid="auto-approve-chip"
+                    aria-pressed={effectiveDangerousMode}
+                    disabled={!selectedSession || busy}
+                    title={
+                      selectedTerminalBinding
+                        ? `Click to restart this session with auto-approve ${effectiveDangerousMode ? 'off' : 'on'}.`
+                        : `Click to set auto-approve ${effectiveDangerousMode ? 'off' : 'on'} for the next launch.`
+                    }
+                    onClick={() => void toggleSelectedSessionYolo()}
+                  >
                     <ShieldWarning size={14} />
-                    {effectiveDangerousMode ? 'Auto-approve · session' : 'Auto-approve · off'}
-                  </div>
+                    {effectiveDangerousMode ? 'Auto-approve · on' : 'Auto-approve · off'}
+                  </button>
                 </div>
               </div>
             ) : null}

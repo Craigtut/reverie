@@ -7,6 +7,10 @@ mod terminal_runtime;
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result};
+use app_shell::{
+    AppShellStore, CaptureCortexSessionRequest, CreateFocusRequest, CreateProjectRequest,
+    CreateSessionRequest, UpdateSessionTabVisibilityRequest, WorkspaceShellSnapshot,
+};
 use reverie_core::activity::ActivityState;
 use reverie_core::activity_watcher::{
     CortexActivityStream, CortexActivityUpdate, watch_cortex_activity,
@@ -17,10 +21,6 @@ use reverie_core::terminal::{TerminalFrame, TerminalId};
 use reverie_core::{AdapterDetection, CommandSpec, TerminalSpawnSpec};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use app_shell::{
-    AppShellStore, CaptureCortexSessionRequest, CreateFocusRequest, CreateProjectRequest,
-    CreateSessionRequest, UpdateSessionTabVisibilityRequest, WorkspaceShellSnapshot,
-};
 use terminal_backend::GhosttyTerminalState;
 use terminal_runtime::{TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest};
 
@@ -28,6 +28,37 @@ const PROOF_COLS: u16 = 120;
 const PROOF_ROWS: u16 = 36;
 const PROOF_FRAMES: usize = 180;
 const STREAM_FRAMES: usize = 240;
+const WINDOW_CORNER_RADIUS: f64 = 44.0;
+
+#[cfg(target_os = "macos")]
+fn apply_macos_window_corners(window: &tauri::WebviewWindow, radius: f64) {
+    use objc::runtime::{Object, YES};
+    use objc::{msg_send, sel, sel_impl};
+
+    let ns_window_ptr = match window.ns_window() {
+        Ok(ptr) => ptr,
+        Err(_) => return,
+    };
+    if ns_window_ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        let ns_window = ns_window_ptr as *mut Object;
+        let content_view: *mut Object = msg_send![ns_window, contentView];
+        if content_view.is_null() {
+            return;
+        }
+        let _: () = msg_send![content_view, setWantsLayer: YES];
+        let layer: *mut Object = msg_send![content_view, layer];
+        if layer.is_null() {
+            return;
+        }
+        let _: () = msg_send![layer, setCornerRadius: radius];
+        let _: () = msg_send![layer, setMasksToBounds: YES];
+        let _: () = msg_send![ns_window, invalidateShadow];
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct GhosttyFrameSequence {
@@ -105,7 +136,9 @@ fn list_agent_clis() -> Vec<AgentCliDetection> {
         .into_iter()
         .map(|adapter| {
             let detection = adapter.detect();
-            let executable = detection.executable().map(|path| path.display().to_string());
+            let executable = detection
+                .executable()
+                .map(|path| path.display().to_string());
             let candidates = match &detection {
                 AdapterDetection::Available { .. } => adapter
                     .executable_candidates()
@@ -186,7 +219,26 @@ fn remove_session(
     store: State<'_, AppShellStore>,
     session_id: SessionId,
 ) -> Result<WorkspaceShellSnapshot, String> {
-    store.remove_session(session_id).map_err(|err| err.to_string())
+    store
+        .remove_session(session_id)
+        .map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSessionDangerousModeRequest {
+    session_id: SessionId,
+    dangerous_mode_override: Option<bool>,
+}
+
+#[tauri::command]
+fn set_session_dangerous_mode(
+    store: State<'_, AppShellStore>,
+    request: SetSessionDangerousModeRequest,
+) -> Result<WorkspaceShellSnapshot, String> {
+    store
+        .set_session_dangerous_mode(request.session_id, request.dangerous_mode_override)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -202,7 +254,9 @@ fn archive_project(
     store: State<'_, AppShellStore>,
     project_id: ProjectId,
 ) -> Result<WorkspaceShellSnapshot, String> {
-    store.archive_project(project_id).map_err(|err| err.to_string())
+    store
+        .archive_project(project_id)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -228,8 +282,9 @@ fn start_session(
     let spawn_spec = match request.spawn_spec {
         Some(spawn_spec) => spawn_spec,
         None => {
-            let shell_session_id = session_id
-                .ok_or_else(|| "start_session requires sessionId when spawnSpec is omitted".to_owned())?;
+            let shell_session_id = session_id.ok_or_else(|| {
+                "start_session requires sessionId when spawnSpec is omitted".to_owned()
+            })?;
             store
                 .build_agent_spawn_spec(
                     shell_session_id,
@@ -327,8 +382,16 @@ fn record_render_metrics(metrics: serde_json::Value) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            let store_path = app.path().app_data_dir()?.join("workspace-shell.v1.sqlite3");
+            let store_path = app
+                .path()
+                .app_data_dir()?
+                .join("workspace-shell.v1.sqlite3");
             app.manage(AppShellStore::load_or_seed(store_path)?);
+
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                apply_macos_window_corners(&window, WINDOW_CORNER_RADIUS);
+            }
 
             // Start the Cortex activity-state watcher. Best-effort: if
             // ~/.cortex/sessions cannot be located (no HOME, etc.), Reverie
@@ -364,6 +427,7 @@ fn main() {
             create_session,
             update_session_tab_visibility,
             remove_session,
+            set_session_dangerous_mode,
             archive_focus,
             archive_project,
             capture_cortex_session,

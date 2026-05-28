@@ -4,7 +4,6 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
-use rusqlite::{Connection, params};
 use reverie_core::activity::ActivityState;
 use reverie_core::agents::{built_in_adapters, require_detected};
 use reverie_core::domain::{
@@ -14,6 +13,7 @@ use reverie_core::domain::{
 use reverie_core::{
     AgentAdapter, CortexSessionDiscovery, CortexSessionMetadata, LaunchContext, TerminalSpawnSpec,
 };
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
 const SHELL_STORE_SCHEMA_VERSION: u32 = 1;
@@ -138,13 +138,19 @@ impl AppShellStore {
         let store_paths = StorePaths::from_requested_path(path);
         if let Some(parent) = store_paths.db_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create Reverie app shell database directory at {}", parent.display())
+                format!(
+                    "failed to create Reverie app shell database directory at {}",
+                    parent.display()
+                )
             })?;
         }
 
         let legacy_json_snapshot = load_legacy_json_snapshot(&store_paths.legacy_json_path)?;
         let conn = Connection::open(&store_paths.db_path).with_context(|| {
-            format!("failed to open Reverie app shell database at {}", store_paths.db_path.display())
+            format!(
+                "failed to open Reverie app shell database at {}",
+                store_paths.db_path.display()
+            )
         })?;
         migrate_database(&conn)?;
 
@@ -197,7 +203,12 @@ impl AppShellStore {
         let adapter = built_in_adapters()
             .into_iter()
             .find(|adapter| adapter.kind() == session.agent_kind)
-            .with_context(|| format!("no built-in adapter registered for {:?}", session.agent_kind))?;
+            .with_context(|| {
+                format!(
+                    "no built-in adapter registered for {:?}",
+                    session.agent_kind
+                )
+            })?;
         let executable_path = require_detected(adapter.as_ref())?;
 
         build_agent_spawn_spec_for_session(
@@ -226,7 +237,10 @@ impl AppShellStore {
             .iter()
             .any(|project| !project.archived && project.path == request.path)
         {
-            return Err(anyhow!("project path is already in Reverie: {}", request.path.display()));
+            return Err(anyhow!(
+                "project path is already in Reverie: {}",
+                request.path.display()
+            ));
         }
 
         snapshot.projects.push(ShellProject {
@@ -253,7 +267,9 @@ impl AppShellStore {
                 .iter()
                 .any(|project| project.id == project_id && !project.archived);
             if !project_exists {
-                return Err(anyhow!("cannot create focus for unknown or archived project {project_id}"));
+                return Err(anyhow!(
+                    "cannot create focus for unknown or archived project {project_id}"
+                ));
             }
         }
 
@@ -294,7 +310,10 @@ impl AppShellStore {
             .iter()
             .any(|focus| focus.id == request.focus_id && !focus.archived);
         if !focus_exists {
-            return Err(anyhow!("cannot create session for unknown or archived focus {}", request.focus_id));
+            return Err(anyhow!(
+                "cannot create session for unknown or archived focus {}",
+                request.focus_id
+            ));
         }
 
         snapshot.sessions.push(ShellSession {
@@ -322,9 +341,9 @@ impl AppShellStore {
         cortex_home: PathBuf,
     ) -> Result<WorkspaceShellSnapshot> {
         let cortex_session_id = required_text(request.cortex_session_id, "Cortex session id")?;
-        let metadata_path = request
-            .metadata_path
-            .unwrap_or_else(|| CortexSessionMetadata::metadata_path(&cortex_home, &cortex_session_id));
+        let metadata_path = request.metadata_path.unwrap_or_else(|| {
+            CortexSessionMetadata::metadata_path(&cortex_home, &cortex_session_id)
+        });
         let encoded = fs::read_to_string(&metadata_path).with_context(|| {
             format!(
                 "failed to read Cortex session metadata at {}",
@@ -356,7 +375,9 @@ impl AppShellStore {
             .sessions
             .iter_mut()
             .find(|session| session.id == request.shell_session_id)
-            .with_context(|| format!("unknown Reverie shell session {}", request.shell_session_id))?;
+            .with_context(|| {
+                format!("unknown Reverie shell session {}", request.shell_session_id)
+            })?;
 
         if session.agent_kind != AgentKind::CortexCode {
             return Err(anyhow!(
@@ -410,7 +431,8 @@ impl AppShellStore {
             &cortex_home,
             &session_cwd,
             Some(launched_after_ms),
-        )? else {
+        )?
+        else {
             return Ok(None);
         };
 
@@ -491,7 +513,9 @@ impl AppShellStore {
 
     pub fn mark_session_failed(&self, session_id: SessionId) -> Result<WorkspaceShellSnapshot> {
         self.update_session(session_id, |session| {
-            session.status = if session.launch_mode == LaunchMode::Resume || session.native_session_ref.is_some() {
+            session.status = if session.launch_mode == LaunchMode::Resume
+                || session.native_session_ref.is_some()
+            {
                 SessionStatus::RestoreFailed
             } else {
                 SessionStatus::Exited
@@ -506,6 +530,16 @@ impl AppShellStore {
     ) -> Result<WorkspaceShellSnapshot> {
         self.update_session(request.shell_session_id, |session| {
             session.tab_visible = request.tab_visible;
+        })
+    }
+
+    pub fn set_session_dangerous_mode(
+        &self,
+        session_id: SessionId,
+        dangerous_mode_override: Option<bool>,
+    ) -> Result<WorkspaceShellSnapshot> {
+        self.update_session(session_id, |session| {
+            session.dangerous_mode_override = dangerous_mode_override;
         })
     }
 
@@ -535,7 +569,11 @@ impl AppShellStore {
             .find(|focus| focus.id == focus_id)
             .with_context(|| format!("unknown Reverie focus {focus_id}"))?;
         focus.archived = true;
-        for session in snapshot.sessions.iter_mut().filter(|session| session.focus_id == focus_id) {
+        for session in snapshot
+            .sessions
+            .iter_mut()
+            .filter(|session| session.focus_id == focus_id)
+        {
             session.tab_visible = false;
         }
 
@@ -563,7 +601,11 @@ impl AppShellStore {
                 focus.id
             })
             .collect();
-        for session in snapshot.sessions.iter_mut().filter(|session| focus_ids.contains(&session.focus_id)) {
+        for session in snapshot
+            .sessions
+            .iter_mut()
+            .filter(|session| focus_ids.contains(&session.focus_id))
+        {
             session.tab_visible = false;
         }
 
@@ -676,7 +718,8 @@ fn build_agent_spawn_spec_for_session(
         model: None,
         executable_path: Some(executable_path),
     };
-    let should_resume = session.launch_mode == LaunchMode::Resume || session.native_session_ref.is_some();
+    let should_resume =
+        session.launch_mode == LaunchMode::Resume || session.native_session_ref.is_some();
     let command = if should_resume {
         let native = session.native_session_ref.as_ref().ok_or_else(|| {
             anyhow!(
@@ -820,7 +863,10 @@ fn write_snapshot(path: &PathBuf, snapshot: &WorkspaceShellSnapshot) -> Result<(
     let encoded = serde_json::to_string_pretty(&document)
         .context("failed to encode Reverie app shell store")?;
     fs::write(path, encoded).with_context(|| {
-        format!("failed to write Reverie app shell store at {}", path.display())
+        format!(
+            "failed to write Reverie app shell store at {}",
+            path.display()
+        )
     })?;
     Ok(())
 }
@@ -859,10 +905,16 @@ fn load_legacy_json_snapshot(path: &Option<PathBuf>) -> Result<Option<WorkspaceS
     }
 
     let encoded = fs::read_to_string(path).with_context(|| {
-        format!("failed to read legacy Reverie app shell JSON store at {}", path.display())
+        format!(
+            "failed to read legacy Reverie app shell JSON store at {}",
+            path.display()
+        )
     })?;
     let document: WorkspaceShellDocument = serde_json::from_str(&encoded).with_context(|| {
-        format!("failed to decode legacy Reverie app shell JSON store at {}", path.display())
+        format!(
+            "failed to decode legacy Reverie app shell JSON store at {}",
+            path.display()
+        )
     })?;
     if document.schema_version != SHELL_STORE_SCHEMA_VERSION {
         return Err(anyhow!(
@@ -876,7 +928,10 @@ fn load_legacy_json_snapshot(path: &Option<PathBuf>) -> Result<Option<WorkspaceS
 
 fn looks_like_json_document(path: &Path) -> Result<bool> {
     let bytes = fs::read(path).with_context(|| {
-        format!("failed to inspect Reverie app shell store at {}", path.display())
+        format!(
+            "failed to inspect Reverie app shell store at {}",
+            path.display()
+        )
     })?;
     Ok(bytes
         .iter()
@@ -927,7 +982,12 @@ fn migrate_database(conn: &Connection) -> Result<()> {
          );",
     )
     .context("failed to migrate Reverie app shell database")?;
-    ensure_column(conn, "sessions", "tab_visible", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_column(
+        conn,
+        "sessions",
+        "tab_visible",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
     ensure_column(conn, "sessions", "latest_activity_json", "TEXT")?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
@@ -950,8 +1010,11 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
         }
     }
 
-    conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])
-        .with_context(|| format!("failed to add Reverie database column {table}.{column}"))?;
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+        [],
+    )
+    .with_context(|| format!("failed to add Reverie database column {table}.{column}"))?;
     Ok(())
 }
 
@@ -1056,9 +1119,7 @@ fn query_sessions(conn: &Connection) -> Result<Vec<ShellSession>> {
                 cwd: PathBuf::from(row.get::<_, String>(4)?),
                 native_session_ref: native_session_ref_from_db(row.get::<_, Option<String>>(5)?)?,
                 launch_mode: launch_mode_from_db(row.get::<_, String>(6)?)?,
-                dangerous_mode_override: row
-                    .get::<_, Option<i64>>(7)?
-                    .map(int_to_bool),
+                dangerous_mode_override: row.get::<_, Option<i64>>(7)?.map(int_to_bool),
                 status: session_status_from_db(row.get::<_, String>(8)?)?,
                 last_exit_code: row.get(9)?,
                 tab_visible: int_to_bool(row.get::<_, i64>(10)?),
@@ -1099,11 +1160,17 @@ fn collect_rows<T>(
 fn write_snapshot_to_database(path: &Path, snapshot: &WorkspaceShellSnapshot) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create Reverie app shell database directory at {}", parent.display())
+            format!(
+                "failed to create Reverie app shell database directory at {}",
+                parent.display()
+            )
         })?;
     }
     let mut conn = Connection::open(path).with_context(|| {
-        format!("failed to open Reverie app shell database at {}", path.display())
+        format!(
+            "failed to open Reverie app shell database at {}",
+            path.display()
+        )
     })?;
     migrate_database(&conn)?;
     let transaction = conn
@@ -1192,11 +1259,9 @@ fn write_snapshot_to_database(path: &Path, snapshot: &WorkspaceShellSnapshot) ->
 }
 
 fn parse_uuid(value: String) -> rusqlite::Result<WorkspaceId> {
-    WorkspaceId::parse_str(&value).map_err(|err| rusqlite::Error::FromSqlConversionFailure(
-        0,
-        rusqlite::types::Type::Text,
-        Box::new(err),
-    ))
+    WorkspaceId::parse_str(&value).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
 }
 
 fn agent_kind_to_db(value: AgentKind) -> Result<String> {
@@ -1256,11 +1321,9 @@ fn native_session_ref_from_db(value: Option<String>) -> rusqlite::Result<Option<
     value
         .map(|encoded| serde_json::from_str(&encoded))
         .transpose()
-        .map_err(|err| rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(err),
-        ))
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })
 }
 
 fn path_to_db(path: &Path) -> String {
@@ -1319,7 +1382,10 @@ fn normalize_shell_snapshot(snapshot: &mut WorkspaceShellSnapshot) -> bool {
         }
 
         if session.native_session_ref.is_some()
-            && matches!(session.status, SessionStatus::NotStarted | SessionStatus::Exited)
+            && matches!(
+                session.status,
+                SessionStatus::NotStarted | SessionStatus::Exited
+            )
         {
             session.status = SessionStatus::Restorable;
             changed = true;
@@ -1362,7 +1428,12 @@ mod tests {
         let snapshot = workspace_shell_snapshot();
 
         assert!(!snapshot.workspace.default_dangerous_mode);
-        assert!(snapshot.focuses.iter().any(|focus| focus.project_id.is_none()));
+        assert!(
+            snapshot
+                .focuses
+                .iter()
+                .any(|focus| focus.project_id.is_none())
+        );
         assert!(snapshot.sessions.iter().any(|session| {
             snapshot
                 .focuses
@@ -1374,7 +1445,10 @@ mod tests {
     #[test]
     fn shell_snapshot_links_project_focus_sessions() {
         let snapshot = workspace_shell_snapshot();
-        let project = snapshot.projects.first().expect("seed project should exist");
+        let project = snapshot
+            .projects
+            .first()
+            .expect("seed project should exist");
         let project_focus_ids = snapshot
             .focuses
             .iter()
@@ -1383,10 +1457,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(!project_focus_ids.is_empty());
-        assert!(snapshot
-            .sessions
-            .iter()
-            .any(|session| project_focus_ids.contains(&session.focus_id)));
+        assert!(
+            snapshot
+                .sessions
+                .iter()
+                .any(|session| project_focus_ids.contains(&session.focus_id))
+        );
     }
 
     #[test]
@@ -1472,10 +1548,7 @@ mod tests {
         let path = temp_store_path("normalize-stale-running");
         let mut snapshot = workspace_shell_snapshot();
         let sessions = &mut snapshot.sessions;
-        let uncaptured_session_id = sessions
-            .first_mut()
-            .expect("seed session should exist")
-            .id;
+        let uncaptured_session_id = sessions.first_mut().expect("seed session should exist").id;
         sessions
             .first_mut()
             .expect("seed session should exist")
@@ -1484,7 +1557,8 @@ mod tests {
             .get_mut(1)
             .expect("second seed session should exist");
         captured_session.status = SessionStatus::Running;
-        captured_session.native_session_ref = Some(NativeSessionRef::cortex("native-cortex-session", None));
+        captured_session.native_session_ref =
+            Some(NativeSessionRef::cortex("native-cortex-session", None));
         let captured_session_id = captured_session.id;
         write_snapshot(&path, &snapshot).expect("stale running fixture should be written");
 
@@ -1525,19 +1599,23 @@ mod tests {
             })
             .expect("focus should be created");
 
-        assert!(updated
-            .focuses
-            .iter()
-            .any(|focus| focus.project_id.is_none() && focus.title == "Inbox"));
+        assert!(
+            updated
+                .focuses
+                .iter()
+                .any(|focus| focus.project_id.is_none() && focus.title == "Inbox")
+        );
 
         let reloaded = AppShellStore::load_or_seed(path.clone())
             .expect("store should reload")
             .snapshot()
             .expect("snapshot should reload");
-        assert!(reloaded
-            .focuses
-            .iter()
-            .any(|focus| focus.project_id.is_none() && focus.title == "Inbox"));
+        assert!(
+            reloaded
+                .focuses
+                .iter()
+                .any(|focus| focus.project_id.is_none() && focus.title == "Inbox")
+        );
 
         let _ = fs::remove_file(path);
     }
@@ -1565,8 +1643,7 @@ mod tests {
     #[test]
     fn app_shell_store_persists_runtime_session_status_changes() {
         let path = temp_store_path("runtime-status");
-        write_snapshot(&path, &workspace_shell_snapshot())
-            .expect("demo fixture should be written");
+        write_snapshot(&path, &workspace_shell_snapshot()).expect("demo fixture should be written");
         let store = AppShellStore::load_or_seed(path.clone()).expect("store should seed");
         let session_id = store
             .snapshot()
@@ -1630,12 +1707,21 @@ mod tests {
         )
         .expect("new Cortex launch spec should build");
 
-        assert_eq!(spec.command.program, PathBuf::from("/opt/homebrew/bin/cortex"));
+        assert_eq!(
+            spec.command.program,
+            PathBuf::from("/opt/homebrew/bin/cortex")
+        );
         assert_eq!(spec.command.args, vec!["--yolo"]);
-        assert_eq!(spec.command.cwd, PathBuf::from("/Users/user/Code/reverie"));
+        assert_eq!(
+            spec.command.cwd,
+            PathBuf::from("/Users/user/Code/reverie")
+        );
         assert_eq!(spec.cols, 132);
         assert_eq!(spec.rows, 43);
-        assert_eq!(spec.title.as_deref(), Some("Live PTY stream proof · Cortex Code"));
+        assert_eq!(
+            spec.title.as_deref(),
+            Some("Live PTY stream proof · Cortex Code")
+        );
     }
 
     #[test]
@@ -1662,9 +1748,15 @@ mod tests {
         )
         .expect("resume Cortex launch spec should build");
 
-        assert_eq!(spec.command.program, PathBuf::from("/opt/homebrew/bin/cortex"));
+        assert_eq!(
+            spec.command.program,
+            PathBuf::from("/opt/homebrew/bin/cortex")
+        );
         assert_eq!(spec.command.args, vec!["--resume", "native-cortex-session"]);
-        assert_eq!(spec.command.cwd, PathBuf::from("/Users/user/Code/reverie"));
+        assert_eq!(
+            spec.command.cwd,
+            PathBuf::from("/Users/user/Code/reverie")
+        );
         assert_eq!(spec.cols, 100);
         assert_eq!(spec.rows, 32);
     }
@@ -1692,13 +1784,26 @@ mod tests {
         )
         .expect("new Codex launch spec should build");
 
-        assert_eq!(spec.command.program, PathBuf::from("/opt/homebrew/bin/codex"));
+        assert_eq!(
+            spec.command.program,
+            PathBuf::from("/opt/homebrew/bin/codex")
+        );
         assert_eq!(
             spec.command.args,
-            vec!["--cd", "/Users/user/Code/reverie", "--dangerously-bypass-approvals-and-sandbox"]
+            vec![
+                "--cd",
+                "/Users/user/Code/reverie",
+                "--dangerously-bypass-approvals-and-sandbox"
+            ]
         );
-        assert_eq!(spec.command.cwd, PathBuf::from("/Users/user/Code/reverie"));
-        assert_eq!(spec.title.as_deref(), Some("Live PTY stream proof · Codex CLI"));
+        assert_eq!(
+            spec.command.cwd,
+            PathBuf::from("/Users/user/Code/reverie")
+        );
+        assert_eq!(
+            spec.title.as_deref(),
+            Some("Live PTY stream proof · Codex CLI")
+        );
     }
 
     #[test]
@@ -1707,8 +1812,12 @@ mod tests {
         let cortex_home = temp_store_path("cortex-home");
         let cortex_session_id = "session-abc";
         let metadata_path = CortexSessionMetadata::metadata_path(&cortex_home, cortex_session_id);
-        fs::create_dir_all(metadata_path.parent().expect("metadata path should have parent"))
-            .expect("metadata directory should be created");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata path should have parent"),
+        )
+        .expect("metadata directory should be created");
         fs::write(
             &metadata_path,
             r#"{
@@ -1724,8 +1833,7 @@ mod tests {
         )
         .expect("metadata should be written");
 
-        write_snapshot(&path, &workspace_shell_snapshot())
-            .expect("demo fixture should be written");
+        write_snapshot(&path, &workspace_shell_snapshot()).expect("demo fixture should be written");
         let store = AppShellStore::load_or_seed(path.clone()).expect("store should seed");
         let session_id = store
             .snapshot()
@@ -1770,8 +1878,7 @@ mod tests {
     fn capture_cortex_session_after_launch_uses_cwd_and_launch_window() {
         let path = temp_store_path("cortex-launch-capture");
         let cortex_home = temp_store_path("cortex-launch-home");
-        write_snapshot(&path, &workspace_shell_snapshot())
-            .expect("demo fixture should be written");
+        write_snapshot(&path, &workspace_shell_snapshot()).expect("demo fixture should be written");
         let store = AppShellStore::load_or_seed(path.clone()).expect("store should seed");
         let session_id = store
             .snapshot()
@@ -1822,8 +1929,12 @@ mod tests {
 
     fn write_cortex_metadata(cortex_home: &PathBuf, session_id: &str, cwd: &str, updated_at: i64) {
         let metadata_path = CortexSessionMetadata::metadata_path(cortex_home, session_id);
-        fs::create_dir_all(metadata_path.parent().expect("metadata path should have parent"))
-            .expect("metadata directory should be created");
+        fs::create_dir_all(
+            metadata_path
+                .parent()
+                .expect("metadata path should have parent"),
+        )
+        .expect("metadata directory should be created");
         fs::write(
             metadata_path,
             format!(
