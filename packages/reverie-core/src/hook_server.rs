@@ -14,7 +14,7 @@
 //! the session launch path in the Tauri shell.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex,
         mpsc::{self, Receiver, Sender},
@@ -42,18 +42,21 @@ pub enum HookSource {
     CodexCli,
 }
 
-/// One translated update from the hook stream. Mirrors the public shape used
-/// by `CortexActivityUpdate` so the Tauri shell can fan both adapters into a
-/// single dashboard channel.
+/// One translated update from the hook stream. `reverie_session_id` is the
+/// Reverie-owned session that minted this token at launch; the Tauri shell
+/// uses it to update the right dashboard row even on the first hook (before
+/// the CLI's native session id is captured into `nativeSessionRef`).
 #[derive(Clone, Debug)]
 pub enum HookActivityUpdate {
     State {
         source: HookSource,
+        reverie_session_id: String,
         native_session_id: String,
         state: ActivityState,
     },
     Removed {
         source: HookSource,
+        reverie_session_id: String,
         native_session_id: String,
     },
 }
@@ -61,19 +64,21 @@ pub enum HookActivityUpdate {
 /// Shared, cheaply-cloned control surface for the running hook server. The
 /// Tauri shell holds one of these as managed state so the launch path can
 /// register a per-session token and the worker thread can validate incoming
-/// requests against the same set.
+/// requests against the same map.
 #[derive(Clone)]
 pub struct HookServerControl {
     pub port: u16,
-    auth: Arc<Mutex<HashSet<(HookSource, String)>>>,
+    auth: Arc<Mutex<HashMap<(HookSource, String), String>>>,
 }
 
 impl HookServerControl {
-    /// Authorize a token for one CLI source so subsequent POSTs to
-    /// `/hooks/<cli>/<token>` are accepted and translated.
-    pub fn register_session(&self, source: HookSource, token: String) {
+    /// Authorize a token for one CLI source and bind it to the Reverie session
+    /// that's about to use it. Subsequent POSTs to `/hooks/<cli>/<token>` are
+    /// accepted, translated, and tagged with the Reverie session id so the
+    /// drain can find the right row to update.
+    pub fn register_session(&self, source: HookSource, token: String, reverie_session_id: String) {
         let mut auth = self.auth.lock().unwrap_or_else(|err| err.into_inner());
-        auth.insert((source, token));
+        auth.insert((source, token), reverie_session_id);
     }
 
     /// Revoke a previously-registered token. Called when a Reverie session
@@ -138,7 +143,7 @@ pub fn start_hook_server() -> Result<HookServerHandle> {
 
     let (tx, rx) = mpsc::channel::<HookActivityUpdate>();
     let sequences: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-    let auth: Arc<Mutex<HashSet<(HookSource, String)>>> = Arc::new(Mutex::new(HashSet::new()));
+    let auth: Arc<Mutex<HashMap<(HookSource, String), String>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let worker_server = Arc::clone(&server);
     let worker_sequences = Arc::clone(&sequences);
@@ -159,7 +164,7 @@ pub fn start_hook_server() -> Result<HookServerHandle> {
 fn run_request_loop(
     server: Arc<Server>,
     sequences: Arc<Mutex<HashMap<String, u64>>>,
-    auth: Arc<Mutex<HashSet<(HookSource, String)>>>,
+    auth: Arc<Mutex<HashMap<(HookSource, String), String>>>,
     tx: Sender<HookActivityUpdate>,
 ) {
     for mut request in server.incoming_requests() {
@@ -174,17 +179,18 @@ fn run_request_loop(
             continue;
         };
 
-        // Validate the per-session token before reading the body. The auth
-        // set is populated by the Tauri shell at launch time via
-        // HookServerControl::register_session; revoked when the session ends.
-        let authorized = {
+        // Validate the per-session token and resolve the Reverie session it
+        // belongs to in one pass. The map is populated by the Tauri shell at
+        // launch time via HookServerControl::register_session; revoked when
+        // the session ends or is removed.
+        let reverie_session_id = {
             let guard = auth.lock().unwrap_or_else(|err| err.into_inner());
-            guard.contains(&(source, token.to_owned()))
+            guard.get(&(source, token.to_owned())).cloned()
         };
-        if !authorized {
+        let Some(reverie_session_id) = reverie_session_id else {
             let _ = request.respond(simple_response(401, "unauthorized"));
             continue;
-        }
+        };
 
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() {
@@ -199,7 +205,7 @@ fn run_request_loop(
             }
         };
 
-        if let Some(update) = translate(source, &payload, &sequences) {
+        if let Some(update) = translate(source, reverie_session_id, &payload, &sequences) {
             let _ = tx.send(update);
         }
         let _ = request.respond(simple_response(204, ""));
@@ -242,12 +248,13 @@ fn next_sequence(sequences: &Mutex<HashMap<String, u64>>, session_id: &str) -> u
 
 fn translate(
     source: HookSource,
+    reverie_session_id: String,
     payload: &Value,
     sequences: &Mutex<HashMap<String, u64>>,
 ) -> Option<HookActivityUpdate> {
     match source {
-        HookSource::ClaudeCode => translate_claude(payload, sequences),
-        HookSource::CodexCli => translate_codex(payload, sequences),
+        HookSource::ClaudeCode => translate_claude(reverie_session_id, payload, sequences),
+        HookSource::CodexCli => translate_codex(reverie_session_id, payload, sequences),
     }
 }
 
@@ -279,6 +286,7 @@ fn parse_envelope(payload: &Value) -> Option<HookEnvelope> {
 }
 
 fn translate_claude(
+    reverie_session_id: String,
     payload: &Value,
     sequences: &Mutex<HashMap<String, u64>>,
 ) -> Option<HookActivityUpdate> {
@@ -328,12 +336,14 @@ fn translate_claude(
 
     Some(HookActivityUpdate::State {
         source: HookSource::ClaudeCode,
+        reverie_session_id,
         native_session_id: session_id,
         state,
     })
 }
 
 fn translate_codex(
+    reverie_session_id: String,
     payload: &Value,
     sequences: &Mutex<HashMap<String, u64>>,
 ) -> Option<HookActivityUpdate> {
@@ -367,6 +377,7 @@ fn translate_codex(
 
     Some(HookActivityUpdate::State {
         source: HookSource::CodexCli,
+        reverie_session_id,
         native_session_id: session_id,
         state,
     })
@@ -600,11 +611,15 @@ mod tests {
         format!("/hooks/codex/{TEST_TOKEN}")
     }
 
+    const TEST_REVERIE_SESSION_ID: &str = "reverie-test-session";
+
     fn started_with_token(source: HookSource) -> HookServerHandle {
         let handle = start_hook_server().expect("server starts");
-        handle
-            .control
-            .register_session(source, TEST_TOKEN.to_owned());
+        handle.control.register_session(
+            source,
+            TEST_TOKEN.to_owned(),
+            TEST_REVERIE_SESSION_ID.to_owned(),
+        );
         handle
     }
 
@@ -627,10 +642,12 @@ mod tests {
         match wait_for_update(&handle) {
             HookActivityUpdate::State {
                 source,
+                reverie_session_id,
                 native_session_id,
                 state,
             } => {
                 assert_eq!(source, HookSource::ClaudeCode);
+                assert_eq!(reverie_session_id, TEST_REVERIE_SESSION_ID);
                 assert_eq!(native_session_id, "claude-sess-1");
                 assert_eq!(state.status, ActivityStatus::AwaitingPermission);
                 let perm = state.awaiting_permission.expect("permission set");
@@ -658,10 +675,12 @@ mod tests {
         match wait_for_update(&handle) {
             HookActivityUpdate::State {
                 source,
+                reverie_session_id,
                 native_session_id,
                 state,
             } => {
                 assert_eq!(source, HookSource::CodexCli);
+                assert_eq!(reverie_session_id, TEST_REVERIE_SESSION_ID);
                 assert_eq!(native_session_id, "codex-sess-1");
                 assert_eq!(state.status, ActivityStatus::AwaitingInput);
                 assert_eq!(state.sequence, 1);

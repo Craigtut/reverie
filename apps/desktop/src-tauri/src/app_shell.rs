@@ -682,6 +682,68 @@ impl AppShellStore {
         Ok(true)
     }
 
+    /// Persist activity for a session looked up by its Reverie id (the launch
+    /// path knows this from the moment it minted the hook token). Also
+    /// captures the CLI's native session id into `native_session_ref` the
+    /// first time we see it, so future launches use the adapter's resume
+    /// path. Returns whether a matching Reverie session was found.
+    pub fn record_session_activity_by_id(
+        &self,
+        reverie_session_id: SessionId,
+        native_session_id: &str,
+        activity: ActivityState,
+    ) -> Result<bool> {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow!("Reverie app shell store lock poisoned"))?;
+        let Some(session) = snapshot
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == reverie_session_id)
+        else {
+            return Ok(false);
+        };
+        if let Some(existing) = &session.latest_activity {
+            if existing.sequence > activity.sequence {
+                return Ok(false);
+            }
+        }
+        if session.native_session_ref.is_none() {
+            session.native_session_ref = Some(NativeSessionRef {
+                kind: session.agent_kind,
+                session_id: Some(native_session_id.to_owned()),
+                metadata_path: None,
+                adapter_payload: serde_json::Value::Null,
+            });
+        }
+        session.latest_activity = Some(activity);
+        write_snapshot_to_database(&self.db_path, &snapshot)?;
+        Ok(true)
+    }
+
+    /// Clear persisted activity for a Reverie session by id (paired with the
+    /// hook adapter's `Removed` updates so the dashboard drops the row).
+    pub fn clear_session_activity_by_id(&self, reverie_session_id: SessionId) -> Result<bool> {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow!("Reverie app shell store lock poisoned"))?;
+        let Some(session) = snapshot
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == reverie_session_id)
+        else {
+            return Ok(false);
+        };
+        if session.latest_activity.is_none() {
+            return Ok(false);
+        }
+        session.latest_activity = None;
+        write_snapshot_to_database(&self.db_path, &snapshot)?;
+        Ok(true)
+    }
+
     fn update_session(
         &self,
         session_id: SessionId,

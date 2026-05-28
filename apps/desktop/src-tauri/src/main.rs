@@ -443,7 +443,7 @@ fn inject_hook_config_if_needed(
         HookSource::CodexCli => reverie_core::write_codex_config(&config_dir, &url)?,
     };
 
-    control.register_session(source, token.clone());
+    control.register_session(source, token.clone(), shell_session_id.to_string());
     registry.replace(shell_session_id, source, token);
 
     spawn_spec
@@ -777,23 +777,82 @@ fn drain_hook_activity(handle: HookServerHandle, app: AppHandle) {
         match update {
             HookActivityUpdate::State {
                 source,
+                reverie_session_id,
                 native_session_id,
                 state,
-            } => forward_activity_update(
+            } => forward_hook_state_update(
                 &app,
                 hook_source_to_activity_source(source),
+                &reverie_session_id,
                 native_session_id,
                 state,
             ),
             HookActivityUpdate::Removed {
                 source,
+                reverie_session_id,
                 native_session_id,
-            } => forward_activity_removed(
+            } => forward_hook_removed_update(
                 &app,
                 hook_source_to_activity_source(source),
+                &reverie_session_id,
                 native_session_id,
             ),
         }
+    }
+}
+
+/// Hook updates carry the Reverie session id that owns the token, so we
+/// persist activity (and capture the CLI's native session id) by Reverie id
+/// directly instead of doing a reverse lookup by native id.
+fn forward_hook_state_update(
+    app: &AppHandle,
+    source: ActivitySource,
+    reverie_session_id: &str,
+    native_session_id: String,
+    state: ActivityState,
+) {
+    if let Some(store) = app.try_state::<AppShellStore>() {
+        if let Ok(parsed) = SessionId::parse_str(reverie_session_id) {
+            if let Err(error) =
+                store.record_session_activity_by_id(parsed, &native_session_id, state.clone())
+            {
+                eprintln!(
+                    "[reverie] failed to persist hook activity for {reverie_session_id}: {error:#}"
+                );
+            }
+        }
+    }
+    let payload = SessionActivityEvent::Updated {
+        source,
+        native_session_id,
+        state,
+    };
+    if let Err(error) = app.emit(SESSION_ACTIVITY_EVENT, payload) {
+        eprintln!("[reverie] failed to emit session activity event: {error}");
+    }
+}
+
+fn forward_hook_removed_update(
+    app: &AppHandle,
+    source: ActivitySource,
+    reverie_session_id: &str,
+    native_session_id: String,
+) {
+    if let Some(store) = app.try_state::<AppShellStore>() {
+        if let Ok(parsed) = SessionId::parse_str(reverie_session_id) {
+            if let Err(error) = store.clear_session_activity_by_id(parsed) {
+                eprintln!(
+                    "[reverie] failed to clear hook activity for {reverie_session_id}: {error:#}"
+                );
+            }
+        }
+    }
+    let payload = SessionActivityEvent::Removed {
+        source,
+        native_session_id,
+    };
+    if let Err(error) = app.emit(SESSION_ACTIVITY_EVENT, payload) {
+        eprintln!("[reverie] failed to emit session activity removal: {error}");
     }
 }
 
