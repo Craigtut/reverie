@@ -16,6 +16,7 @@ import {
   CircleDashed,
   Folder,
   GearSix,
+  House,
   MagnifyingGlass,
   Moon,
   Play,
@@ -23,6 +24,7 @@ import {
   ShieldWarning,
   Sun,
   TerminalWindow,
+  Warning,
   X,
 } from '@phosphor-icons/react';
 
@@ -78,7 +80,7 @@ const USER_HOME = '/Users/user';
 type MetricValue = string | number | boolean | undefined;
 type ProjectFilter = string | null;
 type ThemeMode = 'dark' | 'light';
-type SurfaceMode = 'terminal' | 'settings' | 'session-history';
+type SurfaceMode = 'dashboard' | 'terminal' | 'settings' | 'session-history';
 
 interface RenderMetrics {
   mode: string;
@@ -292,7 +294,7 @@ export function App() {
   const [metrics, setMetrics] = useState<RenderMetrics[]>([]);
   const [busy, setBusy] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>('dark');
-  const [surfaceMode, setSurfaceMode] = useState<SurfaceMode>('terminal');
+  const [surfaceMode, setSurfaceMode] = useState<SurfaceMode>('dashboard');
   const isTauriRuntime = useMemo(() => Boolean(window.__TAURI_INTERNALS__ || (window.__TAURI__ && !window.__REVERIE_BROWSER_FIXTURE__)), []);
   const canUseAppServices = true;
   const scrollbackContract = useMemo(() => terminalScrollbackContract(terminalSurface), [terminalSurface]);
@@ -319,10 +321,14 @@ export function App() {
   }, [selectedFocus, shell.sessions]);
   const visibleSessions = useMemo(() => focusSessions.filter(session => session.tabVisible !== false), [focusSessions]);
   const hiddenFocusSessions = useMemo(() => focusSessions.filter(session => session.tabVisible === false), [focusSessions]);
-  const selectedSession = creationMode || surfaceMode === 'session-history' ? null : visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? null;
+  const selectedSession = creationMode || surfaceMode === 'session-history' || surfaceMode === 'dashboard' ? null : visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? null;
   const selectedTerminalBinding = selectedSession ? sessionTerminalBindings[selectedSession.id] ?? null : null;
   const isLaunchingSelectedSession = Boolean(
     selectedSession && launchingSessionId === selectedSession.id && !selectedTerminalBinding,
+  );
+  const liveSessionCount = useMemo(
+    () => shell.sessions.filter(s => s.tabVisible !== false && (s.status === 'running' || sessionTerminalBindings[s.id])).length,
+    [shell.sessions, sessionTerminalBindings],
   );
 
   // Clean up the launchingSessionId once the live binding arrives (the breathing
@@ -1310,6 +1316,27 @@ export function App() {
     }
   }
 
+  function goToDashboard() {
+    setCreationMode(null);
+    setSurfaceMode('dashboard');
+  }
+
+  function openSessionFromDashboard(session: ShellSession) {
+    const focus = shell.focuses.find(f => f.id === session.focusId);
+    if (!focus) return;
+    const projectId = focus.projectId ?? null;
+    selectedProjectIdRef.current = projectId;
+    selectedProjectRef.current = projectId
+      ? shell.projects.find(p => p.id === projectId) ?? null
+      : null;
+    setSelectedProjectId(projectId);
+    setSelectedFocusId(session.focusId);
+    setSelectedSessionId(session.id);
+    setCreationMode(null);
+    setSurfaceMode('terminal');
+    selectSessionTab(session);
+  }
+
   function openFocus(projectId: string | null, focusId: string) {
     selectedProjectIdRef.current = projectId;
     selectedProjectRef.current = projectId ? shell.projects.find(project => project.id === projectId) ?? null : null;
@@ -1464,11 +1491,25 @@ export function App() {
         </div>
 
         <nav className={navClass} data-testid="workspace-nav">
+          <button
+            type="button"
+            className={homeRowClass({ active: surfaceMode === 'dashboard' })}
+            data-testid="home-nav-button"
+            data-active={surfaceMode === 'dashboard' ? 'true' : 'false'}
+            onClick={goToDashboard}
+          >
+            <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
+            <span className={homeRowLabelClass}>Home</span>
+            {liveSessionCount > 0 ? (
+              <span className={homeRowMetaClass} data-testid="home-nav-live-count">{liveSessionCount} live</span>
+            ) : null}
+          </button>
+
           <ProjectGroup
             icon={<CircleDashed size={15} />}
             title={shell.workspace.generalLabel}
             count={sessionsForProject(null, shell).length}
-            active={selectedProjectId === null}
+            active={selectedProjectId === null && surfaceMode !== 'dashboard'}
             onProjectClick={() => {
               setSelectedProjectId(null);
               setSurfaceMode('terminal');
@@ -1560,7 +1601,17 @@ export function App() {
       </aside>
 
       <section className={canvasStageClass} aria-label="Focus view" data-testid="focus-stage">
-        {surfaceMode === 'settings' ? (
+        {surfaceMode === 'dashboard' ? (
+          <DashboardSurface
+            shell={shell}
+            theme={theme}
+            sessionTerminalBindings={sessionTerminalBindings}
+            onOpenSession={openSessionFromDashboard}
+            onCreateProject={() => openCreation('project')}
+            onCreateFocus={() => openCreation('focus')}
+            cliDetections={agentCliDetections}
+          />
+        ) : surfaceMode === 'settings' ? (
           <SettingsSurface
             theme={theme}
             setTheme={setTheme}
@@ -2071,6 +2122,218 @@ function EmptyState({ cliDetections, createFocus, createProject, openSettings }:
         </div>
       </motion.div>
     </div>
+  );
+}
+
+type DashboardStatus = 'attention' | 'live' | 'recent';
+
+function sessionBreadcrumb(session: ShellSession, shell: WorkspaceShellSnapshot): string {
+  const focus = shell.focuses.find(f => f.id === session.focusId);
+  if (!focus) return 'Workspace';
+  if (!focus.projectId) return `General · ${focus.title}`;
+  const project = shell.projects.find(p => p.id === focus.projectId);
+  return project ? `${project.name} · ${focus.title}` : focus.title;
+}
+
+function plainLanguageStatus(session: ShellSession, isBound: boolean): string {
+  if (session.status === 'restore_failed') return 'Needs your attention';
+  if (session.status === 'running' || isBound) return 'Running';
+  if (session.status === 'restorable' || session.nativeSessionRef) return 'Resumable';
+  if (session.status === 'exited') return 'Ended';
+  return 'Ready to launch';
+}
+
+function statusDotColor(status: DashboardStatus): string {
+  if (status === 'attention') return 'var(--warn)';
+  if (status === 'live') return 'var(--good)';
+  return 'var(--text-4)';
+}
+
+function DashboardSurface({
+  shell,
+  theme,
+  sessionTerminalBindings,
+  onOpenSession,
+  onCreateProject,
+  onCreateFocus,
+  cliDetections,
+}: {
+  shell: WorkspaceShellSnapshot;
+  theme: ThemeMode;
+  sessionTerminalBindings: Record<string, SessionTerminalBinding>;
+  onOpenSession: (session: ShellSession) => void;
+  onCreateProject: () => void;
+  onCreateFocus: () => void;
+  cliDetections: AgentCliDetection[];
+}) {
+  // Partition visible sessions across the three rails. The set is defined from
+  // local product data so the dashboard ships before the activity-state pipeline
+  // arrives. As that lands, `attention` will pick up awaiting_permission too
+  // and `live` will reflect the richer working/awaiting_input split.
+  const visible = shell.sessions.filter(s => s.tabVisible !== false);
+  const attention = visible.filter(s => s.status === 'restore_failed');
+  const live = visible.filter(
+    s => s.status === 'running' || Boolean(sessionTerminalBindings[s.id]),
+  );
+  const liveIds = new Set(live.map(s => s.id));
+  const attentionIds = new Set(attention.map(s => s.id));
+  const recent = visible.filter(s => !liveIds.has(s.id) && !attentionIds.has(s.id));
+
+  const totalVisible = visible.length;
+  const isEmptyWorkspace = totalVisible === 0;
+
+  if (isEmptyWorkspace) {
+    return (
+      <EmptyState
+        cliDetections={cliDetections}
+        createFocus={onCreateFocus}
+        createProject={onCreateProject}
+        openSettings={() => undefined}
+      />
+    );
+  }
+
+  return (
+    <div className={dashboardSurfaceClass} data-testid="dashboard-surface">
+      <DotField variant="ambient" theme={theme} />
+      <motion.div
+        className={dashboardContentClass}
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+      >
+        <header className={dashboardHeaderClass}>
+          <div>
+            <p className={dashboardKickerClass}>Workspace</p>
+            <h1 className={dashboardTitleClass}>{shell.workspace.name}</h1>
+          </div>
+          <div className={dashboardCountsClass}>
+            <span data-tone={live.length > 0 ? 'live' : 'idle'} data-testid="dashboard-live-count">
+              <i style={{ background: live.length > 0 ? 'var(--good)' : 'var(--text-4)' }} />
+              {live.length} live
+            </span>
+            <span data-tone={attention.length > 0 ? 'attention' : 'idle'} data-testid="dashboard-attention-count">
+              <i style={{ background: attention.length > 0 ? 'var(--warn)' : 'var(--text-4)' }} />
+              {attention.length} need attention
+            </span>
+            <span data-tone="recent" data-testid="dashboard-recent-count">
+              <i style={{ background: 'var(--text-4)' }} />
+              {recent.length} recent
+            </span>
+          </div>
+        </header>
+
+        {attention.length > 0 ? (
+          <DashboardRail
+            title="Needs your attention"
+            icon={<Warning size={13} weight="fill" />}
+            tone="attention"
+            sessions={attention}
+            shell={shell}
+            bindings={sessionTerminalBindings}
+            onOpenSession={onOpenSession}
+          />
+        ) : null}
+
+        {live.length > 0 ? (
+          <DashboardRail
+            title="Live now"
+            tone="live"
+            sessions={live}
+            shell={shell}
+            bindings={sessionTerminalBindings}
+            onOpenSession={onOpenSession}
+          />
+        ) : null}
+
+        {recent.length > 0 ? (
+          <DashboardRail
+            title="Recent"
+            tone="recent"
+            sessions={recent}
+            shell={shell}
+            bindings={sessionTerminalBindings}
+            onOpenSession={onOpenSession}
+          />
+        ) : null}
+      </motion.div>
+    </div>
+  );
+}
+
+function DashboardRail({
+  title,
+  icon,
+  tone,
+  sessions,
+  shell,
+  bindings,
+  onOpenSession,
+}: {
+  title: string;
+  icon?: ReactNode;
+  tone: DashboardStatus;
+  sessions: ShellSession[];
+  shell: WorkspaceShellSnapshot;
+  bindings: Record<string, SessionTerminalBinding>;
+  onOpenSession: (session: ShellSession) => void;
+}) {
+  return (
+    <section className={dashboardRailClass} data-tone={tone} data-testid={`dashboard-rail-${tone}`}>
+      <header className={dashboardRailHeaderClass}>
+        {icon ? <span data-testid={`dashboard-rail-icon-${tone}`}>{icon}</span> : null}
+        <h2 style={tone === 'attention' ? { color: 'var(--warn)' } : undefined}>{title}</h2>
+        <span className={dashboardRailCountClass}>{sessions.length}</span>
+      </header>
+      <div className={dashboardCardsClass}>
+        {sessions.map(session => (
+          <SessionDashboardCard
+            key={session.id}
+            session={session}
+            shell={shell}
+            isBound={Boolean(bindings[session.id])}
+            tone={tone}
+            onOpen={() => onOpenSession(session)}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SessionDashboardCard({
+  session,
+  shell,
+  isBound,
+  tone,
+  onOpen,
+}: {
+  session: ShellSession;
+  shell: WorkspaceShellSnapshot;
+  isBound: boolean;
+  tone: DashboardStatus;
+  onOpen: () => void;
+}) {
+  const breadcrumb = sessionBreadcrumb(session, shell);
+  const statusLabel = plainLanguageStatus(session, isBound);
+
+  return (
+    <button
+      type="button"
+      className={dashboardCardClass}
+      data-tone={tone}
+      data-testid="dashboard-session-card"
+      data-session-id={session.id}
+      onClick={onOpen}
+    >
+      <div className={dashboardCardTopClass}>
+        <AgentGlyph kind={session.agentKind} />
+        <span className={dashboardCardDotClass} style={{ background: statusDotColor(tone) }} aria-hidden="true" />
+      </div>
+      <div className={dashboardCardTitleClass}>{agentTabLabel(session)}</div>
+      <div className={dashboardCardBreadcrumbClass}>{breadcrumb}</div>
+      <div className={dashboardCardStatusClass}>{statusLabel}</div>
+    </button>
   );
 }
 
@@ -2750,6 +3013,49 @@ const navClass = css({
   },
 });
 
+function homeRowClass({ active }: { active: boolean }) {
+  return css({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    width: '100%',
+    padding: '7px 10px',
+    marginBottom: '8px',
+    borderRadius: '8px',
+    border: '1px solid',
+    borderColor: active ? 'var(--line-strong)' : 'transparent',
+    color: active ? 'var(--text)' : 'var(--text-2)',
+    background: active ? 'var(--surface-3)' : 'transparent',
+    cursor: 'pointer',
+    userSelect: 'none',
+    textAlign: 'left',
+    fontSize: '13px',
+    fontWeight: 500,
+    letterSpacing: '-0.005em',
+    transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
+    _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
+    '& svg': { color: active ? 'var(--text)' : 'var(--text-3)', flexShrink: 0 },
+  });
+}
+
+const homeRowLabelClass = css({
+  flex: 1,
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+const homeRowMetaClass = css({
+  fontSize: '10.5px',
+  color: 'var(--text-3)',
+  fontVariantNumeric: 'tabular-nums',
+  padding: '1px 7px',
+  border: '1px solid var(--line)',
+  borderRadius: '999px',
+  background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
+});
+
 const projectGroupClass = css({
   display: 'grid',
   gap: '2px',
@@ -3252,6 +3558,192 @@ const surfaceViewportClass = css({
 const terminalScrollSpacerClass = css({
   position: 'relative',
   minHeight: '100%',
+});
+
+const dashboardSurfaceClass = css({
+  ...rimLitPanel,
+  position: 'relative',
+  flex: 1,
+  minHeight: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  overflow: 'hidden',
+});
+
+const dashboardContentClass = css({
+  position: 'relative',
+  zIndex: 2,
+  flex: 1,
+  minHeight: 0,
+  overflowY: 'auto',
+  padding: '28px 32px 40px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '28px',
+  '&::-webkit-scrollbar': { width: '10px' },
+  '&::-webkit-scrollbar-thumb': {
+    background: 'var(--line)',
+    borderRadius: '8px',
+    border: '2px solid transparent',
+    backgroundClip: 'padding-box',
+  },
+});
+
+const dashboardHeaderClass = css({
+  display: 'flex',
+  alignItems: 'flex-end',
+  justifyContent: 'space-between',
+  gap: '16px',
+  flexWrap: 'wrap',
+});
+
+const dashboardKickerClass = css({
+  margin: 0,
+  fontSize: '10.5px',
+  fontWeight: 500,
+  letterSpacing: '0.12em',
+  textTransform: 'uppercase',
+  color: 'var(--text-3)',
+});
+
+const dashboardTitleClass = css({
+  margin: '4px 0 0',
+  fontSize: '22px',
+  fontWeight: 500,
+  letterSpacing: '-0.012em',
+  color: 'var(--text)',
+});
+
+const dashboardCountsClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '10px',
+  flexWrap: 'wrap',
+  '& span': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '7px',
+    padding: '5px 11px',
+    fontSize: '11.5px',
+    fontWeight: 500,
+    color: 'var(--text-2)',
+    background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
+    border: '1px solid var(--line)',
+    borderRadius: '999px',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  '& span i': {
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
+    display: 'inline-block',
+  },
+});
+
+const dashboardRailClass = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '12px',
+});
+
+const dashboardRailHeaderClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  color: 'var(--text-3)',
+  '& > span': {
+    display: 'inline-flex',
+    color: 'var(--warn)',
+  },
+  '& h2': {
+    margin: 0,
+    fontSize: '11px',
+    fontWeight: 500,
+    letterSpacing: '0.10em',
+    textTransform: 'uppercase',
+    color: 'var(--text-3)',
+  },
+});
+
+const dashboardRailCountClass = css({
+  fontSize: '11px',
+  color: 'var(--text-4)',
+  fontVariantNumeric: 'tabular-nums',
+});
+
+const dashboardCardsClass = css({
+  display: 'grid',
+  gap: '12px',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(228px, 1fr))',
+});
+
+const dashboardCardClass = css({
+  position: 'relative',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'flex-start',
+  gap: '8px',
+  padding: '14px 14px 13px',
+  borderRadius: '14px',
+  border: '1px solid var(--line)',
+  background: 'color-mix(in srgb, var(--surface-1) 78%, transparent)',
+  color: 'var(--text-2)',
+  textAlign: 'left',
+  cursor: 'pointer',
+  overflow: 'hidden',
+  transition: 'border-color 140ms ease, transform 140ms cubic-bezier(0.22, 1, 0.36, 1), background 140ms ease',
+  _hover: {
+    borderColor: 'var(--line-strong)',
+    transform: 'translateY(-1px)',
+    background: 'color-mix(in srgb, var(--surface-2) 78%, transparent)',
+    color: 'var(--text)',
+  },
+  '&[data-tone="attention"]': {
+    borderColor: 'color-mix(in srgb, var(--warn) 35%, var(--line) 65%)',
+  },
+});
+
+const dashboardCardTopClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  width: '100%',
+  color: 'var(--text-3)',
+});
+
+const dashboardCardDotClass = css({
+  display: 'inline-block',
+  width: '8px',
+  height: '8px',
+  borderRadius: '50%',
+});
+
+const dashboardCardTitleClass = css({
+  fontSize: '14px',
+  fontWeight: 500,
+  color: 'var(--text)',
+  letterSpacing: '-0.005em',
+  width: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+const dashboardCardBreadcrumbClass = css({
+  fontSize: '11px',
+  color: 'var(--text-3)',
+  width: '100%',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+const dashboardCardStatusClass = css({
+  fontSize: '10.5px',
+  fontWeight: 500,
+  letterSpacing: '0.06em',
+  textTransform: 'uppercase',
+  color: 'var(--text-3)',
 });
 
 const emptyStateClass = css({
