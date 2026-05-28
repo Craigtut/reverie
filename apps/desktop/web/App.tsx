@@ -329,6 +329,11 @@ export function App() {
   // breathing launch animation. Cleared automatically when the live terminal
   // binding arrives, or on launch failure.
   const [launchingSessionId, setLaunchingSessionId] = useState<string | null>(null);
+  // Command palette visibility + current query. The palette filters across
+  // focuses and sessions in the whole workspace; bound to ⌘K (Ctrl+K on
+  // non-mac) and to clicking the search bar.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState('');
   // Map from Cortex session id → live ActivityState. Reverie sessions look up
   // their entry by `nativeSessionRef.sessionId`. Sessions Reverie doesn't own
   // still land in the map but stay invisible until correlation succeeds.
@@ -688,6 +693,31 @@ export function App() {
     applyViewportSize(viewport.clientWidth, viewport.clientHeight);
     return () => observer.disconnect();
   }, [isTauriRuntime, surfaceMode, selectedSession?.id]);
+
+  // Global ⌘K / Ctrl+K opens the command palette from any surface, and Esc
+  // closes it. We swallow the default browser behavior for the shortcut so
+  // it doesn't trigger find-in-page when the focus is inside the terminal.
+  useEffect(() => {
+    function handleKey(event: globalThis.KeyboardEvent) {
+      const isPaletteShortcut =
+        event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+      if (isPaletteShortcut) {
+        event.preventDefault();
+        setPaletteOpen(open => !open);
+        return;
+      }
+      if (event.key === 'Escape' && paletteOpen) {
+        event.preventDefault();
+        setPaletteOpen(false);
+      }
+    }
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [paletteOpen]);
+
+  useEffect(() => {
+    if (!paletteOpen) setPaletteQuery('');
+  }, [paletteOpen]);
 
   // Seed cortexActivity from the persisted `latestActivity` on each session
   // every time the workspace shell snapshot updates. Persisted entries close
@@ -1691,11 +1721,17 @@ export function App() {
           </div>
         </div>
 
-        <div className={searchClass} data-testid="focus-search">
+        <button
+          type="button"
+          className={searchClass}
+          data-testid="focus-search"
+          aria-label="Open command palette"
+          onClick={() => setPaletteOpen(true)}
+        >
           <MagnifyingGlass size={14} />
-          <input placeholder="Search focuses, sessions…" aria-label="Search focuses and sessions" />
-          <span>⌘K</span>
-        </div>
+          <span className={searchPlaceholderClass}>Search focuses, sessions…</span>
+          <span className={searchShortcutClass}>⌘K</span>
+        </button>
 
         <nav className={navClass} data-testid="workspace-nav">
           <button
@@ -2003,6 +2039,23 @@ export function App() {
         )}
       </section>
 
+      {paletteOpen ? (
+        <CommandPalette
+          query={paletteQuery}
+          setQuery={setPaletteQuery}
+          shell={shell}
+          cortexActivity={cortexActivity}
+          onClose={() => setPaletteOpen(false)}
+          onPickSession={session => {
+            setPaletteOpen(false);
+            openSessionFromDashboard(session);
+          }}
+          onPickFocus={(projectId, focusId) => {
+            setPaletteOpen(false);
+            openFocus(projectId, focusId);
+          }}
+        />
+      ) : null}
     </main>
   );
 }
@@ -2085,6 +2138,178 @@ function SessionLaunchOverlay({
           {label}
         </button>
       </div>
+    </div>
+  );
+}
+
+type PaletteEntry =
+  | { kind: 'focus'; id: string; title: string; projectId: string | null; projectName: string | null; sessionCount: number }
+  | { kind: 'session'; session: ShellSession; breadcrumb: string; activity: ActivityState | null };
+
+function buildPaletteEntries(shell: WorkspaceShellSnapshot, cortexActivity: Record<string, ActivityState>): PaletteEntry[] {
+  const entries: PaletteEntry[] = [];
+  for (const focus of shell.focuses) {
+    if (focus.archived) continue;
+    const project = focus.projectId ? shell.projects.find(p => p.id === focus.projectId) ?? null : null;
+    if (project?.archived) continue;
+    entries.push({
+      kind: 'focus',
+      id: focus.id,
+      title: focus.title,
+      projectId: focus.projectId ?? null,
+      projectName: project?.name ?? null,
+      sessionCount: shell.sessions.filter(s => s.focusId === focus.id && s.tabVisible !== false).length,
+    });
+  }
+  for (const session of shell.sessions) {
+    if (session.tabVisible === false) continue;
+    const focus = shell.focuses.find(f => f.id === session.focusId);
+    if (!focus) continue;
+    const project = focus.projectId ? shell.projects.find(p => p.id === focus.projectId) ?? null : null;
+    const breadcrumb = project ? `${project.name} · ${focus.title}` : focus.title;
+    const cortexId = session.nativeSessionRef?.sessionId;
+    const activity = cortexId ? cortexActivity[cortexId] ?? null : null;
+    entries.push({ kind: 'session', session, breadcrumb, activity });
+  }
+  return entries;
+}
+
+function paletteHaystack(entry: PaletteEntry): string {
+  if (entry.kind === 'focus') {
+    return [entry.title, entry.projectName ?? ''].filter(Boolean).join(' ').toLowerCase();
+  }
+  return [entry.session.title, entry.breadcrumb, entry.session.cwd, entry.session.agentKind]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function filterPalette(entries: PaletteEntry[], query: string): PaletteEntry[] {
+  const needle = query.trim().toLowerCase();
+  if (needle.length === 0) return entries.slice(0, 25);
+  // Simple substring filter; small workspace sizes make a fancier matcher
+  // unnecessary for v1. If results explode we can swap in a fuse-style scorer.
+  return entries.filter(entry => paletteHaystack(entry).includes(needle)).slice(0, 25);
+}
+
+function CommandPalette({
+  query,
+  setQuery,
+  shell,
+  cortexActivity,
+  onClose,
+  onPickSession,
+  onPickFocus,
+}: {
+  query: string;
+  setQuery: (next: string) => void;
+  shell: WorkspaceShellSnapshot;
+  cortexActivity: Record<string, ActivityState>;
+  onClose: () => void;
+  onPickSession: (session: ShellSession) => void;
+  onPickFocus: (projectId: string | null, focusId: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const entries = useMemo(() => buildPaletteEntries(shell, cortexActivity), [shell, cortexActivity]);
+  const filtered = useMemo(() => filterPalette(entries, query), [entries, query]);
+  const [highlight, setHighlight] = useState(0);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    setHighlight(0);
+  }, [query]);
+
+  function pick(index: number) {
+    const entry = filtered[index];
+    if (!entry) return;
+    if (entry.kind === 'focus') onPickFocus(entry.projectId, entry.id);
+    else onPickSession(entry.session);
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setHighlight(current => Math.min(current + 1, Math.max(filtered.length - 1, 0)));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setHighlight(current => Math.max(current - 1, 0));
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      pick(highlight);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+    }
+  }
+
+  return (
+    <div className={paletteBackdropClass} role="presentation" onMouseDown={onClose}>
+      <motion.div
+        className={paletteFrameClass}
+        data-testid="command-palette"
+        initial={{ opacity: 0, y: -8, scale: 0.985 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+        onMouseDown={event => event.stopPropagation()}
+      >
+        <div className={paletteInputRowClass}>
+          <MagnifyingGlass size={14} />
+          <input
+            ref={inputRef}
+            type="text"
+            value={query}
+            placeholder="Jump to a focus or session…"
+            aria-label="Command palette query"
+            data-testid="command-palette-input"
+            onChange={event => setQuery(event.currentTarget.value)}
+            onKeyDown={handleKeyDown}
+          />
+          <span className={paletteHintClass}>Esc</span>
+        </div>
+        <ul className={paletteListClass} data-testid="command-palette-results">
+          {filtered.length === 0 ? (
+            <li className={paletteEmptyClass}>No matches</li>
+          ) : (
+            filtered.map((entry, index) => (
+              <li
+                key={entry.kind === 'focus' ? `focus-${entry.id}` : `session-${entry.session.id}`}
+                className={paletteItemClass}
+                data-active={index === highlight}
+                data-kind={entry.kind}
+                data-testid="command-palette-item"
+                onMouseEnter={() => setHighlight(index)}
+                onMouseDown={() => pick(index)}
+              >
+                {entry.kind === 'focus' ? (
+                  <>
+                    <CircleDashed size={13} />
+                    <span className={paletteItemLabelClass}>
+                      <strong>{entry.title}</strong>
+                      <small>{entry.projectName ? `${entry.projectName} · ` : ''}Focus · {entry.sessionCount} session{entry.sessionCount === 1 ? '' : 's'}</small>
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <AgentGlyph kind={entry.session.agentKind} />
+                    <span className={paletteItemLabelClass}>
+                      <strong>{entry.session.title}</strong>
+                      <small>{entry.breadcrumb} · {entry.session.cwd}</small>
+                    </span>
+                    {entry.activity ? (
+                      <span className={paletteItemStatusClass} data-status={entry.activity.status}>
+                        {entry.activity.status.replace(/_/g, ' ')}
+                      </span>
+                    ) : null}
+                  </>
+                )}
+              </li>
+            ))
+          )}
+        </ul>
+      </motion.div>
     </div>
   );
 }
@@ -3407,6 +3632,63 @@ const searchClass = css({
   color: 'var(--text-3)',
   position: 'relative',
   zIndex: 2,
+  cursor: 'pointer',
+  width: 'calc(100% - 28px)',
+  textAlign: 'left',
+  transition: 'border-color 120ms ease, color 120ms ease',
+  _hover: { borderColor: 'var(--line-strong)', color: 'var(--text-2)' },
+});
+
+const searchPlaceholderClass = css({
+  flex: 1,
+  minWidth: 0,
+  fontSize: '13px',
+  color: 'var(--text-3)',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+const searchShortcutClass = css({
+  fontSize: '10.5px',
+  color: 'var(--text-3)',
+  padding: '1px 5px',
+  border: '1px solid var(--line)',
+  borderRadius: '4px',
+  background: 'var(--surface-1)',
+  flexShrink: 0,
+});
+
+const paletteBackdropClass = css({
+  position: 'fixed',
+  inset: 0,
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'center',
+  paddingTop: '12vh',
+  background: 'color-mix(in srgb, var(--bg-deep) 70%, transparent)',
+  backdropFilter: 'blur(8px)',
+  zIndex: 50,
+});
+
+const paletteFrameClass = css({
+  width: 'min(640px, calc(100vw - 64px))',
+  background: 'color-mix(in srgb, var(--surface-1) 92%, transparent)',
+  border: '1px solid var(--line-strong)',
+  borderRadius: '16px',
+  boxShadow: '0 30px 80px -20px rgba(0,0,0,0.55)',
+  overflow: 'hidden',
+  display: 'flex',
+  flexDirection: 'column',
+});
+
+const paletteInputRowClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '10px',
+  padding: '12px 16px',
+  borderBottom: '1px solid var(--line)',
+  color: 'var(--text-3)',
   '& input': {
     flex: 1,
     minWidth: 0,
@@ -3414,16 +3696,83 @@ const searchClass = css({
     border: 0,
     outline: 'none',
     color: 'var(--text)',
+    fontSize: '14px',
     font: 'inherit',
+    fontWeight: 500,
   },
-  '& span': {
-    fontSize: '10.5px',
+});
+
+const paletteHintClass = css({
+  fontSize: '10.5px',
+  color: 'var(--text-3)',
+  padding: '2px 7px',
+  border: '1px solid var(--line)',
+  borderRadius: '4px',
+  background: 'var(--surface-2)',
+});
+
+const paletteListClass = css({
+  margin: 0,
+  padding: '6px',
+  listStyle: 'none',
+  maxHeight: '48vh',
+  overflowY: 'auto',
+});
+
+const paletteItemClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '10px',
+  padding: '8px 10px',
+  borderRadius: '10px',
+  cursor: 'pointer',
+  color: 'var(--text-2)',
+  '&[data-active="true"]': {
+    background: 'var(--surface-3)',
+    color: 'var(--text)',
+  },
+  '& svg': { color: 'var(--text-3)', flexShrink: 0 },
+  '&[data-active="true"] svg': { color: 'var(--text)' },
+});
+
+const paletteItemLabelClass = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '1px',
+  minWidth: 0,
+  flex: 1,
+  '& strong': {
+    fontWeight: 500,
+    color: 'inherit',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  '& small': {
+    fontSize: '11px',
     color: 'var(--text-3)',
-    padding: '1px 5px',
-    border: '1px solid var(--line)',
-    borderRadius: '4px',
-    background: 'var(--surface-1)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
   },
+});
+
+const paletteItemStatusClass = css({
+  fontSize: '10.5px',
+  fontWeight: 500,
+  letterSpacing: '0.06em',
+  textTransform: 'uppercase',
+  color: 'var(--text-3)',
+  '&[data-status="working"]': { color: 'var(--good)' },
+  '&[data-status="awaiting_permission"]': { color: 'var(--warn)' },
+  '&[data-status="error"]': { color: 'var(--bad)' },
+});
+
+const paletteEmptyClass = css({
+  padding: '14px 10px',
+  textAlign: 'center',
+  color: 'var(--text-3)',
+  fontSize: '12px',
 });
 
 const navClass = css({
