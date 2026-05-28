@@ -79,6 +79,15 @@ pub struct ActiveTool {
     pub tool_call_id: String,
     pub tool_name: String,
     pub started_at: String,
+    /// Optional human-readable summary for the currently running tool, e.g.
+    /// `"Run shell: npm test"`. Producer-supplied so Reverie can render
+    /// activity lines without per-tool knowledge.
+    #[serde(default)]
+    pub display_summary: Option<String>,
+    /// Optional child-task correlation id used by Cortex when a tool spawns
+    /// a tracked sub-task (e.g. a long-running background job).
+    #[serde(default)]
+    pub child_task_id: Option<String>,
 }
 
 /// A pending permission request. Reverie shows `display_summary` by default;
@@ -211,16 +220,15 @@ pub struct ToolCallStartedPayload {
 pub struct ToolCallEndedPayload {
     pub tool_call_id: String,
     pub tool_name: String,
-    pub outcome: ToolCallOutcome,
-    pub duration_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolCallOutcome {
-    Success,
-    Error,
-    Cancelled,
+    /// True when the tool execution failed or was cancelled by the agent.
+    /// Cortex's wire format collapses success/error/cancelled into a single
+    /// boolean; richer outcome detail can be reintroduced later if either
+    /// producer starts emitting it.
+    pub is_error: bool,
+    /// Wall-clock duration of the tool call. Producers should fill this on
+    /// completion; the field is optional so partial streams still parse.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -321,7 +329,7 @@ mod tests {
         \n\
         {\"version\":1,\"sequence\":42,\"sessionId\":\"abc\",\"timestamp\":\"2026-05-28T12:34:56.789Z\",\"type\":\"permission_requested\",\"payload\":{\"id\":\"perm-1\",\"toolName\":\"Bash\",\"displaySummary\":\"Run shell: rm -rf foo/\",\"args\":{\"command\":\"rm -rf foo/\"},\"requestedAt\":\"2026-05-28T12:34:56.789Z\"}}\n\
         {\"version\":1,\"sequence\":43,\"sessionId\":\"abc\",\"timestamp\":\"2026-05-28T12:35:02.000Z\",\"type\":\"permission_resolved\",\"payload\":{\"id\":\"perm-1\",\"toolName\":\"Bash\",\"resolution\":\"denied\"}}\n\
-        {\"version\":1,\"sequence\":44,\"sessionId\":\"abc\",\"timestamp\":\"2026-05-28T12:35:02.500Z\",\"type\":\"tool_call_ended\",\"payload\":{\"toolCallId\":\"tc-1\",\"toolName\":\"Bash\",\"outcome\":\"cancelled\",\"durationMs\":32500}}\n\
+        {\"version\":1,\"sequence\":44,\"sessionId\":\"abc\",\"timestamp\":\"2026-05-28T12:35:02.500Z\",\"type\":\"tool_call_ended\",\"payload\":{\"toolCallId\":\"tc-1\",\"toolName\":\"Bash\",\"isError\":true,\"durationMs\":32500}}\n\
         {\"version\":1,\"sequence\":45,\"sessionId\":\"abc\",\"timestamp\":\"2026-05-28T12:35:03.000Z\",\"type\":\"turn_ended\",\"payload\":{\"turnId\":\"turn-7\",\"outcome\":\"completed\",\"durationMs\":54000}}\n\
         {\"version\":1,\"sequence\":46,\"sessionId\":\"abc\",\"timestamp\":\"2026-05-28T12:35:03.001Z\",\"type\":\"status_changed\",\"payload\":{\"from\":\"awaiting_permission\",\"to\":\"awaiting_input\"}}\n";
 
@@ -341,7 +349,9 @@ mod tests {
         assert_eq!(state.active_tools.len(), 1);
         assert_eq!(state.active_tools[0].tool_name, "Bash");
 
-        let perm = state.awaiting_permission.expect("permission request present");
+        let perm = state
+            .awaiting_permission
+            .expect("permission request present");
         assert_eq!(perm.id, "perm-1");
         assert_eq!(perm.tool_name, "Bash");
         assert_eq!(perm.display_summary, "Run shell: rm -rf foo/");
@@ -403,8 +413,8 @@ mod tests {
 
         match &events[4].kind {
             ActivityEventKind::ToolCallEnded(payload) => {
-                assert_eq!(payload.outcome, ToolCallOutcome::Cancelled);
-                assert_eq!(payload.duration_ms, 32_500);
+                assert!(payload.is_error);
+                assert_eq!(payload.duration_ms, Some(32_500));
             }
             other => panic!("expected ToolCallEnded, got {other:?}"),
         }
@@ -433,8 +443,14 @@ mod tests {
             {\"version\":1,\"sequence\":2,\"sessionId\":\"abc\",\"timestamp\":\"2026-05-28T12:00:01.000Z\",\"type\":\"turn_started\",\"payload\":{\"turnId\":\"t\",\"trigger\":\"auto\"}}\n";
         let results: Vec<Result<ActivityEvent>> = parse_events(blob).collect();
         assert_eq!(results.len(), 2);
-        assert!(results[0].is_err(), "future_event type should fail to parse");
-        assert!(results[1].is_ok(), "well-formed event after a bad line still parses");
+        assert!(
+            results[0].is_err(),
+            "future_event type should fail to parse"
+        );
+        assert!(
+            results[1].is_ok(),
+            "well-formed event after a bad line still parses"
+        );
     }
 
     #[test]

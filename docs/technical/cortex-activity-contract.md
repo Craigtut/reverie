@@ -88,11 +88,13 @@ Authoritative snapshot of the session's live activity state. Written atomically 
 | `activeTools[].toolCallId` | string | yes | Stable id for correlation with events. |
 | `activeTools[].toolName` | string | yes | E.g. `Bash`, `Edit`, `Read`. |
 | `activeTools[].startedAt` | timestamp | yes | |
+| `activeTools[].displaySummary` | string \| null | optional | Producer-supplied human-readable summary for this active tool, e.g. `"Run shell: npm test"`. Reverie renders this in the dashboard activity line so it doesn't need per-tool knowledge to phrase the running label. |
+| `activeTools[].childTaskId` | string \| null | optional | Correlation id when the tool spawned a tracked sub-task. |
 | `awaitingPermission` | object \| null | yes | Non-null iff `status == "awaiting_permission"`. |
 | `awaitingPermission.id` | string | yes | Stable id for correlation with `permission_resolved` events. |
 | `awaitingPermission.toolName` | string | yes | |
 | `awaitingPermission.displaySummary` | string | yes | Human-readable, privacy-safe summary Cortex generates. **This is what Reverie shows by default.** E.g. `"Run shell: rm -rf foo/"`, `"Edit src/main.rs"`. Never includes large/sensitive args (file contents, secrets). |
-| `awaitingPermission.args` | object | optional | Raw tool args. May be omitted for tools whose args are too large or sensitive (e.g. Edit content). Reverie shows behind a disclosure if present. |
+| `awaitingPermission.args` | object | optional | Sanitized structured args for disclosure / debug UI. Reverie shows them behind an expand affordance, never in the default label (see `displaySummary`). The producer sanitizes large or sensitive values: e.g. for `Edit` / `Write`, `old_string` and `new_string` are replaced with `{ preview, bytes, lines, truncated }` summaries rather than the raw content. For `Bash` the `command` string is kept intact because it is the meaningful unit to display. |
 | `awaitingPermission.requestedAt` | timestamp | yes | |
 | `lastError` | object \| null | yes | Latest visible error since session start. Distinct from `done` so recoverable errors aren't conflated with shutdown. |
 | `lastError.category` | enum | yes | `rate_limit` \| `authentication` \| `network` \| `context_overflow` \| `cancelled` \| `other`. |
@@ -167,7 +169,7 @@ Cortex opens `events.jsonl` with `O_APPEND` and writes each event as a single `w
 | `turn_started` | New agent turn begins. | `{ "turnId": string, "trigger": "user_prompt" \| "auto" }` |
 | `turn_ended` | Turn completes or aborts. | `{ "turnId": string, "outcome": "completed" \| "aborted", "durationMs": number }` |
 | `tool_call_started` | Tool execution begins. | `{ "toolCallId": string, "toolName": string }` |
-| `tool_call_ended` | Tool execution finishes. | `{ "toolCallId": string, "toolName": string, "outcome": "success" \| "error" \| "cancelled", "durationMs": number }` |
+| `tool_call_ended` | Tool execution finishes. | `{ "toolCallId": string, "toolName": string, "isError": boolean, "durationMs"?: number }` |
 | `permission_requested` | A tool requested user approval. | Same shape as `state.json.awaitingPermission`. |
 | `permission_resolved` | The pending permission was answered. | `{ "id": string, "toolName": string, "resolution": "allowed" \| "denied" \| "cancelled" \| "expired" \| "error" }` |
 | `error` | A session-visible error occurred. | Same shape as `state.json.lastError`. |

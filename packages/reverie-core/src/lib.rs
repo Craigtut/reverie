@@ -15,9 +15,9 @@ pub mod terminal;
 pub use activity::{
     ActiveTool, ActivityError, ActivityEvent, ActivityEventKind, ActivityState, ActivityStatus,
     ActivityTurn, ErrorCategory, ExitReason, FinalExit, PermissionRequest, PermissionResolution,
-    PermissionResolvedPayload, StatusChangedPayload, ToolCallEndedPayload, ToolCallOutcome,
-    ToolCallStartedPayload, TurnEndedPayload, TurnOutcome, TurnStartedPayload, TurnStatus,
-    TurnTrigger, parse_event, parse_events, parse_state,
+    PermissionResolvedPayload, StatusChangedPayload, ToolCallEndedPayload, ToolCallStartedPayload,
+    TurnEndedPayload, TurnOutcome, TurnStartedPayload, TurnStatus, TurnTrigger, parse_event,
+    parse_events, parse_state,
 };
 pub use activity_watcher::{CortexActivityStream, CortexActivityUpdate, watch_cortex_activity};
 pub use hook_server::{HookActivityUpdate, HookServerHandle, HookSource, start_hook_server};

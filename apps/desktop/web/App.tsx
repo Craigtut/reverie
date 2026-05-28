@@ -37,11 +37,8 @@ import {
 } from './terminal-canvas-renderer';
 import {
   SCROLL_FOLLOW_EPSILON_PX,
-  boundedRenderedScrollback,
   cloneTerminalRow,
   frameForSurface,
-  frameWithScrollback,
-  scrolledOffRows,
   terminalScrollbackContract,
   terminalSurfaceForBounds,
   type TerminalSurface,
@@ -234,7 +231,13 @@ interface ActivityState {
   sequence: number;
   cwd: string;
   turn?: { id: string; status: 'running' | 'completed' | 'aborted'; startedAt: string; endedAt?: string | null } | null;
-  activeTools?: { toolCallId: string; toolName: string; startedAt: string }[];
+  activeTools?: {
+    toolCallId: string;
+    toolName: string;
+    startedAt: string;
+    displaySummary?: string | null;
+    childTaskId?: string | null;
+  }[];
   awaitingPermission?: ActivityPermissionRequest | null;
   lastError?: ActivityError | null;
 }
@@ -303,6 +306,8 @@ export function App() {
   const lastTerminalFrameRef = useRef<TerminalFrame | null>(null);
   const lastCompositeTerminalFrameRef = useRef<TerminalFrame | null>(null);
   const scrollbackRowsRef = useRef<TerminalRow[]>([]);
+  const rendererNeedsFullPaintRef = useRef(true);
+  const lastTerminalPaintStartRowRef = useRef<number | null>(null);
   const liveFollowRef = useRef(true);
   const autoScrollingTerminalRef = useRef(false);
   const userTerminalScrollRef = useRef(false);
@@ -418,6 +423,8 @@ export function App() {
   function ensureTerminalRenderer(surface: TerminalSurface, displayRows: number) {
     const renderer = rendererRef.current;
     if (!renderer || renderer.cols !== surface.cols || renderer.rows !== displayRows) {
+      rendererNeedsFullPaintRef.current = true;
+      lastTerminalPaintStartRowRef.current = null;
       return mountTerminalRenderer(surface, displayRows);
     }
 
@@ -449,25 +456,10 @@ export function App() {
 
   function buildSessionTerminalView(previousView: SessionTerminalView | undefined, frame: TerminalFrame, surface = terminalSurfaceRef.current): SessionTerminalView {
     const surfaceFrame = frameForSurface(frame, surface);
-    let renderedScrollbackRows = previousView?.scrollbackRows ?? [];
-
-    if (previousView?.lastFrame) {
-      const scrolledRows = scrolledOffRows(previousView.lastFrame.rows, surfaceFrame.rows);
-      if (scrolledRows.length > 0) {
-        renderedScrollbackRows = boundedRenderedScrollback(
-          [
-            ...renderedScrollbackRows,
-            ...scrolledRows.map(cloneTerminalRow),
-          ],
-          surface,
-        );
-      }
-    }
-
-    renderedScrollbackRows = boundedRenderedScrollback(renderedScrollbackRows, surface);
+    const renderedScrollbackRows: TerminalRow[] = [];
     return {
       lastFrame: surfaceFrame,
-      compositeFrame: frameWithScrollback(renderedScrollbackRows, surfaceFrame),
+      compositeFrame: surfaceFrame,
       scrollbackRows: renderedScrollbackRows,
       rowCount: renderedScrollbackRows.length,
       liveFollow: previousView?.liveFollow ?? true,
@@ -495,6 +487,8 @@ export function App() {
 
   function clearTerminalSurface(surface = terminalSurfaceRef.current) {
     rendererRef.current = null;
+    rendererNeedsFullPaintRef.current = true;
+    lastTerminalPaintStartRowRef.current = null;
     const view = emptyTerminalView(surface);
     lastTerminalFrameRef.current = null;
     lastCompositeTerminalFrameRef.current = view.compositeFrame;
@@ -509,6 +503,8 @@ export function App() {
   function resetTerminalScrollback() {
     scrollbackRowsRef.current = [];
     lastCompositeTerminalFrameRef.current = null;
+    rendererNeedsFullPaintRef.current = true;
+    lastTerminalPaintStartRowRef.current = null;
     liveFollowRef.current = true;
     setScrollbackRowCount(0);
     setTerminalLiveFollow(true);
@@ -540,24 +536,6 @@ export function App() {
     });
   }
 
-  function rememberScrolledRows(previousFrame: TerminalFrame | null, nextFrame: TerminalFrame, surface: TerminalSurface) {
-    if (!previousFrame) return;
-
-    const scrolledRows = scrolledOffRows(previousFrame.rows, nextFrame.rows);
-    if (scrolledRows.length === 0) return;
-
-    const nextScrollback = boundedRenderedScrollback(
-      [
-        ...scrollbackRowsRef.current,
-        ...scrolledRows.map(cloneTerminalRow),
-      ],
-      surface,
-    );
-
-    scrollbackRowsRef.current = nextScrollback;
-    setScrollbackRowCount(nextScrollback.length);
-  }
-
   function paintVisibleTerminalWindow(frame = lastCompositeTerminalFrameRef.current, surface = terminalSurfaceRef.current) {
     if (!frame) return;
 
@@ -570,19 +548,21 @@ export function App() {
     const maxStartRow = Math.max(0, frame.rows.length - displayRows);
     const startRow = Math.min(maxStartRow, Math.max(0, Math.floor(scrollTop / surface.cellHeight) - overscanRows));
     const endRow = startRow + displayRows;
+    const renderer = ensureTerminalRenderer(surface, displayRows);
+    const forceFullPaint = rendererNeedsFullPaintRef.current || lastTerminalPaintStartRowRef.current !== startRow || frame.dirty !== 'partial';
     const rows = frame.rows
-      .filter(row => row.index >= startRow && row.index < endRow)
+      .filter(row => row.index >= startRow && row.index < endRow && (forceFullPaint || row.dirty))
       .map(row => ({
         ...cloneTerminalRow(row),
         index: row.index - startRow,
-        dirty: true,
+        dirty: forceFullPaint || row.dirty,
       }));
     const cursorRow = frame.cursor?.position?.row ?? frame.cursor?.row;
     const cursorCol = frame.cursor?.position?.col ?? frame.cursor?.col;
     const cursorVisible = Number.isFinite(cursorRow) && Number.isFinite(cursorCol) && (cursorRow as number) >= startRow && (cursorRow as number) < endRow;
     const windowFrame: TerminalFrame = {
       ...frame,
-      dirty: 'full',
+      dirty: forceFullPaint ? 'full' : frame.dirty,
       rows,
       cursor: cursorVisible
         ? {
@@ -596,29 +576,28 @@ export function App() {
           }
         : { ...frame.cursor, visible: false },
     };
-    const renderer = ensureTerminalRenderer(surface, displayRows);
     if (canvasRef.current) {
       canvasRef.current.style.transform = `translateY(${startRow * surface.cellHeight}px)`;
     }
-    renderer?.clear(windowFrame.colors?.background);
+    if (forceFullPaint) {
+      renderer?.clear(windowFrame.colors?.background);
+    }
     renderer?.paintFrame(windowFrame);
+    rendererNeedsFullPaintRef.current = false;
+    lastTerminalPaintStartRowRef.current = startRow;
   }
 
   function paintTerminalFrame(frame: TerminalFrame, { rememberScrollback = true }: { rememberScrollback?: boolean } = {}) {
     const surface = terminalSurfaceRef.current;
     const surfaceFrame = frameForSurface(frame, surface);
 
-    if (rememberScrollback) {
-      rememberScrolledRows(lastTerminalFrameRef.current, surfaceFrame, surface);
-    }
-
     lastTerminalFrameRef.current = surfaceFrame;
-    const renderedScrollbackRows = boundedRenderedScrollback(scrollbackRowsRef.current, surface);
+    const renderedScrollbackRows: TerminalRow[] = [];
     if (renderedScrollbackRows.length !== scrollbackRowsRef.current.length) {
       scrollbackRowsRef.current = renderedScrollbackRows;
       setScrollbackRowCount(renderedScrollbackRows.length);
     }
-    const compositeFrame = frameWithScrollback(renderedScrollbackRows, surfaceFrame);
+    const compositeFrame = surfaceFrame;
     lastCompositeTerminalFrameRef.current = compositeFrame;
     updateTerminalScrollSpacer(compositeFrame.rows.length, surface);
     paintVisibleTerminalWindow(compositeFrame, surface);
@@ -945,12 +924,36 @@ export function App() {
     let lastEventAt: number | null = null;
     let receiveStarted: number | null = null;
     let startedPayload: TerminalStreamStartedPayload | null = null;
+    let pendingTerminalFramePayload: TerminalFramePayload | null = null;
+    let terminalFrameRaf = 0;
     const unlisteners: UnlistenFn[] = [];
 
     function cleanup() {
+      if (terminalFrameRaf) {
+        cancelAnimationFrame(terminalFrameRaf);
+        terminalFrameRaf = 0;
+      }
       for (const unlisten of unlisteners.splice(0)) {
         unlisten();
       }
+    }
+
+    function paintPendingTerminalFrame() {
+      terminalFrameRaf = 0;
+      const payload = pendingTerminalFramePayload;
+      pendingTerminalFramePayload = null;
+      if (!payload) return;
+
+      const frameStarted = performance.now();
+      const previousView = sessionTerminalViewsRef.current[session.id];
+      const nextView = buildSessionTerminalView(previousView, payload.frame);
+      sessionTerminalViewsRef.current[session.id] = nextView;
+      if (activeTerminalIdRef.current === terminalId) {
+        applyTerminalView(nextView);
+      }
+      const frameEnded = performance.now();
+      timings.push(frameEnded - frameStarted);
+      cellsDrawn += payload.frame.rows.reduce((sum, row) => sum + row.cells.length, 0);
     }
 
     function setSessionTerminalInputReady(inputArmed: boolean) {
@@ -1001,23 +1004,24 @@ export function App() {
       }
       expectedSeq = payload.seq + 1;
 
-      const frameStarted = performance.now();
-      const previousView = sessionTerminalViewsRef.current[session.id];
-      const nextView = buildSessionTerminalView(previousView, payload.frame);
-      sessionTerminalViewsRef.current[session.id] = nextView;
-      if (activeTerminalIdRef.current === terminalId) {
-        applyTerminalView(nextView);
-      }
-      const frameEnded = performance.now();
-      timings.push(frameEnded - frameStarted);
-      cellsDrawn += payload.frame.rows.reduce((sum, row) => sum + row.cells.length, 0);
       framesReceived += 1;
+      pendingTerminalFramePayload = payload;
+      if (!terminalFrameRaf) {
+        terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrame);
+      }
     }));
 
     unlisteners.push(await listen<TerminalExitPayload>('terminal_exit', event => {
       const finished = event.payload;
       if (finished.terminalId !== terminalId) return;
 
+      if (pendingTerminalFramePayload) {
+        if (terminalFrameRaf) {
+          cancelAnimationFrame(terminalFrameRaf);
+          terminalFrameRaf = 0;
+        }
+        paintPendingTerminalFrame();
+      }
       const receiveElapsed = receiveStarted === null ? 0 : performance.now() - receiveStarted;
       cleanup();
       clearActiveTerminal();
@@ -1332,7 +1336,7 @@ export function App() {
   function handleTerminalScroll(event: UIEvent<HTMLDivElement>) {
     paintVisibleTerminalWindow();
 
-    if (autoScrollingTerminalRef.current || (!userTerminalScrollRef.current && liveFollowRef.current)) {
+    if (autoScrollingTerminalRef.current) {
       liveFollowRef.current = true;
       setTerminalLiveFollow(true);
       return;
@@ -2310,8 +2314,10 @@ function plainLanguageStatus(
       case 'awaiting_permission':
         return 'Needs your approval';
       case 'working': {
-        const tool = activity.activeTools?.[0]?.toolName;
-        return tool ? `Running ${tool}` : 'Working';
+        const tool = activity.activeTools?.[0];
+        if (tool?.displaySummary) return tool.displaySummary;
+        if (tool?.toolName) return `Running ${tool.toolName}`;
+        return 'Working';
       }
       case 'awaiting_input':
         return isBound ? 'Idle · ready for next prompt' : 'Resumable';
@@ -3051,7 +3057,7 @@ const appClass = css({
   padding: '22px',
   overflow: 'hidden',
   borderRadius: '44px',
-  boxShadow: '0 0 0 1px rgba(0,0,0,0.45), 0 30px 80px -20px rgba(0,0,0,0.6), 0 12px 32px -12px rgba(0,0,0,0.55)',
+  boxShadow: '0 30px 80px -20px rgba(0,0,0,0.55), 0 12px 32px -12px rgba(0,0,0,0.5)',
   color: 'var(--text)',
   background: 'radial-gradient(circle at 18% 10%, var(--surface-2), transparent 30%), linear-gradient(135deg, var(--bg), var(--bg-deep))',
   fontSize: '13px',
@@ -4608,4 +4614,3 @@ const checkRowClass = css({
   color: 'var(--text-2)! important',
   '& input': { width: 'auto! important' },
 });
-
