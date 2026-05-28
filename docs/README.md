@@ -18,3 +18,4 @@ Documentation for Reverie, a local-first agentic workspace. Start with the visio
 - [`technical/frontend-architecture.md`](technical/frontend-architecture.md) — React/Panda shell direction and the imperative terminal-renderer boundary.
 - [`technical/terminal-strategy.md`](technical/terminal-strategy.md) — Ghostty/libghostty research and terminal implementation strategy.
 - [`technical/implementation-queue.md`](technical/implementation-queue.md) — current build status, immediate build queue, and the "checks to keep green".
+- [`technical/cortex-activity-contract.md`](technical/cortex-activity-contract.md) — authoritative spec for the Cortex Code activity-state surface (per-session `activity/state.json` + `events.jsonl`).
