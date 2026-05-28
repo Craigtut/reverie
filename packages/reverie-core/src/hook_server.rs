@@ -14,7 +14,7 @@
 //! the session launch path in the Tauri shell.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{Arc, Mutex,
         mpsc::{self, Receiver, Sender},
@@ -33,12 +33,10 @@ use crate::activity::{
 };
 
 const ACTIVITY_VERSION: u32 = 1;
-const CLAUDE_PATH_PREFIX: &str = "/hooks/claude";
-const CODEX_PATH_PREFIX: &str = "/hooks/codex";
 
 /// Which CLI sourced a translated update. Reverie carries this through to the
 /// dashboard so adapter-specific copy and routing stay possible.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum HookSource {
     ClaudeCode,
     CodexCli,
@@ -60,17 +58,47 @@ pub enum HookActivityUpdate {
     },
 }
 
+/// Shared, cheaply-cloned control surface for the running hook server. The
+/// Tauri shell holds one of these as managed state so the launch path can
+/// register a per-session token and the worker thread can validate incoming
+/// requests against the same set.
+#[derive(Clone)]
+pub struct HookServerControl {
+    pub port: u16,
+    auth: Arc<Mutex<HashSet<(HookSource, String)>>>,
+}
+
+impl HookServerControl {
+    /// Authorize a token for one CLI source so subsequent POSTs to
+    /// `/hooks/<cli>/<token>` are accepted and translated.
+    pub fn register_session(&self, source: HookSource, token: String) {
+        let mut auth = self.auth.lock().unwrap_or_else(|err| err.into_inner());
+        auth.insert((source, token));
+    }
+
+    /// Revoke a previously-registered token. Called when a Reverie session
+    /// ends or is removed so a stale CLI process can't keep pushing state.
+    pub fn revoke_session(&self, source: HookSource, token: &str) {
+        let mut auth = self.auth.lock().unwrap_or_else(|err| err.into_inner());
+        auth.remove(&(source, token.to_owned()));
+    }
+}
+
 /// Handle returned by [`start_hook_server`]. Drain `events` for translated
 /// updates. The server stops when the handle is dropped: tiny_http's accept
 /// loop is unblocked, the worker exits, and the bound socket closes.
 pub struct HookServerHandle {
     pub events: Receiver<HookActivityUpdate>,
-    pub port: u16,
+    pub control: HookServerControl,
     server: Arc<Server>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl HookServerHandle {
+    pub fn port(&self) -> u16 {
+        self.control.port
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         // Server::server_addr returns ListeningAddr; for our IP-bound listener
         // this is always an IP socket address.
@@ -110,17 +138,19 @@ pub fn start_hook_server() -> Result<HookServerHandle> {
 
     let (tx, rx) = mpsc::channel::<HookActivityUpdate>();
     let sequences: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+    let auth: Arc<Mutex<HashSet<(HookSource, String)>>> = Arc::new(Mutex::new(HashSet::new()));
 
     let worker_server = Arc::clone(&server);
     let worker_sequences = Arc::clone(&sequences);
+    let worker_auth = Arc::clone(&auth);
     let worker = thread::Builder::new()
         .name("reverie-hook-http-server".to_owned())
-        .spawn(move || run_request_loop(worker_server, worker_sequences, tx))
+        .spawn(move || run_request_loop(worker_server, worker_sequences, worker_auth, tx))
         .context("spawning hook HTTP worker thread")?;
 
     Ok(HookServerHandle {
         events: rx,
-        port,
+        control: HookServerControl { port, auth },
         server,
         worker: Some(worker),
     })
@@ -129,6 +159,7 @@ pub fn start_hook_server() -> Result<HookServerHandle> {
 fn run_request_loop(
     server: Arc<Server>,
     sequences: Arc<Mutex<HashMap<String, u64>>>,
+    auth: Arc<Mutex<HashSet<(HookSource, String)>>>,
     tx: Sender<HookActivityUpdate>,
 ) {
     for mut request in server.incoming_requests() {
@@ -138,14 +169,22 @@ fn run_request_loop(
             let _ = request.respond(simple_response(405, "method not allowed"));
             continue;
         }
-        let source = if url.starts_with(CLAUDE_PATH_PREFIX) {
-            HookSource::ClaudeCode
-        } else if url.starts_with(CODEX_PATH_PREFIX) {
-            HookSource::CodexCli
-        } else {
+        let Some((source, token)) = parse_hook_path(&url) else {
             let _ = request.respond(simple_response(404, "not found"));
             continue;
         };
+
+        // Validate the per-session token before reading the body. The auth
+        // set is populated by the Tauri shell at launch time via
+        // HookServerControl::register_session; revoked when the session ends.
+        let authorized = {
+            let guard = auth.lock().unwrap_or_else(|err| err.into_inner());
+            guard.contains(&(source, token.to_owned()))
+        };
+        if !authorized {
+            let _ = request.respond(simple_response(401, "unauthorized"));
+            continue;
+        }
 
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() {
@@ -165,6 +204,29 @@ fn run_request_loop(
         }
         let _ = request.respond(simple_response(204, ""));
     }
+}
+
+/// Extract `(source, token)` from a request URL of the form
+/// `/hooks/<cli>/<token>` (or `/hooks/<cli>` for legacy/test usage with the
+/// empty token, which still has to be registered explicitly to pass auth).
+fn parse_hook_path(url: &str) -> Option<(HookSource, &str)> {
+    // Strip query string if present.
+    let path = url.split('?').next().unwrap_or(url);
+    let mut segments = path.trim_start_matches('/').split('/');
+    if segments.next()? != "hooks" {
+        return None;
+    }
+    let source = match segments.next()? {
+        "claude" => HookSource::ClaudeCode,
+        "codex" => HookSource::CodexCli,
+        _ => return None,
+    };
+    let token = segments.next().unwrap_or("");
+    // Defense: don't accept further path segments.
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((source, token))
 }
 
 fn simple_response(status: u16, body: &'static str) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -528,9 +590,27 @@ mod tests {
             .expect("hook update arrived")
     }
 
+    const TEST_TOKEN: &str = "tok-test-001";
+
+    fn claude_path() -> String {
+        format!("/hooks/claude/{TEST_TOKEN}")
+    }
+
+    fn codex_path() -> String {
+        format!("/hooks/codex/{TEST_TOKEN}")
+    }
+
+    fn started_with_token(source: HookSource) -> HookServerHandle {
+        let handle = start_hook_server().expect("server starts");
+        handle
+            .control
+            .register_session(source, TEST_TOKEN.to_owned());
+        handle
+    }
+
     #[test]
     fn claude_permission_request_translates_to_awaiting_permission() {
-        let handle = start_hook_server().expect("server starts");
+        let handle = started_with_token(HookSource::ClaudeCode);
         let body = serde_json::json!({
             "hook_event_name": "PermissionRequest",
             "session_id": "claude-sess-1",
@@ -541,7 +621,7 @@ mod tests {
         })
         .to_string();
 
-        let response = post_hook(handle.port, CLAUDE_PATH_PREFIX, &body);
+        let response = post_hook(handle.port(), &claude_path(), &body);
         assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
 
         match wait_for_update(&handle) {
@@ -563,7 +643,7 @@ mod tests {
 
     #[test]
     fn codex_stop_hook_marks_session_awaiting_input() {
-        let handle = start_hook_server().expect("server starts");
+        let handle = started_with_token(HookSource::CodexCli);
         let body = serde_json::json!({
             "hook_event_name": "Stop",
             "session_id": "codex-sess-1",
@@ -572,7 +652,7 @@ mod tests {
         })
         .to_string();
 
-        let response = post_hook(handle.port, CODEX_PATH_PREFIX, &body);
+        let response = post_hook(handle.port(), &codex_path(), &body);
         assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
 
         match wait_for_update(&handle) {
@@ -592,7 +672,7 @@ mod tests {
 
     #[test]
     fn sequence_increments_per_session() {
-        let handle = start_hook_server().expect("server starts");
+        let handle = started_with_token(HookSource::ClaudeCode);
         let body_one = serde_json::json!({
             "hook_event_name": "SessionStart",
             "session_id": "s-1",
@@ -606,8 +686,8 @@ mod tests {
         })
         .to_string();
 
-        let _ = post_hook(handle.port, CLAUDE_PATH_PREFIX, &body_one);
-        let _ = post_hook(handle.port, CLAUDE_PATH_PREFIX, &body_two);
+        let _ = post_hook(handle.port(), &claude_path(), &body_one);
+        let _ = post_hook(handle.port(), &claude_path(), &body_two);
 
         let first = wait_for_update(&handle);
         let second = wait_for_update(&handle);
@@ -624,16 +704,44 @@ mod tests {
     #[test]
     fn unknown_paths_404_without_emitting() {
         let handle = start_hook_server().expect("server starts");
-        let response = post_hook(handle.port, "/hooks/unknown", r#"{}"#);
+        let response = post_hook(handle.port(), "/hooks/unknown/whatever", r#"{}"#);
         assert!(response.starts_with("HTTP/1.1 404"), "response: {response}");
         assert!(handle.events.try_recv().is_err());
     }
 
     #[test]
     fn invalid_json_returns_400() {
-        let handle = start_hook_server().expect("server starts");
-        let response = post_hook(handle.port, CLAUDE_PATH_PREFIX, "not json");
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let response = post_hook(handle.port(), &claude_path(), "not json");
         assert!(response.starts_with("HTTP/1.1 400"), "response: {response}");
         assert!(handle.events.try_recv().is_err());
+    }
+
+    #[test]
+    fn unregistered_token_returns_401() {
+        let handle = start_hook_server().expect("server starts");
+        let body = serde_json::json!({"hook_event_name":"Stop","session_id":"x","cwd":"/"})
+            .to_string();
+        let response = post_hook(handle.port(), "/hooks/claude/never-registered", &body);
+        assert!(response.starts_with("HTTP/1.1 401"), "response: {response}");
+        assert!(handle.events.try_recv().is_err());
+    }
+
+    #[test]
+    fn revoke_blocks_further_posts() {
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({"hook_event_name":"Stop","session_id":"x","cwd":"/"})
+            .to_string();
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "first call: {response}");
+
+        handle
+            .control
+            .revoke_session(HookSource::ClaudeCode, TEST_TOKEN);
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(
+            response.starts_with("HTTP/1.1 401"),
+            "after revoke: {response}"
+        );
     }
 }

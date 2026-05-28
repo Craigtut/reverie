@@ -20,7 +20,9 @@ pub use activity::{
     parse_events, parse_state,
 };
 pub use activity_watcher::{CortexActivityStream, CortexActivityUpdate, watch_cortex_activity};
-pub use hook_server::{HookActivityUpdate, HookServerHandle, HookSource, start_hook_server};
+pub use hook_server::{
+    HookActivityUpdate, HookServerControl, HookServerHandle, HookSource, start_hook_server,
+};
 pub use agents::{
     AdapterDetection, AgentAdapter, CommandSpec, CortexAdapter, CortexSessionDiscovery,
     CortexSessionMetadata, LaunchContext,

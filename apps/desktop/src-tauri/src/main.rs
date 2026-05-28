@@ -17,7 +17,9 @@ use reverie_core::activity_watcher::{
 };
 use reverie_core::agents::built_in_adapters;
 use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId};
-use reverie_core::hook_server::{HookActivityUpdate, HookServerHandle, HookSource, start_hook_server};
+use reverie_core::hook_server::{
+    HookActivityUpdate, HookServerControl, HookServerHandle, HookSource, start_hook_server,
+};
 use reverie_core::terminal::{TerminalFrame, TerminalId};
 use reverie_core::{AdapterDetection, CommandSpec, TerminalSpawnSpec};
 use serde::{Deserialize, Serialize};
@@ -453,7 +455,9 @@ fn record_render_metrics(metrics: serde_json::Value) -> Result<(), String> {
 
 #[cfg(debug_assertions)]
 fn install_dev_panic_logger() {
-    let log_path = env::temp_dir().join("reverie-dev-crashes.log");
+    let log_path = env::current_dir()
+        .unwrap_or_else(|_| env::temp_dir())
+        .join("reverie-dev-crashes.log");
     eprintln!("[reverie] development panic log: {}", log_path.display());
     std::panic::set_hook(Box::new(move |panic_info| {
         let backtrace = std::backtrace::Backtrace::force_capture();
@@ -522,8 +526,9 @@ fn main() {
             // hook configs (CLAUDE_CONFIG_DIR / CODEX_HOME).
             match start_hook_server() {
                 Ok(handle) => {
-                    let port = handle.port;
-                    app.manage(HookServerInfo { port });
+                    let control = handle.control.clone();
+                    app.manage(HookServerInfo { port: control.port });
+                    app.manage(control);
                     let app_handle = app.handle().clone();
                     std::thread::Builder::new()
                         .name("reverie-hook-activity-bridge".to_owned())
@@ -603,9 +608,7 @@ fn forward_activity_update(
 ) {
     if let Some(store) = app.try_state::<AppShellStore>() {
         if let Err(error) = store.record_session_activity(&native_session_id, state.clone()) {
-            eprintln!(
-                "[reverie] failed to persist activity for {native_session_id}: {error:#}"
-            );
+            eprintln!("[reverie] failed to persist activity for {native_session_id}: {error:#}");
         }
     }
     let payload = SessionActivityEvent::Updated {
@@ -621,9 +624,7 @@ fn forward_activity_update(
 fn forward_activity_removed(app: &AppHandle, source: ActivitySource, native_session_id: String) {
     if let Some(store) = app.try_state::<AppShellStore>() {
         if let Err(error) = store.clear_session_activity(&native_session_id) {
-            eprintln!(
-                "[reverie] failed to clear activity for {native_session_id}: {error:#}"
-            );
+            eprintln!("[reverie] failed to clear activity for {native_session_id}: {error:#}");
         }
     }
     let payload = SessionActivityEvent::Removed {
