@@ -310,7 +310,6 @@ export function App() {
   const lastTerminalPaintStartRowRef = useRef<number | null>(null);
   const liveFollowRef = useRef(true);
   const autoScrollingTerminalRef = useRef(false);
-  const userTerminalScrollRef = useRef(false);
   const [shell, setShell] = useState<WorkspaceShellSnapshot>(() => fallbackShellSnapshot());
   const [selectedProjectId, setSelectedProjectId] = useState<ProjectFilter>(null);
   const [selectedFocusId, setSelectedFocusId] = useState<string | null>(null);
@@ -403,9 +402,12 @@ export function App() {
   const runningSession = runningSessionId ? shell.sessions.find(session => session.id === runningSessionId) ?? null : null;
   const hasActiveTerminal = activeTerminalId !== null;
   const effectiveDangerousMode = dangerousLabel(selectedSession, shell.workspace.defaultDangerousMode) !== 'Off';
+  // Plain-language status shown in the terminal meta strip. We deliberately
+  // omit terminal-internal details (cols×rows, scrollback row counts) from
+  // the primary surface; they're available behind diagnostics if needed.
   const runningLabel = selectedTerminalBinding
-    ? `${selectedSession?.title ?? 'Terminal'} · ${shortId(selectedTerminalBinding.terminalId)}${selectedTerminalBinding.inputArmed ? '' : ' · starting'}`
-    : busy ? 'Working' : selectedSession ? 'Created · waiting for launch' : 'Ready';
+    ? (selectedTerminalBinding.inputArmed ? 'Running' : 'Starting')
+    : busy ? 'Working' : selectedSession ? 'Ready to launch' : 'Ready';
 
   const writeLog = (line: string) => {
     const stamped = `[${new Date().toLocaleTimeString()}] ${line}`;
@@ -587,7 +589,7 @@ export function App() {
     lastTerminalPaintStartRowRef.current = startRow;
   }
 
-  function paintTerminalFrame(frame: TerminalFrame, { rememberScrollback = true }: { rememberScrollback?: boolean } = {}) {
+  function paintTerminalFrame(frame: TerminalFrame) {
     const surface = terminalSurfaceRef.current;
     const surfaceFrame = frameForSurface(frame, surface);
 
@@ -621,7 +623,7 @@ export function App() {
     }
 
     if (lastTerminalFrameRef.current) {
-      paintTerminalFrame(lastTerminalFrameRef.current, { rememberScrollback: false });
+      paintTerminalFrame(lastTerminalFrameRef.current);
       return;
     }
 
@@ -1344,13 +1346,8 @@ export function App() {
 
     const viewport = event.currentTarget;
     const following = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
-    userTerminalScrollRef.current = false;
     liveFollowRef.current = following;
     setTerminalLiveFollow(following);
-  }
-
-  function handleTerminalWheel() {
-    userTerminalScrollRef.current = true;
   }
 
   function followLiveTerminalOutput() {
@@ -1854,13 +1851,14 @@ export function App() {
             {selectedSession && !creationMode ? (
               <div className={terminalBodyClass} data-testid="terminal-body" data-session-id={selectedSession.id} data-terminal-id={selectedTerminalBinding?.terminalId ?? ''}>
                 <div className={terminalMetaStripClass} data-testid="terminal-meta-strip" data-session-id={selectedSession.id} data-terminal-id={selectedTerminalBinding?.terminalId ?? ''}>
-                  <span>{selectedFocus?.title ?? 'Focus'} / {selectedSession.title}</span>
-                  <span data-testid="terminal-status-label">{runningLabel}</span>
-                  <span>{terminalSurface.cols}×{terminalSurface.rows}</span>
-                  <span data-testid="scrollback-row-count">{scrollbackRowCount.toLocaleString()} / {scrollbackContract.maxRenderedHistoryRows.toLocaleString()} rows</span>
+                  <span className={metaStripBreadcrumbClass}>{sessionBreadcrumb(selectedSession, shell)} · {selectedSession.title}</span>
+                  <span data-testid="terminal-status-label" className={metaStripStatusClass}>{runningLabel}</span>
+                  <span className={metaStripCwdClass} title={selectedSession.cwd}>{shortenCwd(selectedSession.cwd)}</span>
                   {!terminalLiveFollow ? (
-                    <button type="button" data-testid="follow-live-button" onClick={followLiveTerminalOutput}>Follow live</button>
-                  ) : <span data-testid="follow-live-state">Following live</span>}
+                    <button type="button" className={followLiveButtonClass} data-testid="follow-live-button" onClick={followLiveTerminalOutput}>Jump to latest</button>
+                  ) : null}
+                  <span data-testid="scrollback-row-count" hidden>{scrollbackRowCount.toLocaleString()} / {scrollbackContract.maxRenderedHistoryRows.toLocaleString()}</span>
+                  <span data-testid="follow-live-state" hidden>{terminalLiveFollow ? 'live' : 'history'}</span>
                 </div>
                 {selectedPermissionRequest ? (
                   <div
@@ -1876,7 +1874,7 @@ export function App() {
                     <span className={permissionBannerHintClass}>Respond in the terminal</span>
                   </div>
                 ) : null}
-                <div ref={surfaceViewportRef} className={surfaceViewportClass} data-testid="terminal-viewport" onScroll={handleTerminalScroll} onWheel={handleTerminalWheel} onMouseDown={focusTerminalCanvas}>
+                <div ref={surfaceViewportRef} className={surfaceViewportClass} data-testid="terminal-viewport" onScroll={handleTerminalScroll} onMouseDown={focusTerminalCanvas}>
                   <div ref={terminalScrollSpacerRef} className={terminalScrollSpacerClass} data-testid="terminal-scroll-spacer">
                     <canvas
                       ref={canvasRef}
@@ -2269,9 +2267,22 @@ type DashboardStatus = 'attention' | 'live' | 'recent';
 function sessionBreadcrumb(session: ShellSession, shell: WorkspaceShellSnapshot): string {
   const focus = shell.focuses.find(f => f.id === session.focusId);
   if (!focus) return 'Workspace';
-  if (!focus.projectId) return `General · ${focus.title}`;
+  if (!focus.projectId) return focus.title;
   const project = shell.projects.find(p => p.id === focus.projectId);
   return project ? `${project.name} · ${focus.title}` : focus.title;
+}
+
+/// Compact a cwd for display: replace the home directory with `~` and elide
+/// long middle segments so the meta strip stays scannable. Keeps the final
+/// folder name intact so the user can always tell which project they're in.
+function shortenCwd(cwd: string): string {
+  if (!cwd) return '';
+  const home = USER_HOME;
+  let path = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+  if (path.length <= 48) return path;
+  const segments = path.split('/');
+  if (segments.length <= 3) return path;
+  return `${segments[0]}/…/${segments[segments.length - 2]}/${segments[segments.length - 1]}`;
 }
 
 function activityForSession(
@@ -3057,7 +3068,6 @@ const appClass = css({
   padding: '22px',
   overflow: 'hidden',
   borderRadius: '44px',
-  boxShadow: '0 30px 80px -20px rgba(0,0,0,0.55), 0 12px 32px -12px rgba(0,0,0,0.5)',
   color: 'var(--text)',
   background: 'radial-gradient(circle at 18% 10%, var(--surface-2), transparent 30%), linear-gradient(135deg, var(--bg), var(--bg-deep))',
   fontSize: '13px',
@@ -3822,20 +3832,54 @@ const terminalMetaStripClass = css({
   display: 'flex',
   alignItems: 'center',
   gap: '12px',
-  padding: '7px 14px',
-  borderBottom: '1px solid rgba(255,255,255,0.045)',
+  padding: '8px 14px',
+  borderBottom: '1px solid color-mix(in srgb, var(--line) 60%, transparent)',
   color: 'var(--text-3)',
-  fontSize: '11px',
+  fontSize: '11.5px',
   whiteSpace: 'nowrap',
   overflowX: 'auto',
-  '& span:first-child': { color: 'var(--text-2)' },
-  '& button': {
-    color: 'var(--text)',
-    border: '1px solid var(--line)',
-    borderRadius: '999px',
-    padding: '2px 7px',
-    cursor: 'pointer',
-  },
+  '& [hidden]': { display: 'none' },
+});
+
+const metaStripBreadcrumbClass = css({
+  color: 'var(--text-2)',
+  fontWeight: 500,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  minWidth: 0,
+  flex: '0 1 auto',
+});
+
+const metaStripStatusClass = css({
+  color: 'var(--text-3)',
+  fontSize: '10.5px',
+  fontWeight: 500,
+  letterSpacing: '0.08em',
+  textTransform: 'uppercase',
+  flexShrink: 0,
+});
+
+const metaStripCwdClass = css({
+  color: 'var(--text-3)',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+  fontSize: '10.5px',
+  marginLeft: 'auto',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+});
+
+const followLiveButtonClass = css({
+  color: 'var(--text-2)',
+  border: '1px solid var(--line)',
+  background: 'transparent',
+  borderRadius: '999px',
+  padding: '3px 9px',
+  cursor: 'pointer',
+  fontSize: '10.5px',
+  fontWeight: 500,
+  flexShrink: 0,
+  transition: 'color 140ms ease, border-color 140ms ease',
+  _hover: { color: 'var(--text)', borderColor: 'var(--line-strong)' },
 });
 
 const surfaceViewportClass = css({
