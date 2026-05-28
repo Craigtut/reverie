@@ -543,6 +543,19 @@ impl AppShellStore {
         })
     }
 
+    pub fn set_workspace_default_dangerous_mode(
+        &self,
+        default_dangerous_mode: bool,
+    ) -> Result<WorkspaceShellSnapshot> {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow!("Reverie app shell store lock poisoned"))?;
+        snapshot.workspace.default_dangerous_mode = default_dangerous_mode;
+        write_snapshot_to_database(&self.db_path, &snapshot)?;
+        Ok(snapshot.clone())
+    }
+
     pub fn remove_session(&self, session_id: SessionId) -> Result<WorkspaceShellSnapshot> {
         let mut snapshot = self
             .snapshot

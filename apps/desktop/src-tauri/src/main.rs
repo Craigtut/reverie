@@ -241,6 +241,22 @@ fn set_session_dangerous_mode(
         .map_err(|err| err.to_string())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetWorkspaceDefaultDangerousModeRequest {
+    default_dangerous_mode: bool,
+}
+
+#[tauri::command]
+fn set_workspace_default_dangerous_mode(
+    store: State<'_, AppShellStore>,
+    request: SetWorkspaceDefaultDangerousModeRequest,
+) -> Result<WorkspaceShellSnapshot, String> {
+    store
+        .set_workspace_default_dangerous_mode(request.default_dangerous_mode)
+        .map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 fn archive_focus(
     store: State<'_, AppShellStore>,
@@ -428,6 +444,7 @@ fn main() {
             update_session_tab_visibility,
             remove_session,
             set_session_dangerous_mode,
+            set_workspace_default_dangerous_mode,
             archive_focus,
             archive_project,
             capture_cortex_session,

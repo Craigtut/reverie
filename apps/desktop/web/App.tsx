@@ -1496,6 +1496,19 @@ export function App() {
     clearTerminalSurface();
   }
 
+  async function setWorkspaceDefaultDangerousMode(next: boolean) {
+    if (shell.workspace.defaultDangerousMode === next) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_workspace_default_dangerous_mode', {
+        request: { defaultDangerousMode: next },
+      });
+      setShell(snapshot);
+      writeLog(`Default auto-approve set to ${next ? 'on' : 'off'} for this workspace.`);
+    } catch (error) {
+      writeLog(`Update workspace default auto-approve failed: ${errorMessage(error)}`);
+    }
+  }
+
   async function toggleSelectedSessionYolo() {
     // The CLIs read their auto-approve flag at process start, so changing the
     // setting on a live session means terminate + relaunch with --resume +
@@ -1808,6 +1821,7 @@ export function App() {
             onCreateProject={() => openCreation('project')}
             onCreateFocus={() => openCreation('focus')}
             cliDetections={agentCliDetections}
+            onSetWorkspaceDefaultDangerousMode={next => void setWorkspaceDefaultDangerousMode(next)}
           />
         ) : surfaceMode === 'settings' ? (
           <SettingsSurface
@@ -1981,6 +1995,8 @@ export function App() {
                 createFocus={() => openCreation('focus')}
                 createProject={() => openCreation('project')}
                 openSettings={() => setSurfaceMode('settings')}
+                workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
+                onSetWorkspaceDefaultDangerousMode={next => void setWorkspaceDefaultDangerousMode(next)}
               />
             )}
           </div>
@@ -2219,11 +2235,20 @@ function AgentGlyph({ kind }: { kind: string }) {
   );
 }
 
-function EmptyState({ cliDetections, createFocus, createProject, openSettings }: {
+function EmptyState({
+  cliDetections,
+  createFocus,
+  createProject,
+  openSettings,
+  workspaceDefaultDangerousMode,
+  onSetWorkspaceDefaultDangerousMode,
+}: {
   cliDetections: AgentCliDetection[];
   createFocus: () => void;
   createProject: () => void;
   openSettings: () => void;
+  workspaceDefaultDangerousMode: boolean;
+  onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
   const availableCliCount = cliDetections.filter(detection => detection.available).length;
   const onboardingGridClass = css({
@@ -2270,6 +2295,39 @@ function EmptyState({ cliDetections, createFocus, createProject, openSettings }:
     '& strong': { color: 'var(--text)', fontSize: '13px' },
     '& span': { color: 'var(--text-3)', fontSize: '12px', lineHeight: 1.55 },
   });
+  const onboardingSafetyToggleClass = css({
+    display: 'inline-flex',
+    gap: '6px',
+    marginTop: '8px',
+    padding: '3px',
+    border: '1px solid var(--line)',
+    borderRadius: '999px',
+    background: 'color-mix(in srgb, var(--surface-2) 75%, transparent)',
+    width: 'fit-content',
+    '& button': {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '5px',
+      padding: '4px 11px',
+      borderRadius: '999px',
+      border: 0,
+      background: 'transparent',
+      color: 'var(--text-3)',
+      fontSize: '11.5px',
+      fontWeight: 500,
+      cursor: 'pointer',
+      transition: 'background 140ms ease, color 140ms ease',
+    },
+    '& button[data-active="true"]': {
+      background: 'var(--surface-hi)',
+      color: 'var(--text)',
+    },
+    '& button:hover': { color: 'var(--text)' },
+    '& button[data-testid="onboarding-safety-on"][data-active="true"]': {
+      background: 'color-mix(in srgb, var(--warn) 18%, var(--surface-hi) 82%)',
+      color: 'var(--warn)',
+    },
+  });
   const onboardingCliClass = css({
     gridColumn: '1 / -1',
     display: 'grid',
@@ -2294,13 +2352,39 @@ function EmptyState({ cliDetections, createFocus, createProject, openSettings }:
           </section>
 
           <aside className={onboardingStepsClass} data-testid="onboarding-steps">
+            <div className={onboardingStepClass} data-testid="onboarding-safety-step">
+              <strong>Auto-approve default</strong>
+              <span>Off by default. New sessions launch with full prompts unless you choose otherwise. You can override per session anytime.</span>
+              <div className={onboardingSafetyToggleClass} role="radiogroup" aria-label="Auto-approve default">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!workspaceDefaultDangerousMode}
+                  data-active={!workspaceDefaultDangerousMode}
+                  data-testid="onboarding-safety-off"
+                  onClick={() => onSetWorkspaceDefaultDangerousMode(false)}
+                >
+                  Off
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={workspaceDefaultDangerousMode}
+                  data-active={workspaceDefaultDangerousMode}
+                  data-testid="onboarding-safety-on"
+                  onClick={() => onSetWorkspaceDefaultDangerousMode(true)}
+                >
+                  <ShieldWarning size={11} /> Auto-approve
+                </button>
+              </div>
+            </div>
             <div className={onboardingStepClass}>
               <strong>1. Project</strong>
               <span>Optional folder-backed context for long-running work.</span>
             </div>
             <div className={onboardingStepClass}>
               <strong>2. Focus</strong>
-              <span>The human-sized thread inside a project or General workspace.</span>
+              <span>The human-sized thread inside a project or workspace.</span>
             </div>
             <div className={onboardingStepClass}>
               <strong>3. Session</strong>
@@ -2460,6 +2544,7 @@ function DashboardSurface({
   onCreateProject,
   onCreateFocus,
   cliDetections,
+  onSetWorkspaceDefaultDangerousMode,
 }: {
   shell: WorkspaceShellSnapshot;
   theme: ThemeMode;
@@ -2469,6 +2554,7 @@ function DashboardSurface({
   onCreateProject: () => void;
   onCreateFocus: () => void;
   cliDetections: AgentCliDetection[];
+  onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
   // Partition visible sessions across the three rails. Activity-state drives
   // classification when available; the persisted record status is the fallback
@@ -2496,6 +2582,8 @@ function DashboardSurface({
         createFocus={onCreateFocus}
         createProject={onCreateProject}
         openSettings={() => undefined}
+        workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
+        onSetWorkspaceDefaultDangerousMode={onSetWorkspaceDefaultDangerousMode}
       />
     );
   }
