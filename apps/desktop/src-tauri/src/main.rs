@@ -407,13 +407,33 @@ fn cortex_sessions_root() -> Option<PathBuf> {
 fn drain_cortex_activity(stream: CortexActivityStream, app: AppHandle) {
     while let Ok(update) = stream.events.recv() {
         let payload = match update {
-            CortexActivityUpdate::State { session_id, state } => CortexActivityEvent::Updated {
-                cortex_session_id: session_id,
-                state,
-            },
-            CortexActivityUpdate::Removed { session_id } => CortexActivityEvent::Removed {
-                cortex_session_id: session_id,
-            },
+            CortexActivityUpdate::State { session_id, state } => {
+                // Best-effort persist before the event fans out, so a restart
+                // before the next state change still surfaces the latest state.
+                if let Some(store) = app.try_state::<AppShellStore>() {
+                    if let Err(error) = store.record_session_activity(&session_id, state.clone()) {
+                        eprintln!(
+                            "[reverie] failed to persist cortex activity for {session_id}: {error:#}"
+                        );
+                    }
+                }
+                CortexActivityEvent::Updated {
+                    cortex_session_id: session_id,
+                    state,
+                }
+            }
+            CortexActivityUpdate::Removed { session_id } => {
+                if let Some(store) = app.try_state::<AppShellStore>() {
+                    if let Err(error) = store.clear_session_activity(&session_id) {
+                        eprintln!(
+                            "[reverie] failed to clear cortex activity for {session_id}: {error:#}"
+                        );
+                    }
+                }
+                CortexActivityEvent::Removed {
+                    cortex_session_id: session_id,
+                }
+            }
         };
         if let Err(error) = app.emit(CORTEX_ACTIVITY_EVENT, payload) {
             eprintln!("[reverie] failed to emit cortex activity event: {error}");

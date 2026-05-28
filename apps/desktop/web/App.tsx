@@ -202,6 +202,10 @@ interface ShellSession {
   status: 'not_started' | 'running' | 'exited' | 'restorable' | 'restore_failed';
   lastExitCode?: number | null;
   tabVisible?: boolean;
+  // Persisted last-observed activity for this session (from the Cortex
+  // filesystem watcher, eventually also Claude/Codex hooks). Seeds the
+  // dashboard cortexActivity map on app start so state is visible immediately.
+  latestActivity?: ActivityState | null;
 }
 
 // Mirrors reverie-core's ActivityStatus enum (snake_case wire format).
@@ -703,6 +707,30 @@ export function App() {
     applyViewportSize(viewport.clientWidth, viewport.clientHeight);
     return () => observer.disconnect();
   }, [isTauriRuntime, surfaceMode, selectedSession?.id]);
+
+  // Seed cortexActivity from the persisted `latestActivity` on each session
+  // every time the workspace shell snapshot updates. Persisted entries close
+  // the gap between app start and the first live event, and they cover the
+  // case where Reverie restarts while a Cortex session is no longer writing
+  // updates (the last-known state is still surfaced on the dashboard).
+  useEffect(() => {
+    setCortexActivity(current => {
+      let next = current;
+      let dirty = false;
+      for (const session of shell.sessions) {
+        const cortexId = session.nativeSessionRef?.sessionId;
+        if (!cortexId || !session.latestActivity) continue;
+        const existing = next[cortexId];
+        if (existing && existing.sequence >= session.latestActivity.sequence) continue;
+        if (!dirty) {
+          next = { ...current };
+          dirty = true;
+        }
+        next[cortexId] = session.latestActivity;
+      }
+      return dirty ? next : current;
+    });
+  }, [shell.sessions]);
 
   // Subscribe to Cortex activity-state updates pushed by the Tauri shell.
   // Cleanup is a single unlisten; we mount one subscription for the app's
@@ -1406,17 +1434,17 @@ export function App() {
     return true;
   }
 
-  function shouldAutoResumeSession(session: ShellSession) {
-    return session.status === 'restorable' || session.status === 'restore_failed' || session.launchMode === 'resume' || Boolean(session.nativeSessionRef);
-  }
-
   function selectSessionTab(session: ShellSession) {
+    // Selecting a tab is an "open this session" intent. If it's already bound
+    // to a live PTY we just re-focus it; otherwise we launch (or resume, if
+    // there's a native session ref). The user shouldn't have to also click a
+    // separate Run button just to start a session they meant to open.
     const attached = activateSessionTerminal(session);
-    if (!attached && shouldAutoResumeSession(session)) {
-      void launchRuntimeSession(session).catch(error => {
-        writeLog(`Resume failed for ${session.title}: ${errorMessage(error)}`);
-      });
-    }
+    if (attached) return;
+    void launchRuntimeSession(session).catch(error => {
+      const verb = session.nativeSessionRef ? 'Resume' : 'Launch';
+      writeLog(`${verb} failed for ${session.title}: ${errorMessage(error)}`);
+    });
   }
 
   function goToDashboard() {
@@ -1576,6 +1604,7 @@ export function App() {
 
   return (
     <main className={appClass} data-theme={theme} data-testid="reverie-app-shell">
+      <div className={windowDragStripClass} data-tauri-drag-region aria-hidden="true" />
       <DotField variant="ambient" theme={theme} />
 
       <aside className={leftPanelClass} aria-label="Reverie navigation" data-testid="left-panel">
@@ -3021,6 +3050,8 @@ const appClass = css({
   gap: '18px',
   padding: '22px',
   overflow: 'hidden',
+  borderRadius: '44px',
+  boxShadow: '0 0 0 1px rgba(0,0,0,0.45), 0 30px 80px -20px rgba(0,0,0,0.6), 0 12px 32px -12px rgba(0,0,0,0.55)',
   color: 'var(--text)',
   background: 'radial-gradient(circle at 18% 10%, var(--surface-2), transparent 30%), linear-gradient(135deg, var(--bg), var(--bg-deep))',
   fontSize: '13px',
@@ -3055,13 +3086,26 @@ const appClass = css({
   lgDown: {
     gridTemplateColumns: '260px minmax(0, 1fr)',
     padding: '14px',
+    borderRadius: '36px',
   },
   mdDown: {
     position: 'relative',
     minHeight: '100vh',
     gridTemplateColumns: '1fr',
     overflow: 'auto',
+    borderRadius: 0,
   },
+});
+
+const windowDragStripClass = css({
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  right: 0,
+  height: '22px',
+  zIndex: 4,
+  lgDown: { height: '14px' },
+  mdDown: { display: 'none' },
 });
 
 const dotFieldCanvasClass = css({

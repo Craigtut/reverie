@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, params};
+use reverie_core::activity::ActivityState;
 use reverie_core::agents::{built_in_adapters, require_detected};
 use reverie_core::domain::{
     AgentKind, FocusId, LaunchMode, NativeSessionRef, ProjectId, SessionId, SessionStatus,
@@ -71,6 +72,12 @@ pub struct ShellSession {
     pub last_exit_code: Option<i32>,
     #[serde(default = "default_true")]
     pub tab_visible: bool,
+    /// Last observed activity-state snapshot from whichever adapter owns this
+    /// session (Cortex filesystem watcher today, Claude/Codex hook receiver
+    /// soon). Persisted so the dashboard renders state immediately on app
+    /// start, before any live signal arrives.
+    #[serde(default)]
+    pub latest_activity: Option<ActivityState>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -302,6 +309,7 @@ impl AppShellStore {
             status: SessionStatus::NotStarted,
             last_exit_code: None,
             tab_visible: true,
+            latest_activity: None,
         });
 
         write_snapshot_to_database(&self.db_path, &snapshot)?;
@@ -563,6 +571,62 @@ impl AppShellStore {
         Ok(snapshot.clone())
     }
 
+    /// Persist the latest observed activity state for whichever Reverie
+    /// session owns the given CLI-native session id. Drops older updates by
+    /// sequence so racing watcher events can't roll the column backwards.
+    /// Returns whether a matching Reverie session was found and updated.
+    pub fn record_session_activity(
+        &self,
+        native_session_id: &str,
+        activity: ActivityState,
+    ) -> Result<bool> {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow!("Reverie app shell store lock poisoned"))?;
+        let Some(session) = snapshot.sessions.iter_mut().find(|session| {
+            session
+                .native_session_ref
+                .as_ref()
+                .and_then(|reference| reference.session_id.as_deref())
+                .map_or(false, |existing| existing == native_session_id)
+        }) else {
+            return Ok(false);
+        };
+        if let Some(existing) = &session.latest_activity {
+            if existing.sequence > activity.sequence {
+                return Ok(false);
+            }
+        }
+        session.latest_activity = Some(activity);
+        write_snapshot_to_database(&self.db_path, &snapshot)?;
+        Ok(true)
+    }
+
+    /// Clear the persisted activity for whichever Reverie session owns the
+    /// given native session id (called when the watcher reports `Removed`).
+    pub fn clear_session_activity(&self, native_session_id: &str) -> Result<bool> {
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow!("Reverie app shell store lock poisoned"))?;
+        let Some(session) = snapshot.sessions.iter_mut().find(|session| {
+            session
+                .native_session_ref
+                .as_ref()
+                .and_then(|reference| reference.session_id.as_deref())
+                .map_or(false, |existing| existing == native_session_id)
+        }) else {
+            return Ok(false);
+        };
+        if session.latest_activity.is_none() {
+            return Ok(false);
+        }
+        session.latest_activity = None;
+        write_snapshot_to_database(&self.db_path, &snapshot)?;
+        Ok(true)
+    }
+
     fn update_session(
         &self,
         session_id: SessionId,
@@ -713,6 +777,7 @@ pub fn workspace_shell_snapshot() -> WorkspaceShellSnapshot {
                 status: SessionStatus::NotStarted,
                 last_exit_code: None,
                 tab_visible: true,
+                latest_activity: None,
             },
             ShellSession {
                 id: uuid("f6232926-ec20-470b-92c6-d3db1434ab84"),
@@ -726,6 +791,7 @@ pub fn workspace_shell_snapshot() -> WorkspaceShellSnapshot {
                 status: SessionStatus::NotStarted,
                 last_exit_code: None,
                 tab_visible: true,
+                latest_activity: None,
             },
             ShellSession {
                 id: uuid("85caac02-3893-4fdb-9428-9b05cf057d04"),
@@ -739,6 +805,7 @@ pub fn workspace_shell_snapshot() -> WorkspaceShellSnapshot {
                 status: SessionStatus::NotStarted,
                 last_exit_code: None,
                 tab_visible: true,
+                latest_activity: None,
             },
         ],
     }
@@ -861,6 +928,7 @@ fn migrate_database(conn: &Connection) -> Result<()> {
     )
     .context("failed to migrate Reverie app shell database")?;
     ensure_column(conn, "sessions", "tab_visible", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_column(conn, "sessions", "latest_activity_json", "TEXT")?;
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at_ms) VALUES (?1, ?2)",
         params![SHELL_STORE_SCHEMA_VERSION, unix_time_ms()?],
@@ -972,7 +1040,8 @@ fn query_sessions(conn: &Connection) -> Result<Vec<ShellSession>> {
     let mut statement = conn
         .prepare(
             "SELECT id, focus_id, title, agent_kind, cwd, native_session_ref_json,
-                    launch_mode, dangerous_mode_override, status, last_exit_code, tab_visible
+                    launch_mode, dangerous_mode_override, status, last_exit_code, tab_visible,
+                    latest_activity_json
              FROM sessions
              ORDER BY rowid",
         )
@@ -993,11 +1062,27 @@ fn query_sessions(conn: &Connection) -> Result<Vec<ShellSession>> {
                 status: session_status_from_db(row.get::<_, String>(8)?)?,
                 last_exit_code: row.get(9)?,
                 tab_visible: int_to_bool(row.get::<_, i64>(10)?),
+                latest_activity: activity_state_from_db(row.get::<_, Option<String>>(11)?)?,
             })
         })
         .context("failed to query Reverie sessions")?;
 
     collect_rows(rows, "session")
+}
+
+fn activity_state_from_db(json: Option<String>) -> rusqlite::Result<Option<ActivityState>> {
+    match json {
+        Some(text) if !text.is_empty() => serde_json::from_str::<ActivityState>(&text)
+            .map(Some)
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            }),
+        _ => Ok(None),
+    }
 }
 
 fn collect_rows<T>(
@@ -1069,11 +1154,20 @@ fn write_snapshot_to_database(path: &Path, snapshot: &WorkspaceShellSnapshot) ->
     }
 
     for session in &snapshot.sessions {
+        let latest_activity_json = match &session.latest_activity {
+            Some(state) => Some(serde_json::to_string(state).with_context(|| {
+                format!(
+                    "serializing latest activity for Reverie session {}",
+                    session.id
+                )
+            })?),
+            None => None,
+        };
         transaction.execute(
             "INSERT INTO sessions (
                 id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
-                dangerous_mode_override, status, last_exit_code, tab_visible
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 session.id.to_string(),
                 session.focus_id.to_string(),
@@ -1086,6 +1180,7 @@ fn write_snapshot_to_database(path: &Path, snapshot: &WorkspaceShellSnapshot) ->
                 session_status_to_db(session.status)?,
                 session.last_exit_code,
                 bool_to_int(session.tab_visible),
+                latest_activity_json,
             ],
         )?;
     }
