@@ -5,6 +5,7 @@
 //! testable and independent from whichever terminal renderer wins the v1 spike.
 
 pub mod activity;
+pub mod activity_watcher;
 pub mod agents;
 pub mod domain;
 pub mod pty;
@@ -17,6 +18,7 @@ pub use activity::{
     ToolCallStartedPayload, ToolCallOutcome, TurnEndedPayload, TurnOutcome, TurnStartedPayload,
     TurnStatus, TurnTrigger, parse_event, parse_events, parse_state,
 };
+pub use activity_watcher::{CortexActivityStream, CortexActivityUpdate, watch_cortex_activity};
 pub use agents::{
     AdapterDetection, AgentAdapter, CommandSpec, CortexAdapter, CortexSessionDiscovery,
     CortexSessionMetadata, LaunchContext,

@@ -12,3 +12,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 portable-pty.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
