@@ -211,6 +211,20 @@ Keep these as local builder notes unless they become a decision, blocker, or mea
   - Keep the next build seam focused on Cortex hardening before opening Claude/Codex adapter research, so one real adapter path becomes boring before the product widens.
 - Keep Slack quiet: share only decisions, blockers, meaningful milestones, or direct questions for Craig.
 
+## Open: finish per-session config injection for Claude / Codex hooks
+
+Foundation landed: the localhost hook HTTP server is running in the Tauri shell, translating Claude/Codex hook POSTs into the same `session_activity_changed` event the Cortex watcher feeds. Per-session token auth (`HookServerControl::register_session` / `revoke_session`) is in place and tested. What's left to make this actually light up the dashboard for Claude + Codex sessions:
+
+1. **Per-session config writer in `reverie-core`** (new `hook_config.rs` module):
+   - `fn write_claude_settings(config_dir: &Path, hook_url: &str) -> Result<()>` produces a `settings.json` with HTTP hooks for `PermissionRequest`, `Stop`, `StopFailure`, `PostToolUse`, `SessionStart`, `SessionEnd` pointing at the supplied URL.
+   - `fn write_codex_config(config_dir: &Path, hook_url: &str) -> Result<()>` produces a `config.toml` (or whatever Codex hooks live in for the version we ship) pointing at the same URL.
+2. **Launch-time wiring in `start_session`** (`apps/desktop/src-tauri/src/main.rs`):
+   - For `ClaudeCode` / `CodexCli` sessions, before spawning the PTY: mint a token (`Uuid::new_v4`), call `HookServerControl::register_session(source, token)`, compute a per-session config dir under `app.path().app_cache_dir()/sessions/<session_id>/{claude|codex}`, call the appropriate `write_*` helper with `http://127.0.0.1:<port>/hooks/<cli>/<token>`, and set `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in `spawn_spec.command.env`.
+   - On terminate / remove, call `HookServerControl::revoke_session(source, token)`.
+3. **Native-session capture for Claude + Codex.** The hook payloads carry the CLI's own `session_id`. The first time we see a state update for a session we launched, persist that id as `ShellSession.nativeSessionRef` so subsequent launches use `--resume <id>` and so the dashboard correlates state to the right Reverie session (same as Cortex does today).
+
+Once (1)–(3) land, the day a user installs `claude` or `codex` on `PATH` and launches a session through Reverie, the dashboard rails will route their activity exactly the way Cortex's does today — same banner, glyph, and `displaySummary` flow.
+
 ## Guardrails
 
 - Do not turn Reverie into a generic IDE.
