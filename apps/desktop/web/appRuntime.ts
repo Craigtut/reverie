@@ -481,96 +481,13 @@ function makeFixtureShellSnapshot(): FixtureShellSnapshot {
     defaultDangerousMode: false,
   };
 
-  if (new URLSearchParams(window.location.search).get('fixture') === 'empty') {
-    return {
-      workspace,
-      projects: [],
-      focuses: [],
-      sessions: [],
-    };
-  }
-
+  // The harness defaults to an empty workspace, matching the Tauri build's first-launch state.
+  // The `?fixture=empty` URL param is still honored for callers that pass it explicitly; the
+  // default branch returns the same shape.
   return {
     workspace,
-    projects: [
-      {
-        id: 'fixture-reverie-project',
-        name: 'reverie',
-        path: '/Users/user/Code/reverie',
-        archived: false,
-      },
-    ],
-    focuses: [
-      {
-        id: 'fixture-general-focus',
-        projectId: null,
-        title: 'Drafts & notes',
-        description: 'Unprojected work stays available without forcing first-run project setup.',
-        sortOrder: 0,
-        archived: false,
-      },
-      {
-        id: 'fixture-terminal-focus',
-        projectId: 'fixture-reverie-project',
-        title: 'Terminal renderer',
-        description: 'Browser-testable terminal and product-shell fixture.',
-        sortOrder: 10,
-        archived: false,
-      },
-    ],
-    sessions: [
-      {
-        id: 'fixture-general-session',
-        focusId: 'fixture-general-focus',
-        title: 'Morning planning',
-        agentKind: 'cortex_code',
-        cwd: '/Users/user',
-        nativeSessionRef: null,
-        launchMode: 'new',
-        dangerousModeOverride: false,
-        status: 'not_started',
-        lastExitCode: null,
-        tabVisible: true,
-      },
-      {
-        id: 'fixture-cortex-session',
-        focusId: 'fixture-terminal-focus',
-        title: 'Cortex',
-        agentKind: 'cortex_code',
-        cwd: '/Users/user/Code/reverie',
-        nativeSessionRef: null,
-        launchMode: 'resume',
-        dangerousModeOverride: false,
-        status: 'restorable',
-        lastExitCode: 0,
-        tabVisible: true,
-      },
-      {
-        id: 'fixture-claude-session',
-        focusId: 'fixture-terminal-focus',
-        title: 'Claude Code',
-        agentKind: 'claude_code',
-        cwd: '/Users/user/Code/reverie',
-        nativeSessionRef: null,
-        launchMode: 'new',
-        dangerousModeOverride: false,
-        status: 'not_started',
-        lastExitCode: null,
-        tabVisible: true,
-      },
-      {
-        id: 'fixture-codex-session',
-        focusId: 'fixture-terminal-focus',
-        title: 'Codex',
-        agentKind: 'codex_cli',
-        cwd: '/Users/user/Code/reverie',
-        nativeSessionRef: null,
-        launchMode: 'new',
-        dangerousModeOverride: false,
-        status: 'not_started',
-        lastExitCode: null,
-        tabVisible: true,
-      },
-    ],
+    projects: [],
+    focuses: [],
+    sessions: [],
   };
 }

@@ -2213,6 +2213,9 @@ function Metric({ label, value }: { label: string; value: MetricValue }) {
   );
 }
 
+// Initial React state before the backend snapshot loads. Intentionally empty so the first paint
+// matches the Tauri build's first-launch state; the real snapshot replaces this once `workspace_shell`
+// resolves. If the backend fails to load, the user sees an empty workspace rather than fake content.
 function fallbackShellSnapshot(): WorkspaceShellSnapshot {
   return {
     workspace: {
@@ -2221,90 +2224,9 @@ function fallbackShellSnapshot(): WorkspaceShellSnapshot {
       generalLabel: 'General',
       defaultDangerousMode: false,
     },
-    projects: [
-      {
-        id: 'fallback-reverie-project',
-        name: 'reverie',
-        path: '/Users/user/Code/reverie',
-        archived: false,
-      },
-    ],
-    focuses: [
-      {
-        id: 'fallback-general-focus',
-        projectId: null,
-        title: 'Drafts & notes',
-        description: 'Unprojected work stays available without forcing first-run project setup.',
-        sortOrder: 0,
-        archived: false,
-      },
-      {
-        id: 'fallback-terminal-focus',
-        projectId: 'fallback-reverie-project',
-        title: 'Terminal renderer',
-        description: 'Ghostty-backed PTY runtime and Canvas rendering proof line.',
-        sortOrder: 10,
-        archived: false,
-      },
-      {
-        id: 'fallback-product-focus',
-        projectId: 'fallback-reverie-project',
-        title: 'Design kit',
-        description: 'Floating-panel product shell and session tab treatment.',
-        sortOrder: 20,
-        archived: false,
-      },
-    ],
-    sessions: [
-      {
-        id: 'fallback-general-session',
-        focusId: 'fallback-general-focus',
-        title: 'Morning planning',
-        agentKind: 'cortex_code',
-        cwd: '/Users/user',
-        launchMode: 'new',
-        dangerousModeOverride: false,
-        status: 'not_started',
-        lastExitCode: null,
-        tabVisible: true,
-      },
-      {
-        id: 'fallback-terminal-session',
-        focusId: 'fallback-terminal-focus',
-        title: 'Cortex',
-        agentKind: 'cortex_code',
-        cwd: '/Users/user/Code/reverie',
-        launchMode: 'resume',
-        dangerousModeOverride: false,
-        status: 'restorable',
-        lastExitCode: 0,
-        tabVisible: true,
-      },
-      {
-        id: 'fallback-claude-session',
-        focusId: 'fallback-terminal-focus',
-        title: 'Claude Code',
-        agentKind: 'claude_code',
-        cwd: '/Users/user/Code/reverie',
-        launchMode: 'new',
-        dangerousModeOverride: false,
-        status: 'not_started',
-        lastExitCode: null,
-        tabVisible: true,
-      },
-      {
-        id: 'fallback-codex-session',
-        focusId: 'fallback-terminal-focus',
-        title: 'Codex',
-        agentKind: 'codex_cli',
-        cwd: '/Users/user/Code/reverie',
-        launchMode: 'new',
-        dangerousModeOverride: false,
-        status: 'not_started',
-        lastExitCode: null,
-        tabVisible: true,
-      },
-    ],
+    projects: [],
+    focuses: [],
+    sessions: [],
   };
 }
 
