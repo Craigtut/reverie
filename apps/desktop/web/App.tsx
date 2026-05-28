@@ -46,6 +46,29 @@ import {
 } from './terminalScrollback';
 import type { TerminalFrame, TerminalRenderer, TerminalRow } from './terminalTypes';
 import { maybeRunHarnessSmokeTest } from './harnessSmoke';
+import { createDotField, type DotFieldHandle, type DotFieldVariant } from './dotField';
+
+type WindowControlAction = 'close' | 'minimize' | 'toggleMaximize';
+async function invokeWindowControl(action: WindowControlAction) {
+  // Lazy-import so the browser harness (no Tauri APIs) doesn't pay the cost
+  // and so a missing module never breaks the React shell.
+  try {
+    const tauriGlobals = window as Window & {
+      __TAURI_INTERNALS__?: unknown;
+      __TAURI__?: unknown;
+      __REVERIE_BROWSER_FIXTURE__?: unknown;
+    };
+    if (!tauriGlobals.__TAURI_INTERNALS__ && !tauriGlobals.__TAURI__) return;
+    if (tauriGlobals.__REVERIE_BROWSER_FIXTURE__) return;
+    const mod = await import('@tauri-apps/api/window');
+    const win = mod.getCurrentWindow();
+    if (action === 'close') await win.close();
+    else if (action === 'minimize') await win.minimize();
+    else await win.toggleMaximize();
+  } catch (error) {
+    console.warn('[reverie] window control failed', action, error);
+  }
+}
 
 const BENCH_FRAMES = 360;
 const DIRTY_ROWS_PER_FRAME = 8;
@@ -256,6 +279,10 @@ export function App() {
   const [agentCliDetections, setAgentCliDetections] = useState<AgentCliDetection[]>(() => fallbackAgentCliDetections());
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const [runningSessionId, setRunningSessionId] = useState<string | null>(null);
+  // Tracks which session is mid-launch so the terminal surface can show the
+  // breathing launch animation. Cleared automatically when the live terminal
+  // binding arrives, or on launch failure.
+  const [launchingSessionId, setLaunchingSessionId] = useState<string | null>(null);
   const [terminalInputArmed, setTerminalInputArmed] = useState(false);
   const [sessionTerminalBindings, setSessionTerminalBindings] = useState<Record<string, SessionTerminalBinding>>({});
   const [terminalSurface, setTerminalSurface] = useState<TerminalSurface>(() => TERMINAL_SURFACE);
@@ -294,6 +321,17 @@ export function App() {
   const hiddenFocusSessions = useMemo(() => focusSessions.filter(session => session.tabVisible === false), [focusSessions]);
   const selectedSession = creationMode || surfaceMode === 'session-history' ? null : visibleSessions.find(session => session.id === selectedSessionId) ?? visibleSessions[0] ?? null;
   const selectedTerminalBinding = selectedSession ? sessionTerminalBindings[selectedSession.id] ?? null : null;
+  const isLaunchingSelectedSession = Boolean(
+    selectedSession && launchingSessionId === selectedSession.id && !selectedTerminalBinding,
+  );
+
+  // Clean up the launchingSessionId once the live binding arrives (the breathing
+  // overlay disappears as soon as the real terminal surface takes over).
+  useEffect(() => {
+    if (launchingSessionId && sessionTerminalBindings[launchingSessionId]) {
+      setLaunchingSessionId(null);
+    }
+  }, [launchingSessionId, sessionTerminalBindings]);
   const runningSession = runningSessionId ? shell.sessions.find(session => session.id === runningSessionId) ?? null : null;
   const hasActiveTerminal = activeTerminalId !== null;
   const effectiveDangerousMode = dangerousLabel(selectedSession, shell.workspace.defaultDangerousMode) !== 'Off';
@@ -1046,6 +1084,7 @@ export function App() {
 
     setSurfaceMode('terminal');
     if (options.manageBusy !== false) setBusy(true);
+    setLaunchingSessionId(session.id);
     resetTerminalScrollback();
     sessionTerminalViewsRef.current[session.id] = emptyTerminalView();
     applyTerminalView(sessionTerminalViewsRef.current[session.id]);
@@ -1085,6 +1124,7 @@ export function App() {
       }
       setActiveTerminalId(current => current === terminalId ? null : current);
       setRunningSessionId(current => current === session.id ? null : current);
+      setLaunchingSessionId(current => current === session.id ? null : current);
       writeLog(`Runtime session launch failed: ${errorMessage(error)}`);
       throw error;
     } finally {
@@ -1406,12 +1446,12 @@ export function App() {
 
   return (
     <main className={appClass} data-theme={theme} data-testid="reverie-app-shell">
-      <div className={ambientClass} aria-hidden="true" />
+      <DotField variant="ambient" theme={theme} />
 
       <aside className={leftPanelClass} aria-label="Reverie navigation" data-testid="left-panel">
-        <div className={titlebarClass}>
+        <div className={titlebarClass} data-tauri-drag-region>
           <TrafficLights />
-          <div className={brandClass}>
+          <div className={brandClass} data-tauri-drag-region>
             <BrandMark />
             REVERIE
           </div>
@@ -1656,6 +1696,19 @@ export function App() {
                       onMouseDown={focusTerminalCanvas}
                     />
                   </div>
+                  {!selectedTerminalBinding ? (
+                    <SessionLaunchOverlay
+                      session={selectedSession}
+                      theme={theme}
+                      launching={isLaunchingSelectedSession}
+                      disabled={busy && !isLaunchingSelectedSession}
+                      onLaunch={() => {
+                        void launchRuntimeSession(selectedSession).catch(error => {
+                          writeLog(`Launch failed: ${errorMessage(error)}`);
+                        });
+                      }}
+                    />
+                  ) : null}
                 </div>
               </div>
             ) : creationMode ? null : (
@@ -1679,12 +1732,104 @@ export function App() {
 
 function TrafficLights() {
   return (
-    <div className={lightsClass} aria-hidden="true">
-      <span />
-      <span />
-      <span />
+    <div className={lightsClass} aria-label="Window controls" data-testid="window-controls">
+      <button
+        type="button"
+        aria-label="Close window"
+        data-action="close"
+        data-tauri-drag-region={false}
+        onClick={() => void invokeWindowControl('close')}
+      />
+      <button
+        type="button"
+        aria-label="Minimize window"
+        data-action="min"
+        data-tauri-drag-region={false}
+        onClick={() => void invokeWindowControl('minimize')}
+      />
+      <button
+        type="button"
+        aria-label="Maximize window"
+        data-action="max"
+        data-tauri-drag-region={false}
+        onClick={() => void invokeWindowControl('toggleMaximize')}
+      />
     </div>
   );
+}
+
+function SessionLaunchOverlay({
+  session,
+  theme,
+  launching,
+  disabled,
+  onLaunch,
+}: {
+  session: ShellSession | null;
+  theme: ThemeMode;
+  launching: boolean;
+  disabled: boolean;
+  onLaunch: () => void;
+}) {
+  if (!session) return null;
+
+  if (launching) {
+    return (
+      <div className={launchOverlayClass} data-testid="session-launch-overlay" data-state="launching">
+        <div className={launchCardClass} data-state="launching">
+          <div className={launchFieldClass}>
+            <DotField variant="launching" theme={theme} />
+          </div>
+          <span className={launchingLabelClass} data-testid="session-launching-label">
+            Launching {agentLabel(session.agentKind)}
+          </span>
+          <span className={launchCardMetaClass}>{session.cwd}</span>
+        </div>
+      </div>
+    );
+  }
+
+  const label = launchButtonLabel(session);
+  return (
+    <div className={launchOverlayClass} data-testid="session-launch-overlay" data-state="idle">
+      <div className={launchCardClass} data-state="idle">
+        <span className={launchCardTitleClass}>{agentTabLabel(session)}</span>
+        <span className={launchCardMetaClass}>
+          {agentLabel(session.agentKind)} · {session.cwd}
+        </span>
+        <button
+          type="button"
+          className={primaryLaunchButtonClass}
+          data-testid="session-launch-button"
+          disabled={disabled}
+          onClick={onLaunch}
+        >
+          <Play size={13} weight="fill" />
+          {label}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DotField({ variant = 'ambient', theme }: { variant?: DotFieldVariant; theme: ThemeMode }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const handleRef = useRef<DotFieldHandle | null>(null);
+
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    handleRef.current = createDotField(canvasRef.current, { variant });
+    return () => {
+      handleRef.current?.destroy();
+      handleRef.current = null;
+    };
+  }, [variant]);
+
+  useEffect(() => {
+    handleRef.current?.refresh();
+  }, [theme]);
+
+  return <canvas ref={canvasRef} className={dotFieldCanvasClass} aria-hidden="true" />;
 }
 
 function BrandMark() {
@@ -2284,11 +2429,16 @@ function fallbackAgentCliDetections(): AgentCliDetection[] {
 }
 
 function agentTabLabel(session: ShellSession) {
+  // Tab identity is the user's session title; the agent kind travels in the
+  // AgentGlyph next to the label so parallel sessions of the same CLI are
+  // distinguishable at a glance.
+  const title = session.title.trim();
+  if (title.length > 0) return title;
   const kind = session.agentKind;
   if (kind === 'claude_code') return 'Claude Code';
   if (kind === 'codex_cli') return 'Codex';
   if (kind === 'cortex_code') return 'Cortex';
-  return session.title;
+  return 'Session';
 }
 
 function nativeSessionSummary(session: ShellSession | null) {
@@ -2445,14 +2595,14 @@ const appClass = css({
   },
 });
 
-const ambientClass = css({
+const dotFieldCanvasClass = css({
   position: 'absolute',
   inset: 0,
+  width: '100%',
+  height: '100%',
   pointerEvents: 'none',
-  backgroundImage: 'radial-gradient(var(--dot-bg) 1px, transparent 1px)',
-  backgroundSize: '22px 22px',
-  opacity: 0.34,
-  maskImage: 'radial-gradient(circle at 70% 52%, black, transparent 68%)',
+  zIndex: 0,
+  display: 'block',
 });
 
 const rimLitPanel = {
@@ -2508,15 +2658,22 @@ const titlebarClass = css({
 const lightsClass = css({
   display: 'flex',
   gap: '8px',
-  '& span': {
+  alignItems: 'center',
+  '& button': {
     width: '12px',
     height: '12px',
     borderRadius: '50%',
-    border: '0.5px solid rgba(0,0,0,0.12)',
+    border: '0.5px solid rgba(0,0,0,0.18)',
+    padding: 0,
+    margin: 0,
+    cursor: 'pointer',
+    background: 'var(--surface-hi)',
+    transition: 'background 140ms ease, transform 140ms ease',
   },
-  '& span:nth-child(1)': { background: '#ED6A5E' },
-  '& span:nth-child(2)': { background: '#F4BF4F' },
-  '& span:nth-child(3)': { background: '#61C554' },
+  '& button:hover': { transform: 'scale(1.05)' },
+  '&:hover button[data-action="close"]': { background: '#ED6A5E' },
+  '&:hover button[data-action="min"]':   { background: '#F4BF4F' },
+  '&:hover button[data-action="max"]':   { background: '#61C554' },
 });
 
 const brandClass = css({
@@ -2973,6 +3130,7 @@ const terminateButtonClass = css({
 });
 
 const terminalBodyClass = css({
+  position: 'relative',
   flex: 1,
   minHeight: 0,
   display: 'grid',
@@ -2981,6 +3139,86 @@ const terminalBodyClass = css({
   borderRadius: '0 0 22px 22px',
   background: 'var(--terminal-bg)',
   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.025)',
+});
+
+const launchOverlayClass = css({
+  position: 'absolute',
+  inset: 0,
+  display: 'grid',
+  placeItems: 'center',
+  pointerEvents: 'none',
+  zIndex: 5,
+  '& > *': { pointerEvents: 'auto' },
+});
+
+const launchCardClass = css({
+  position: 'relative',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: '14px',
+  padding: '28px 32px 26px',
+  borderRadius: '20px',
+  background: 'color-mix(in srgb, var(--surface-1) 84%, transparent)',
+  border: '1px solid var(--line)',
+  boxShadow: '0 24px 70px -28px rgba(0,0,0,0.55)',
+  minWidth: '320px',
+  maxWidth: '420px',
+  textAlign: 'center',
+  backdropFilter: 'blur(10px)',
+});
+
+const launchCardTitleClass = css({
+  fontSize: '14px',
+  fontWeight: 500,
+  color: 'var(--text)',
+  letterSpacing: '-0.005em',
+});
+
+const launchCardMetaClass = css({
+  fontSize: '11px',
+  color: 'var(--text-3)',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+  wordBreak: 'break-all',
+  lineHeight: 1.5,
+});
+
+const primaryLaunchButtonClass = css({
+  marginTop: '6px',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '8px',
+  padding: '9px 18px',
+  borderRadius: '999px',
+  background: 'var(--text)',
+  color: 'var(--bg)',
+  border: 0,
+  cursor: 'pointer',
+  fontWeight: 500,
+  fontSize: '12.5px',
+  letterSpacing: '0.01em',
+  transition: 'transform 140ms cubic-bezier(0.22, 1, 0.36, 1), opacity 140ms ease',
+  '&:hover': { transform: 'translateY(-1px)' },
+  '&:active': { transform: 'translateY(0)' },
+  '&:disabled': { opacity: 0.5, cursor: 'not-allowed', transform: 'none' },
+  '& svg': { color: 'var(--bg)' },
+});
+
+const launchFieldClass = css({
+  position: 'absolute',
+  inset: 0,
+  pointerEvents: 'none',
+  opacity: 0.85,
+});
+
+const launchingLabelClass = css({
+  position: 'relative',
+  zIndex: 1,
+  fontSize: '11.5px',
+  fontWeight: 500,
+  letterSpacing: '0.08em',
+  textTransform: 'uppercase',
+  color: 'var(--text-2)',
 });
 
 const terminalMetaStripClass = css({
@@ -3004,6 +3242,7 @@ const terminalMetaStripClass = css({
 });
 
 const surfaceViewportClass = css({
+  position: 'relative',
   minHeight: 0,
   height: '100%',
   overflow: 'auto',

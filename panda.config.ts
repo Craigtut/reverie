@@ -1,45 +1,27 @@
 import { defineConfig } from '@pandacss/dev';
 
+// Panda CSS config for Reverie.
+//
+// Panda is used here only for the css() function (atomic styles in App.tsx),
+// preflight reset, and JSX framework wiring. Design tokens are intentionally
+// not declared here yet: the warm-neutral palette is defined inline as CSS
+// custom properties on the app shell (apps/desktop/web/App.tsx → appClass)
+// and switched via data-theme. Promoting that palette into proper Panda
+// tokens / data-theme recipes is a follow-up. Until then this config stays
+// minimal and theme-neutral so it can't fight the live token set.
+
 export default defineConfig({
   preflight: true,
   jsxFramework: 'react',
   include: ['./apps/desktop/web/**/*.{ts,tsx}'],
   exclude: [],
   outdir: 'apps/desktop/web/styled-system',
-  theme: {
-    extend: {
-      tokens: {
-        colors: {
-          bg: { value: '#070b16' },
-          bgElevated: { value: '#0b1020' },
-          panel: { value: 'rgba(15, 23, 42, 0.72)' },
-          panelStrong: { value: 'rgba(7, 11, 22, 0.78)' },
-          border: { value: 'rgba(236, 239, 244, 0.12)' },
-          text: { value: '#e5e9f0' },
-          textMuted: { value: '#a7b0c0' },
-          cyan: { value: '#88c0d0' },
-          green: { value: '#a3be8c' },
-          amber: { value: '#ebcb8b' },
-        },
-        radii: {
-          panel: { value: '18px' },
-          pill: { value: '999px' },
-        },
-        shadows: {
-          panel: { value: '0 24px 90px rgba(0, 0, 0, 0.42)' },
-        },
-      },
-    },
-  },
   globalCss: {
     'html, body, #root': {
       minHeight: '100%',
     },
     body: {
       margin: '0',
-      colorScheme: 'dark',
-      background: '#070b16',
-      color: '#e5e9f0',
       fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
     },
     '*': {
