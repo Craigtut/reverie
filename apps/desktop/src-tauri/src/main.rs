@@ -7,12 +7,16 @@ mod terminal_runtime;
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result};
+use reverie_core::activity::ActivityState;
+use reverie_core::activity_watcher::{
+    CortexActivityStream, CortexActivityUpdate, watch_cortex_activity,
+};
 use reverie_core::agents::built_in_adapters;
 use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId};
 use reverie_core::terminal::{TerminalFrame, TerminalId};
 use reverie_core::{AdapterDetection, CommandSpec, TerminalSpawnSpec};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use app_shell::{
     AppShellStore, CaptureCortexSessionRequest, CreateFocusRequest, CreateProjectRequest,
     CreateSessionRequest, UpdateSessionTabVisibilityRequest, WorkspaceShellSnapshot,
@@ -61,6 +65,24 @@ struct ProjectFolderSelection {
     name: String,
     path: String,
 }
+
+/// Payload emitted to the React shell whenever a Cortex session's activity
+/// state changes (or its directory is removed). React correlates the
+/// `cortexSessionId` against its persisted `nativeSessionRef.sessionId` to
+/// route updates to the right Reverie session.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind", content = "payload")]
+enum CortexActivityEvent {
+    Updated {
+        cortex_session_id: String,
+        state: ActivityState,
+    },
+    Removed {
+        cortex_session_id: String,
+    },
+}
+
+const CORTEX_ACTIVITY_EVENT: &str = "cortex_activity_changed";
 
 #[tauri::command]
 fn app_status() -> &'static str {
@@ -307,6 +329,27 @@ fn main() {
         .setup(|app| {
             let store_path = app.path().app_data_dir()?.join("workspace-shell.v1.sqlite3");
             app.manage(AppShellStore::load_or_seed(store_path)?);
+
+            // Start the Cortex activity-state watcher. Best-effort: if
+            // ~/.cortex/sessions cannot be located (no HOME, etc.), Reverie
+            // still boots; the watcher just stays off and the dashboard
+            // falls back to record status.
+            if let Some(sessions_root) = cortex_sessions_root() {
+                match watch_cortex_activity(sessions_root) {
+                    Ok(stream) => {
+                        let app_handle = app.handle().clone();
+                        std::thread::Builder::new()
+                            .name("reverie-cortex-activity-bridge".to_owned())
+                            .spawn(move || drain_cortex_activity(stream, app_handle))
+                            .ok();
+                    }
+                    Err(error) => {
+                        eprintln!("[reverie] Cortex activity watcher disabled: {error:#}");
+                    }
+                }
+            } else {
+                eprintln!("[reverie] Cortex home not located; activity watcher disabled");
+            }
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
@@ -344,6 +387,38 @@ fn cortex_home_dir() -> Result<PathBuf, String> {
     env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".cortex"))
         .ok_or_else(|| "HOME is not set, so Reverie cannot locate ~/.cortex".to_owned())
+}
+
+/// Resolve the directory the Cortex activity watcher should attach to. Returns
+/// `None` if neither `CORTEX_HOME` nor `HOME` (Unix) / `USERPROFILE` (Windows)
+/// is available, in which case the watcher is silently skipped.
+fn cortex_sessions_root() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("CORTEX_HOME") {
+        return Some(PathBuf::from(path).join("sessions"));
+    }
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".cortex").join("sessions"))
+}
+
+/// Drain the watcher's channel and forward every update to the React shell as
+/// a `cortex_activity_changed` event. The function returns when the stream is
+/// dropped (which closes the channel), so the thread exits cleanly on app
+/// shutdown.
+fn drain_cortex_activity(stream: CortexActivityStream, app: AppHandle) {
+    while let Ok(update) = stream.events.recv() {
+        let payload = match update {
+            CortexActivityUpdate::State { session_id, state } => CortexActivityEvent::Updated {
+                cortex_session_id: session_id,
+                state,
+            },
+            CortexActivityUpdate::Removed { session_id } => CortexActivityEvent::Removed {
+                cortex_session_id: session_id,
+            },
+        };
+        if let Err(error) = app.emit(CORTEX_ACTIVITY_EVENT, payload) {
+            eprintln!("[reverie] failed to emit cortex activity event: {error}");
+        }
+    }
 }
 
 fn build_ghostty_frame_sequence() -> Result<GhosttyFrameSequence> {
