@@ -142,6 +142,27 @@ fn hook_server_port(info: State<'_, HookServerInfo>) -> u16 {
     info.port
 }
 
+/// Tracks the (cli, token) Reverie minted for each launched session so the
+/// terminate / remove paths can revoke the right authorization. Without this,
+/// a token issued in a previous launch would stay valid forever and let a
+/// stale CLI process keep pushing state.
+#[derive(Default)]
+struct HookTokenRegistry {
+    sessions: std::sync::Mutex<std::collections::HashMap<SessionId, (HookSource, String)>>,
+}
+
+impl HookTokenRegistry {
+    fn replace(&self, session_id: SessionId, source: HookSource, token: String) -> Option<(HookSource, String)> {
+        let mut guard = self.sessions.lock().unwrap_or_else(|err| err.into_inner());
+        guard.insert(session_id, (source, token))
+    }
+
+    fn take(&self, session_id: SessionId) -> Option<(HookSource, String)> {
+        let mut guard = self.sessions.lock().unwrap_or_else(|err| err.into_inner());
+        guard.remove(&session_id)
+    }
+}
+
 #[tauri::command]
 fn app_status() -> &'static str {
     "reverie-desktop-product-shell"
@@ -243,9 +264,20 @@ fn update_session_tab_visibility(
 
 #[tauri::command]
 fn remove_session(
+    app: AppHandle,
     store: State<'_, AppShellStore>,
     session_id: SessionId,
 ) -> Result<WorkspaceShellSnapshot, String> {
+    // Revoke any hook token tied to this session before deleting the record
+    // so a still-running CLI can't keep authorizing against a now-orphaned id.
+    if let (Some(control), Some(registry)) = (
+        app.try_state::<HookServerControl>(),
+        app.try_state::<HookTokenRegistry>(),
+    ) {
+        if let Some((source, token)) = registry.take(session_id) {
+            control.revoke_session(source, &token);
+        }
+    }
     store
         .remove_session(session_id)
         .map_err(|err| err.to_string())
@@ -322,7 +354,7 @@ fn start_session(
 ) -> Result<TerminalId, String> {
     let terminal_id = request.terminal_id.unwrap_or_else(TerminalId::new_v4);
     let session_id = request.session_id;
-    let spawn_spec = match request.spawn_spec {
+    let mut spawn_spec = match request.spawn_spec {
         Some(spawn_spec) => spawn_spec,
         None => {
             let shell_session_id = session_id.ok_or_else(|| {
@@ -338,6 +370,22 @@ fn start_session(
         }
     };
 
+    // For Claude Code and Codex CLI sessions we own the hook channel: write
+    // a per-session config file in a private cache dir, set the CLI's config
+    // env var to point at it, and register a token with the localhost hook
+    // server so the CLI's lifecycle POSTs are authorized and routed.
+    if let Some(shell_session_id) = session_id {
+        if let Err(error) = inject_hook_config_if_needed(&app, &store, shell_session_id, &mut spawn_spec)
+        {
+            // Hook injection is best-effort. The CLI still launches; the
+            // dashboard just won't show live activity for this session until
+            // the next launch succeeds.
+            eprintln!(
+                "[reverie] hook config injection failed for {shell_session_id}: {error:#}"
+            );
+        }
+    }
+
     runtime
         .spawn_session_stream(
             app,
@@ -351,6 +399,77 @@ fn start_session(
             },
         )
         .map_err(|err| err.to_string())
+}
+
+fn inject_hook_config_if_needed(
+    app: &AppHandle,
+    store: &AppShellStore,
+    shell_session_id: SessionId,
+    spawn_spec: &mut TerminalSpawnSpec,
+) -> Result<()> {
+    let snapshot = store.snapshot()?;
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == shell_session_id)
+        .ok_or_else(|| anyhow::anyhow!("unknown Reverie session {shell_session_id}"))?;
+
+    let source = match session.agent_kind {
+        AgentKind::ClaudeCode => HookSource::ClaudeCode,
+        AgentKind::CodexCli => HookSource::CodexCli,
+        AgentKind::CortexCode => return Ok(()),
+    };
+
+    let Some(control) = app.try_state::<HookServerControl>() else {
+        // Hook server failed to start; quietly skip without breaking the launch.
+        return Ok(());
+    };
+    let registry = app
+        .try_state::<HookTokenRegistry>()
+        .ok_or_else(|| anyhow::anyhow!("hook token registry missing from managed state"))?;
+
+    // If this session had a previous token (from an earlier launch), revoke it
+    // so a stale CLI process can't keep talking to the server.
+    if let Some((prior_source, prior_token)) = registry.take(shell_session_id) {
+        control.revoke_session(prior_source, &prior_token);
+    }
+
+    let token = uuid::Uuid::new_v4().to_string();
+    let url = reverie_core::hook_url(source, control.port, &token);
+    let config_dir = hook_config_dir_for_session(app, source, shell_session_id)?;
+
+    let written = match source {
+        HookSource::ClaudeCode => reverie_core::write_claude_settings(&config_dir, &url)?,
+        HookSource::CodexCli => reverie_core::write_codex_config(&config_dir, &url)?,
+    };
+
+    control.register_session(source, token.clone());
+    registry.replace(shell_session_id, source, token);
+
+    spawn_spec
+        .command
+        .env
+        .insert(written.env_var.to_owned(), written.config_dir.display().to_string());
+    Ok(())
+}
+
+fn hook_config_dir_for_session(
+    app: &AppHandle,
+    source: HookSource,
+    shell_session_id: SessionId,
+) -> Result<PathBuf> {
+    let cache_root = app
+        .path()
+        .app_cache_dir()
+        .context("resolving Reverie app cache dir")?;
+    let cli = match source {
+        HookSource::ClaudeCode => "claude",
+        HookSource::CodexCli => "codex",
+    };
+    Ok(cache_root
+        .join("sessions")
+        .join(shell_session_id.to_string())
+        .join(cli))
 }
 
 #[tauri::command]
@@ -524,6 +643,7 @@ fn main() {
             // same SessionActivityEvent stream as Cortex. The bound port is
             // managed so the launch path can read it to write per-session
             // hook configs (CLAUDE_CONFIG_DIR / CODEX_HOME).
+            app.manage(HookTokenRegistry::default());
             match start_hook_server() {
                 Ok(handle) => {
                     let control = handle.control.clone();
