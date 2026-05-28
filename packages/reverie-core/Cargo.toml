@@ -14,6 +14,7 @@ uuid.workspace = true
 portable-pty.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
+tiny_http.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
