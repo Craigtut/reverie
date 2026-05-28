@@ -8,6 +8,7 @@ import {
   type MouseEvent,
   type ReactNode,
   type UIEvent,
+  type WheelEvent,
 } from 'react';
 import { invoke, listen, type UnlistenFn } from './appRuntime';
 import { motion } from 'motion/react';
@@ -242,11 +243,14 @@ interface ActivityState {
   lastError?: ActivityError | null;
 }
 
-// Payload shape from the Tauri `cortex_activity_changed` event. Matches the
-// Rust `CortexActivityEvent` enum at apps/desktop/src-tauri/src/main.rs.
-type CortexActivityEventPayload =
-  | { kind: 'updated'; payload: { cortexSessionId: string; state: ActivityState } }
-  | { kind: 'removed'; payload: { cortexSessionId: string } };
+// Payload shape from the Tauri `session_activity_changed` event. Matches the
+// Rust `SessionActivityEvent` enum at apps/desktop/src-tauri/src/main.rs.
+// One stream now carries Cortex (filesystem watcher) plus Claude and Codex
+// (HTTP hook receiver) updates; the `source` discriminator says which.
+type SessionActivitySource = 'cortex_code' | 'claude_code' | 'codex_cli';
+type SessionActivityEventPayload =
+  | { kind: 'updated'; payload: { source: SessionActivitySource; nativeSessionId: string; state: ActivityState } }
+  | { kind: 'removed'; payload: { source: SessionActivitySource; nativeSessionId: string } };
 
 type AgentKind = 'claude_code' | 'codex_cli' | 'cortex_code';
 type CreationMode = 'project' | 'focus' | 'session' | null;
@@ -468,8 +472,8 @@ export function App() {
       lastFrame: surfaceFrame,
       compositeFrame: surfaceFrame,
       scrollbackRows: renderedScrollbackRows,
-      rowCount: renderedScrollbackRows.length,
-      liveFollow: previousView?.liveFollow ?? true,
+      rowCount: surfaceFrame.scrollback?.scrollbackRows ?? renderedScrollbackRows.length,
+      liveFollow: surfaceFrame.scrollback?.atBottom ?? previousView?.liveFollow ?? true,
     };
   }
 
@@ -602,8 +606,8 @@ export function App() {
     const renderedScrollbackRows: TerminalRow[] = [];
     if (renderedScrollbackRows.length !== scrollbackRowsRef.current.length) {
       scrollbackRowsRef.current = renderedScrollbackRows;
-      setScrollbackRowCount(renderedScrollbackRows.length);
     }
+    setScrollbackRowCount(surfaceFrame.scrollback?.scrollbackRows ?? renderedScrollbackRows.length);
     const compositeFrame = surfaceFrame;
     lastCompositeTerminalFrameRef.current = compositeFrame;
     updateTerminalScrollSpacer(compositeFrame.rows.length, surface);
@@ -751,24 +755,24 @@ export function App() {
     let unlisten: UnlistenFn | null = null;
     void (async () => {
       try {
-        const fn = await listen<CortexActivityEventPayload>('cortex_activity_changed', event => {
+        const fn = await listen<SessionActivityEventPayload>('session_activity_changed', event => {
           if (cancelled) return;
           const message = event.payload;
           if (message.kind === 'updated') {
-            const { cortexSessionId, state } = message.payload;
+            const { nativeSessionId, state } = message.payload;
             setCortexActivity(current => {
               // Drop strictly-older updates by sequence so events that race
               // across threads can't roll us backwards.
-              const prior = current[cortexSessionId];
+              const prior = current[nativeSessionId];
               if (prior && prior.sequence > state.sequence) return current;
-              return { ...current, [cortexSessionId]: state };
+              return { ...current, [nativeSessionId]: state };
             });
           } else {
-            const { cortexSessionId } = message.payload;
+            const { nativeSessionId } = message.payload;
             setCortexActivity(current => {
-              if (!(cortexSessionId in current)) return current;
+              if (!(nativeSessionId in current)) return current;
               const next = { ...current };
-              delete next[cortexSessionId];
+              delete next[nativeSessionId];
               return next;
             });
           }
@@ -1335,6 +1339,26 @@ export function App() {
     }
   }
 
+  async function sendTerminalViewportScroll(deltaRows: number) {
+    if (!activeTerminalId || deltaRows === 0) return;
+
+    try {
+      await invoke('scroll_terminal_viewport', { terminalId: activeTerminalId, deltaRows });
+    } catch (error) {
+      writeLog(`Terminal scroll failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async function sendTerminalViewportToBottom() {
+    if (!activeTerminalId) return;
+
+    try {
+      await invoke('scroll_terminal_viewport_to_bottom', { terminalId: activeTerminalId });
+    } catch (error) {
+      writeLog(`Follow live failed: ${errorMessage(error)}`);
+    }
+  }
+
   function terminalInputReady() {
     return Boolean(activeTerminalId && terminalInputArmed);
   }
@@ -1380,9 +1404,24 @@ export function App() {
     setTerminalLiveFollow(following);
   }
 
+  function handleTerminalWheel(event: WheelEvent<HTMLDivElement>) {
+    if (!activeTerminalId || lastTerminalFrameRef.current?.modes?.mouseTracking) return;
+
+    const deltaRows = terminalWheelDeltaRows(event, terminalSurfaceRef.current);
+    if (deltaRows === 0) return;
+
+    event.preventDefault();
+    if (deltaRows < 0) {
+      liveFollowRef.current = false;
+      setTerminalLiveFollow(false);
+    }
+    void sendTerminalViewportScroll(deltaRows);
+  }
+
   function followLiveTerminalOutput() {
     liveFollowRef.current = true;
     setTerminalLiveFollow(true);
+    void sendTerminalViewportToBottom();
 
     requestAnimationFrame(() => {
       scrollTerminalViewportToTail();
@@ -3404,6 +3443,22 @@ function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>, modes?: Te
     default:
       return event.key.length === 1 ? event.key : null;
   }
+}
+
+function terminalWheelDeltaRows(event: WheelEvent<HTMLElement>, surface: TerminalSurface) {
+  if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return 0;
+
+  const sign = event.deltaY > 0 ? 1 : -1;
+  let rows: number;
+  if (event.deltaMode === 1) {
+    rows = Math.ceil(Math.abs(event.deltaY));
+  } else if (event.deltaMode === 2) {
+    rows = surface.rows;
+  } else {
+    rows = Math.ceil(Math.abs(event.deltaY) / surface.cellHeight);
+  }
+
+  return sign * Math.max(1, Math.min(surface.rows, rows));
 }
 
 function errorMessage(error: unknown) {

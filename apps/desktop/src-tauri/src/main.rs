@@ -4,7 +4,7 @@ mod app_shell;
 mod terminal_backend;
 mod terminal_runtime;
 
-use std::{env, path::PathBuf};
+use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
 
 use anyhow::{Context, Result};
 use app_shell::{
@@ -17,6 +17,7 @@ use reverie_core::activity_watcher::{
 };
 use reverie_core::agents::built_in_adapters;
 use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId};
+use reverie_core::hook_server::{HookActivityUpdate, HookServerHandle, HookSource, start_hook_server};
 use reverie_core::terminal::{TerminalFrame, TerminalId};
 use reverie_core::{AdapterDetection, CommandSpec, TerminalSpawnSpec};
 use serde::{Deserialize, Serialize};
@@ -97,23 +98,47 @@ struct ProjectFolderSelection {
     path: String,
 }
 
-/// Payload emitted to the React shell whenever a Cortex session's activity
-/// state changes (or its directory is removed). React correlates the
-/// `cortexSessionId` against its persisted `nativeSessionRef.sessionId` to
-/// route updates to the right Reverie session.
+/// Payload emitted to the React shell whenever any adapter (Cortex filesystem
+/// watcher today, Claude/Codex hook receiver via the localhost HTTP server)
+/// reports an activity-state change. React correlates `nativeSessionId`
+/// against its persisted `nativeSessionRef.sessionId` to route updates to the
+/// right Reverie session.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase", tag = "kind", content = "payload")]
-enum CortexActivityEvent {
+enum SessionActivityEvent {
     Updated {
-        cortex_session_id: String,
+        source: ActivitySource,
+        native_session_id: String,
         state: ActivityState,
     },
     Removed {
-        cortex_session_id: String,
+        source: ActivitySource,
+        native_session_id: String,
     },
 }
 
-const CORTEX_ACTIVITY_EVENT: &str = "cortex_activity_changed";
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ActivitySource {
+    CortexCode,
+    ClaudeCode,
+    CodexCli,
+}
+
+const SESSION_ACTIVITY_EVENT: &str = "session_activity_changed";
+
+/// Managed Tauri state holding the bound port of the hook HTTP server. The
+/// session launch path reads this to write per-session Claude/Codex configs
+/// that point at `http://127.0.0.1:<port>/hooks/<cli>/<token>`.
+#[derive(Clone, Debug)]
+struct HookServerInfo {
+    port: u16,
+}
+
+#[tauri::command]
+fn hook_server_port(info: State<'_, HookServerInfo>) -> u16 {
+    info.port
+}
 
 #[tauri::command]
 fn app_status() -> &'static str {
@@ -379,6 +404,37 @@ fn resize_terminal(
 }
 
 #[tauri::command]
+fn scroll_terminal_viewport(
+    runtime: State<'_, TerminalSessionRuntime>,
+    terminal_id: TerminalId,
+    delta_rows: i32,
+) -> Result<(), String> {
+    runtime
+        .scroll_terminal(terminal_id, delta_rows as isize)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn scroll_terminal_viewport_to_top(
+    runtime: State<'_, TerminalSessionRuntime>,
+    terminal_id: TerminalId,
+) -> Result<(), String> {
+    runtime
+        .scroll_terminal_to_top(terminal_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn scroll_terminal_viewport_to_bottom(
+    runtime: State<'_, TerminalSessionRuntime>,
+    terminal_id: TerminalId,
+) -> Result<(), String> {
+    runtime
+        .scroll_terminal_to_bottom(terminal_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn terminate_session(
     runtime: State<'_, TerminalSessionRuntime>,
     terminal_id: TerminalId,
@@ -395,7 +451,36 @@ fn record_render_metrics(metrics: serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(debug_assertions)]
+fn install_dev_panic_logger() {
+    let log_path = env::temp_dir().join("reverie-dev-crashes.log");
+    eprintln!("[reverie] development panic log: {}", log_path.display());
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let message = format!(
+            "\n=== Reverie panic ===\nwhen: {}\ninfo: {panic_info}\nbacktrace:\n{backtrace}\n",
+            unix_time_millis_for_log(),
+        );
+        eprintln!("{message}");
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = file.write_all(message.as_bytes());
+        }
+    }));
+}
+
+#[cfg(not(debug_assertions))]
+fn install_dev_panic_logger() {}
+
+fn unix_time_millis_for_log() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
 fn main() {
+    install_dev_panic_logger();
+
     tauri::Builder::default()
         .setup(|app| {
             let store_path = app
@@ -429,6 +514,27 @@ fn main() {
             } else {
                 eprintln!("[reverie] Cortex home not located; activity watcher disabled");
             }
+
+            // Start the localhost hook HTTP server. Claude Code and Codex CLI
+            // POST lifecycle hooks here; the payloads are translated into the
+            // same SessionActivityEvent stream as Cortex. The bound port is
+            // managed so the launch path can read it to write per-session
+            // hook configs (CLAUDE_CONFIG_DIR / CODEX_HOME).
+            match start_hook_server() {
+                Ok(handle) => {
+                    let port = handle.port;
+                    app.manage(HookServerInfo { port });
+                    let app_handle = app.handle().clone();
+                    std::thread::Builder::new()
+                        .name("reverie-hook-activity-bridge".to_owned())
+                        .spawn(move || drain_hook_activity(handle, app_handle))
+                        .ok();
+                }
+                Err(error) => {
+                    eprintln!("[reverie] hook HTTP server disabled: {error:#}");
+                }
+            }
+
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
@@ -445,6 +551,7 @@ fn main() {
             remove_session,
             set_session_dangerous_mode,
             set_workspace_default_dangerous_mode,
+            hook_server_port,
             archive_focus,
             archive_project,
             capture_cortex_session,
@@ -453,6 +560,9 @@ fn main() {
             list_terminal_sessions,
             write_terminal_input,
             resize_terminal,
+            scroll_terminal_viewport,
+            scroll_terminal_viewport_to_top,
+            scroll_terminal_viewport_to_bottom,
             terminate_session,
             record_render_metrics
         ])
@@ -485,40 +595,91 @@ fn cortex_sessions_root() -> Option<PathBuf> {
 /// a `cortex_activity_changed` event. The function returns when the stream is
 /// dropped (which closes the channel), so the thread exits cleanly on app
 /// shutdown.
+fn forward_activity_update(
+    app: &AppHandle,
+    source: ActivitySource,
+    native_session_id: String,
+    state: ActivityState,
+) {
+    if let Some(store) = app.try_state::<AppShellStore>() {
+        if let Err(error) = store.record_session_activity(&native_session_id, state.clone()) {
+            eprintln!(
+                "[reverie] failed to persist activity for {native_session_id}: {error:#}"
+            );
+        }
+    }
+    let payload = SessionActivityEvent::Updated {
+        source,
+        native_session_id,
+        state,
+    };
+    if let Err(error) = app.emit(SESSION_ACTIVITY_EVENT, payload) {
+        eprintln!("[reverie] failed to emit session activity event: {error}");
+    }
+}
+
+fn forward_activity_removed(app: &AppHandle, source: ActivitySource, native_session_id: String) {
+    if let Some(store) = app.try_state::<AppShellStore>() {
+        if let Err(error) = store.clear_session_activity(&native_session_id) {
+            eprintln!(
+                "[reverie] failed to clear activity for {native_session_id}: {error:#}"
+            );
+        }
+    }
+    let payload = SessionActivityEvent::Removed {
+        source,
+        native_session_id,
+    };
+    if let Err(error) = app.emit(SESSION_ACTIVITY_EVENT, payload) {
+        eprintln!("[reverie] failed to emit session activity removal: {error}");
+    }
+}
+
 fn drain_cortex_activity(stream: CortexActivityStream, app: AppHandle) {
     while let Ok(update) = stream.events.recv() {
-        let payload = match update {
+        match update {
             CortexActivityUpdate::State { session_id, state } => {
-                // Best-effort persist before the event fans out, so a restart
-                // before the next state change still surfaces the latest state.
-                if let Some(store) = app.try_state::<AppShellStore>() {
-                    if let Err(error) = store.record_session_activity(&session_id, state.clone()) {
-                        eprintln!(
-                            "[reverie] failed to persist cortex activity for {session_id}: {error:#}"
-                        );
-                    }
-                }
-                CortexActivityEvent::Updated {
-                    cortex_session_id: session_id,
-                    state,
-                }
+                forward_activity_update(&app, ActivitySource::CortexCode, session_id, state);
             }
             CortexActivityUpdate::Removed { session_id } => {
-                if let Some(store) = app.try_state::<AppShellStore>() {
-                    if let Err(error) = store.clear_session_activity(&session_id) {
-                        eprintln!(
-                            "[reverie] failed to clear cortex activity for {session_id}: {error:#}"
-                        );
-                    }
-                }
-                CortexActivityEvent::Removed {
-                    cortex_session_id: session_id,
-                }
+                forward_activity_removed(&app, ActivitySource::CortexCode, session_id);
             }
-        };
-        if let Err(error) = app.emit(CORTEX_ACTIVITY_EVENT, payload) {
-            eprintln!("[reverie] failed to emit cortex activity event: {error}");
         }
+    }
+}
+
+fn drain_hook_activity(handle: HookServerHandle, app: AppHandle) {
+    // Moving `handle` into this thread keeps the bound HTTP server alive for
+    // the thread's lifetime; on app shutdown the thread tears down, the
+    // handle drops, and the server stops cleanly.
+    while let Ok(update) = handle.events.recv() {
+        match update {
+            HookActivityUpdate::State {
+                source,
+                native_session_id,
+                state,
+            } => forward_activity_update(
+                &app,
+                hook_source_to_activity_source(source),
+                native_session_id,
+                state,
+            ),
+            HookActivityUpdate::Removed {
+                source,
+                native_session_id,
+            } => forward_activity_removed(
+                &app,
+                hook_source_to_activity_source(source),
+                native_session_id,
+            ),
+        }
+    }
+}
+
+fn hook_source_to_activity_source(source: HookSource) -> ActivitySource {
+    match source {
+        HookSource::ClaudeCode => ActivitySource::ClaudeCode,
+        HookSource::CodexCli => ActivitySource::CodexCli,
     }
 }
 
