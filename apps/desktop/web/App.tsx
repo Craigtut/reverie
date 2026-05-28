@@ -1506,6 +1506,20 @@ export function App() {
 
   async function hideSessionTab(event: { stopPropagation: () => void }, session: ShellSession) {
     event.stopPropagation();
+    // Closing a tab terminates the underlying CLI process. The session record
+    // (title, focus, cwd, native session ref) stays in the store so the user
+    // can resume it later; reopening will call the adapter's resume path
+    // with the captured native session id (Cortex today, Claude/Codex once
+    // their capture lands), which restarts the CLI with `--resume <id>` and
+    // the session's current dangerous-mode override.
+    const binding = sessionTerminalBindingsRef.current[session.id];
+    if (binding) {
+      try {
+        await invoke('terminate_session', { terminalId: binding.terminalId });
+      } catch (error) {
+        writeLog(`Close requested terminal stop first; stop failed for ${shortId(binding.terminalId)}: ${errorMessage(error)}`);
+      }
+    }
     const nextVisibleSession = visibleSessions.find(candidate => candidate.id !== session.id) ?? null;
     const snapshot = await setSessionTabVisibility(session, false);
     if (selectedSessionId === session.id) {
@@ -1518,7 +1532,7 @@ export function App() {
         if (stillHasHistory) setSurfaceMode('session-history');
       }
     }
-    writeLog(`Closed ${session.title} from active tabs; session record preserved for restore.`);
+    writeLog(`Closed ${session.title}; CLI process terminated. Reopen to resume.`);
   }
 
   async function restoreSessionTab(session: ShellSession) {
