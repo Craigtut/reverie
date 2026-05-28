@@ -1,0 +1,708 @@
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::domain::{AgentKind, NativeSessionRef, SessionId};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CommandSpec {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: BTreeMap<String, String>,
+}
+
+impl CommandSpec {
+    pub fn new(program: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            cwd: cwd.into(),
+            env: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct LaunchContext {
+    pub session_id: SessionId,
+    pub cwd: PathBuf,
+    pub dangerous_mode: bool,
+    pub model: Option<String>,
+    pub executable_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterDetection {
+    Available { executable: PathBuf },
+    Missing { candidates: Vec<String> },
+}
+
+impl AdapterDetection {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+
+    pub fn executable(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Available { executable } => Some(executable),
+            Self::Missing { .. } => None,
+        }
+    }
+}
+
+pub trait AgentAdapter: Send + Sync {
+    fn kind(&self) -> AgentKind;
+    fn display_name(&self) -> &'static str;
+    fn executable_candidates(&self) -> &'static [&'static str];
+
+    fn detect(&self) -> AdapterDetection {
+        match find_executable(self.executable_candidates()) {
+            Some(executable) => AdapterDetection::Available { executable },
+            None => AdapterDetection::Missing {
+                candidates: self
+                    .executable_candidates()
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+            },
+        }
+    }
+
+    fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec>;
+
+    fn build_resume_command(
+        &self,
+        ctx: &LaunchContext,
+        native: &NativeSessionRef,
+    ) -> Result<CommandSpec>;
+
+    fn dangerous_mode_arg(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CortexSessionMetadata {
+    pub id: String,
+    pub mode: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub cwd: PathBuf,
+    pub created_at: Option<i64>,
+    pub updated_at: Option<i64>,
+    #[serde(flatten)]
+    pub adapter_payload: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CortexSessionDiscovery {
+    pub metadata_path: PathBuf,
+    pub metadata: CortexSessionMetadata,
+}
+
+impl CortexSessionMetadata {
+    pub fn from_json(encoded: &str) -> Result<Self> {
+        serde_json::from_str(encoded).context("failed to decode Cortex session metadata")
+    }
+
+    pub fn metadata_path(cortex_home: impl AsRef<Path>, session_id: &str) -> PathBuf {
+        cortex_home
+            .as_ref()
+            .join("sessions")
+            .join(session_id)
+            .join("meta.json")
+    }
+
+    pub fn discover_latest_for_cwd(
+        cortex_home: impl AsRef<Path>,
+        cwd: impl AsRef<Path>,
+        launched_after_ms: Option<i64>,
+    ) -> Result<Option<CortexSessionDiscovery>> {
+        let sessions_dir = cortex_home.as_ref().join("sessions");
+        if !sessions_dir.exists() {
+            return Ok(None);
+        }
+
+        let mut best: Option<CortexSessionDiscovery> = None;
+        for entry in fs::read_dir(&sessions_dir).with_context(|| {
+            format!(
+                "failed to read Cortex sessions directory at {}",
+                sessions_dir.display()
+            )
+        })? {
+            let entry = entry.with_context(|| {
+                format!(
+                    "failed to inspect Cortex session entry under {}",
+                    sessions_dir.display()
+                )
+            })?;
+            let metadata_path = entry.path().join("meta.json");
+            if !metadata_path.is_file() {
+                continue;
+            }
+
+            let encoded = match fs::read_to_string(&metadata_path) {
+                Ok(encoded) => encoded,
+                Err(_) => continue,
+            };
+            let metadata = match Self::from_json(&encoded) {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+
+            if !same_logical_path(&metadata.cwd, cwd.as_ref()) {
+                continue;
+            }
+
+            let timestamp = metadata
+                .updated_at
+                .or(metadata.created_at)
+                .unwrap_or_default();
+            if let Some(min_timestamp) = launched_after_ms {
+                if timestamp < min_timestamp {
+                    continue;
+                }
+            }
+
+            let should_replace = best
+                .as_ref()
+                .map(|current| {
+                    let current_timestamp = current
+                        .metadata
+                        .updated_at
+                        .or(current.metadata.created_at)
+                        .unwrap_or_default();
+                    timestamp > current_timestamp
+                        || (timestamp == current_timestamp && metadata.id > current.metadata.id)
+                })
+                .unwrap_or(true);
+
+            if should_replace {
+                best = Some(CortexSessionDiscovery {
+                    metadata_path,
+                    metadata,
+                });
+            }
+        }
+
+        Ok(best)
+    }
+
+    pub fn into_native_ref(self, metadata_path: impl Into<PathBuf>) -> NativeSessionRef {
+        let mut payload = serde_json::Map::new();
+        payload.insert("cwd".to_owned(), serde_json::json!(self.cwd));
+        if let Some(mode) = self.mode {
+            payload.insert("mode".to_owned(), serde_json::json!(mode));
+        }
+        if let Some(provider) = self.provider {
+            payload.insert("provider".to_owned(), serde_json::json!(provider));
+        }
+        if let Some(model) = self.model {
+            payload.insert("model".to_owned(), serde_json::json!(model));
+        }
+        if let Some(created_at) = self.created_at {
+            payload.insert("createdAt".to_owned(), serde_json::json!(created_at));
+        }
+        if let Some(updated_at) = self.updated_at {
+            payload.insert("updatedAt".to_owned(), serde_json::json!(updated_at));
+        }
+        for (key, value) in self.adapter_payload {
+            payload.insert(key, value);
+        }
+
+        NativeSessionRef {
+            kind: AgentKind::CortexCode,
+            session_id: Some(self.id),
+            metadata_path: Some(metadata_path.into()),
+            adapter_payload: serde_json::Value::Object(payload),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CortexAdapter;
+
+impl AgentAdapter for CortexAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::CortexCode
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Cortex Code"
+    }
+
+    fn executable_candidates(&self) -> &'static [&'static str] {
+        &["cortex", "cortex-code"]
+    }
+
+    fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
+        let mut command = CommandSpec::new(program_or_default(ctx, "cortex"), &ctx.cwd);
+
+        if ctx.dangerous_mode {
+            command.args.push("--yolo".to_owned());
+        }
+
+        if let Some(model) = &ctx.model {
+            command.args.extend(["--model".to_owned(), model.clone()]);
+        }
+
+        Ok(command)
+    }
+
+    fn build_resume_command(
+        &self,
+        ctx: &LaunchContext,
+        native: &NativeSessionRef,
+    ) -> Result<CommandSpec> {
+        if native.kind != AgentKind::CortexCode {
+            bail!(
+                "cannot resume {} native session with Cortex adapter",
+                native.kind.as_str()
+            );
+        }
+
+        let session_id = native
+            .session_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("Cortex resume requires a native Cortex session id"))?;
+
+        let mut command = CommandSpec::new(program_or_default(ctx, "cortex"), &ctx.cwd)
+            .with_args(["--resume", session_id]);
+
+        if ctx.dangerous_mode {
+            command.args.push("--yolo".to_owned());
+        }
+
+        Ok(command)
+    }
+
+    fn dangerous_mode_arg(&self) -> Option<&'static str> {
+        Some("--yolo")
+    }
+}
+
+/// Claude Code adapter command semantics from the public CLI reference, with
+/// local transcript evidence under `~/.claude/projects/{escaped-cwd}/*.jsonl`.
+/// Native session capture still needs a JSONL scanner, but command construction
+/// can already use the documented `--resume <session-id>` path.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ClaudeCodeAdapter;
+
+impl AgentAdapter for ClaudeCodeAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::ClaudeCode
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn executable_candidates(&self) -> &'static [&'static str] {
+        &["claude"]
+    }
+
+    fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
+        let mut command = CommandSpec::new(program_or_default(ctx, "claude"), &ctx.cwd);
+
+        if ctx.dangerous_mode {
+            command
+                .args
+                .push("--dangerously-skip-permissions".to_owned());
+        }
+
+        if let Some(model) = &ctx.model {
+            command.args.extend(["--model".to_owned(), model.clone()]);
+        }
+
+        Ok(command)
+    }
+
+    fn build_resume_command(
+        &self,
+        ctx: &LaunchContext,
+        native: &NativeSessionRef,
+    ) -> Result<CommandSpec> {
+        if native.kind != AgentKind::ClaudeCode {
+            bail!(
+                "cannot resume {} native session with Claude Code adapter",
+                native.kind.as_str()
+            );
+        }
+
+        let session_id = native
+            .session_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("Claude Code resume requires a native Claude session id"))?;
+
+        let mut command = CommandSpec::new(program_or_default(ctx, "claude"), &ctx.cwd)
+            .with_args(["--resume", session_id]);
+
+        if ctx.dangerous_mode {
+            command
+                .args
+                .push("--dangerously-skip-permissions".to_owned());
+        }
+
+        if let Some(model) = &ctx.model {
+            command.args.extend(["--model".to_owned(), model.clone()]);
+        }
+
+        Ok(command)
+    }
+
+    fn dangerous_mode_arg(&self) -> Option<&'static str> {
+        Some("--dangerously-skip-permissions")
+    }
+}
+
+/// Codex CLI adapter command semantics verified against `codex-cli 0.133.0`.
+///
+/// This only owns launch/resume command construction. Native session discovery is
+/// still intentionally separate because Codex records sessions as JSONL under
+/// `~/.codex/sessions/YYYY/MM/DD/...`, unlike Cortex's simple `meta.json` layout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CodexCliAdapter;
+
+impl AgentAdapter for CodexCliAdapter {
+    fn kind(&self) -> AgentKind {
+        AgentKind::CodexCli
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Codex CLI"
+    }
+
+    fn executable_candidates(&self) -> &'static [&'static str] {
+        &["codex"]
+    }
+
+    fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
+        let mut command = CommandSpec::new(program_or_default(ctx, "codex"), &ctx.cwd);
+
+        command
+            .args
+            .extend(["--cd".to_owned(), ctx.cwd.display().to_string()]);
+
+        if ctx.dangerous_mode {
+            command
+                .args
+                .push("--dangerously-bypass-approvals-and-sandbox".to_owned());
+        }
+
+        if let Some(model) = &ctx.model {
+            command.args.extend(["--model".to_owned(), model.clone()]);
+        }
+
+        Ok(command)
+    }
+
+    fn build_resume_command(
+        &self,
+        ctx: &LaunchContext,
+        native: &NativeSessionRef,
+    ) -> Result<CommandSpec> {
+        if native.kind != AgentKind::CodexCli {
+            bail!(
+                "cannot resume {} native session with Codex CLI adapter",
+                native.kind.as_str()
+            );
+        }
+
+        let session_id = native
+            .session_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("Codex CLI resume requires a native Codex session id"))?;
+
+        let mut command = CommandSpec::new(program_or_default(ctx, "codex"), &ctx.cwd)
+            .with_args(["resume", session_id, "--cd"])
+            .with_arg(ctx.cwd.display().to_string());
+
+        if ctx.dangerous_mode {
+            command
+                .args
+                .push("--dangerously-bypass-approvals-and-sandbox".to_owned());
+        }
+
+        if let Some(model) = &ctx.model {
+            command.args.extend(["--model".to_owned(), model.clone()]);
+        }
+
+        Ok(command)
+    }
+
+    fn dangerous_mode_arg(&self) -> Option<&'static str> {
+        Some("--dangerously-bypass-approvals-and-sandbox")
+    }
+}
+
+pub fn built_in_adapters() -> Vec<Box<dyn AgentAdapter>> {
+    vec![
+        Box::new(ClaudeCodeAdapter),
+        Box::new(CodexCliAdapter),
+        Box::new(CortexAdapter),
+    ]
+}
+
+fn same_logical_path(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn program_or_default(ctx: &LaunchContext, fallback: &'static str) -> PathBuf {
+    ctx.executable_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(fallback))
+}
+
+fn find_executable(candidates: &[&str]) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    let path_dirs = env::split_paths(&path_var);
+
+    for dir in path_dirs {
+        for candidate in candidates {
+            for executable_name in executable_names(candidate) {
+                let path = dir.join(executable_name);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn executable_names(candidate: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let candidate_path = std::path::Path::new(candidate);
+        if candidate_path.extension().is_some() {
+            return vec![candidate.to_owned()];
+        }
+
+        let pathext = env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+        pathext
+            .split(';')
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| format!("{candidate}{ext}"))
+            .collect()
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![candidate.to_owned()]
+    }
+}
+
+pub fn require_detected(adapter: &dyn AgentAdapter) -> Result<PathBuf> {
+    match adapter.detect() {
+        AdapterDetection::Available { executable } => Ok(executable),
+        AdapterDetection::Missing { candidates } => Err(anyhow!(
+            "{} is not installed or not on PATH; tried {}",
+            adapter.display_name(),
+            candidates.join(", ")
+        ))
+        .with_context(|| format!("detecting {}", adapter.display_name())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn cortex_new_command_applies_yolo_and_model() {
+        let adapter = CortexAdapter;
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: true,
+            model: Some("gpt-test".to_owned()),
+            executable_path: Some(PathBuf::from("/bin/cortex")),
+        };
+
+        let command = adapter.build_new_command(&ctx).unwrap();
+
+        assert_eq!(command.program, PathBuf::from("/bin/cortex"));
+        assert_eq!(command.args, vec!["--yolo", "--model", "gpt-test"]);
+        assert_eq!(command.cwd, PathBuf::from("/tmp/reverie"));
+    }
+
+    #[test]
+    fn cortex_resume_command_requires_cortex_native_session_id() {
+        let adapter = CortexAdapter;
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: false,
+            model: None,
+            executable_path: None,
+        };
+        let native = NativeSessionRef::cortex("session-123", None);
+
+        let command = adapter.build_resume_command(&ctx, &native).unwrap();
+
+        assert_eq!(command.program, PathBuf::from("cortex"));
+        assert_eq!(command.args, vec!["--resume", "session-123"]);
+    }
+
+    #[test]
+    fn claude_commands_use_documented_resume_and_permission_flags() {
+        let adapter = ClaudeCodeAdapter;
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: true,
+            model: Some("sonnet".to_owned()),
+            executable_path: Some(PathBuf::from("/bin/claude")),
+        };
+
+        let new_command = adapter.build_new_command(&ctx).unwrap();
+        assert_eq!(new_command.program, PathBuf::from("/bin/claude"));
+        assert_eq!(
+            new_command.args,
+            vec!["--dangerously-skip-permissions", "--model", "sonnet"]
+        );
+
+        let native = NativeSessionRef {
+            kind: AgentKind::ClaudeCode,
+            session_id: Some("37c6ba0c-e8a8-4cd3-8129-aa8ac289a9ca".to_owned()),
+            metadata_path: Some(PathBuf::from(
+                "/tmp/.claude/projects/-tmp-reverie/37c6ba0c-e8a8-4cd3-8129-aa8ac289a9ca.jsonl",
+            )),
+            adapter_payload: serde_json::json!({ "cwd": "/tmp/reverie" }),
+        };
+
+        let resume_command = adapter.build_resume_command(&ctx, &native).unwrap();
+        assert_eq!(resume_command.program, PathBuf::from("/bin/claude"));
+        assert_eq!(
+            resume_command.args,
+            vec![
+                "--resume",
+                "37c6ba0c-e8a8-4cd3-8129-aa8ac289a9ca",
+                "--dangerously-skip-permissions",
+                "--model",
+                "sonnet"
+            ]
+        );
+    }
+
+    #[test]
+    fn cortex_metadata_becomes_native_session_ref() {
+        let metadata = CortexSessionMetadata::from_json(
+            r#"{
+              "id": "session-123",
+              "mode": "build",
+              "provider": "openai-codex",
+              "model": "gpt-5.5",
+              "cwd": "/tmp/reverie",
+              "createdAt": 1779664765667,
+              "updatedAt": 1779665243918,
+              "contextTokenCount": 162804
+            }"#,
+        )
+        .unwrap();
+
+        let native = metadata.into_native_ref("/tmp/.cortex/sessions/session-123/meta.json");
+
+        assert_eq!(native.kind, AgentKind::CortexCode);
+        assert_eq!(native.session_id.as_deref(), Some("session-123"));
+        assert_eq!(
+            native.metadata_path,
+            Some(PathBuf::from("/tmp/.cortex/sessions/session-123/meta.json"))
+        );
+        assert_eq!(
+            native.adapter_payload["cwd"],
+            serde_json::json!("/tmp/reverie")
+        );
+        assert_eq!(
+            native.adapter_payload["provider"],
+            serde_json::json!("openai-codex")
+        );
+        assert_eq!(
+            native.adapter_payload["contextTokenCount"],
+            serde_json::json!(162804)
+        );
+    }
+
+    #[test]
+    fn discovers_latest_cortex_metadata_for_cwd_after_launch_window() {
+        let root = temp_root("cortex-discovery");
+        let cortex_home = root.join(".cortex");
+        let cwd = root.join("project");
+        let other_cwd = root.join("other-project");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&other_cwd).unwrap();
+
+        write_cortex_meta(&cortex_home, "old-match", &cwd, 1_000);
+        write_cortex_meta(&cortex_home, "latest-match", &cwd, 2_000);
+        write_cortex_meta(&cortex_home, "wrong-cwd", &other_cwd, 3_000);
+
+        let discovered =
+            CortexSessionMetadata::discover_latest_for_cwd(&cortex_home, &cwd, Some(1_500))
+                .unwrap()
+                .expect("matching Cortex metadata should be discovered");
+
+        assert_eq!(discovered.metadata.id, "latest-match");
+        assert_eq!(
+            discovered.metadata_path,
+            cortex_home.join("sessions/latest-match/meta.json")
+        );
+
+        let too_late =
+            CortexSessionMetadata::discover_latest_for_cwd(&cortex_home, &cwd, Some(2_500))
+                .unwrap();
+        assert_eq!(too_late, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_cortex_meta(cortex_home: &Path, session_id: &str, cwd: &Path, updated_at: i64) {
+        let metadata_dir = cortex_home.join("sessions").join(session_id);
+        fs::create_dir_all(&metadata_dir).unwrap();
+        let metadata = CortexSessionMetadata {
+            id: session_id.to_owned(),
+            mode: Some("build".to_owned()),
+            provider: Some("openai-codex".to_owned()),
+            model: None,
+            cwd: cwd.to_path_buf(),
+            created_at: Some(updated_at - 100),
+            updated_at: Some(updated_at),
+            adapter_payload: BTreeMap::new(),
+        };
+        fs::write(
+            metadata_dir.join("meta.json"),
+            serde_json::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn temp_root(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("reverie-{label}-{}-{nanos}", std::process::id()))
+    }
+}

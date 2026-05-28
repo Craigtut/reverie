@@ -1,0 +1,27 @@
+@layer reset, base, tokens, recipes, utilities;
+
+.terminal-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 1080px;
+  max-width: none;
+  transform-origin: 0 0;
+  background: var(--terminal-bg, #060605);
+  outline: none;
+}
+
+.terminal-canvas:focus {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text, #efe9df) 46%, transparent);
+}
+
+.proof-log {
+  white-space: pre-wrap;
+  min-height: 180px;
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  color: var(--text-2, #b7aea1);
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}

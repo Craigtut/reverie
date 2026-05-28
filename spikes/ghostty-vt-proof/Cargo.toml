@@ -1,0 +1,13 @@
+[package]
+name = "ghostty-vt-proof"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0"
+libghostty-vt = "0.1.1"
+portable-pty = "0.9"
+reverie-core = { path = "../../packages/reverie-core" }

@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+.pnp.*
+
+# Rust / Cargo build output
+target/
+**/target/
+
+# Tauri generated files and local runtime output
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/.tauri/
+apps/desktop/src-tauri/target/
+
+# Frontend build output
+apps/desktop/web/dist/
+dist/
+
+# Panda CSS generated artifacts
+apps/desktop/web/styled-system/
+
+# Test / coverage / reports
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local screenshots / recordings from desktop validation
+screenshots/
+recordings/
+*.mov
+*.mp4
+*.webm
+
+# Temporary files
+.tmp/
+tmp/
+*.tmp
+*.temp
