@@ -46,7 +46,7 @@ import {
   terminalSurfaceForBounds,
   type TerminalSurface,
 } from './terminalScrollback';
-import type { TerminalFrame, TerminalRenderer, TerminalRow } from './terminalTypes';
+import type { TerminalFrame, TerminalModes, TerminalRenderer, TerminalRow } from './terminalTypes';
 import { maybeRunHarnessSmokeTest } from './harnessSmoke';
 import { createDotField, type DotFieldHandle, type DotFieldVariant } from './dotField';
 
@@ -205,6 +205,43 @@ interface ShellSession {
   tabVisible?: boolean;
 }
 
+// Mirrors reverie-core's ActivityStatus enum (snake_case wire format).
+type ActivityStatus = 'working' | 'awaiting_input' | 'awaiting_permission' | 'done' | 'error';
+
+interface ActivityPermissionRequest {
+  id: string;
+  toolName: string;
+  displaySummary: string;
+  args?: unknown;
+  requestedAt: string;
+}
+
+interface ActivityError {
+  category: 'rate_limit' | 'authentication' | 'network' | 'context_overflow' | 'cancelled' | 'other';
+  message: string;
+  recoverable: boolean;
+  occurredAt: string;
+}
+
+interface ActivityState {
+  version: number;
+  sessionId: string;
+  status: ActivityStatus;
+  updatedAt: string;
+  sequence: number;
+  cwd: string;
+  turn?: { id: string; status: 'running' | 'completed' | 'aborted'; startedAt: string; endedAt?: string | null } | null;
+  activeTools?: { toolCallId: string; toolName: string; startedAt: string }[];
+  awaitingPermission?: ActivityPermissionRequest | null;
+  lastError?: ActivityError | null;
+}
+
+// Payload shape from the Tauri `cortex_activity_changed` event. Matches the
+// Rust `CortexActivityEvent` enum at apps/desktop/src-tauri/src/main.rs.
+type CortexActivityEventPayload =
+  | { kind: 'updated'; payload: { cortexSessionId: string; state: ActivityState } }
+  | { kind: 'removed'; payload: { cortexSessionId: string } };
+
 type AgentKind = 'claude_code' | 'codex_cli' | 'cortex_code';
 type CreationMode = 'project' | 'focus' | 'session' | null;
 
@@ -285,6 +322,10 @@ export function App() {
   // breathing launch animation. Cleared automatically when the live terminal
   // binding arrives, or on launch failure.
   const [launchingSessionId, setLaunchingSessionId] = useState<string | null>(null);
+  // Map from Cortex session id → live ActivityState. Reverie sessions look up
+  // their entry by `nativeSessionRef.sessionId`. Sessions Reverie doesn't own
+  // still land in the map but stay invisible until correlation succeeds.
+  const [cortexActivity, setCortexActivity] = useState<Record<string, ActivityState>>({});
   const [terminalInputArmed, setTerminalInputArmed] = useState(false);
   const [sessionTerminalBindings, setSessionTerminalBindings] = useState<Record<string, SessionTerminalBinding>>({});
   const [terminalSurface, setTerminalSurface] = useState<TerminalSurface>(() => TERMINAL_SURFACE);
@@ -327,8 +368,14 @@ export function App() {
     selectedSession && launchingSessionId === selectedSession.id && !selectedTerminalBinding,
   );
   const liveSessionCount = useMemo(
-    () => shell.sessions.filter(s => s.tabVisible !== false && (s.status === 'running' || sessionTerminalBindings[s.id])).length,
-    [shell.sessions, sessionTerminalBindings],
+    () => shell.sessions.filter(s => {
+      if (s.tabVisible === false) return false;
+      if (s.status === 'running' || sessionTerminalBindings[s.id]) return true;
+      const cortexId = s.nativeSessionRef?.sessionId;
+      const activity = cortexId ? cortexActivity[cortexId] : null;
+      return activity?.status === 'working' || activity?.status === 'awaiting_permission';
+    }).length,
+    [shell.sessions, sessionTerminalBindings, cortexActivity],
   );
 
   // Clean up the launchingSessionId once the live binding arrives (the breathing
@@ -507,7 +554,8 @@ export function App() {
     const viewport = surfaceViewportRef.current;
     const viewportHeight = Math.max(surface.cellHeight, viewport?.clientHeight ?? surface.rows * surface.cellHeight);
     const overscanRows = 3;
-    const displayRows = Math.max(surface.rows, Math.ceil(viewportHeight / surface.cellHeight) + overscanRows * 2);
+    const targetDisplayRows = Math.max(surface.rows, Math.ceil(viewportHeight / surface.cellHeight) + overscanRows * 2);
+    const displayRows = Math.max(1, Math.min(frame.rows.length, targetDisplayRows));
     const scrollTop = viewport?.scrollTop ?? 0;
     const maxStartRow = Math.max(0, frame.rows.length - displayRows);
     const startRow = Math.min(maxStartRow, Math.max(0, Math.floor(scrollTop / surface.cellHeight) - overscanRows));
@@ -542,7 +590,7 @@ export function App() {
     if (canvasRef.current) {
       canvasRef.current.style.transform = `translateY(${startRow * surface.cellHeight}px)`;
     }
-    renderer?.clear();
+    renderer?.clear(windowFrame.colors?.background);
     renderer?.paintFrame(windowFrame);
   }
 
@@ -649,6 +697,52 @@ export function App() {
     applyViewportSize(viewport.clientWidth, viewport.clientHeight);
     return () => observer.disconnect();
   }, [isTauriRuntime, surfaceMode, selectedSession?.id]);
+
+  // Subscribe to Cortex activity-state updates pushed by the Tauri shell.
+  // Cleanup is a single unlisten; we mount one subscription for the app's
+  // lifetime so dashboard cards can react no matter which surface is visible.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: UnlistenFn | null = null;
+    void (async () => {
+      try {
+        const fn = await listen<CortexActivityEventPayload>('cortex_activity_changed', event => {
+          if (cancelled) return;
+          const message = event.payload;
+          if (message.kind === 'updated') {
+            const { cortexSessionId, state } = message.payload;
+            setCortexActivity(current => {
+              // Drop strictly-older updates by sequence so events that race
+              // across threads can't roll us backwards.
+              const prior = current[cortexSessionId];
+              if (prior && prior.sequence > state.sequence) return current;
+              return { ...current, [cortexSessionId]: state };
+            });
+          } else {
+            const { cortexSessionId } = message.payload;
+            setCortexActivity(current => {
+              if (!(cortexSessionId in current)) return current;
+              const next = { ...current };
+              delete next[cortexSessionId];
+              return next;
+            });
+          }
+        });
+        if (cancelled) {
+          fn();
+          return;
+        }
+        unlisten = fn;
+      } catch (error) {
+        // The browser harness has no Tauri event bus; quietly skip.
+        if (!cancelled) writeLog(`Activity event bus unavailable: ${errorMessage(error)}`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   async function loadWorkspaceShell() {
     if (!canUseAppServices) return null;
@@ -1176,7 +1270,7 @@ export function App() {
   }
 
   function handleTerminalKeyDown(event: KeyboardEvent<HTMLCanvasElement>) {
-    const input = terminalInputForKey(event);
+    const input = terminalInputForKey(event, lastTerminalFrameRef.current?.modes);
     if (!input || !terminalInputReady()) return;
 
     event.preventDefault();
@@ -1190,7 +1284,10 @@ export function App() {
     if (!text) return;
 
     event.preventDefault();
-    void sendTerminalInput(text);
+    const input = lastTerminalFrameRef.current?.modes?.bracketedPaste
+      ? `\x1b[200~${text}\x1b[201~`
+      : text;
+    void sendTerminalInput(input);
   }
 
   function focusTerminalCanvas(event?: MouseEvent<HTMLElement>) {
@@ -1606,6 +1703,7 @@ export function App() {
             shell={shell}
             theme={theme}
             sessionTerminalBindings={sessionTerminalBindings}
+            cortexActivity={cortexActivity}
             onOpenSession={openSessionFromDashboard}
             onCreateProject={() => openCreation('project')}
             onCreateFocus={() => openCreation('focus')}
@@ -2135,7 +2233,57 @@ function sessionBreadcrumb(session: ShellSession, shell: WorkspaceShellSnapshot)
   return project ? `${project.name} · ${focus.title}` : focus.title;
 }
 
-function plainLanguageStatus(session: ShellSession, isBound: boolean): string {
+function activityForSession(
+  session: ShellSession,
+  cortexActivity: Record<string, ActivityState>,
+): ActivityState | null {
+  const cortexId = session.nativeSessionRef?.sessionId;
+  if (!cortexId) return null;
+  return cortexActivity[cortexId] ?? null;
+}
+
+/// Classify a session into one of the dashboard rails. Activity-state wins
+/// when present; we fall back to the persisted record status when no live
+/// signal is available (e.g. session was started before the activity surface
+/// existed, or runs on a CLI we haven't wired yet).
+function classifyForDashboard(
+  session: ShellSession,
+  isBound: boolean,
+  activity: ActivityState | null,
+): DashboardStatus {
+  if (activity) {
+    if (activity.status === 'awaiting_permission') return 'attention';
+    if (activity.lastError && !activity.lastError.recoverable) return 'attention';
+    if (activity.status === 'working') return 'live';
+    if (activity.status === 'awaiting_input') return isBound ? 'live' : 'recent';
+    return 'recent'; // done | error (recoverable)
+  }
+  if (session.status === 'restore_failed') return 'attention';
+  if (session.status === 'running' || isBound) return 'live';
+  return 'recent';
+}
+
+function plainLanguageStatus(
+  session: ShellSession,
+  isBound: boolean,
+  activity: ActivityState | null,
+): string {
+  if (activity) {
+    switch (activity.status) {
+      case 'awaiting_permission':
+        return 'Needs your approval';
+      case 'working': {
+        const tool = activity.activeTools?.[0]?.toolName;
+        return tool ? `Running ${tool}` : 'Working';
+      }
+      case 'awaiting_input':
+        return isBound ? 'Idle · ready for next prompt' : 'Resumable';
+      case 'done':
+        return 'Ended';
+      case 'error':
+        return activity.lastError?.recoverable ? 'Recovered from error' : 'Errored';
+    }
+  }
   if (session.status === 'restore_failed') return 'Needs your attention';
   if (session.status === 'running' || isBound) return 'Running';
   if (session.status === 'restorable' || session.nativeSessionRef) return 'Resumable';
@@ -2143,9 +2291,9 @@ function plainLanguageStatus(session: ShellSession, isBound: boolean): string {
   return 'Ready to launch';
 }
 
-function statusDotColor(status: DashboardStatus): string {
-  if (status === 'attention') return 'var(--warn)';
-  if (status === 'live') return 'var(--good)';
+function statusDotColor(tone: DashboardStatus): string {
+  if (tone === 'attention') return 'var(--warn)';
+  if (tone === 'live') return 'var(--good)';
   return 'var(--text-4)';
 }
 
@@ -2153,6 +2301,7 @@ function DashboardSurface({
   shell,
   theme,
   sessionTerminalBindings,
+  cortexActivity,
   onOpenSession,
   onCreateProject,
   onCreateFocus,
@@ -2161,23 +2310,27 @@ function DashboardSurface({
   shell: WorkspaceShellSnapshot;
   theme: ThemeMode;
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
+  cortexActivity: Record<string, ActivityState>;
   onOpenSession: (session: ShellSession) => void;
   onCreateProject: () => void;
   onCreateFocus: () => void;
   cliDetections: AgentCliDetection[];
 }) {
-  // Partition visible sessions across the three rails. The set is defined from
-  // local product data so the dashboard ships before the activity-state pipeline
-  // arrives. As that lands, `attention` will pick up awaiting_permission too
-  // and `live` will reflect the richer working/awaiting_input split.
+  // Partition visible sessions across the three rails. Activity-state drives
+  // classification when available; the persisted record status is the fallback
+  // for sessions on CLIs without an activity surface yet.
   const visible = shell.sessions.filter(s => s.tabVisible !== false);
-  const attention = visible.filter(s => s.status === 'restore_failed');
-  const live = visible.filter(
-    s => s.status === 'running' || Boolean(sessionTerminalBindings[s.id]),
-  );
-  const liveIds = new Set(live.map(s => s.id));
-  const attentionIds = new Set(attention.map(s => s.id));
-  const recent = visible.filter(s => !liveIds.has(s.id) && !attentionIds.has(s.id));
+  const attention: ShellSession[] = [];
+  const live: ShellSession[] = [];
+  const recent: ShellSession[] = [];
+  for (const session of visible) {
+    const isBound = Boolean(sessionTerminalBindings[session.id]);
+    const activity = activityForSession(session, cortexActivity);
+    const tone = classifyForDashboard(session, isBound, activity);
+    if (tone === 'attention') attention.push(session);
+    else if (tone === 'live') live.push(session);
+    else recent.push(session);
+  }
 
   const totalVisible = visible.length;
   const isEmptyWorkspace = totalVisible === 0;
@@ -2231,6 +2384,7 @@ function DashboardSurface({
             sessions={attention}
             shell={shell}
             bindings={sessionTerminalBindings}
+            cortexActivity={cortexActivity}
             onOpenSession={onOpenSession}
           />
         ) : null}
@@ -2242,6 +2396,7 @@ function DashboardSurface({
             sessions={live}
             shell={shell}
             bindings={sessionTerminalBindings}
+            cortexActivity={cortexActivity}
             onOpenSession={onOpenSession}
           />
         ) : null}
@@ -2253,6 +2408,7 @@ function DashboardSurface({
             sessions={recent}
             shell={shell}
             bindings={sessionTerminalBindings}
+            cortexActivity={cortexActivity}
             onOpenSession={onOpenSession}
           />
         ) : null}
@@ -2268,6 +2424,7 @@ function DashboardRail({
   sessions,
   shell,
   bindings,
+  cortexActivity,
   onOpenSession,
 }: {
   title: string;
@@ -2276,6 +2433,7 @@ function DashboardRail({
   sessions: ShellSession[];
   shell: WorkspaceShellSnapshot;
   bindings: Record<string, SessionTerminalBinding>;
+  cortexActivity: Record<string, ActivityState>;
   onOpenSession: (session: ShellSession) => void;
 }) {
   return (
@@ -2292,6 +2450,7 @@ function DashboardRail({
             session={session}
             shell={shell}
             isBound={Boolean(bindings[session.id])}
+            activity={activityForSession(session, cortexActivity)}
             tone={tone}
             onOpen={() => onOpenSession(session)}
           />
@@ -2305,23 +2464,27 @@ function SessionDashboardCard({
   session,
   shell,
   isBound,
+  activity,
   tone,
   onOpen,
 }: {
   session: ShellSession;
   shell: WorkspaceShellSnapshot;
   isBound: boolean;
+  activity: ActivityState | null;
   tone: DashboardStatus;
   onOpen: () => void;
 }) {
   const breadcrumb = sessionBreadcrumb(session, shell);
-  const statusLabel = plainLanguageStatus(session, isBound);
+  const statusLabel = plainLanguageStatus(session, isBound, activity);
+  const permission = activity?.awaitingPermission ?? null;
 
   return (
     <button
       type="button"
       className={dashboardCardClass}
       data-tone={tone}
+      data-activity-status={activity?.status ?? 'none'}
       data-testid="dashboard-session-card"
       data-session-id={session.id}
       onClick={onOpen}
@@ -2333,6 +2496,11 @@ function SessionDashboardCard({
       <div className={dashboardCardTitleClass}>{agentTabLabel(session)}</div>
       <div className={dashboardCardBreadcrumbClass}>{breadcrumb}</div>
       <div className={dashboardCardStatusClass}>{statusLabel}</div>
+      {permission ? (
+        <div className={dashboardCardPermissionClass} data-testid="dashboard-card-permission-summary">
+          {permission.displaySummary}
+        </div>
+      ) : null}
     </button>
   );
 }
@@ -2723,7 +2891,7 @@ function dangerousLabel(session: ShellSession | null, workspaceDefault: boolean)
   return effective ? 'Explicitly enabled' : 'Off';
 }
 
-function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>) {
+function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>, modes?: TerminalModes) {
   if (event.metaKey) return null;
 
   if (event.ctrlKey) {
@@ -2740,6 +2908,11 @@ function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>) {
     return `\x1b${event.key}`;
   }
 
+  const cursorApplication = Boolean(modes?.cursorKeyApplication);
+  const cursorSequence = (normal: string, application: string) => (
+    cursorApplication ? application : normal
+  );
+
   switch (event.key) {
     case 'Enter':
       return '\r';
@@ -2750,19 +2923,23 @@ function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>) {
     case 'Escape':
       return '\x1b';
     case 'ArrowUp':
-      return '\x1b[A';
+      return cursorSequence('\x1b[A', '\x1bOA');
     case 'ArrowDown':
-      return '\x1b[B';
+      return cursorSequence('\x1b[B', '\x1bOB');
     case 'ArrowRight':
-      return '\x1b[C';
+      return cursorSequence('\x1b[C', '\x1bOC');
     case 'ArrowLeft':
-      return '\x1b[D';
+      return cursorSequence('\x1b[D', '\x1bOD');
     case 'Delete':
       return '\x1b[3~';
     case 'Home':
-      return '\x1b[H';
+      return cursorSequence('\x1b[H', '\x1bOH');
     case 'End':
-      return '\x1b[F';
+      return cursorSequence('\x1b[F', '\x1bOF');
+    case 'PageUp':
+      return '\x1b[5~';
+    case 'PageDown':
+      return '\x1b[6~';
     default:
       return event.key.length === 1 ? event.key : null;
   }
@@ -3558,6 +3735,7 @@ const surfaceViewportClass = css({
 const terminalScrollSpacerClass = css({
   position: 'relative',
   minHeight: '100%',
+  overflow: 'hidden',
 });
 
 const dashboardSurfaceClass = css({
@@ -3744,6 +3922,21 @@ const dashboardCardStatusClass = css({
   letterSpacing: '0.06em',
   textTransform: 'uppercase',
   color: 'var(--text-3)',
+});
+
+const dashboardCardPermissionClass = css({
+  marginTop: '2px',
+  width: '100%',
+  padding: '6px 8px',
+  fontSize: '11.5px',
+  color: 'var(--warn)',
+  background: 'color-mix(in srgb, var(--warn) 10%, transparent)',
+  border: '1px solid color-mix(in srgb, var(--warn) 28%, transparent)',
+  borderRadius: '8px',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
 });
 
 const emptyStateClass = css({
