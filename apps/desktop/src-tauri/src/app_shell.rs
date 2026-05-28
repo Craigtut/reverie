@@ -146,7 +146,7 @@ impl AppShellStore {
         } else if let Some(snapshot) = legacy_json_snapshot {
             snapshot
         } else {
-            workspace_shell_snapshot()
+            empty_workspace_snapshot()
         };
 
         let normalized = normalize_shell_snapshot(&mut snapshot);
@@ -633,6 +633,27 @@ fn build_agent_spawn_spec_for_session(
     Ok(spec)
 }
 
+/// First-launch snapshot used by `load_or_seed` when neither the database nor a legacy JSON
+/// file is present. Returns just the workspace row plus the "General" bucket label, with no
+/// projects, focuses, or sessions: users start with an empty workspace and build their own map.
+pub fn empty_workspace_snapshot() -> WorkspaceShellSnapshot {
+    let workspace_id = uuid("0f70f21f-55c0-4e2a-923e-73360342db80");
+    WorkspaceShellSnapshot {
+        workspace: ShellWorkspace {
+            id: workspace_id,
+            name: "Local workspace".to_owned(),
+            general_label: "General".to_owned(),
+            default_dangerous_mode: false,
+        },
+        projects: Vec::new(),
+        focuses: Vec::new(),
+        sessions: Vec::new(),
+    }
+}
+
+/// Populated demo snapshot. Retained for tests that need a non-trivial shell shape; never
+/// invoked from production startup. Production first-launch goes through
+/// `empty_workspace_snapshot` above.
 pub fn workspace_shell_snapshot() -> WorkspaceShellSnapshot {
     let workspace_id = uuid("0f70f21f-55c0-4e2a-923e-73360342db80");
     let general_focus_id = uuid("342f1d9a-6a8b-4f76-bf9a-4f0908744cc2");
@@ -1449,6 +1470,8 @@ mod tests {
     #[test]
     fn app_shell_store_persists_runtime_session_status_changes() {
         let path = temp_store_path("runtime-status");
+        write_snapshot(&path, &workspace_shell_snapshot())
+            .expect("demo fixture should be written");
         let store = AppShellStore::load_or_seed(path.clone()).expect("store should seed");
         let session_id = store
             .snapshot()
@@ -1606,6 +1629,8 @@ mod tests {
         )
         .expect("metadata should be written");
 
+        write_snapshot(&path, &workspace_shell_snapshot())
+            .expect("demo fixture should be written");
         let store = AppShellStore::load_or_seed(path.clone()).expect("store should seed");
         let session_id = store
             .snapshot()
@@ -1650,6 +1675,8 @@ mod tests {
     fn capture_cortex_session_after_launch_uses_cwd_and_launch_window() {
         let path = temp_store_path("cortex-launch-capture");
         let cortex_home = temp_store_path("cortex-launch-home");
+        write_snapshot(&path, &workspace_shell_snapshot())
+            .expect("demo fixture should be written");
         let store = AppShellStore::load_or_seed(path.clone()).expect("store should seed");
         let session_id = store
             .snapshot()
