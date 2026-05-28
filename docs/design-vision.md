@@ -1,6 +1,6 @@
 # Reverie Design Vision
 
-> The visual and interaction language of Reverie, extracted from the current implementation (`apps/desktop/web/App.tsx`) and the design reference (`mockup.html` at the repo root). For the frontend's structural/architecture rules, see [`technical/frontend-architecture.md`](technical/frontend-architecture.md).
+> The visual and interaction language of Reverie. The live source of truth is `apps/desktop/web/App.tsx` (warm-neutral CSS variables on the app shell, switched by `data-theme`) plus `apps/desktop/web/dotField.ts` (the canvas dot field). For the frontend's structural/architecture rules, see [`technical/frontend-architecture.md`](technical/frontend-architecture.md).
 
 ## Design thesis
 
@@ -8,9 +8,9 @@ Reverie should feel **calm, monochromatic, and quietly alive**. It is a home for
 
 ## Source of truth
 
-- **`mockup.html`** (repo root) is the canonical design reference: tokens, layout, rim-lit panels, the ambient dot field, and the dot-matrix wordmark all live there as a self-contained prototype.
-- **`apps/desktop/web/App.tsx`** is the live implementation of that language using Panda CSS. The warm-neutral token set is defined inline there (`appClass`, `rimLitPanel`, `ambientClass`).
-- **Note / known drift:** `panda.config.ts` still carries an older blue/Nord-ish token set (`#070b16`, `cyan`, dark-only) that predates this direction. It is effectively stale — the live app does **not** use it. When formalizing tokens, reconcile `panda.config.ts` to the warm-neutral palette below rather than copying the blue one.
+- **`apps/desktop/web/App.tsx`** is the live implementation. The warm-neutral token set is declared inline on the app shell (`appClass`, `rimLitPanel`) and switched via `data-theme`.
+- **`apps/desktop/web/dotField.ts`** owns the signature canvas dot field (ambient + launching variants), shared across surfaces.
+- **`panda.config.ts`** is intentionally minimal — preflight reset, JSX wiring, and `css()` codegen only. No theme tokens declared there yet; promoting the warm palette into proper Panda tokens / `data-theme` recipes is a follow-up.
 
 ## Core principles
 
@@ -25,7 +25,7 @@ Reverie should feel **calm, monochromatic, and quietly alive**. It is a home for
 
 ## Palette (warm-neutral monochrome)
 
-Defined as CSS variables on the shell root, switched by `data-theme`. Values below are authoritative (mirrors `App.tsx` / `mockup.html`).
+Defined as CSS variables on the shell root, switched by `data-theme`. Values below mirror the live declarations in `App.tsx`.
 
 ### Dark (default)
 

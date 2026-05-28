@@ -32,7 +32,6 @@ reverie/
 │   ├── src-tauri/                # Tauri v2 desktop app (Rust)
 │   └── web/                      # Vite + React frontend (WebView UI)
 ├── spikes/                       # Isolated proofs (e.g. ghostty-vt-proof)
-├── mockup.html                   # Canonical design reference (warm-neutral monochrome)
 └── docs/                         # Documentation (see map above)
 ```
 
@@ -67,7 +66,7 @@ These are load-bearing product and architecture rules. Breaking them undermines 
 - **Don't animate inside the terminal paint loop.** Motion is shell-level only.
 - **Local-first only.** No accounts, cloud sync, or sync seams in v1.
 - **Dangerous / YOLO mode stays explicit.** Off by default, opt-in, overridable per session. Never hidden behind defaults.
-- **Design is monochrome + status colors only.** Warm-neutral palette, light *and* dark as equals. Don't reintroduce the stale blue palette in `panda.config.ts`. See [`docs/design-vision.md`](docs/design-vision.md).
+- **Design is monochrome + status colors only.** Warm-neutral palette, light *and* dark as equals. See [`docs/design-vision.md`](docs/design-vision.md).
 - **Don't let terminal proof/spike code become production architecture by accident.**
 
 ## Writing style
