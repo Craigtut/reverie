@@ -106,4 +106,4 @@ refactor(core): split native session ref capture out of app_shell
 - Write in imperative mood: "add resume flow" not "added resume flow".
 - Keep the first line under 100 characters.
 - Always use `git commit -m "..."` with a single-line message.
-- Only commit or push when the user asks. If you are on `main`, branch first.
+- Only commit or push when the user asks.
