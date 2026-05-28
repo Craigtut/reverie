@@ -25,3 +25,25 @@
   color: var(--text-2, #b7aea1);
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
+
+/* Per-card session status glyph. The core 2x2 dots pulse when an agent is
+ * working; the outer constellation stays static. Animating opacity/transform
+ * only keeps these GPU-composited so dozens of cards stay free at 60fps. */
+@keyframes reverie-glyph-breathe {
+  0%, 100% { opacity: 0.55; transform: scale(0.92); }
+  50%      { opacity: 1;    transform: scale(1.08); }
+}
+
+@keyframes reverie-glyph-attention-pulse {
+  0%, 100% { opacity: 0.85; }
+  50%      { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes reverie-glyph-breathe {
+    0%, 100% { opacity: 1; transform: none; }
+  }
+  @keyframes reverie-glyph-attention-pulse {
+    0%, 100% { opacity: 1; }
+  }
+}

@@ -77,7 +77,6 @@ const DIRTY_ROWS_PER_FRAME = 8;
 const DEFAULT_TERMINAL_SCROLLBACK_ROWS = 10_000;
 const USER_HOME = '/Users/user';
 
-type MetricValue = string | number | boolean | undefined;
 type ProjectFilter = string | null;
 type ThemeMode = 'dark' | 'light';
 type SurfaceMode = 'dashboard' | 'terminal' | 'settings' | 'session-history';
@@ -367,6 +366,13 @@ export function App() {
   const isLaunchingSelectedSession = Boolean(
     selectedSession && launchingSessionId === selectedSession.id && !selectedTerminalBinding,
   );
+  const selectedSessionActivity: ActivityState | null = selectedSession
+    ? activityForSession(selectedSession, cortexActivity)
+    : null;
+  const selectedPermissionRequest: ActivityPermissionRequest | null =
+    selectedSessionActivity?.status === 'awaiting_permission'
+      ? (selectedSessionActivity.awaitingPermission ?? null)
+      : null;
   const liveSessionCount = useMemo(
     () => shell.sessions.filter(s => {
       if (s.tabVisible === false) return false;
@@ -1687,12 +1693,15 @@ export function App() {
         </nav>
 
         <div className={leftFooterClass}>
-          <button className={userButtonClass} type="button" data-testid="open-settings-button" onClick={() => setSurfaceMode('settings')}>
-            <span className={avatarClass}>{workspaceInitial(shell.workspace.name)}</span>
-            <span>
-              <strong>{shell.workspace.name}</strong>
-            </span>
-            <GearSix size={16} />
+          <button
+            type="button"
+            className={settingsNavRowClass({ active: surfaceMode === 'settings' })}
+            data-testid="open-settings-button"
+            data-active={surfaceMode === 'settings' ? 'true' : 'false'}
+            onClick={() => setSurfaceMode('settings')}
+          >
+            <GearSix size={15} weight={surfaceMode === 'settings' ? 'fill' : 'regular'} />
+            <span>Settings</span>
           </button>
         </div>
       </aside>
@@ -1713,22 +1722,10 @@ export function App() {
           <SettingsSurface
             theme={theme}
             setTheme={setTheme}
-            workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
-            newSessionTitle={newSessionTitle}
-            setNewSessionTitle={setNewSessionTitle}
-            newSessionCwd={newSessionCwd}
-            setNewSessionCwd={setNewSessionCwd}
             newSessionAgentKind={newSessionAgentKind}
             setNewSessionAgentKind={setNewSessionAgentKind}
             newSessionDangerousMode={newSessionDangerousMode}
             setNewSessionDangerousMode={setNewSessionDangerousMode}
-            logs={logs}
-            metrics={metrics}
-            runSyntheticProof={runSyntheticProof}
-            runGhosttyBridgeProof={runGhosttyBridgeProof}
-            busy={busy}
-            hasActiveTerminal={hasActiveTerminal}
-            isTauriRuntime={isTauriRuntime}
           />
         ) : surfaceMode === 'session-history' ? (
           <SessionHistorySurface
@@ -1832,6 +1829,20 @@ export function App() {
                     <button type="button" data-testid="follow-live-button" onClick={followLiveTerminalOutput}>Follow live</button>
                   ) : <span data-testid="follow-live-state">Following live</span>}
                 </div>
+                {selectedPermissionRequest ? (
+                  <div
+                    className={permissionBannerClass}
+                    data-testid="session-permission-banner"
+                    role="status"
+                  >
+                    <ShieldWarning size={14} weight="fill" />
+                    <div className={permissionBannerBodyClass}>
+                      <strong>{agentLabel(selectedSession?.agentKind ?? '')} wants to {selectedPermissionRequest.toolName}</strong>
+                      <span data-testid="session-permission-banner-summary">{selectedPermissionRequest.displaySummary}</span>
+                    </div>
+                    <span className={permissionBannerHintClass}>Respond in the terminal</span>
+                  </div>
+                ) : null}
                 <div ref={surfaceViewportRef} className={surfaceViewportClass} data-testid="terminal-viewport" onScroll={handleTerminalScroll} onWheel={handleTerminalWheel} onMouseDown={focusTerminalCanvas}>
                   <div ref={terminalScrollSpacerRef} className={terminalScrollSpacerClass} data-testid="terminal-scroll-spacer">
                     <canvas
@@ -1872,9 +1883,6 @@ export function App() {
         )}
       </section>
 
-      <button className={themeToggleClass} type="button" data-testid="theme-toggle" aria-label="Toggle theme" onClick={() => setTheme(current => current === 'dark' ? 'light' : 'dark')}>
-        {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
-      </button>
     </main>
   );
 }
@@ -2297,6 +2305,33 @@ function statusDotColor(tone: DashboardStatus): string {
   return 'var(--text-4)';
 }
 
+type GlyphState = 'working' | 'attention' | 'error' | 'idle';
+
+function glyphStateFor(activity: ActivityState | null, tone: DashboardStatus): GlyphState {
+  if (activity?.status === 'working') return 'working';
+  if (activity?.status === 'awaiting_permission' || tone === 'attention') return 'attention';
+  if (activity?.status === 'error' && activity.lastError && !activity.lastError.recoverable) return 'error';
+  return 'idle';
+}
+
+// 4x4 dot glyph rendering the GIF-4 motif at card scale. The outer twelve
+// dots stay quietly dim; the inner 2x2 "core" carries live state via CSS
+// @keyframes that animate opacity + transform only, so the compositor handles
+// dozens at once for free.
+function SessionStatusGlyph({ state }: { state: GlyphState }) {
+  return (
+    <span className={sessionGlyphClass} data-state={state} aria-hidden="true">
+      {Array.from({ length: 16 }, (_, index) => {
+        const row = Math.floor(index / 4);
+        const col = index % 4;
+        const isCore = (row === 1 || row === 2) && (col === 1 || col === 2);
+        return <i key={index} data-core={isCore ? 'true' : 'false'} />;
+      })}
+    </span>
+  );
+}
+
+
 function DashboardSurface({
   shell,
   theme,
@@ -2491,7 +2526,7 @@ function SessionDashboardCard({
     >
       <div className={dashboardCardTopClass}>
         <AgentGlyph kind={session.agentKind} />
-        <span className={dashboardCardDotClass} style={{ background: statusDotColor(tone) }} aria-hidden="true" />
+        <SessionStatusGlyph state={glyphStateFor(activity, tone)} />
       </div>
       <div className={dashboardCardTitleClass}>{agentTabLabel(session)}</div>
       <div className={dashboardCardBreadcrumbClass}>{breadcrumb}</div>
@@ -2684,107 +2719,105 @@ const canUseAppServices = true;
 function SettingsSurface({
   theme,
   setTheme,
-  workspaceDefaultDangerousMode,
-  newSessionTitle,
-  setNewSessionTitle,
-  newSessionCwd,
-  setNewSessionCwd,
   newSessionAgentKind,
   setNewSessionAgentKind,
   newSessionDangerousMode,
   setNewSessionDangerousMode,
-  logs,
-  metrics,
-  runSyntheticProof,
-  runGhosttyBridgeProof,
-  busy,
-  hasActiveTerminal,
-  isTauriRuntime,
 }: {
   theme: ThemeMode;
   setTheme: (theme: ThemeMode) => void;
-  workspaceDefaultDangerousMode: boolean;
-  newSessionTitle: string;
-  setNewSessionTitle: (value: string) => void;
-  newSessionCwd: string;
-  setNewSessionCwd: (value: string) => void;
   newSessionAgentKind: CreateSessionRecordRequest['agentKind'];
   setNewSessionAgentKind: (value: CreateSessionRecordRequest['agentKind']) => void;
   newSessionDangerousMode: boolean;
   setNewSessionDangerousMode: (value: boolean) => void;
-  logs: string[];
-  metrics: RenderMetrics[];
-  runSyntheticProof: () => Promise<void>;
-  runGhosttyBridgeProof: () => Promise<void>;
-  busy: boolean;
-  hasActiveTerminal: boolean;
-  isTauriRuntime: boolean;
 }) {
   return (
-    <div className={settingsSurfaceClass}>
-      <div className={settingsHeaderClass}>
-        <span>Settings</span>
-        <h1>Workspace preferences</h1>
-        <p>Settings load into the main stage instead of a separate modal. This keeps Reverie’s floating surface model intact.</p>
+    <div className={settingsSurfaceClass} data-testid="settings-surface">
+      <div className={settingsScrollClass}>
+        <header className={settingsHeaderClass}>
+          <span className={settingsKickerClass}>Settings</span>
+          <h1 className={settingsTitleClass}>Settings</h1>
+        </header>
+
+        <section className={settingsGroupClass} aria-labelledby="settings-appearance-label">
+          <h2 id="settings-appearance-label" className={settingsGroupLabelClass}>Appearance</h2>
+          <ul className={settingsListClass}>
+            <li className={settingsRowClass}>
+              <div className={settingsRowTextClass}>
+                <span className={settingsRowTitleClass}>Theme</span>
+                <span className={settingsRowHelpClass}>The same warm-neutral palette in either mode.</span>
+              </div>
+              <div className={themeSegmentedClass} role="radiogroup" aria-label="Theme">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === 'light'}
+                  aria-label="Light theme"
+                  data-active={theme === 'light'}
+                  data-testid="settings-theme-light"
+                  onClick={() => setTheme('light')}
+                >
+                  <Sun size={15} />
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === 'dark'}
+                  aria-label="Dark theme"
+                  data-active={theme === 'dark'}
+                  data-testid="settings-theme-dark"
+                  onClick={() => setTheme('dark')}
+                >
+                  <Moon size={15} />
+                </button>
+              </div>
+            </li>
+          </ul>
+        </section>
+
+        <section className={settingsGroupClass} aria-labelledby="settings-sessions-label">
+          <h2 id="settings-sessions-label" className={settingsGroupLabelClass}>Sessions</h2>
+          <ul className={settingsListClass}>
+            <li className={settingsRowClass}>
+              <div className={settingsRowTextClass}>
+                <span className={settingsRowTitleClass}>Default agent</span>
+                <span className={settingsRowHelpClass}>The CLI new sessions start with.</span>
+              </div>
+              <div className={settingsSelectWrapClass}>
+                <select
+                  className={settingsSelectClass}
+                  value={newSessionAgentKind}
+                  data-testid="settings-default-agent"
+                  onChange={event => setNewSessionAgentKind(event.currentTarget.value as CreateSessionRecordRequest['agentKind'])}
+                >
+                  <option value="cortex_code">Cortex Code</option>
+                  <option value="codex_cli">Codex CLI</option>
+                  <option value="claude_code">Claude Code</option>
+                </select>
+                <CaretRight size={12} weight="bold" />
+              </div>
+            </li>
+            <li className={settingsRowClass}>
+              <div className={settingsRowTextClass}>
+                <span className={settingsRowTitleClass}>Enable YOLO for new sessions</span>
+                <span className={settingsRowHelpClass}>Skip per-tool approvals when launching a new session.</span>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={newSessionDangerousMode}
+                aria-label="Enable YOLO for new sessions"
+                data-state={newSessionDangerousMode ? 'on' : 'off'}
+                data-testid="settings-yolo-toggle"
+                className={settingsSwitchClass}
+                onClick={() => setNewSessionDangerousMode(!newSessionDangerousMode)}
+              >
+                <span className={settingsSwitchKnobClass} />
+              </button>
+            </li>
+          </ul>
+        </section>
       </div>
-
-      <div className={settingsGridClass}>
-        <section className={floatingCardClass}>
-          <h2>Appearance</h2>
-          <p>Warm neutral theme with the same rim-lit panel language in light and dark.</p>
-          <div className={segmentedClass}>
-            <button type="button" data-active={theme === 'dark'} onClick={() => setTheme('dark')}>Dark</button>
-            <button type="button" data-active={theme === 'light'} onClick={() => setTheme('light')}>Light</button>
-          </div>
-        </section>
-
-        <section className={floatingCardClass}>
-          <h2>Session defaults</h2>
-          <label>Title<input value={newSessionTitle} placeholder="New Cortex session" onChange={event => setNewSessionTitle(event.currentTarget.value)} /></label>
-          <label>Agent<select value={newSessionAgentKind} onChange={event => setNewSessionAgentKind(event.currentTarget.value as CreateSessionRecordRequest['agentKind'])}>
-            <option value="cortex_code">Cortex Code</option>
-            <option value="codex_cli">Codex CLI</option>
-            <option value="claude_code">Claude Code</option>
-          </select></label>
-          <label>Working directory<input value={newSessionCwd} onChange={event => setNewSessionCwd(event.currentTarget.value)} /></label>
-          <label className={checkRowClass}><input type="checkbox" checked={newSessionDangerousMode} onChange={event => setNewSessionDangerousMode(event.currentTarget.checked)} /> Enable YOLO for new sessions</label>
-          <p>Workspace default auto-approve: <strong>{workspaceDefaultDangerousMode ? 'on' : 'off'}</strong></p>
-        </section>
-
-        <section className={floatingCardClass}>
-          <h2>Diagnostics</h2>
-          <p>Kept here so the primary product surface no longer reads like a proof harness.</p>
-          <div className={settingsActionsClass}>
-            <button type="button" disabled={busy || hasActiveTerminal} onClick={() => runSyntheticProof().catch(() => {})}>Paint proof</button>
-            <button type="button" disabled={busy || hasActiveTerminal || !canUseAppServices} onClick={() => runGhosttyBridgeProof().catch(() => {})}>Ghostty proof</button>
-          </div>
-          <pre className="proof-log">{logs.slice(0, 12).join('\n')}</pre>
-        </section>
-
-        <section className={floatingCardClass}>
-          <h2>Last metrics</h2>
-          {metrics.length === 0 ? <p>No metrics captured in this view yet.</p> : metrics.map(metric => (
-            <dl className={metricListClass} key={metric.mode}>
-              <Metric label="Mode" value={metric.mode} />
-              <Metric label="Frames" value={metric.frames} />
-              <Metric label="P95 paint" value={`${metric.p95FrameMs.toFixed(3)} ms`} />
-              <Metric label="Dropped" value={metric.droppedFrames} />
-              <Metric label="Terminal" value={shortId(metric.terminalId)} />
-            </dl>
-          ))}
-        </section>
-      </div>
-    </div>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: MetricValue }) {
-  if (value === undefined || value === null) return null;
-
-  return (
-    <div className={metricRowClass}>
-      <dt>{label}</dt>
-      <dd>{String(value)}</dd>
     </div>
   );
 }
@@ -2813,10 +2846,6 @@ function sessionsForProject(projectId: string | null, shell: WorkspaceShellSnaps
 
 function average(values: number[]) {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function workspaceInitial(value: string) {
-  return (value.trim()[0] ?? 'R').toUpperCase();
 }
 
 function shortId(value: string | undefined | null) {
@@ -3103,17 +3132,17 @@ const lightsClass = css({
     width: '12px',
     height: '12px',
     borderRadius: '50%',
-    border: '0.5px solid rgba(0,0,0,0.18)',
+    border: '0.5px solid rgba(0,0,0,0.28)',
     padding: 0,
     margin: 0,
     cursor: 'pointer',
-    background: 'var(--surface-hi)',
-    transition: 'background 140ms ease, transform 140ms ease',
+    boxShadow: 'inset 0 -0.5px 0 rgba(0,0,0,0.18), inset 0 0.5px 0 rgba(255,255,255,0.18)',
+    transition: 'transform 140ms ease, filter 140ms ease',
   },
-  '& button:hover': { transform: 'scale(1.05)' },
-  '&:hover button[data-action="close"]': { background: '#ED6A5E' },
-  '&:hover button[data-action="min"]':   { background: '#F4BF4F' },
-  '&:hover button[data-action="max"]':   { background: '#61C554' },
+  '& button[data-action="close"]': { background: '#ED6A5E' },
+  '& button[data-action="min"]':   { background: '#F4BF4F' },
+  '& button[data-action="max"]':   { background: '#61C554' },
+  '& button:hover': { transform: 'scale(1.05)', filter: 'brightness(1.05)' },
 });
 
 const brandClass = css({
@@ -3384,40 +3413,36 @@ const sectionLabelClass = css({
 });
 
 const leftFooterClass = css({
-  borderTop: '1px solid var(--line)',
-  padding: '10px 12px 12px',
+  borderTop: '1px solid var(--line-faint)',
+  padding: '8px 10px 10px',
   position: 'relative',
   zIndex: 2,
-  background: 'linear-gradient(to top, var(--surface-1), transparent)',
 });
 
-const userButtonClass = css({
-  width: '100%',
-  display: 'grid',
-  gridTemplateColumns: '24px minmax(0, 1fr) 18px',
-  alignItems: 'center',
-  gap: '10px',
-  padding: '6px',
-  borderRadius: '8px',
-  cursor: 'pointer',
-  textAlign: 'left',
-  _hover: { background: 'var(--surface-2)' },
-  '& strong': { display: 'block', fontSize: '12.5px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  '& small': { display: 'block', fontSize: '11.5px', color: 'var(--text-3)' },
-});
-
-const avatarClass = css({
-  width: '24px',
-  height: '24px',
-  borderRadius: '7px',
-  background: 'var(--surface-3)',
-  display: 'grid',
-  placeItems: 'center',
-  fontSize: '11px',
-  fontWeight: 600,
-  color: 'var(--text)',
-  border: '1px solid var(--line)',
-});
+function settingsNavRowClass({ active }: { active: boolean }) {
+  return css({
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    width: '100%',
+    padding: '9px 10px',
+    borderRadius: '8px',
+    border: '1px solid',
+    borderColor: active ? 'var(--line-strong)' : 'transparent',
+    color: active ? 'var(--text)' : 'var(--text-2)',
+    background: active ? 'var(--surface-3)' : 'transparent',
+    cursor: 'pointer',
+    userSelect: 'none',
+    textAlign: 'left',
+    fontSize: '13px',
+    fontWeight: 500,
+    letterSpacing: '-0.005em',
+    transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
+    _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
+    '& svg': { color: active ? 'var(--text)' : 'var(--text-3)', flexShrink: 0 },
+    '& span': { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  });
+}
 
 const canvasStageClass = css({
   zIndex: 2,
@@ -3617,11 +3642,50 @@ const terminalBodyClass = css({
   flex: 1,
   minHeight: 0,
   display: 'grid',
-  gridTemplateRows: 'auto minmax(0, 1fr)',
+  // meta strip | optional permission banner | viewport
+  gridTemplateRows: 'auto auto minmax(0, 1fr)',
   overflow: 'hidden',
   borderRadius: '0 0 22px 22px',
   background: 'var(--terminal-bg)',
   boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.025)',
+});
+
+const permissionBannerClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '10px',
+  padding: '8px 14px',
+  background: 'color-mix(in srgb, var(--warn) 12%, transparent)',
+  borderBottom: '1px solid color-mix(in srgb, var(--warn) 28%, transparent)',
+  color: 'var(--text)',
+  fontSize: '12px',
+  '& > svg': { color: 'var(--warn)', flexShrink: 0 },
+});
+
+const permissionBannerBodyClass = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2px',
+  minWidth: 0,
+  flex: 1,
+  '& strong': { fontWeight: 500, color: 'var(--text)' },
+  '& span': {
+    fontSize: '11.5px',
+    color: 'var(--text-2)',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+});
+
+const permissionBannerHintClass = css({
+  fontSize: '10.5px',
+  fontWeight: 500,
+  letterSpacing: '0.08em',
+  textTransform: 'uppercase',
+  color: 'var(--warn)',
+  flexShrink: 0,
 });
 
 const launchOverlayClass = css({
@@ -3894,6 +3958,42 @@ const dashboardCardDotClass = css({
   width: '8px',
   height: '8px',
   borderRadius: '50%',
+});
+
+const sessionGlyphClass = css({
+  width: '22px',
+  height: '22px',
+  display: 'grid',
+  gridTemplateColumns: 'repeat(4, 1fr)',
+  gridTemplateRows: 'repeat(4, 1fr)',
+  gap: '2px',
+  flexShrink: 0,
+  '& i': {
+    borderRadius: '50%',
+    background: 'var(--text-3)',
+    opacity: 0.22,
+    transformOrigin: '50% 50%',
+  },
+  '& i[data-core="true"]': {
+    background: 'var(--text)',
+    opacity: 0.5,
+  },
+  '&[data-state="working"] i[data-core="true"]': {
+    background: 'var(--good)',
+    animation: 'reverie-glyph-breathe 1.6s ease-in-out infinite',
+  },
+  '&[data-state="working"] i[data-core="true"]:nth-of-type(7)':  { animationDelay: '0.10s' },
+  '&[data-state="working"] i[data-core="true"]:nth-of-type(10)': { animationDelay: '0.20s' },
+  '&[data-state="working"] i[data-core="true"]:nth-of-type(11)': { animationDelay: '0.30s' },
+  '&[data-state="attention"] i[data-core="true"]': {
+    background: 'var(--warn)',
+    opacity: 1,
+    animation: 'reverie-glyph-attention-pulse 1.4s ease-in-out infinite',
+  },
+  '&[data-state="error"] i[data-core="true"]': {
+    background: 'var(--bad)',
+    opacity: 1,
+  },
 });
 
 const dashboardCardTitleClass = css({
@@ -4276,74 +4376,182 @@ const cliEmptyHelpClass = css({
 });
 
 const settingsSurfaceClass = css({
-  ...rimLitPanel,
-  height: '100%',
+  position: 'relative',
   zIndex: 2,
-  padding: '26px',
+  height: '100%',
+  minHeight: 0,
   overflow: 'auto',
+  background: 'transparent',
+});
+
+const settingsScrollClass = css({
+  width: 'min(680px, calc(100% - 64px))',
+  margin: '0 auto',
+  padding: '72px 0 96px',
   display: 'grid',
-  gridTemplateRows: 'auto minmax(0, 1fr)',
-  gap: '22px',
+  gap: '36px',
+  lgDown: { width: 'min(680px, calc(100% - 40px))', padding: '48px 0 72px' },
 });
 
 const settingsHeaderClass = css({
-  position: 'relative',
-  zIndex: 2,
-  maxWidth: '760px',
-  '& span': { display: 'block', color: 'var(--text-3)', fontSize: '12px', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: '8px' },
-  '& h1': { margin: '0 0 8px', fontSize: '28px', letterSpacing: '-0.04em' },
-  '& p': { margin: 0, color: 'var(--text-2)', lineHeight: 1.55 },
-});
-
-const settingsGridClass = css({
-  position: 'relative',
-  zIndex: 2,
   display: 'grid',
-  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-  gap: '14px',
-  lgDown: { gridTemplateColumns: '1fr' },
+  gap: '6px',
+  marginBottom: '4px',
 });
 
-const floatingCardClass = css({
-  border: '1px solid var(--line)',
-  borderRadius: '16px',
-  background: 'linear-gradient(135deg, color-mix(in srgb, var(--surface-2) 78%, transparent), color-mix(in srgb, var(--surface-1) 92%, transparent))',
-  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
-  padding: '16px',
+const settingsKickerClass = css({
+  color: 'var(--text-3)',
+  fontSize: '11px',
+  letterSpacing: '0.12em',
+  textTransform: 'uppercase',
+});
+
+const settingsTitleClass = css({
+  margin: 0,
+  fontSize: '32px',
+  letterSpacing: '-0.035em',
+  color: 'var(--text)',
+  fontWeight: 500,
+});
+
+const settingsGroupClass = css({
   display: 'grid',
   gap: '12px',
-  '& h2': { margin: 0, fontSize: '15px' },
-  '& p': { margin: 0, color: 'var(--text-2)', lineHeight: 1.5 },
-  '& label': { display: 'grid', gap: '6px', color: 'var(--text-3)', fontSize: '11px', letterSpacing: '0.04em', textTransform: 'uppercase' },
-  '& input, & select': {
-    width: '100%',
-    border: '1px solid var(--line)',
-    borderRadius: '10px',
-    background: 'var(--surface-1)',
-    color: 'var(--text)',
-    padding: '8px 10px',
-    font: 'inherit',
-    outline: 'none',
-  },
 });
 
-const segmentedClass = css({
+const settingsGroupLabelClass = css({
+  margin: 0,
+  color: 'var(--text-3)',
+  fontSize: '10.5px',
+  letterSpacing: '0.12em',
+  textTransform: 'uppercase',
+  fontWeight: 500,
+});
+
+const settingsListClass = css({
+  listStyle: 'none',
+  margin: 0,
+  padding: 0,
   display: 'grid',
-  gridTemplateColumns: '1fr 1fr',
-  gap: '6px',
-  padding: '4px',
-  borderRadius: '12px',
+  borderTop: '1px solid var(--line-faint)',
+  borderBottom: '1px solid var(--line-faint)',
+});
+
+const settingsRowClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '24px',
+  padding: '18px 4px',
+  borderTop: '1px solid var(--line-faint)',
+  _first: { borderTop: 'none' },
+});
+
+const settingsRowTextClass = css({
+  flex: 1,
+  minWidth: 0,
+  display: 'grid',
+  gap: '3px',
+});
+
+const settingsRowTitleClass = css({
+  color: 'var(--text)',
+  fontSize: '13.5px',
+  fontWeight: 500,
+  letterSpacing: '-0.005em',
+});
+
+const settingsRowHelpClass = css({
+  color: 'var(--text-3)',
+  fontSize: '12px',
+  lineHeight: 1.5,
+});
+
+const themeSegmentedClass = css({
+  display: 'inline-flex',
+  padding: '3px',
+  borderRadius: '999px',
   border: '1px solid var(--line)',
-  background: 'var(--surface-1)',
+  background: 'color-mix(in srgb, var(--surface-1) 80%, transparent)',
+  gap: '2px',
   '& button': {
-    borderRadius: '9px',
-    padding: '8px 10px',
+    width: '34px',
+    height: '28px',
+    display: 'grid',
+    placeItems: 'center',
+    borderRadius: '999px',
     color: 'var(--text-3)',
     cursor: 'pointer',
+    transition: 'color 140ms ease, background 140ms ease',
+    _hover: { color: 'var(--text-2)' },
   },
   '& button[data-active="true"]': {
     color: 'var(--text)',
     background: 'var(--surface-3)',
+    boxShadow: 'inset 0 0 0 1px var(--line-strong)',
+  },
+});
+
+const settingsSelectWrapClass = css({
+  position: 'relative',
+  display: 'inline-flex',
+  alignItems: 'center',
+  '& svg': {
+    position: 'absolute',
+    right: '10px',
+    color: 'var(--text-3)',
+    pointerEvents: 'none',
+    transform: 'rotate(90deg)',
+  },
+});
+
+const settingsSelectClass = css({
+  appearance: 'none',
+  border: '1px solid var(--line)',
+  borderRadius: '10px',
+  background: 'color-mix(in srgb, var(--surface-1) 80%, transparent)',
+  color: 'var(--text)',
+  font: 'inherit',
+  fontSize: '13px',
+  padding: '8px 28px 8px 12px',
+  cursor: 'pointer',
+  outline: 'none',
+  transition: 'border-color 140ms ease, background 140ms ease',
+  _hover: { borderColor: 'var(--line-strong)' },
+  _focusVisible: { borderColor: 'var(--line-strong)', boxShadow: '0 0 0 3px color-mix(in srgb, var(--text) 8%, transparent)' },
+});
+
+const settingsSwitchClass = css({
+  position: 'relative',
+  width: '38px',
+  height: '22px',
+  borderRadius: '999px',
+  border: '1px solid var(--line)',
+  background: 'var(--surface-2)',
+  cursor: 'pointer',
+  padding: 0,
+  flexShrink: 0,
+  transition: 'background 160ms ease, border-color 160ms ease',
+  _hover: { borderColor: 'var(--line-strong)' },
+  '&[data-state="on"]': {
+    background: 'color-mix(in srgb, var(--warn) 78%, transparent)',
+    borderColor: 'color-mix(in srgb, var(--warn) 60%, var(--line-strong))',
+  },
+});
+
+const settingsSwitchKnobClass = css({
+  position: 'absolute',
+  top: '50%',
+  left: '2px',
+  width: '16px',
+  height: '16px',
+  borderRadius: '50%',
+  background: 'var(--text)',
+  transform: 'translateY(-50%)',
+  transition: 'left 160ms ease, background 160ms ease',
+  boxShadow: '0 1px 2px rgba(0,0,0,0.25)',
+  '[data-state="on"] &': {
+    left: '18px',
+    background: '#FFFFFF',
   },
 });
 
@@ -4357,50 +4565,3 @@ const checkRowClass = css({
   '& input': { width: 'auto! important' },
 });
 
-const settingsActionsClass = css({
-  display: 'flex',
-  gap: '8px',
-  flexWrap: 'wrap',
-  '& button': {
-    border: '1px solid var(--line)',
-    borderRadius: '999px',
-    padding: '8px 10px',
-    color: 'var(--text)',
-    background: 'var(--surface-2)',
-    cursor: 'pointer',
-    _disabled: { opacity: 0.45, cursor: 'not-allowed' },
-  },
-});
-
-const metricListClass = css({
-  display: 'grid',
-  gap: '8px',
-  margin: 0,
-});
-
-const metricRowClass = css({
-  display: 'flex',
-  justifyContent: 'space-between',
-  gap: '16px',
-  fontSize: '13px',
-  '& dt': { color: 'var(--text-3)' },
-  '& dd': { margin: 0, fontVariantNumeric: 'tabular-nums', textAlign: 'right' },
-});
-
-const themeToggleClass = css({
-  position: 'fixed',
-  right: '22px',
-  bottom: '22px',
-  zIndex: 5,
-  width: '42px',
-  height: '42px',
-  display: 'grid',
-  placeItems: 'center',
-  borderRadius: '999px',
-  border: '1px solid var(--line)',
-  background: 'var(--surface-1)',
-  color: 'var(--text-2)',
-  boxShadow: 'var(--shadow)',
-  cursor: 'pointer',
-  _hover: { color: 'var(--text)', background: 'var(--surface-2)' },
-});
