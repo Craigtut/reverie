@@ -26,21 +26,20 @@ export function cliChoiceClass({ active, available }: { active: boolean; availab
     textAlign: 'left',
     padding: '9px 10px',
     opacity: available ? 1 : 0.56,
-    boxShadow: active ? 'inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent)' : 'none',
+    boxShadow: active
+      ? 'inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent)'
+      : 'none',
+    // Layout/box only; the card's text (name, executable, badge) is rendered
+    // through <Typography>, which owns size/weight/color. The badge (`& em`)
+    // keeps its pill box + active-dependent color here; tone="inherit" on the
+    // Typography lets that color win.
     '& span:nth-child(2)': { display: 'grid', gap: '2px', minWidth: 0 },
-    '& strong': { fontSize: '12px', fontWeight: 650 },
-    '& small': { color: 'var(--text-3)', fontSize: '10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
     '& em': {
       justifySelf: 'end',
       borderRadius: '999px',
       padding: '3px 7px',
       color: active ? 'var(--bg)' : 'var(--text-3)',
       background: active ? 'var(--text)' : 'var(--surface-2)',
-      fontSize: '9.5px',
-      fontStyle: 'normal',
-      fontWeight: 700,
-      letterSpacing: '0.04em',
-      textTransform: 'uppercase',
     },
   });
 }

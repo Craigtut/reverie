@@ -249,12 +249,14 @@ export function EmptyState({
                   >
                     <AgentGlyph kind={detection.kind} />
                     <span>
-                      <strong>{detection.displayName}</strong>
-                      <small>
+                      <Typography as="strong" variant="smallBodyAlt" tone="inherit">
+                        {detection.displayName}
+                      </Typography>
+                      <Typography as="small" variant="tiny" tone="faint" truncate>
                         {detection.available
                           ? 'Fixture-detected'
                           : `Missing: ${detection.candidates.join(', ')}`}
-                      </small>
+                      </Typography>
                     </span>
                   </button>
                 ))}
