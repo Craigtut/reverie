@@ -18,10 +18,11 @@ Start here, then drill down. `docs/README.md` is the full index.
 | React/Panda shell and the terminal-renderer boundary | [`docs/technical/frontend-architecture.md`](docs/technical/frontend-architecture.md) |
 | Ghostty/libghostty terminal strategy | [`docs/technical/terminal-strategy.md`](docs/technical/terminal-strategy.md) |
 | What to build next + the canonical "checks to keep green" | [`docs/technical/implementation-queue.md`](docs/technical/implementation-queue.md) |
+| Bundling, the Ghostty dylib/rpath story, signing, and how to cut a release | [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md) |
 
 ## Repo structure
 
-Hybrid Rust + TypeScript monorepo building one cross-platform desktop app.
+Hybrid Rust + TypeScript monorepo building one macOS desktop app (Apple Silicon).
 
 ```
 reverie/
@@ -52,8 +53,18 @@ Keep the checks in [`docs/technical/implementation-queue.md`](docs/technical/imp
 ### Build constraints you must know
 
 - **Zig `0.15.x` must be on `PATH`** for any build that links `libghostty-vt`. The npm scripts prepend the Homebrew `zig@0.15` keg path when present; if a build fails on the Ghostty link step, this is the usual cause.
-- Builds that link Ghostty need `DYLD_LIBRARY_PATH` pointed at the generated `libghostty-vt.dylib`; `npm run dev:desktop` / `run:release` handle this. Prefer those scripts over raw `cargo run`.
+- The terminal core links `libghostty-vt.dylib`, but **nothing needs `DYLD_LIBRARY_PATH` at runtime**. For development, `npm run dev` / `dev:desktop` / `run:release` go through `cargo run`, which injects the library search path automatically. For distribution, `npm run bundle` ships the dylib inside the app (`Contents/Frameworks`) resolved by a baked rpath. Prefer those scripts over launching the raw built binary directly. See [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md).
 - macOS desktop WebDriver can't drive WKWebView, so **use `npm run dev:harness` for UI iteration and screenshots**. Rust/Tauri tests remain the source of truth for persistence, commands, CLI detection, and native session launch.
+
+### Releases
+
+Releases are cut by pushing a `vX.Y.Z` tag, which triggers `.github/workflows/release.yml` (macOS, Apple Silicon: Reverie's only target). Read [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md) before cutting one. Before tagging:
+
+- Update `CHANGELOG.md`: move `Unreleased` items into a new `## [X.Y.Z]` section, summarizing the commits since the previous tag (`git log <prev-tag>..HEAD`), grouped by Conventional Commit type. Commit as `docs(release): changelog for vX.Y.Z`.
+- Bump the version in `package.json`, `apps/desktop/src-tauri/tauri.conf.json`, and the crate `Cargo.toml` files.
+- macOS signing/notarization needs these repo secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Without them the build is unsigned.
+
+Bundling is enabled and the Ghostty dylib ships inside the app with a baked rpath (no runtime `DYLD_LIBRARY_PATH`). `npm run bundle` produces the `.app` and `.dmg` locally; the release workflow builds them in CI. Signed, notarized releases additionally need the Apple secrets above. See the packaging doc for how it works.
 
 ## Guardrails (do not violate)
 

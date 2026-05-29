@@ -4,7 +4,7 @@
 
 ## Shape of the repo
 
-Reverie is a **hybrid Rust + TypeScript monorepo** building a single cross-platform desktop app.
+Reverie is a **hybrid Rust + TypeScript monorepo** building a single macOS desktop app.
 
 ```
 reverie/
@@ -62,8 +62,8 @@ Because Tauri desktop WebDriver can't drive macOS WKWebView, the React shell has
 ## Key build constraints
 
 - **Zig `0.15.x` must be on `PATH`** for any build that links `libghostty-vt`. The npm scripts prepend the Homebrew `zig@0.15` keg path (`/opt/homebrew/opt/zig@0.15/bin`) when present.
-- Builds that link Ghostty need `DYLD_LIBRARY_PATH` set to the generated `libghostty-vt.dylib` directory; `npm run dev:desktop` / `run:release` resolve this automatically. App bundling in `tauri.conf.json` is still disabled pending icon/bundle metadata.
-- Target platforms: **macOS, Windows, Linux**. macOS is proven; Windows/Linux packaging is an explicit open risk (Zig + source-pinned Ghostty + per-platform renderer).
+- The terminal core links `libghostty-vt.dylib`, but nothing needs `DYLD_LIBRARY_PATH` at runtime: `npm run dev:desktop` / `run:release` use `cargo run` (which injects the library path), and `npm run bundle` ships the dylib inside the app bundle (`Contents/Frameworks`) resolved by a baked rpath. App bundling is enabled in `tauri.conf.json`. See [`packaging-and-distribution.md`](packaging-and-distribution.md).
+- Target platform: **macOS (Apple Silicon) only**. Windows and Linux are out of scope: the `libghostty-vt-sys` bindings have no Windows build path, and shipping is scoped to Apple Silicon. See [`packaging-and-distribution.md`](packaging-and-distribution.md).
 
 ## Common commands
 

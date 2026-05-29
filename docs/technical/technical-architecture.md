@@ -7,7 +7,7 @@
 - Frontend: React app shell in the Tauri webview, with Panda CSS, Motion, and Phosphor Icons
 - Terminal strategy: Ghostty-quality v1 terminal, implemented behind a clean abstraction with an imperative Canvas/WebGPU renderer island so product architecture stays stable
 - Persistence: local-first app storage, likely SQLite plus config files
-- Target platforms: macOS, Windows, Linux
+- Target platform: macOS (Apple Silicon) only
 
 ## Architectural rule
 
@@ -315,7 +315,7 @@ Responsibilities:
 - Track process exit.
 - Clean up child processes.
 
-Evaluate `portable-pty` first because Reverie needs macOS, Windows, and Linux coverage.
+Use `portable-pty` for PTY/process lifecycle. (It is cross-platform, which keeps the door open if Reverie's target ever broadens, but macOS on Apple Silicon is the only shipping target today.)
 
 ## Renderer strategy
 
@@ -329,7 +329,7 @@ Requirements before committing:
 - Feed PTY bytes into Ghostty VT state.
 - Render visible terminal surface in Tauri.
 - Support keyboard, paste, mouse, selection, resize.
-- Confirm credible Windows/Linux build story.
+- Confirm a credible macOS (Apple Silicon) build story.
 
 ### Fallback path
 

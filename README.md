@@ -6,7 +6,7 @@ The product thesis: people increasingly use terminal-based agents for many kinds
 
 ## V1 shape
 
-- Cross-platform desktop app built with Tauri v2 and a Rust-first backend.
+- macOS desktop app (Apple Silicon) built with Tauri v2 and a Rust-first backend.
 - Local-only persistence: no accounts, sync, or cloud services in v1.
 - Core hierarchy: `Workspace → Project → Focus → Session`.
 - Projects are optional folder-backed contexts and must not require git.
@@ -52,7 +52,8 @@ npm run test:web:harness # build/typecheck the harness and run scripted browser 
 npm run build:web        # generate Panda CSS, typecheck, and build the web assets
 npm run build            # production desktop build alias
 npm run build:desktop    # build web assets and the release desktop binary
-npm run run:release      # build, set the Ghostty runtime dylib path, and launch the release binary
+npm run bundle           # build the distributable macOS .app + .dmg (Tauri bundle)
+npm run run:release      # build and launch the optimized release binary
 npm run check            # frontend build/typecheck plus Rust tests/checks
 ```
 
@@ -62,4 +63,16 @@ The production app still runs through Tauri/Rust, but the React shell now has a 
 
 Stable browser automation anchors are exposed through `data-testid` attributes such as `left-panel`, `workspace-nav`, `onboarding-panel`, `onboarding-cli-choice`, `create-focus-button`, `add-project-button`, `session-tabs`, `create-session-button`, `selected-cli-summary`, `cli-choice-list`, `cli-availability-summary`, `cli-empty-help`, `launch-session-button`, `terminal-viewport`, `terminal-canvas`, `terminal-status-label`, and `theme-toggle`. `npm run test:web:harness` now runs scripted Chrome smoke coverage over the empty onboarding flow, reload persistence, partial-CLI selection, and no-supported-CLI blocking state; set `CHROME_PATH` if Chrome/Chromium is installed somewhere nonstandard. This harness is the intended fast loop for screenshots and interaction tests; Rust/Tauri tests remain the source of truth for SQLite persistence, command handlers, CLI detection, and native session launch behavior.
 
-The production desktop binary is emitted under `apps/desktop/src-tauri/target/release/` by `npm run build:desktop`. Because the current Ghostty VT binding links `@rpath/libghostty-vt.dylib` without a packaged app bundle/rpath yet, use `npm run run:release` when launching the raw release binary from the repo; it resolves the generated Ghostty runtime library directory and sets `DYLD_LIBRARY_PATH` for that process. Full app bundling is still disabled in `tauri.conf.json` until icon/bundle metadata is ready.
+`npm run bundle` produces a distributable macOS app (`Reverie.app`) and disk image (`.dmg`) under `apps/desktop/src-tauri/target/release/bundle/`. The Ghostty VT library (`libghostty-vt.dylib`) is bundled into `Reverie.app/Contents/Frameworks/` and resolved through a baked `@executable_path/../Frameworks` rpath, so the packaged app needs no `DYLD_LIBRARY_PATH` at runtime. For development, `npm run dev` and `npm run run:release` launch through `cargo run`, which resolves the library automatically. See [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md) for the full packaging and release story, including code signing.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, the checks to keep green, and the commit conventions. Agent operating instructions live in [`CLAUDE.md`](CLAUDE.md).
+
+## Acknowledgements
+
+Reverie's terminal core is built on [Ghostty](https://ghostty.org/)'s VT engine via the `libghostty-vt` bindings, and the desktop shell is built with [Tauri](https://tauri.app/). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the major third-party components and their licenses.
+
+## License
+
+Reverie is licensed under the [MIT License](LICENSE). © 2026 Craig Tuttle.
