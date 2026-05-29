@@ -25,20 +25,22 @@ use reverie_core::repository::{PersistenceError, RepoResult, WorkspaceRepository
 /// Ordered schema migrations. Index `i` migrates `user_version` from `i` to
 /// `i + 1`. Never edit a shipped entry; append a new one for each change.
 const MIGRATIONS: &[&str] = &[
-    // v0 -> v1: initial schema.
-    "CREATE TABLE workspace (
+    // v0 -> v1: initial schema. Uses IF NOT EXISTS so a database created by the
+    // pre-migration-system code (which never set user_version, so it reads as 0
+    // here) is adopted in place rather than erroring on a re-create.
+    "CREATE TABLE IF NOT EXISTS workspace (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         general_label TEXT NOT NULL,
         default_dangerous_mode INTEGER NOT NULL
      );
-     CREATE TABLE projects (
+     CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         path TEXT NOT NULL,
         archived INTEGER NOT NULL
      );
-     CREATE TABLE focuses (
+     CREATE TABLE IF NOT EXISTS focuses (
         id TEXT PRIMARY KEY,
         project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
         title TEXT NOT NULL,
@@ -46,7 +48,7 @@ const MIGRATIONS: &[&str] = &[
         sort_order INTEGER NOT NULL,
         archived INTEGER NOT NULL
      );
-     CREATE TABLE sessions (
+     CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         focus_id TEXT NOT NULL REFERENCES focuses(id) ON DELETE CASCADE,
         title TEXT NOT NULL,
@@ -664,5 +666,25 @@ mod tests {
         workspace.default_dangerous_mode = true;
         repo.save_workspace(&workspace).unwrap();
         assert!(repo.load_snapshot().unwrap().workspace.default_dangerous_mode);
+    }
+
+    #[test]
+    fn migrate_adopts_a_pre_versioned_database() {
+        // Simulate a database created by the old code: the schema already
+        // exists but user_version was never set, so it reads as 0.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        let before: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(before, 0);
+
+        // Migrating must adopt it (no "table already exists") and stamp the
+        // current version rather than crash at startup.
+        migrate(&conn).unwrap();
+        let after: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(after as usize, MIGRATIONS.len());
     }
 }
