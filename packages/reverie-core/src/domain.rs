@@ -10,25 +10,6 @@ pub type ProjectId = Uuid;
 pub type FocusId = Uuid;
 pub type SessionId = Uuid;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct WorkspaceSettings {
-    pub id: WorkspaceId,
-    pub app_data_path: PathBuf,
-    pub general_workspace_path: PathBuf,
-    pub default_dangerous_mode: bool,
-}
-
-impl WorkspaceSettings {
-    pub fn new(app_data_path: PathBuf, general_workspace_path: PathBuf) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            app_data_path,
-            general_workspace_path,
-            default_dangerous_mode: false,
-        }
-    }
-}
-
 /// Top-level workspace record shown in the dashboard. The persistence layer and
 /// the Tauri wire format both use this shape.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

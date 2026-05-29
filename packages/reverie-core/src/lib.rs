@@ -39,7 +39,7 @@ pub use agents::{
 };
 pub use domain::{
     AgentKind, Focus, NativeSessionRef, Project, Session, SessionStatus, Workspace,
-    WorkspaceSettings, WorkspaceSnapshot,
+    WorkspaceSnapshot,
 };
 pub use terminal::{
     TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors,
