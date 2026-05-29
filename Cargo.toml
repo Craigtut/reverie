@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/reverie-core"]
+members = ["packages/reverie-core", "packages/reverie-persistence"]
 resolver = "2"
 
 [workspace.package]
@@ -18,3 +18,5 @@ notify = "8"
 notify-debouncer-full = "0.6"
 tempfile = "3"
 tiny_http = "0.12"
+rusqlite = { version = "0.32", features = ["bundled"] }
+reverie-core = { path = "packages/reverie-core" }
