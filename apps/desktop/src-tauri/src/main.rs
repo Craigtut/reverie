@@ -370,20 +370,14 @@ fn start_session(
         }
     };
 
-    // For Claude Code and Codex CLI sessions we own the hook channel: write
-    // a per-session config file in a private cache dir, set the CLI's config
-    // env var to point at it, and register a token with the localhost hook
-    // server so the CLI's lifecycle POSTs are authorized and routed.
+    // Claude Code and Codex must inherit the user's normal local auth/config
+    // locations. The earlier hook prototype injected CLAUDE_CONFIG_DIR/CODEX_HOME
+    // to point at Reverie-owned per-session config dirs, which can make those CLIs
+    // behave like a fresh install and prompt for sign-in again. Until hooks can be
+    // attached without redirecting credential homes, keep the spawn env clean.
     if let Some(shell_session_id) = session_id {
-        if let Err(error) = inject_hook_config_if_needed(&app, &store, shell_session_id, &mut spawn_spec)
-        {
-            // Hook injection is best-effort. The CLI still launches; the
-            // dashboard just won't show live activity for this session until
-            // the next launch succeeds.
-            eprintln!(
-                "[reverie] hook config injection failed for {shell_session_id}: {error:#}"
-            );
-        }
+        keep_cli_auth_env_unmodified(&store, shell_session_id, &spawn_spec)
+            .map_err(|err| err.to_string())?;
     }
 
     runtime
@@ -401,11 +395,10 @@ fn start_session(
         .map_err(|err| err.to_string())
 }
 
-fn inject_hook_config_if_needed(
-    app: &AppHandle,
+fn keep_cli_auth_env_unmodified(
     store: &AppShellStore,
     shell_session_id: SessionId,
-    spawn_spec: &mut TerminalSpawnSpec,
+    spawn_spec: &TerminalSpawnSpec,
 ) -> Result<()> {
     let snapshot = store.snapshot()?;
     let session = snapshot
@@ -414,62 +407,37 @@ fn inject_hook_config_if_needed(
         .find(|session| session.id == shell_session_id)
         .ok_or_else(|| anyhow::anyhow!("unknown Reverie session {shell_session_id}"))?;
 
-    let source = match session.agent_kind {
-        AgentKind::ClaudeCode => HookSource::ClaudeCode,
-        AgentKind::CodexCli => HookSource::CodexCli,
+    assert_safe_cli_env(session.agent_kind, &spawn_spec.command.env)
+}
+
+/// Refuse launches that would redirect a CLI's credential or config home.
+///
+/// The check is a **denylist**: every other env key is allowed through. In
+/// particular, the inter-agent connection bridge relies on Reverie injecting
+/// `REVERIE_SESSION_ID`, `REVERIE_SESSION_SECRET`, and `REVERIE_BRIDGE_SOCK`
+/// at spawn time, and those must continue to pass cleanly through this guard.
+/// If credential-home keys are ever broadened, keep that contract intact: the
+/// design is documented in `docs/technical/inter-agent-connections.md`.
+fn assert_safe_cli_env(
+    agent_kind: AgentKind,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    let forbidden_env_keys: &[&str] = match agent_kind {
+        AgentKind::ClaudeCode => &["CLAUDE_CONFIG_DIR", "HOME", "XDG_CONFIG_HOME"],
+        AgentKind::CodexCli => &["CODEX_HOME", "HOME", "XDG_CONFIG_HOME"],
         AgentKind::CortexCode => return Ok(()),
     };
 
-    let Some(control) = app.try_state::<HookServerControl>() else {
-        // Hook server failed to start; quietly skip without breaking the launch.
-        return Ok(());
-    };
-    let registry = app
-        .try_state::<HookTokenRegistry>()
-        .ok_or_else(|| anyhow::anyhow!("hook token registry missing from managed state"))?;
-
-    // If this session had a previous token (from an earlier launch), revoke it
-    // so a stale CLI process can't keep talking to the server.
-    if let Some((prior_source, prior_token)) = registry.take(shell_session_id) {
-        control.revoke_session(prior_source, &prior_token);
+    for key in forbidden_env_keys {
+        if env.contains_key(*key) {
+            return Err(anyhow::anyhow!(
+                "refusing to launch {} with overridden {key}; Reverie must not redirect CLI credential homes",
+                agent_kind.as_str()
+            ));
+        }
     }
 
-    let token = uuid::Uuid::new_v4().to_string();
-    let url = reverie_core::hook_url(source, control.port, &token);
-    let config_dir = hook_config_dir_for_session(app, source, shell_session_id)?;
-
-    let written = match source {
-        HookSource::ClaudeCode => reverie_core::write_claude_settings(&config_dir, &url)?,
-        HookSource::CodexCli => reverie_core::write_codex_config(&config_dir, &url)?,
-    };
-
-    control.register_session(source, token.clone(), shell_session_id.to_string());
-    registry.replace(shell_session_id, source, token);
-
-    spawn_spec
-        .command
-        .env
-        .insert(written.env_var.to_owned(), written.config_dir.display().to_string());
     Ok(())
-}
-
-fn hook_config_dir_for_session(
-    app: &AppHandle,
-    source: HookSource,
-    shell_session_id: SessionId,
-) -> Result<PathBuf> {
-    let cache_root = app
-        .path()
-        .app_cache_dir()
-        .context("resolving Reverie app cache dir")?;
-    let cli = match source {
-        HookSource::ClaudeCode => "claude",
-        HookSource::CodexCli => "codex",
-    };
-    Ok(cache_root
-        .join("sessions")
-        .join(shell_session_id.to_string())
-        .join(cli))
 }
 
 #[tauri::command]
@@ -639,10 +607,9 @@ fn main() {
             }
 
             // Start the localhost hook HTTP server. Claude Code and Codex CLI
-            // POST lifecycle hooks here; the payloads are translated into the
-            // same SessionActivityEvent stream as Cortex. The bound port is
-            // managed so the launch path can read it to write per-session
-            // hook configs (CLAUDE_CONFIG_DIR / CODEX_HOME).
+            // hook ingestion is available once we have a non-invasive attachment
+            // path. We intentionally do not redirect CLAUDE_CONFIG_DIR/CODEX_HOME
+            // because those env vars also move each CLI's auth/config home.
             app.manage(HookTokenRegistry::default());
             match start_hook_server() {
                 Ok(handle) => {
@@ -941,4 +908,147 @@ printf '\033[1;32mtauri-live-stream-complete\033[0m\r\n'
 "#,
         frames = STREAM_FRAMES
     )
+}
+
+#[cfg(test)]
+mod env_guard_tests {
+    //! Behavioral pinning for `assert_safe_cli_env`.
+    //!
+    //! Two things must hold for inter-agent connections to work safely:
+    //!
+    //! 1. Credential-home overrides for Claude Code and Codex CLI remain
+    //!    refused. The product reason is in the implementation-queue's
+    //!    "Claude / Codex hook integration paused for auth safety" note;
+    //!    redirecting `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `HOME` /
+    //!    `XDG_CONFIG_HOME` would make each CLI behave like a fresh install
+    //!    and prompt for sign-in.
+    //!
+    //! 2. Reverie-scoped env variables (`REVERIE_SESSION_ID`,
+    //!    `REVERIE_SESSION_SECRET`, `REVERIE_BRIDGE_SOCK`) pass through for
+    //!    every CLI. These are the vehicle for the bridge's per-session
+    //!    identity. See `docs/technical/inter-agent-connections.md`.
+
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn env<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {
+        pairs
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn claude_refuses_each_credential_home_key() {
+        for key in ["CLAUDE_CONFIG_DIR", "HOME", "XDG_CONFIG_HOME"] {
+            let env = env([(key, "/tmp/anywhere")]);
+            let err = assert_safe_cli_env(AgentKind::ClaudeCode, &env)
+                .expect_err(&format!("Claude should refuse {key}"));
+            assert!(
+                err.to_string().contains(key),
+                "error mentions the refused key, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_refuses_each_credential_home_key() {
+        for key in ["CODEX_HOME", "HOME", "XDG_CONFIG_HOME"] {
+            let env = env([(key, "/tmp/anywhere")]);
+            let err = assert_safe_cli_env(AgentKind::CodexCli, &env)
+                .expect_err(&format!("Codex should refuse {key}"));
+            assert!(
+                err.to_string().contains(key),
+                "error mentions the refused key, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn cortex_is_unrestricted_because_reverie_owns_its_config_home_separately() {
+        // Cortex Code is the in-house adapter; Reverie can manage
+        // `~/.cortex` directly without sign-in fallout. The guard is a
+        // pass-through for Cortex.
+        let env = env([
+            ("HOME", "/tmp/anywhere"),
+            ("CLAUDE_CONFIG_DIR", "/tmp/elsewhere"),
+            ("CODEX_HOME", "/tmp/elsewhere"),
+            ("XDG_CONFIG_HOME", "/tmp/elsewhere"),
+        ]);
+        assert_safe_cli_env(AgentKind::CortexCode, &env)
+            .expect("Cortex guard never refuses credential-home keys");
+    }
+
+    #[test]
+    fn reverie_session_id_passes_through_for_every_cli() {
+        let env = env([("REVERIE_SESSION_ID", "0193abcd-ef01-7000-8000-0123456789ab")]);
+        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+            assert_safe_cli_env(kind, &env)
+                .unwrap_or_else(|err| panic!("{kind:?} must permit REVERIE_SESSION_ID: {err}"));
+        }
+    }
+
+    #[test]
+    fn reverie_session_secret_passes_through_for_every_cli() {
+        let env = env([("REVERIE_SESSION_SECRET", "deadbeefcafef00d")]);
+        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+            assert_safe_cli_env(kind, &env)
+                .unwrap_or_else(|err| panic!("{kind:?} must permit REVERIE_SESSION_SECRET: {err}"));
+        }
+    }
+
+    #[test]
+    fn reverie_bridge_sock_passes_through_for_every_cli() {
+        let env = env([("REVERIE_BRIDGE_SOCK", "/tmp/reverie/bridge.sock")]);
+        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+            assert_safe_cli_env(kind, &env)
+                .unwrap_or_else(|err| panic!("{kind:?} must permit REVERIE_BRIDGE_SOCK: {err}"));
+        }
+    }
+
+    #[test]
+    fn all_three_reverie_env_vars_together_pass_through_for_every_cli() {
+        let env = env([
+            ("REVERIE_SESSION_ID", "0193abcd-ef01-7000-8000-0123456789ab"),
+            ("REVERIE_SESSION_SECRET", "deadbeefcafef00d"),
+            ("REVERIE_BRIDGE_SOCK", "/tmp/reverie/bridge.sock"),
+        ]);
+        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+            assert_safe_cli_env(kind, &env).unwrap_or_else(|err| {
+                panic!("{kind:?} must permit the full REVERIE_* trio: {err}")
+            });
+        }
+    }
+
+    #[test]
+    fn unrelated_env_keys_pass_through_for_every_cli() {
+        let env = env([("PATH", "/usr/bin"), ("LANG", "en_US.UTF-8")]);
+        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+            assert_safe_cli_env(kind, &env)
+                .unwrap_or_else(|err| panic!("{kind:?} must permit unrelated vars: {err}"));
+        }
+    }
+
+    #[test]
+    fn empty_env_passes_for_every_cli() {
+        let env = BTreeMap::new();
+        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+            assert_safe_cli_env(kind, &env)
+                .unwrap_or_else(|err| panic!("{kind:?} must permit empty env: {err}"));
+        }
+    }
+
+    #[test]
+    fn reverie_env_vars_alongside_a_forbidden_key_still_refused() {
+        // Defensive: even if a REVERIE_* var is present, a forbidden key
+        // still trips the guard. This rules out a future bug where someone
+        // assumes "REVERIE_* set means safe."
+        let env = env([
+            ("REVERIE_SESSION_ID", "abc"),
+            ("CLAUDE_CONFIG_DIR", "/tmp/elsewhere"),
+        ]);
+        let err = assert_safe_cli_env(AgentKind::ClaudeCode, &env)
+            .expect_err("forbidden key still trips guard even with REVERIE_* present");
+        assert!(err.to_string().contains("CLAUDE_CONFIG_DIR"));
+    }
 }

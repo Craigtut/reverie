@@ -1495,7 +1495,7 @@ fn uuid(value: &str) -> WorkspaceId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reverie_core::agents::{CodexCliAdapter, CortexAdapter};
+    use reverie_core::agents::{ClaudeCodeAdapter, CodexCliAdapter, CortexAdapter};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1878,6 +1878,47 @@ mod tests {
         assert_eq!(
             spec.title.as_deref(),
             Some("Live PTY stream proof · Codex CLI")
+        );
+        assert!(
+            spec.command.env.is_empty(),
+            "Codex launch should not redirect CODEX_HOME/HOME/XDG_CONFIG_HOME away from the user's normal auth"
+        );
+    }
+
+    #[test]
+    fn claude_launch_spec_preserves_user_auth_environment() {
+        let snapshot = workspace_shell_snapshot();
+        let mut session = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.cwd == PathBuf::from("/Users/user/Code/reverie"))
+            .expect("seeded Reverie session should exist")
+            .clone();
+        session.agent_kind = AgentKind::ClaudeCode;
+        session.dangerous_mode_override = Some(false);
+
+        let adapter = ClaudeCodeAdapter;
+        let spec = build_agent_spawn_spec_for_session(
+            &session,
+            false,
+            120,
+            40,
+            PathBuf::from("/opt/homebrew/bin/claude"),
+            &adapter,
+        )
+        .expect("new Claude launch spec should build");
+
+        assert_eq!(
+            spec.command.program,
+            PathBuf::from("/opt/homebrew/bin/claude")
+        );
+        assert_eq!(
+            spec.command.cwd,
+            PathBuf::from("/Users/user/Code/reverie")
+        );
+        assert!(
+            spec.command.env.is_empty(),
+            "Claude launch should not redirect CLAUDE_CONFIG_DIR/HOME/XDG_CONFIG_HOME away from the user's normal auth"
         );
     }
 

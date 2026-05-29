@@ -67,8 +67,12 @@ pub struct CortexActivityStream {
 /// existing session directory it finds during the initial scan, then live
 /// updates as `state.json` files change.
 pub fn watch_cortex_activity(sessions_root: PathBuf) -> Result<CortexActivityStream> {
-    fs::create_dir_all(&sessions_root)
-        .with_context(|| format!("ensuring sessions root exists at {}", sessions_root.display()))?;
+    fs::create_dir_all(&sessions_root).with_context(|| {
+        format!(
+            "ensuring sessions root exists at {}",
+            sessions_root.display()
+        )
+    })?;
 
     let (out_tx, out_rx) = mpsc::channel::<CortexActivityUpdate>();
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
@@ -92,11 +96,7 @@ pub fn watch_cortex_activity(sessions_root: PathBuf) -> Result<CortexActivityStr
     })
 }
 
-fn run_watch_loop(
-    root: PathBuf,
-    out_tx: Sender<CortexActivityUpdate>,
-    shutdown_rx: Receiver<()>,
-) {
+fn run_watch_loop(root: PathBuf, out_tx: Sender<CortexActivityUpdate>, shutdown_rx: Receiver<()>) {
     let (debounce_tx, debounce_rx) = mpsc::channel::<DebounceEventResult>();
     let mut debouncer: Debouncer<RecommendedWatcher, RecommendedCache> =
         match new_debouncer(Duration::from_millis(DEBOUNCE_MS), None, debounce_tx) {
@@ -181,14 +181,16 @@ fn handle_events(result: DebounceEventResult, out_tx: &Sender<CortexActivityUpda
 }
 
 fn is_state_file(path: &Path) -> bool {
-    let Some(name) = path.file_name() else { return false };
+    let Some(name) = path.file_name() else {
+        return false;
+    };
     if name != STATE_FILENAME {
         return false;
     }
-    let Some(parent) = path.parent() else { return false };
-    parent
-        .file_name()
-        .is_some_and(|n| n == ACTIVITY_DIRNAME)
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    parent.file_name().is_some_and(|n| n == ACTIVITY_DIRNAME)
 }
 
 fn session_id_from_state_path(path: &Path) -> Option<String> {
@@ -203,8 +205,7 @@ fn session_id_from_state_path(path: &Path) -> Option<String> {
 fn try_read_state(path: &Path) -> Option<CortexActivityUpdate> {
     let content = fs::read_to_string(path).ok()?;
     let state = parse_state(&content).ok()?;
-    let session_id =
-        session_id_from_state_path(path).unwrap_or_else(|| state.session_id.clone());
+    let session_id = session_id_from_state_path(path).unwrap_or_else(|| state.session_id.clone());
     Some(CortexActivityUpdate::State { session_id, state })
 }
 
@@ -387,6 +388,9 @@ mod tests {
             }
             false
         });
-        assert!(found, "watcher survived malformed write and emitted next valid one");
+        assert!(
+            found,
+            "watcher survived malformed write and emitted next valid one"
+        );
     }
 }

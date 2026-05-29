@@ -41,6 +41,10 @@ pub struct TerminalFrame {
     pub dirty: TerminalDirtyState,
     pub colors: TerminalColors,
     pub cursor: TerminalCursor,
+    #[serde(default)]
+    pub modes: TerminalModes,
+    #[serde(default)]
+    pub scrollback: TerminalScrollback,
     pub rows: Vec<TerminalRow>,
 }
 
@@ -57,6 +61,27 @@ pub struct TerminalColors {
     pub foreground: TerminalColor,
     pub background: TerminalColor,
     pub cursor: Option<TerminalColor>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalModes {
+    pub cursor_key_application: bool,
+    pub keypad_key_application: bool,
+    pub bracketed_paste: bool,
+    pub sync_output: bool,
+    pub mouse_tracking: bool,
+    pub kitty_keyboard_flags: u8,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalScrollback {
+    pub total_rows: usize,
+    pub scrollback_rows: usize,
+    pub viewport_offset: usize,
+    pub viewport_rows: usize,
+    pub at_bottom: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

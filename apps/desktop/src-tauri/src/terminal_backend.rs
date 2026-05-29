@@ -1,11 +1,12 @@
 use anyhow::Result;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::style::{RgbColor, Style, Underline as GhosttyUnderline};
+use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use reverie_core::terminal::{
     TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors, TerminalCursor,
-    TerminalCursorStyle, TerminalDirtyState, TerminalFrame, TerminalPosition, TerminalRow,
-    TerminalUnderline,
+    TerminalCursorStyle, TerminalDirtyState, TerminalFrame, TerminalModes, TerminalPosition,
+    TerminalRow, TerminalScrollback, TerminalUnderline,
 };
 
 const DEFAULT_CELL_WIDTH_PX: u32 = 9;
@@ -19,6 +20,7 @@ const DEFAULT_CELL_HEIGHT_PX: u32 = 18;
 pub struct GhosttyTerminalState<'alloc, 'cb> {
     terminal: Terminal<'alloc, 'cb>,
     render_state: RenderState<'alloc>,
+    force_next_full_frame: bool,
 }
 
 impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
@@ -30,6 +32,7 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
                 max_scrollback,
             })?,
             render_state: RenderState::new()?,
+            force_next_full_frame: true,
         })
     }
 
@@ -37,14 +40,51 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         self.terminal.vt_write(bytes);
     }
 
+    pub fn on_pty_write(
+        &mut self,
+        mut callback: impl for<'data> FnMut(&'data [u8]) + 'cb,
+    ) -> Result<()> {
+        self.terminal
+            .on_pty_write(move |_terminal, data| callback(data))?;
+        Ok(())
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
-        Ok(self
-            .terminal
-            .resize(cols, rows, DEFAULT_CELL_WIDTH_PX, DEFAULT_CELL_HEIGHT_PX)?)
+        self.terminal
+            .resize(cols, rows, DEFAULT_CELL_WIDTH_PX, DEFAULT_CELL_HEIGHT_PX)?;
+        self.force_next_full_frame = true;
+        Ok(())
+    }
+
+    pub fn scroll_delta(&mut self, rows: isize) {
+        self.terminal.scroll_viewport(ScrollViewport::Delta(rows));
+        self.force_next_full_frame = true;
+    }
+
+    pub fn scroll_top(&mut self) {
+        self.terminal.scroll_viewport(ScrollViewport::Top);
+        self.force_next_full_frame = true;
+    }
+
+    pub fn scroll_bottom(&mut self) {
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        self.force_next_full_frame = true;
+    }
+
+    pub fn is_viewport_at_bottom(&self) -> Result<bool> {
+        let scrollbar = self.terminal.scrollbar()?;
+        Ok(scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total)
     }
 
     pub fn frame(&mut self) -> Result<TerminalFrame> {
-        extract_frame(&mut self.render_state, &self.terminal)
+        let mut frame = extract_frame(&mut self.render_state, &self.terminal)?;
+        if std::mem::take(&mut self.force_next_full_frame) {
+            frame.dirty = TerminalDirtyState::Full;
+            for row in &mut frame.rows {
+                row.dirty = true;
+            }
+        }
+        Ok(frame)
     }
 }
 
@@ -55,6 +95,9 @@ fn extract_frame<'alloc, 'cb>(
     let snapshot = render_state.update(terminal)?;
     let colors = snapshot.colors()?;
     let cursor_viewport = snapshot.cursor_viewport()?;
+    let scrollbar = terminal.scrollbar()?;
+    let scrollbar_offset = usize::try_from(scrollbar.offset).unwrap_or(usize::MAX);
+    let scrollbar_len = usize::try_from(scrollbar.len).unwrap_or(usize::MAX);
 
     let cursor = TerminalCursor {
         visible: snapshot.cursor_visible()?,
@@ -111,6 +154,21 @@ fn extract_frame<'alloc, 'cb>(
             cursor: colors.cursor.map(map_color),
         },
         cursor,
+        modes: TerminalModes {
+            cursor_key_application: terminal.mode(Mode::DECCKM)?,
+            keypad_key_application: terminal.mode(Mode::KEYPAD_KEYS)?,
+            bracketed_paste: terminal.mode(Mode::BRACKETED_PASTE)?,
+            sync_output: terminal.mode(Mode::SYNC_OUTPUT)?,
+            mouse_tracking: terminal.is_mouse_tracking()?,
+            kitty_keyboard_flags: terminal.kitty_keyboard_flags()?.bits(),
+        },
+        scrollback: TerminalScrollback {
+            total_rows: terminal.total_rows()?,
+            scrollback_rows: terminal.scrollback_rows()?,
+            viewport_offset: scrollbar_offset,
+            viewport_rows: scrollbar_len,
+            at_bottom: scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total,
+        },
         rows,
     })
 }
@@ -236,7 +294,11 @@ mod tests {
               \x1b[38;2;0;133;119m----------\x1b[39m\x1b[0m\r\n",
         );
         let frame = terminal.frame().unwrap();
-        let cells = frame.rows.iter().flat_map(|row| row.cells.iter()).collect::<Vec<_>>();
+        let cells = frame
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .collect::<Vec<_>>();
         let logo_cell = cells
             .iter()
             .find(|cell| cell.text == "C")
@@ -250,9 +312,50 @@ mod tests {
             .find(|cell| cell.text == "-")
             .expect("Cortex divider cell should render");
 
-        assert_eq!(logo_cell.fg, Some(TerminalColor { r: 0, g: 229, b: 204 }));
-        assert_eq!(version_cell.fg, Some(TerminalColor { r: 107, g: 114, b: 128 }));
-        assert_eq!(divider_cell.fg, Some(TerminalColor { r: 0, g: 133, b: 119 }));
+        assert_eq!(
+            logo_cell.fg,
+            Some(TerminalColor {
+                r: 0,
+                g: 229,
+                b: 204
+            })
+        );
+        assert_eq!(
+            version_cell.fg,
+            Some(TerminalColor {
+                r: 107,
+                g: 114,
+                b: 128
+            })
+        );
+        assert_eq!(
+            divider_cell.fg,
+            Some(TerminalColor {
+                r: 0,
+                g: 133,
+                b: 119
+            })
+        );
+    }
+
+    #[test]
+    fn ghostty_terminal_state_exposes_input_modes_to_frontend() {
+        let mut terminal = GhosttyTerminalState::new(40, 8, 100).unwrap();
+        terminal.write(b"\x1b[?1h\x1b[?66h\x1b[?2004h\x1b[?2026h");
+        let frame = terminal.frame().unwrap();
+
+        assert!(frame.modes.cursor_key_application);
+        assert!(frame.modes.keypad_key_application);
+        assert!(frame.modes.bracketed_paste);
+        assert!(frame.modes.sync_output);
+
+        terminal.write(b"\x1b[?1l\x1b[?66l\x1b[?2004l\x1b[?2026l");
+        let frame = terminal.frame().unwrap();
+
+        assert!(!frame.modes.cursor_key_application);
+        assert!(!frame.modes.keypad_key_application);
+        assert!(!frame.modes.bracketed_paste);
+        assert!(!frame.modes.sync_output);
     }
 
     #[test]
@@ -271,6 +374,36 @@ mod tests {
         assert!(resized_text.contains("reverieresizeproofkeepswrappedtextintactacrossshapechange"));
         assert!(initial_non_empty_rows > resized_non_empty_rows);
         assert_eq!(resized.rows.len(), 8);
+    }
+
+    #[test]
+    fn ghostty_terminal_state_forces_full_frame_after_resize() {
+        let mut terminal = GhosttyTerminalState::new(24, 4, 100).unwrap();
+        terminal.write(b"resize dirty proof\r\n");
+        let _ = terminal.frame().unwrap();
+
+        terminal.resize(32, 4).unwrap();
+        let resized = terminal.frame().unwrap();
+
+        assert_eq!(resized.dirty, TerminalDirtyState::Full);
+        assert!(resized.rows.iter().all(|row| row.dirty));
+    }
+
+    #[test]
+    fn ghostty_terminal_state_forces_full_frame_after_viewport_scroll() {
+        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        for index in 1..=10 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        terminal.scroll_top();
+        let top = terminal.frame().unwrap();
+
+        assert_eq!(top.dirty, TerminalDirtyState::Full);
+        assert!(top.rows.iter().all(|row| row.dirty));
+        assert_eq!(top.rows[0].plain_text().trim_end(), "L01");
     }
 
     fn count_non_empty_rows(frame: &TerminalFrame) -> usize {

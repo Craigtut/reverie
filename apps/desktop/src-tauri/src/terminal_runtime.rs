@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{self, Receiver, RecvTimeoutError, Sender},
+};
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use reverie_core::TerminalSpawnSpec;
@@ -17,19 +20,33 @@ use crate::app_shell::AppShellStore;
 use crate::terminal_backend::GhosttyTerminalState;
 
 const READ_BUFFER_BYTES: usize = 4096;
-const MAX_TERMINAL_FRAME_SEGMENT_BYTES: usize = 512;
+const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Default)]
 pub struct TerminalSessionRuntime {
     sessions: Arc<Mutex<HashMap<TerminalId, TerminalSessionRecord>>>,
     controllers: Arc<Mutex<HashMap<TerminalId, PtyController>>>,
-    pending_resizes: Arc<Mutex<HashMap<TerminalId, PendingTerminalResize>>>,
+    command_senders: Arc<Mutex<HashMap<TerminalId, Sender<TerminalRuntimeCommand>>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct PendingTerminalResize {
-    cols: u16,
-    rows: u16,
+enum TerminalRuntimeCommand {
+    Resize { cols: u16, rows: u16 },
+    ScrollDelta(isize),
+    ScrollTop,
+    ScrollBottom,
+}
+
+#[derive(Debug)]
+enum PtyReadEvent {
+    Chunk(Vec<u8>),
+    Exited { child_success: bool },
+    Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalViewportState {
+    follow_tail: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -123,19 +140,26 @@ impl TerminalSessionRuntime {
 
         let runtime = self.clone();
         thread::spawn(move || {
-            if let Err(err) = runtime.run_stream_worker(app.clone(), request.clone()) {
-                runtime.remove_controller(request.terminal_id);
-                runtime.register_failed(request.terminal_id);
-                persist_shell_session_failed(&app, request.session_id);
-                let failure = TerminalFailedEvent {
-                    session_id: request.session_id,
-                    terminal_id: Some(request.terminal_id),
-                    message: err.to_string(),
-                };
-                let _ = app.emit("terminal_failed", failure.clone());
-                if request.legacy_proof_events {
-                    let _ = app.emit("reverie-terminal-stream-failed", failure);
-                }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.run_stream_worker(app.clone(), request.clone())
+            }));
+            let failure_message = match result {
+                Ok(Ok(())) => return,
+                Ok(Err(err)) => err.to_string(),
+                Err(payload) => panic_payload_message(payload.as_ref()),
+            };
+
+            runtime.remove_controller(request.terminal_id);
+            runtime.register_failed(request.terminal_id);
+            persist_shell_session_failed(&app, request.session_id);
+            let failure = TerminalFailedEvent {
+                session_id: request.session_id,
+                terminal_id: Some(request.terminal_id),
+                message: failure_message,
+            };
+            let _ = app.emit("terminal_failed", failure.clone());
+            if request.legacy_proof_events {
+                let _ = app.emit("reverie-terminal-stream-failed", failure);
             }
         });
 
@@ -168,11 +192,35 @@ impl TerminalSessionRuntime {
         }
 
         self.controller_for(terminal_id)?.resize(cols, rows)?;
-        self.queue_pending_resize(terminal_id, cols, rows)?;
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::Resize { cols, rows })
+            .context("failed to queue terminal resize command")?;
         self.update_record(terminal_id, |record| {
             record.cols = cols;
             record.rows = rows;
         })
+    }
+
+    pub fn scroll_terminal(&self, terminal_id: TerminalId, delta_rows: isize) -> Result<()> {
+        if delta_rows == 0 {
+            return Ok(());
+        }
+
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::ScrollDelta(delta_rows))
+            .context("failed to queue terminal scroll command")
+    }
+
+    pub fn scroll_terminal_to_top(&self, terminal_id: TerminalId) -> Result<()> {
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::ScrollTop)
+            .context("failed to queue terminal scroll-to-top command")
+    }
+
+    pub fn scroll_terminal_to_bottom(&self, terminal_id: TerminalId) -> Result<()> {
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::ScrollBottom)
+            .context("failed to queue terminal scroll-to-bottom command")
     }
 
     pub fn terminate_session(&self, terminal_id: TerminalId) -> Result<()> {
@@ -185,8 +233,16 @@ impl TerminalSessionRuntime {
         let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows, request.max_scrollback)?;
         let process = PtyProcess::spawn(request.terminal_id, &spec)
             .context("failed to spawn terminal session PTY process")?;
-        let (mut reader, controller) = process.split();
+        let (reader, controller) = process.split();
+        let (read_tx, read_rx) = mpsc::channel();
+        spawn_pty_reader_thread(request.terminal_id, reader, read_tx)?;
+        let (command_tx, command_rx) = mpsc::channel();
+        let response_controller = controller.clone();
+        terminal.on_pty_write(move |data| {
+            let _ = response_controller.write_input(data);
+        })?;
         self.register_controller(request.terminal_id, controller)?;
+        self.register_command_sender(request.terminal_id, command_tx)?;
 
         self.mark_running(request.terminal_id)?;
         persist_shell_session_running(&app, request.session_id);
@@ -205,51 +261,108 @@ impl TerminalSessionRuntime {
         }
 
         let started = Instant::now();
-        let mut buf = [0_u8; READ_BUFFER_BYTES];
         let mut bytes_read = 0_usize;
         let mut bytes_rendered = 0_usize;
+        let mut bytes_since_last_frame = 0_usize;
         let mut chunks_read = 0_usize;
         let mut frames_emitted = 0_usize;
         let mut total_emit_ms = 0_f64;
         let mut max_emit_ms = 0_f64;
-
-        loop {
-            let read = reader.read_chunk(&mut buf)?;
-            if read == 0 {
-                break;
+        let mut pending_frame = false;
+        let mut last_frame_emit = Instant::now()
+            .checked_sub(TERMINAL_FRAME_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        let mut viewport_state = TerminalViewportState { follow_tail: true };
+        let child_success = loop {
+            if apply_terminal_commands(&command_rx, &mut terminal, &mut viewport_state)? {
+                pending_frame = true;
             }
 
-            chunks_read += 1;
-            bytes_read += read;
-
-            for segment in terminal_frame_segments(&buf[..read], MAX_TERMINAL_FRAME_SEGMENT_BYTES) {
-                terminal.write(segment);
-                bytes_rendered += segment.len();
-                self.apply_pending_resize(request.terminal_id, &mut terminal)?;
-                let event = TerminalFrameEvent {
-                    session_id: request.session_id,
-                    terminal_id: request.terminal_id,
-                    seq: frames_emitted,
-                    bytes_read: bytes_rendered,
-                    chunk_bytes: segment.len(),
-                    rust_elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-                    frame: terminal.frame()?,
-                };
-
-                let emit_started = Instant::now();
-                app.emit("terminal_frame", event.clone())?;
-                if request.legacy_proof_events {
-                    app.emit("reverie-terminal-stream-frame", event)?;
-                }
-                let emit_ms = emit_started.elapsed().as_secs_f64() * 1000.0;
+            if pending_frame && last_frame_emit.elapsed() >= TERMINAL_FRAME_INTERVAL {
+                let emit_ms = emit_terminal_frame_event(
+                    &app,
+                    request.session_id,
+                    request.terminal_id,
+                    frames_emitted,
+                    bytes_rendered,
+                    bytes_since_last_frame,
+                    started,
+                    &mut terminal,
+                    request.legacy_proof_events,
+                )?;
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
                 frames_emitted += 1;
                 self.update_progress(request.terminal_id, frames_emitted, bytes_rendered)?;
+                bytes_since_last_frame = 0;
+                pending_frame = false;
+                last_frame_emit = Instant::now();
             }
+
+            match read_rx.recv_timeout(Duration::from_millis(4)) {
+                Ok(PtyReadEvent::Chunk(chunk)) => {
+                    chunks_read += 1;
+                    bytes_read += chunk.len();
+                    bytes_rendered += chunk.len();
+                    bytes_since_last_frame += chunk.len();
+
+                    terminal.write(&chunk);
+                    if viewport_state.follow_tail {
+                        terminal.scroll_bottom();
+                    }
+                    pending_frame = true;
+                }
+                Ok(PtyReadEvent::Exited { child_success }) => break child_success,
+                Ok(PtyReadEvent::Failed(message)) => bail!(message),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    bail!("terminal reader disconnected before reporting process exit")
+                }
+            }
+
+            // Gate on `pending_frame` so an idle terminal (no new PTY output and
+            // no applied commands) never emits. Without this guard the loop ships
+            // a full grid frame every TERMINAL_FRAME_INTERVAL forever, per session.
+            if pending_frame && last_frame_emit.elapsed() >= TERMINAL_FRAME_INTERVAL {
+                let emit_ms = emit_terminal_frame_event(
+                    &app,
+                    request.session_id,
+                    request.terminal_id,
+                    frames_emitted,
+                    bytes_rendered,
+                    bytes_since_last_frame,
+                    started,
+                    &mut terminal,
+                    request.legacy_proof_events,
+                )?;
+                total_emit_ms += emit_ms;
+                max_emit_ms = max_emit_ms.max(emit_ms);
+                frames_emitted += 1;
+                self.update_progress(request.terminal_id, frames_emitted, bytes_rendered)?;
+                bytes_since_last_frame = 0;
+                pending_frame = false;
+                last_frame_emit = Instant::now();
+            }
+        };
+
+        if pending_frame {
+            let emit_ms = emit_terminal_frame_event(
+                &app,
+                request.session_id,
+                request.terminal_id,
+                frames_emitted,
+                bytes_rendered,
+                bytes_since_last_frame,
+                started,
+                &mut terminal,
+                request.legacy_proof_events,
+            )?;
+            total_emit_ms += emit_ms;
+            max_emit_ms = max_emit_ms.max(emit_ms);
+            frames_emitted += 1;
+            self.update_progress(request.terminal_id, frames_emitted, bytes_rendered)?;
         }
 
-        let status = reader.wait()?;
         let avg_emit_ms = if frames_emitted == 0 {
             0.0
         } else {
@@ -266,7 +379,7 @@ impl TerminalSessionRuntime {
             total_emit_ms,
             avg_emit_ms,
             max_emit_ms,
-            child_success: status.success(),
+            child_success,
         };
 
         self.remove_controller(request.terminal_id);
@@ -274,10 +387,10 @@ impl TerminalSessionRuntime {
             request.terminal_id,
             frames_emitted,
             bytes_read,
-            status.success(),
+            child_success,
         )?;
         persist_cortex_session_after_launch(&app, request.session_id, launch_started_ms);
-        persist_shell_session_finished(&app, request.session_id, status.success());
+        persist_shell_session_finished(&app, request.session_id, child_success);
         app.emit("terminal_exit", finished.clone())?;
         app.emit("session_status_changed", finished.clone())?;
         if request.legacy_proof_events {
@@ -321,39 +434,25 @@ impl TerminalSessionRuntime {
         Ok(())
     }
 
+    fn register_command_sender(
+        &self,
+        terminal_id: TerminalId,
+        sender: Sender<TerminalRuntimeCommand>,
+    ) -> Result<()> {
+        self.command_senders
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal runtime command map is poisoned"))?
+            .insert(terminal_id, sender);
+        Ok(())
+    }
+
     fn remove_controller(&self, terminal_id: TerminalId) {
         if let Ok(mut controllers) = self.controllers.lock() {
             controllers.remove(&terminal_id);
         }
-        if let Ok(mut pending_resizes) = self.pending_resizes.lock() {
-            pending_resizes.remove(&terminal_id);
+        if let Ok(mut command_senders) = self.command_senders.lock() {
+            command_senders.remove(&terminal_id);
         }
-    }
-
-    fn queue_pending_resize(&self, terminal_id: TerminalId, cols: u16, rows: u16) -> Result<()> {
-        self.pending_resizes
-            .lock()
-            .map_err(|_| anyhow::anyhow!("terminal runtime pending resize map is poisoned"))?
-            .insert(terminal_id, PendingTerminalResize { cols, rows });
-        Ok(())
-    }
-
-    fn apply_pending_resize(
-        &self,
-        terminal_id: TerminalId,
-        terminal: &mut GhosttyTerminalState<'_, '_>,
-    ) -> Result<()> {
-        let resize = self
-            .pending_resizes
-            .lock()
-            .map_err(|_| anyhow::anyhow!("terminal runtime pending resize map is poisoned"))?
-            .remove(&terminal_id);
-
-        if let Some(resize) = resize {
-            terminal.resize(resize.cols, resize.rows)?;
-        }
-
-        Ok(())
     }
 
     fn controller_for(&self, terminal_id: TerminalId) -> Result<PtyController> {
@@ -363,6 +462,20 @@ impl TerminalSessionRuntime {
             .get(&terminal_id)
             .cloned()
             .with_context(|| format!("terminal session {terminal_id} has no live PTY controller"))
+    }
+
+    fn command_sender_for(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<Sender<TerminalRuntimeCommand>> {
+        self.command_senders
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal runtime command map is poisoned"))?
+            .get(&terminal_id)
+            .cloned()
+            .with_context(|| {
+                format!("terminal session {terminal_id} has no live terminal command channel")
+            })
     }
 
     fn mark_running(&self, terminal_id: TerminalId) -> Result<()> {
@@ -422,13 +535,131 @@ impl TerminalSessionRuntime {
     }
 }
 
+fn emit_terminal_frame_event(
+    app: &AppHandle,
+    session_id: Option<SessionId>,
+    terminal_id: TerminalId,
+    seq: usize,
+    bytes_read: usize,
+    chunk_bytes: usize,
+    started: Instant,
+    terminal: &mut GhosttyTerminalState<'_, '_>,
+    legacy_proof_events: bool,
+) -> Result<f64> {
+    let event = TerminalFrameEvent {
+        session_id,
+        terminal_id,
+        seq,
+        bytes_read,
+        chunk_bytes,
+        rust_elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+        frame: terminal.frame()?,
+    };
+
+    let emit_started = Instant::now();
+    app.emit("terminal_frame", event.clone())?;
+    if legacy_proof_events {
+        app.emit("reverie-terminal-stream-frame", event)?;
+    }
+
+    Ok(emit_started.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn spawn_pty_reader_thread(
+    terminal_id: TerminalId,
+    mut reader: reverie_core::pty::PtyReader,
+    sender: Sender<PtyReadEvent>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name(format!("reverie-pty-reader-{terminal_id}"))
+        .spawn(move || {
+            let result = (|| -> Result<()> {
+                let mut buf = [0_u8; READ_BUFFER_BYTES];
+                loop {
+                    let read = reader.read_chunk(&mut buf)?;
+                    if read == 0 {
+                        break;
+                    }
+                    if sender
+                        .send(PtyReadEvent::Chunk(buf[..read].to_vec()))
+                        .is_err()
+                    {
+                        return Ok(());
+                    }
+                }
+
+                let status = reader.wait()?;
+                let _ = sender.send(PtyReadEvent::Exited {
+                    child_success: status.success(),
+                });
+                Ok(())
+            })();
+
+            if let Err(error) = result {
+                let _ = sender.send(PtyReadEvent::Failed(error.to_string()));
+            }
+        })
+        .context("failed to spawn terminal reader thread")?;
+    Ok(())
+}
+
+fn apply_terminal_commands(
+    receiver: &Receiver<TerminalRuntimeCommand>,
+    terminal: &mut GhosttyTerminalState<'_, '_>,
+    viewport_state: &mut TerminalViewportState,
+) -> Result<bool> {
+    let mut needs_frame = false;
+
+    while let Ok(command) = receiver.try_recv() {
+        match command {
+            TerminalRuntimeCommand::Resize { cols, rows } => {
+                terminal.resize(cols, rows)?;
+                if viewport_state.follow_tail {
+                    terminal.scroll_bottom();
+                }
+                needs_frame = true;
+            }
+            TerminalRuntimeCommand::ScrollDelta(rows) => {
+                terminal.scroll_delta(rows);
+                viewport_state.follow_tail = terminal.is_viewport_at_bottom()?;
+                needs_frame = true;
+            }
+            TerminalRuntimeCommand::ScrollTop => {
+                terminal.scroll_top();
+                viewport_state.follow_tail = false;
+                needs_frame = true;
+            }
+            TerminalRuntimeCommand::ScrollBottom => {
+                terminal.scroll_bottom();
+                viewport_state.follow_tail = true;
+                needs_frame = true;
+            }
+        }
+    }
+
+    Ok(needs_frame)
+}
+
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        format!("terminal worker panicked: {message}")
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        format!("terminal worker panicked: {message}")
+    } else {
+        "terminal worker panicked".to_owned()
+    }
+}
+
 fn persist_cortex_session_after_launch(
     app: &AppHandle,
     session_id: Option<SessionId>,
     launch_started_ms: i64,
 ) {
-    if let (Some((store, session_id)), Some(cortex_home)) = (shell_store(app, session_id), cortex_home_dir()) {
-        let _ = store.capture_cortex_session_after_launch(session_id, cortex_home, launch_started_ms);
+    if let (Some((store, session_id)), Some(cortex_home)) =
+        (shell_store(app, session_id), cortex_home_dir())
+    {
+        let _ =
+            store.capture_cortex_session_after_launch(session_id, cortex_home, launch_started_ms);
     }
 }
 
@@ -454,7 +685,10 @@ fn persist_shell_session_failed(app: &AppHandle, session_id: Option<SessionId>) 
     }
 }
 
-fn shell_store(app: &AppHandle, session_id: Option<SessionId>) -> Option<(tauri::State<'_, AppShellStore>, SessionId)> {
+fn shell_store(
+    app: &AppHandle,
+    session_id: Option<SessionId>,
+) -> Option<(tauri::State<'_, AppShellStore>, SessionId)> {
     Some((app.try_state::<AppShellStore>()?, session_id?))
 }
 
@@ -471,6 +705,7 @@ fn unix_time_millis() -> i64 {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn terminal_frame_segments(chunk: &[u8], max_segment_bytes: usize) -> Vec<&[u8]> {
     if chunk.is_empty() {
         return Vec::new();
@@ -539,6 +774,7 @@ mod tests {
 
         let input_error = runtime.write_input(terminal_id, b"hello").unwrap_err();
         let resize_error = runtime.resize_terminal(terminal_id, 120, 32).unwrap_err();
+        let scroll_error = runtime.scroll_terminal(terminal_id, -3).unwrap_err();
         let terminate_error = runtime.terminate_session(terminal_id).unwrap_err();
 
         assert!(
@@ -556,6 +792,11 @@ mod tests {
                 .to_string()
                 .contains("has no live PTY controller")
         );
+        assert!(
+            scroll_error
+                .to_string()
+                .contains("has no live terminal command channel")
+        );
     }
 
     #[test]
@@ -569,31 +810,28 @@ mod tests {
     }
 
     #[test]
-    fn runtime_applies_pending_resize_to_ghostty_state_once() {
-        let runtime = TerminalSessionRuntime::default();
-        let terminal_id = TerminalId::new_v4();
-        let mut terminal = GhosttyTerminalState::new(24, 8, 100).unwrap();
+    fn terminal_commands_scroll_ghostty_viewport() {
+        let (sender, receiver) = mpsc::channel();
+        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let mut viewport_state = TerminalViewportState { follow_tail: true };
 
-        terminal.write(b"reverie pending resize keeps ghostty aligned with the PTY\r\n");
-        runtime.queue_pending_resize(terminal_id, 48, 8).unwrap();
-        runtime
-            .apply_pending_resize(terminal_id, &mut terminal)
-            .unwrap();
-        runtime
-            .apply_pending_resize(terminal_id, &mut terminal)
-            .unwrap();
+        for index in 1..=10 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
 
-        let rows = terminal.frame().unwrap().rows;
+        sender.send(TerminalRuntimeCommand::ScrollTop).unwrap();
+        assert!(apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        let top = terminal.frame().unwrap();
+        assert!(!viewport_state.follow_tail);
+        assert!(!top.scrollback.at_bottom);
+        assert_eq!(top.rows[0].plain_text().trim_end(), "L01");
 
-        assert_eq!(rows.len(), 8);
-        assert_eq!(
-            runtime
-                .pending_resizes
-                .lock()
-                .expect("pending resize map should not be poisoned")
-                .get(&terminal_id),
-            None
-        );
+        sender.send(TerminalRuntimeCommand::ScrollBottom).unwrap();
+        assert!(apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        let bottom = terminal.frame().unwrap();
+        assert!(viewport_state.follow_tail);
+        assert!(bottom.scrollback.at_bottom);
     }
 
     #[test]

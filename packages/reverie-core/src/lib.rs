@@ -7,6 +7,7 @@
 pub mod activity;
 pub mod activity_watcher;
 pub mod agents;
+pub mod connection;
 pub mod domain;
 pub mod hook_config;
 pub mod hook_server;
@@ -21,6 +22,11 @@ pub use activity::{
     parse_events, parse_state,
 };
 pub use activity_watcher::{CortexActivityStream, CortexActivityUpdate, watch_cortex_activity};
+pub use connection::{
+    Connection, ConnectionClosedBy, ConnectionId, ConnectionInitiator, ConnectionMessage,
+    ConnectionPolicy, ConnectionStatus, ConnectionTransitionError, MessageId, PendingRequest,
+    RequestId,
+};
 pub use hook_config::{WrittenHookConfig, hook_url, write_claude_settings, write_codex_config};
 pub use hook_server::{
     HookActivityUpdate, HookServerControl, HookServerHandle, HookSource, start_hook_server,
