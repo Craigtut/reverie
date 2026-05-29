@@ -4,19 +4,27 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use reverie_core::agents::built_in_adapters;
 use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId};
 use reverie_core::hook_server::HookServerControl;
 use reverie_core::terminal::{TerminalFrame, TerminalId};
-use reverie_core::{AdapterDetection, TerminalSpawnSpec, WorkspaceService, WorkspaceSnapshot};
+use reverie_core::{
+    AdapterDetection, ConnectionService, RegisteredSession, SessionAddress, TerminalSpawnSpec,
+    WorkspaceService, WorkspaceSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
+#[cfg(unix)]
+use crate::bridge::{BridgeInfo, mint_session_secret};
 use crate::state::{HookServerInfo, HookTokenRegistry};
 use crate::terminal::ghostty::GhosttyTerminalState;
-use crate::terminal::runtime::{TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest};
+use crate::terminal::runtime::{
+    TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest,
+};
 
 const PROOF_COLS: u16 = 120;
 const PROOF_ROWS: u16 = 36;
@@ -49,7 +57,12 @@ pub(crate) struct AgentCliDetection {
     display_name: &'static str,
     executable: Option<String>,
     candidates: Vec<String>,
+    /// Detected on this machine (installed and on PATH / at a known location).
     available: bool,
+    /// User has this CLI switched on. Enabled by default; only an explicit
+    /// toggle-off in settings sets this false. A CLI must be both `available`
+    /// and `enabled` to be offered as a session agent.
+    enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +125,13 @@ pub(crate) struct SetWorkspaceDefaultDangerousModeRequest {
     default_dangerous_mode: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetAgentCliEnabledRequest {
+    kind: AgentKind,
+    enabled: bool,
+}
+
 #[tauri::command]
 pub(crate) fn app_status() -> &'static str {
     "reverie-desktop-product-shell"
@@ -125,7 +145,17 @@ pub(crate) fn workspace_shell(
 }
 
 #[tauri::command]
-pub(crate) fn list_agent_clis() -> Vec<AgentCliDetection> {
+pub(crate) fn list_agent_clis(service: State<'_, WorkspaceService>) -> Vec<AgentCliDetection> {
+    // A failed read defaults to "nothing disabled" so detection still works if
+    // the workspace row is somehow unreadable; the toggle just appears on.
+    let disabled = service.disabled_agent_kinds().unwrap_or_default();
+    detect_agent_clis(&disabled)
+}
+
+/// Run detection across the built-in adapters and fold in the user's per-CLI
+/// enablement (a CLI is enabled unless it is in `disabled`). Shared by
+/// `list_agent_clis` and `set_agent_cli_enabled` so both return the same shape.
+fn detect_agent_clis(disabled: &[AgentKind]) -> Vec<AgentCliDetection> {
     built_in_adapters()
         .into_iter()
         .map(|adapter| {
@@ -141,16 +171,63 @@ pub(crate) fn list_agent_clis() -> Vec<AgentCliDetection> {
                     .collect(),
                 AdapterDetection::Missing { candidates } => candidates.clone(),
             };
+            let kind = adapter.kind();
 
             AgentCliDetection {
-                kind: adapter.kind(),
+                kind,
                 display_name: adapter.display_name(),
                 executable,
                 candidates,
                 available: detection.is_available(),
+                enabled: !disabled.contains(&kind),
             }
         })
         .collect()
+}
+
+/// Switch a single agent CLI on or off. Returns the refreshed detection list
+/// (so the shell store updates in one round-trip). Disabling a CLI also
+/// removes any inter-agent bridge entries it has, so an off CLI never has
+/// Reverie-managed config left in its files.
+#[tauri::command]
+pub(crate) fn set_agent_cli_enabled(
+    app: AppHandle,
+    service: State<'_, WorkspaceService>,
+    request: SetAgentCliEnabledRequest,
+) -> Result<Vec<AgentCliDetection>, String> {
+    let snapshot = service
+        .set_agent_cli_enabled(request.kind, request.enabled)
+        .map_err(|err| err.to_string())?;
+
+    if !request.enabled {
+        // Best-effort: tear down the bridge so a disabled CLI keeps nothing
+        // Reverie-managed in its config. A failure here must not block the
+        // toggle, so we log and carry on.
+        if let Err(err) = remove_bridge_for(&app, request.kind) {
+            eprintln!("[reverie] could not remove bridge for disabled CLI: {err:#}");
+        }
+    }
+
+    Ok(detect_agent_clis(&snapshot.workspace.disabled_agent_kinds))
+}
+
+/// Remove the inter-agent bridge entries for one CLI. Unix-only (the installer
+/// is too); a no-op elsewhere.
+#[cfg(unix)]
+fn remove_bridge_for(_app: &AppHandle, kind: AgentKind) -> Result<()> {
+    use crate::bridge_installer::{
+        uninstall_claude_bridge, uninstall_codex_bridge, uninstall_cortex_bridge,
+    };
+    match kind {
+        AgentKind::CortexCode => uninstall_cortex_bridge(),
+        AgentKind::CodexCli => uninstall_codex_bridge(),
+        AgentKind::ClaudeCode => uninstall_claude_bridge(),
+    }
+}
+
+#[cfg(not(unix))]
+fn remove_bridge_for(_app: &AppHandle, _kind: AgentKind) -> Result<()> {
+    Ok(())
 }
 
 #[tauri::command]
@@ -236,6 +313,7 @@ pub(crate) fn remove_session(
             control.revoke_session(source, &token);
         }
     }
+    unregister_session_from_bridge(&app, session_id);
     service
         .remove_session(session_id)
         .map_err(|err| err.to_string())
@@ -306,7 +384,7 @@ pub(crate) fn start_session(
 ) -> Result<TerminalId, String> {
     let terminal_id = request.terminal_id.unwrap_or_else(TerminalId::new_v4);
     let session_id = request.session_id;
-    let spawn_spec = match request.spawn_spec {
+    let mut spawn_spec = match request.spawn_spec {
         Some(spawn_spec) => spawn_spec,
         None => {
             let shell_session_id = session_id.ok_or_else(|| {
@@ -330,6 +408,16 @@ pub(crate) fn start_session(
     if let Some(shell_session_id) = session_id {
         keep_cli_auth_env_unmodified(&service, shell_session_id, &spawn_spec)
             .map_err(|err| err.to_string())?;
+    }
+
+    // Inter-agent bridge wiring. If the connection service is managed (it
+    // only is on Unix and only when `start_bridge` succeeded at startup), we
+    // register this session with it and inject the three `REVERIE_*` env
+    // vars so the `reverie-bridge` helper subprocess can authenticate.
+    // Failures here log and continue: the session still starts, just
+    // without inter-agent connection capability.
+    if let Some(shell_session_id) = session_id {
+        register_session_with_bridge(&app, &service, shell_session_id, &mut spawn_spec);
     }
 
     runtime
@@ -492,6 +580,107 @@ fn assert_safe_cli_env(
     Ok(())
 }
 
+/// Resolve a [`SessionAddress`] from the workspace snapshot. Returns `None`
+/// if the session does not exist or its focus has been dropped concurrently;
+/// callers treat that the same as bridge-disabled and skip injection.
+fn resolve_session_address(
+    snapshot: &WorkspaceSnapshot,
+    session_id: SessionId,
+) -> Option<SessionAddress> {
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)?;
+    let focus = snapshot
+        .focuses
+        .iter()
+        .find(|focus| focus.id == session.focus_id)?;
+    let project = focus
+        .project_id
+        .and_then(|pid| snapshot.projects.iter().find(|project| project.id == pid));
+    Some(SessionAddress {
+        agent_kind: session.agent_kind,
+        project_id: focus.project_id,
+        project_name: project.map(|p| p.name.clone()),
+        focus_id: focus.id,
+        focus_title: focus.title.clone(),
+        session_title: session.title.clone(),
+    })
+}
+
+/// Register a session with the inter-agent connection bridge and inject the
+/// three `REVERIE_*` environment variables the helper needs to authenticate.
+///
+/// No-op when the bridge is not managed (non-Unix, or `start_bridge` failed
+/// at boot). No-op when the session record cannot be resolved (transient
+/// inconsistency); the session still launches, just without bridge support.
+#[cfg(unix)]
+fn register_session_with_bridge(
+    app: &AppHandle,
+    service: &WorkspaceService,
+    shell_session_id: SessionId,
+    spawn_spec: &mut TerminalSpawnSpec,
+) {
+    let Some(connection_service) = app.try_state::<Arc<ConnectionService>>() else {
+        return;
+    };
+    let Some(bridge_info) = app.try_state::<BridgeInfo>() else {
+        return;
+    };
+    let snapshot = match service.snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            eprintln!("[reverie-bridge] snapshot for bridge wiring failed: {err}");
+            return;
+        }
+    };
+    let Some(address) = resolve_session_address(&snapshot, shell_session_id) else {
+        eprintln!("[reverie-bridge] session {shell_session_id} not found in snapshot");
+        return;
+    };
+
+    let secret = mint_session_secret();
+    connection_service.register_session(RegisteredSession {
+        session_id: shell_session_id,
+        secret: secret.clone(),
+        address,
+    });
+    spawn_spec.command.env.insert(
+        "REVERIE_SESSION_ID".to_owned(),
+        shell_session_id.to_string(),
+    );
+    spawn_spec
+        .command
+        .env
+        .insert("REVERIE_SESSION_SECRET".to_owned(), secret);
+    spawn_spec.command.env.insert(
+        "REVERIE_BRIDGE_SOCK".to_owned(),
+        bridge_info.socket_path.to_string_lossy().into_owned(),
+    );
+}
+
+#[cfg(not(unix))]
+fn register_session_with_bridge(
+    _app: &AppHandle,
+    _service: &WorkspaceService,
+    _shell_session_id: SessionId,
+    _spawn_spec: &mut TerminalSpawnSpec,
+) {
+}
+
+/// Remove a session from the bridge registry. Safe to call when the bridge
+/// is not enabled (no-op) or when the session was never registered
+/// (`unregister_session` is idempotent in `ConnectionService`).
+#[cfg(unix)]
+fn unregister_session_from_bridge(app: &AppHandle, session_id: SessionId) {
+    if let Some(connection_service) = app.try_state::<Arc<ConnectionService>>() {
+        connection_service.unregister_session(session_id);
+    }
+}
+
+#[cfg(not(unix))]
+fn unregister_session_from_bridge(_app: &AppHandle, _session_id: SessionId) {}
+
 fn build_ghostty_frame_sequence() -> Result<GhosttyFrameSequence> {
     let mut terminal = GhosttyTerminalState::new(
         PROOF_COLS,
@@ -536,6 +725,95 @@ fn build_ghostty_frame_sequence() -> Result<GhosttyFrameSequence> {
         output_bytes,
         frames,
     })
+}
+
+#[cfg(test)]
+mod address_resolution_tests {
+    //! Pin the workspace-snapshot to `SessionAddress` mapping. This is the
+    //! projection bridge clients see in `list_peers` and the connection
+    //! banner, so a regression here would silently mislabel sessions.
+
+    use super::*;
+    use reverie_core::domain::{Focus, Project, Session, Workspace};
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn empty_snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            workspace: Workspace::new("Test workspace", "General"),
+            projects: vec![],
+            focuses: vec![],
+            sessions: vec![],
+        }
+    }
+
+    #[test]
+    fn resolves_session_with_focus_and_project() {
+        let mut snapshot = empty_snapshot();
+        let project = Project::new("Reverie", PathBuf::from("/repo"));
+        let focus = Focus::for_project(project.id, "Inter-agent handoff design", 10);
+        let session = Session::new(
+            focus.id,
+            "Claude orchestrator",
+            AgentKind::ClaudeCode,
+            PathBuf::from("/repo"),
+        );
+        let session_id = session.id;
+        snapshot.projects.push(project.clone());
+        snapshot.focuses.push(focus.clone());
+        snapshot.sessions.push(session);
+
+        let address = resolve_session_address(&snapshot, session_id).expect("address resolves");
+        assert_eq!(address.agent_kind, AgentKind::ClaudeCode);
+        assert_eq!(address.project_id, Some(project.id));
+        assert_eq!(address.project_name.as_deref(), Some("Reverie"));
+        assert_eq!(address.focus_id, focus.id);
+        assert_eq!(address.focus_title, "Inter-agent handoff design");
+        assert_eq!(address.session_title, "Claude orchestrator");
+    }
+
+    #[test]
+    fn resolves_general_workspace_session_with_no_project() {
+        let mut snapshot = empty_snapshot();
+        let focus = Focus::general("Sketchpad", 0);
+        let session = Session::new(
+            focus.id,
+            "Scratch",
+            AgentKind::CortexCode,
+            PathBuf::from("/tmp"),
+        );
+        let session_id = session.id;
+        snapshot.focuses.push(focus.clone());
+        snapshot.sessions.push(session);
+
+        let address = resolve_session_address(&snapshot, session_id).expect("address resolves");
+        assert!(address.project_id.is_none());
+        assert!(address.project_name.is_none());
+        assert_eq!(address.focus_id, focus.id);
+    }
+
+    #[test]
+    fn returns_none_for_unknown_session() {
+        let snapshot = empty_snapshot();
+        assert!(resolve_session_address(&snapshot, Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_focus_is_missing() {
+        // Pathological: a session referring to a focus the snapshot lacks.
+        // Resolution must fail closed, not panic.
+        let mut snapshot = empty_snapshot();
+        let dangling_focus_id = Uuid::new_v4();
+        let session = Session::new(
+            dangling_focus_id,
+            "S",
+            AgentKind::ClaudeCode,
+            PathBuf::from("/repo"),
+        );
+        let session_id = session.id;
+        snapshot.sessions.push(session);
+        assert!(resolve_session_address(&snapshot, session_id).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -610,7 +888,11 @@ mod env_guard_tests {
     #[test]
     fn reverie_session_id_passes_through_for_every_cli() {
         let env = env([("REVERIE_SESSION_ID", "0193abcd-ef01-7000-8000-0123456789ab")]);
-        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+        for kind in [
+            AgentKind::ClaudeCode,
+            AgentKind::CodexCli,
+            AgentKind::CortexCode,
+        ] {
             assert_safe_cli_env(kind, &env)
                 .unwrap_or_else(|err| panic!("{kind:?} must permit REVERIE_SESSION_ID: {err}"));
         }
@@ -619,7 +901,11 @@ mod env_guard_tests {
     #[test]
     fn reverie_session_secret_passes_through_for_every_cli() {
         let env = env([("REVERIE_SESSION_SECRET", "deadbeefcafef00d")]);
-        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+        for kind in [
+            AgentKind::ClaudeCode,
+            AgentKind::CodexCli,
+            AgentKind::CortexCode,
+        ] {
             assert_safe_cli_env(kind, &env)
                 .unwrap_or_else(|err| panic!("{kind:?} must permit REVERIE_SESSION_SECRET: {err}"));
         }
@@ -628,7 +914,11 @@ mod env_guard_tests {
     #[test]
     fn reverie_bridge_sock_passes_through_for_every_cli() {
         let env = env([("REVERIE_BRIDGE_SOCK", "/tmp/reverie/bridge.sock")]);
-        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+        for kind in [
+            AgentKind::ClaudeCode,
+            AgentKind::CodexCli,
+            AgentKind::CortexCode,
+        ] {
             assert_safe_cli_env(kind, &env)
                 .unwrap_or_else(|err| panic!("{kind:?} must permit REVERIE_BRIDGE_SOCK: {err}"));
         }
@@ -641,7 +931,11 @@ mod env_guard_tests {
             ("REVERIE_SESSION_SECRET", "deadbeefcafef00d"),
             ("REVERIE_BRIDGE_SOCK", "/tmp/reverie/bridge.sock"),
         ]);
-        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+        for kind in [
+            AgentKind::ClaudeCode,
+            AgentKind::CodexCli,
+            AgentKind::CortexCode,
+        ] {
             assert_safe_cli_env(kind, &env).unwrap_or_else(|err| {
                 panic!("{kind:?} must permit the full REVERIE_* trio: {err}")
             });
@@ -651,7 +945,11 @@ mod env_guard_tests {
     #[test]
     fn unrelated_env_keys_pass_through_for_every_cli() {
         let env = env([("PATH", "/usr/bin"), ("LANG", "en_US.UTF-8")]);
-        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+        for kind in [
+            AgentKind::ClaudeCode,
+            AgentKind::CodexCli,
+            AgentKind::CortexCode,
+        ] {
             assert_safe_cli_env(kind, &env)
                 .unwrap_or_else(|err| panic!("{kind:?} must permit unrelated vars: {err}"));
         }
@@ -660,7 +958,11 @@ mod env_guard_tests {
     #[test]
     fn empty_env_passes_for_every_cli() {
         let env = BTreeMap::new();
-        for kind in [AgentKind::ClaudeCode, AgentKind::CodexCli, AgentKind::CortexCode] {
+        for kind in [
+            AgentKind::ClaudeCode,
+            AgentKind::CodexCli,
+            AgentKind::CortexCode,
+        ] {
             assert_safe_cli_env(kind, &env)
                 .unwrap_or_else(|err| panic!("{kind:?} must permit empty env: {err}"));
         }

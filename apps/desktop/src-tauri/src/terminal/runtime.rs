@@ -16,8 +16,8 @@ use reverie_core::terminal::{TerminalFrame, TerminalId};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use reverie_core::WorkspaceService;
 use crate::terminal::ghostty::GhosttyTerminalState;
+use reverie_core::WorkspaceService;
 
 const READ_BUFFER_BYTES: usize = 4096;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);

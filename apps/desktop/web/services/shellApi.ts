@@ -1,6 +1,7 @@
 import { invoke } from './runtime';
 import type {
   AgentCliDetection,
+  AgentKind,
   CreateFocusRequest,
   CreateProjectRequest,
   CreateSessionRecordRequest,
@@ -19,6 +20,15 @@ export function fetchWorkspaceShell() {
 
 export function listAgentClis() {
   return invoke<AgentCliDetection[]>('list_agent_clis');
+}
+
+// Switch a single agent CLI on or off. Returns the refreshed detection list so
+// the shell store updates in one round-trip. Disabling also tears down that
+// CLI's inter-agent bridge config on the backend.
+export function setAgentCliEnabled(kind: AgentKind, enabled: boolean) {
+  return invoke<AgentCliDetection[]>('set_agent_cli_enabled', {
+    request: { kind, enabled },
+  });
 }
 
 export function chooseProjectFolder() {

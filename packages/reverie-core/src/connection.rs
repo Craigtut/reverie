@@ -469,7 +469,10 @@ mod tests {
         assert!(conn.is_open());
         assert_eq!(conn.initiator, ConnectionInitiator::User);
         assert!(conn.pending_request.is_none());
-        assert_eq!(conn.accepted_at.as_deref(), Some("2026-05-28T12:00:00.000Z"));
+        assert_eq!(
+            conn.accepted_at.as_deref(),
+            Some("2026-05-28T12:00:00.000Z")
+        );
     }
 
     #[test]
@@ -545,7 +548,10 @@ mod tests {
         assert_eq!(conn.closed_at.as_deref(), Some("t1"));
         assert_eq!(conn.closed_by, Some(ConnectionClosedBy::User));
         assert_eq!(conn.reason_closed.as_deref(), Some("not now"));
-        assert!(conn.accepted_at.is_none(), "denied connections never opened");
+        assert!(
+            conn.accepted_at.is_none(),
+            "denied connections never opened"
+        );
         assert!(conn.pending_request.is_none());
     }
 
@@ -563,7 +569,10 @@ mod tests {
             .expect_err("deny from open is invalid");
         assert!(matches!(
             err,
-            ConnectionTransitionError::UnexpectedStatus { actual: ConnectionStatus::Open, .. }
+            ConnectionTransitionError::UnexpectedStatus {
+                actual: ConnectionStatus::Open,
+                ..
+            }
         ));
     }
 
@@ -612,7 +621,10 @@ mod tests {
             .expect_err("double-close is invalid");
         assert!(matches!(
             err,
-            ConnectionTransitionError::UnexpectedStatus { actual: ConnectionStatus::Closed, .. }
+            ConnectionTransitionError::UnexpectedStatus {
+                actual: ConnectionStatus::Closed,
+                ..
+            }
         ));
     }
 
@@ -625,8 +637,14 @@ mod tests {
             ConnectionPolicy::AlwaysAsk,
             "t0",
         );
-        assert_eq!(conn.other_participant(session_id(0x01)), Some(session_id(0x02)));
-        assert_eq!(conn.other_participant(session_id(0x02)), Some(session_id(0x01)));
+        assert_eq!(
+            conn.other_participant(session_id(0x01)),
+            Some(session_id(0x02))
+        );
+        assert_eq!(
+            conn.other_participant(session_id(0x02)),
+            Some(session_id(0x01))
+        );
         assert_eq!(conn.other_participant(session_id(0x03)), None);
     }
 
@@ -681,7 +699,10 @@ mod tests {
         assert!(encoded.get("policy_at_open").is_none());
         assert_eq!(encoded["createdAt"], "2026-05-28T12:00:00.000Z");
         assert_eq!(encoded["participantA"].is_string(), true);
-        assert_eq!(encoded["pendingRequest"]["requestedAt"], "2026-05-28T12:00:00.000Z");
+        assert_eq!(
+            encoded["pendingRequest"]["requestedAt"],
+            "2026-05-28T12:00:00.000Z"
+        );
         assert_eq!(encoded["initiator"]["kind"], "agent");
         assert_eq!(encoded["sequence"], 1);
     }
@@ -739,7 +760,10 @@ mod tests {
             "t0",
         );
         let topic = conn.topic.expect("topic derived");
-        assert!(topic.ends_with('…'), "topic ends with ellipsis when truncated");
+        assert!(
+            topic.ends_with('…'),
+            "topic ends with ellipsis when truncated"
+        );
         // 79 x's + ellipsis = 80 chars / 82 bytes (… is 3 bytes UTF-8).
         assert_eq!(topic.chars().count(), 80);
     }

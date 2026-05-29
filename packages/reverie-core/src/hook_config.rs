@@ -73,14 +73,11 @@ pub fn hook_url(source: HookSource, port: u16, token: &str) -> String {
 /// directory is created (with restrictive permissions on Unix) if it doesn't
 /// exist. The resulting `settings.json` is what Claude Code will read when
 /// `CLAUDE_CONFIG_DIR` is set to `config_dir`.
-pub fn write_claude_settings(
-    config_dir: &Path,
-    hook_url: &str,
-) -> Result<WrittenHookConfig> {
+pub fn write_claude_settings(config_dir: &Path, hook_url: &str) -> Result<WrittenHookConfig> {
     ensure_private_dir(config_dir)?;
     let settings = build_claude_settings(hook_url);
-    let json = serde_json::to_string_pretty(&settings)
-        .context("serializing Claude Code settings.json")?;
+    let json =
+        serde_json::to_string_pretty(&settings).context("serializing Claude Code settings.json")?;
     let target = config_dir.join("settings.json");
     write_private_file(&target, json.as_bytes())
         .with_context(|| format!("writing {}", target.display()))?;
@@ -167,8 +164,7 @@ fn ensure_private_dir(dir: &Path) -> Result<()> {
         let metadata = fs::metadata(dir).with_context(|| format!("stat {}", dir.display()))?;
         let mut perms = metadata.permissions();
         perms.set_mode(0o700);
-        fs::set_permissions(dir, perms)
-            .with_context(|| format!("chmod 0700 {}", dir.display()))?;
+        fs::set_permissions(dir, perms).with_context(|| format!("chmod 0700 {}", dir.display()))?;
     }
     Ok(())
 }
@@ -258,9 +254,20 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let written = write_claude_settings(dir.path(), "http://localhost/h").expect("writes");
 
-        let dir_mode = fs::metadata(&written.config_dir).unwrap().permissions().mode() & 0o777;
-        let file_mode = fs::metadata(&written.config_file).unwrap().permissions().mode() & 0o777;
+        let dir_mode = fs::metadata(&written.config_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let file_mode = fs::metadata(&written.config_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(dir_mode, 0o700, "config dir should be private");
-        assert_eq!(file_mode, 0o600, "config file should be owner read/write only");
+        assert_eq!(
+            file_mode, 0o600,
+            "config file should be owner read/write only"
+        );
     }
 }

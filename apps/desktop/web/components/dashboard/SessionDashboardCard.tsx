@@ -1,7 +1,14 @@
 import { css } from '../../styled-system/css';
 import { agentTabLabel, glyphStateFor, plainLanguageStatus, sessionBreadcrumb } from '../../domain';
-import type { ActivityState, DashboardStatus, ShellSession, WorkspaceShellSnapshot } from '../../domain';
+import type {
+  ActivityState,
+  DashboardStatus,
+  ShellSession,
+  WorkspaceShellSnapshot,
+} from '../../domain';
 import { AgentGlyph, SessionStatusGlyph } from '../glyphs';
+import { ConnectionChip } from '../connections';
+import { useConnectionPanelStore } from '../../store';
 
 // A single session card on the dashboard: agent glyph + live status glyph,
 // title, breadcrumb, plain-language status, and an awaiting-permission summary
@@ -24,30 +31,47 @@ export function SessionDashboardCard({
   const breadcrumb = sessionBreadcrumb(session, shell);
   const statusLabel = plainLanguageStatus(session, isBound, activity);
   const permission = activity?.awaitingPermission ?? null;
+  const openConnectionPanel = useConnectionPanelStore(s => s.openForSession);
 
+  // The card is a `role="button"` div rather than a native `<button>` so the
+  // ConnectionChip (itself an interactive `<button>`) can be nested without
+  // producing invalid HTML / ambiguous keyboard semantics.
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       className={dashboardCardClass}
       data-tone={tone}
       data-activity-status={activity?.status ?? 'none'}
       data-testid="dashboard-session-card"
       data-session-id={session.id}
       onClick={onOpen}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
     >
       <div className={dashboardCardTopClass}>
         <AgentGlyph kind={session.agentKind} />
         <SessionStatusGlyph state={glyphStateFor(activity, tone)} />
+        <span className={chipSlotClass}>
+          <ConnectionChip sessionId={session.id} onOpenPanel={openConnectionPanel} />
+        </span>
       </div>
       <div className={dashboardCardTitleClass}>{agentTabLabel(session)}</div>
       <div className={dashboardCardBreadcrumbClass}>{breadcrumb}</div>
       <div className={dashboardCardStatusClass}>{statusLabel}</div>
       {permission ? (
-        <div className={dashboardCardPermissionClass} data-testid="dashboard-card-permission-summary">
+        <div
+          className={dashboardCardPermissionClass}
+          data-testid="dashboard-card-permission-summary"
+        >
           {permission.displaySummary}
         </div>
       ) : null}
-    </button>
+    </div>
   );
 }
 
@@ -65,7 +89,8 @@ const dashboardCardClass = css({
   textAlign: 'left',
   cursor: 'pointer',
   overflow: 'hidden',
-  transition: 'border-color 140ms ease, transform 140ms cubic-bezier(0.22, 1, 0.36, 1), background 140ms ease',
+  transition:
+    'border-color 140ms ease, transform 140ms cubic-bezier(0.22, 1, 0.36, 1), background 140ms ease',
   _hover: {
     borderColor: 'var(--line-strong)',
     transform: 'translateY(-1px)',
@@ -80,9 +105,14 @@ const dashboardCardClass = css({
 const dashboardCardTopClass = css({
   display: 'flex',
   alignItems: 'center',
+  gap: '8px',
   justifyContent: 'space-between',
   width: '100%',
   color: 'var(--text-3)',
+});
+
+const chipSlotClass = css({
+  marginLeft: 'auto',
 });
 
 const dashboardCardTitleClass = css({

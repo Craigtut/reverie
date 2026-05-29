@@ -19,6 +19,12 @@ pub struct Workspace {
     pub name: String,
     pub general_label: String,
     pub default_dangerous_mode: bool,
+    /// Agent CLIs the user has explicitly switched off in settings. Absence
+    /// means enabled, so a fresh workspace has every detected CLI available.
+    /// A disabled CLI is never offered as a session agent and never has its
+    /// config files written (the inter-agent bridge).
+    #[serde(default)]
+    pub disabled_agent_kinds: Vec<AgentKind>,
 }
 
 impl Workspace {
@@ -28,6 +34,7 @@ impl Workspace {
             name: name.into(),
             general_label: general_label.into(),
             default_dangerous_mode: false,
+            disabled_agent_kinds: Vec::new(),
         }
     }
 }
@@ -304,8 +311,10 @@ mod tests {
         let encoded = serde_json::to_value(&workspace).expect("workspace serializes");
         assert!(encoded.get("generalLabel").is_some());
         assert!(encoded.get("defaultDangerousMode").is_some());
+        assert!(encoded.get("disabledAgentKinds").is_some());
         assert!(encoded.get("general_label").is_none());
         assert!(encoded.get("default_dangerous_mode").is_none());
+        assert!(encoded.get("disabled_agent_kinds").is_none());
     }
 
     #[test]
@@ -349,7 +358,10 @@ mod tests {
             "tab_visible",
             "latest_activity",
         ] {
-            assert!(encoded.get(snake).is_none(), "leaked snake_case key {snake}");
+            assert!(
+                encoded.get(snake).is_none(),
+                "leaked snake_case key {snake}"
+            );
         }
         // tab_visible defaults true and serializes as a bool, not null.
         assert_eq!(encoded["tabVisible"], serde_json::json!(true));

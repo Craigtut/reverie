@@ -1,0 +1,3 @@
+# Validate the commit message against Reverie's Conventional Commit rules.
+# See commitlint.config.mjs (types/scopes mirror CLAUDE.md).
+npx --no-install commitlint --edit "$1"

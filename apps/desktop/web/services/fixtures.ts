@@ -12,11 +12,21 @@ import type { EventHandler, UnlistenFn } from './types';
 // ShellSession, ...) so there is a single source of truth for the shapes.
 
 const browserListeners = new Map<string, Set<EventHandler<unknown>>>();
-const runningTerminals = new Map<string, { sessionId: string; cancelled: boolean; startedAt: number; framesEmitted: number }>();
+const runningTerminals = new Map<
+  string,
+  { sessionId: string; cancelled: boolean; startedAt: number; framesEmitted: number }
+>();
 const fixtureStorageKey = makeFixtureStorageKey();
 let fixtureShell: WorkspaceShellSnapshot = loadFixtureShellSnapshot();
+// CLIs the user has switched off in the harness. Drives the same enabled/
+// disabled behavior as the real workspace pref so the settings toggle and the
+// downstream gating can be exercised without a Rust backend.
+const fixtureDisabledClis = new Set<AgentKind>();
 
-export async function invokeBrowserFixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+export async function invokeBrowserFixture<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
   switch (command) {
     case 'workspace_shell':
       return clone(fixtureShell) as T;
@@ -38,6 +48,8 @@ export async function invokeBrowserFixture<T>(command: string, args?: Record<str
       return archiveFixtureProject(args) as T;
     case 'list_agent_clis':
       return listFixtureAgentClis() as T;
+    case 'set_agent_cli_enabled':
+      return setFixtureAgentCliEnabled(args) as T;
     case 'ghostty_frame_sequence':
       return makeFixtureFrameSequence() as T;
     case 'start_session':
@@ -87,8 +99,14 @@ function createFixtureProject(args?: Record<string, unknown>) {
 }
 
 function createFixtureFocus(args?: Record<string, unknown>) {
-  const request = readRequest<{ projectId: string | null; title: string; description?: string | null }>(args);
-  const projectFocuses = fixtureShell.focuses.filter(focus => focus.projectId === request.projectId);
+  const request = readRequest<{
+    projectId: string | null;
+    title: string;
+    description?: string | null;
+  }>(args);
+  const projectFocuses = fixtureShell.focuses.filter(
+    focus => focus.projectId === request.projectId,
+  );
   const focus = {
     id: makeId('focus'),
     projectId: request.projectId,
@@ -154,7 +172,8 @@ function removeFixtureSession(args?: Record<string, unknown>) {
     ...fixtureShell,
     sessions: fixtureShell.sessions.filter(session => session.id !== sessionId),
   };
-  if (fixtureShell.sessions.length === before) throw new Error(`Unknown fixture session: ${sessionId}`);
+  if (fixtureShell.sessions.length === before)
+    throw new Error(`Unknown fixture session: ${sessionId}`);
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
@@ -176,7 +195,9 @@ function archiveFixtureProject(args?: Record<string, unknown>) {
   const project = fixtureShell.projects.find(item => item.id === projectId);
   if (!project) throw new Error(`Unknown fixture project: ${projectId}`);
   project.archived = true;
-  const focusIds = new Set(fixtureShell.focuses.filter(focus => focus.projectId === projectId).map(focus => focus.id));
+  const focusIds = new Set(
+    fixtureShell.focuses.filter(focus => focus.projectId === projectId).map(focus => focus.id),
+  );
   for (const focus of fixtureShell.focuses.filter(item => focusIds.has(item.id))) {
     focus.archived = true;
   }
@@ -222,7 +243,13 @@ function listFixtureAgentClis(): AgentCliDetection[] {
   ];
 }
 
-function makeFixtureAgentCli({ kind, displayName, executable, candidates, unavailable }: {
+function makeFixtureAgentCli({
+  kind,
+  displayName,
+  executable,
+  candidates,
+  unavailable,
+}: {
   kind: AgentKind;
   displayName: string;
   executable: string;
@@ -236,17 +263,38 @@ function makeFixtureAgentCli({ kind, displayName, executable, candidates, unavai
     executable: available ? executable : null,
     candidates,
     available,
+    enabled: !fixtureDisabledClis.has(kind),
   };
 }
 
+function setFixtureAgentCliEnabled(args?: Record<string, unknown>): AgentCliDetection[] {
+  const request = readRequest<{ kind: AgentKind; enabled: boolean }>(args);
+  if (request.enabled) {
+    fixtureDisabledClis.delete(request.kind);
+  } else {
+    fixtureDisabledClis.add(request.kind);
+  }
+  return listFixtureAgentClis();
+}
+
 function startFixtureSession(args?: Record<string, unknown>) {
-  const request = readRequest<{ sessionId: string; terminalId: string; cols: number; rows: number }>(args);
+  const request = readRequest<{
+    sessionId: string;
+    terminalId: string;
+    cols: number;
+    rows: number;
+  }>(args);
   const session = fixtureShell.sessions.find(item => item.id === request.sessionId);
   if (!session) throw new Error(`Unknown fixture session: ${request.sessionId}`);
 
   session.status = 'running';
   persistFixtureShellSnapshot();
-  const terminal = { sessionId: request.sessionId, cancelled: false, startedAt: performance.now(), framesEmitted: 0 };
+  const terminal = {
+    sessionId: request.sessionId,
+    cancelled: false,
+    startedAt: performance.now(),
+    framesEmitted: 0,
+  };
   runningTerminals.set(request.terminalId, terminal);
 
   window.setTimeout(() => {
@@ -323,11 +371,13 @@ function finishFixtureTerminal(terminalId: string, childSuccess: boolean) {
 }
 
 function makeFixtureFrameSequence() {
-  const frames: TerminalFrame[] = Array.from({ length: 72 }, (_, index) => makeSyntheticFrame(index, {
-    cols: 120,
-    rows: 36,
-    dirtyOnly: false,
-  }));
+  const frames: TerminalFrame[] = Array.from({ length: 72 }, (_, index) =>
+    makeSyntheticFrame(index, {
+      cols: 120,
+      rows: 36,
+      dirtyOnly: false,
+    }),
+  );
 
   return {
     frames,

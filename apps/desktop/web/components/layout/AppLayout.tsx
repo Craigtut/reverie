@@ -1,5 +1,11 @@
 import { errorMessage } from '../../domain';
-import type { CreationForm, ShellNavigation, TerminalSession, WorkspaceModel, WorkspaceMutations } from '../../hooks';
+import type {
+  CreationForm,
+  ShellNavigation,
+  TerminalSession,
+  WorkspaceModel,
+  WorkspaceMutations,
+} from '../../hooks';
 import {
   useActivityStore,
   useNavigationStore,
@@ -18,6 +24,8 @@ import { EmptyState } from '../onboarding';
 import { DashboardSurface } from '../dashboard';
 import { CreationComposer } from '../creation';
 import { SettingsSurface } from '../settings';
+import { ConnectionPanel, ConnectionRequestBanner } from '../connections';
+import { useConnectionPanelStore } from '../../store';
 
 const canUseAppServices = true;
 
@@ -71,7 +79,13 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     runningLabel,
     scrollbackContract,
   } = model;
-  const { selectSessionTab, goToDashboard, openSessionFromDashboard, openFocus, openSessionHistory } = nav;
+  const {
+    selectSessionTab,
+    goToDashboard,
+    openSessionFromDashboard,
+    openFocus,
+    openSessionHistory,
+  } = nav;
   const {
     newProjectName,
     setNewProjectName,
@@ -104,7 +118,12 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   } = mutations;
 
   return (
-    <main className={appShellClass} data-theme={theme} data-app-focused={appFocused ? 'true' : 'false'} data-testid="reverie-app-shell">
+    <main
+      className={appShellClass}
+      data-theme={theme}
+      data-app-focused={appFocused ? 'true' : 'false'}
+      data-testid="reverie-app-shell"
+    >
       <div className={windowDragStripClass} data-tauri-drag-region aria-hidden="true" />
       <DotField variant="ambient" />
 
@@ -130,7 +149,9 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         onOpenSettings={() => setSurfaceMode('settings')}
       />
 
+      <ConnectionPanelHost />
       <section className={canvasStageClass} aria-label="Focus view" data-testid="focus-stage">
+        <ConnectionRequestBanner />
         {surfaceMode === 'dashboard' ? (
           <DashboardSurface
             shell={shell}
@@ -155,8 +176,16 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             sessions={focusSessions}
             visibleCount={visibleSessions.length}
             hiddenCount={hiddenFocusSessions.length}
-            onRestore={session => restoreSessionTab(session).catch(error => writeLog(`Restore failed: ${errorMessage(error)}`))}
-            onDelete={session => removeSessionRecord(session).catch(error => writeLog(`Delete failed: ${errorMessage(error)}`))}
+            onRestore={session =>
+              restoreSessionTab(session).catch(error =>
+                writeLog(`Restore failed: ${errorMessage(error)}`),
+              )
+            }
+            onDelete={session =>
+              removeSessionRecord(session).catch(error =>
+                writeLog(`Delete failed: ${errorMessage(error)}`),
+              )
+            }
             onCreateSession={() => openCreation('session')}
             busy={busy}
           />
@@ -235,7 +264,9 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 createProject={() => openCreation('project')}
                 openSettings={() => setSurfaceMode('settings')}
                 workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
-                onSetWorkspaceDefaultDangerousMode={next => void setWorkspaceDefaultDangerousMode(next)}
+                onSetWorkspaceDefaultDangerousMode={next =>
+                  void setWorkspaceDefaultDangerousMode(next)
+                }
               />
             )}
           </div>
@@ -286,3 +317,9 @@ const activeSurfaceClass = css({
   borderRadius: '22px',
   background: 'transparent',
 });
+
+function ConnectionPanelHost() {
+  const activeSessionId = useConnectionPanelStore(s => s.activeSessionId);
+  const closePanel = useConnectionPanelStore(s => s.closePanel);
+  return <ConnectionPanel sessionId={activeSessionId} onClose={closePanel} />;
+}

@@ -9,3 +9,4 @@ export * from './session';
 export * from './activity';
 export * from './palette';
 export * from './terminalInput';
+export * from './connection';

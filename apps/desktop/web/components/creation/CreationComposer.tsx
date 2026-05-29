@@ -2,7 +2,13 @@ import { Folder } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import { agentLabel, folderNameFromPath } from '../../domain';
-import type { AgentCliDetection, AgentKind, CreationMode, ShellFocus, ShellProject } from '../../domain';
+import type {
+  AgentCliDetection,
+  AgentKind,
+  CreationMode,
+  ShellFocus,
+  ShellProject,
+} from '../../domain';
 import { AgentGlyph } from '../glyphs';
 import { primaryComposerButtonClass, secondaryComposerButtonClass } from '../primitives/buttons';
 import { cliChoiceClass, cliChoiceGridClass } from '../primitives/cliChoice';
@@ -62,26 +68,30 @@ export function CreationComposer({
   onCreateSession: () => void;
   onCancel: () => void;
 }) {
+  // A CLI is offered only when it is both detected and switched on in settings.
+  // Switched-off CLIs are hidden from the picker entirely; not-detected (but
+  // on) CLIs still show, greyed, so the user knows what Reverie supports.
+  const isUsable = (detection: AgentCliDetection) => detection.available && detection.enabled;
   const selectedDetection = cliDetections.find(detection => detection.kind === newSessionAgentKind);
-  const availableDetections = cliDetections.filter(detection => detection.available);
-  const availableCliCount = availableDetections.length;
-  const selectedExecutable = selectedDetection?.executable ?? selectedDetection?.candidates[0] ?? null;
-  const selectedCliSummary = selectedDetection?.available
-    ? `${selectedDetection.displayName} is ready${selectedExecutable ? ` at ${selectedExecutable}` : ''}.`
+  const visibleDetections = cliDetections.filter(detection => detection.enabled);
+  const usableDetections = visibleDetections.filter(isUsable);
+  const availableCliCount = usableDetections.length;
+  const selectedUsable = selectedDetection ? isUsable(selectedDetection) : false;
+  const selectedExecutable =
+    selectedDetection?.executable ?? selectedDetection?.candidates[0] ?? null;
+  const selectedCliSummary = selectedUsable
+    ? `${selectedDetection!.displayName} is ready${selectedExecutable ? ` at ${selectedExecutable}` : ''}.`
     : selectedDetection
       ? `${selectedDetection.displayName} is not available. Reverie will not create a session with a missing CLI.`
       : 'Pick one detected CLI before creating a session.';
   const canCreateSession = Boolean(
-    selectedFocus
-      && newSessionCwd.trim().length > 0
-      && availableCliCount > 0
-      && (selectedDetection?.available ?? false),
+    selectedFocus && newSessionCwd.trim().length > 0 && availableCliCount > 0 && selectedUsable,
   );
   const sessionBlocker = !selectedFocus
     ? 'Choose or create a focus before creating a session.'
     : availableCliCount === 0
-      ? 'No supported CLIs are currently detected. Install Cortex, Claude Code, or Codex CLI, then retry detection.'
-      : !selectedDetection?.available
+      ? 'No supported CLIs are currently enabled. Install Cortex, Claude Code, or Codex CLI and turn it on in Settings, then retry.'
+      : !selectedUsable
         ? `${selectedDetection?.displayName ?? 'Selected CLI'} is not available on this machine.`
         : newSessionCwd.trim().length === 0
           ? 'Working directory is required.'
@@ -90,51 +100,142 @@ export function CreationComposer({
   return (
     <section className={creationComposerClass} data-testid="creation-composer" data-mode={mode}>
       <div className={creationHeaderClass}>
-        <span>{mode === 'project' ? 'New project' : mode === 'focus' ? 'New focus' : 'New session'}</span>
-        <button type="button" data-testid="close-creation-composer" onClick={onCancel}>Close</button>
+        <span>
+          {mode === 'project' ? 'New project' : mode === 'focus' ? 'New focus' : 'New session'}
+        </span>
+        <button type="button" data-testid="close-creation-composer" onClick={onCancel}>
+          Close
+        </button>
       </div>
 
       {mode === 'project' ? (
         <div className={creationGridClass}>
-          <div className={folderPickerCardClass} data-testid="project-folder-selection" data-selected={newProjectPath.trim().length > 0 ? 'true' : 'false'}>
+          <div
+            className={folderPickerCardClass}
+            data-testid="project-folder-selection"
+            data-selected={newProjectPath.trim().length > 0 ? 'true' : 'false'}
+          >
             <Folder size={18} />
-            <span>{newProjectPath.trim().length > 0 ? newProjectName || folderNameFromPath(newProjectPath) || 'Selected folder' : 'Choose a project folder'}</span>
-            <small>{newProjectPath.trim().length > 0 ? newProjectPath : 'Reverie will name the project from the folder and use that folder as the session working directory.'}</small>
+            <span>
+              {newProjectPath.trim().length > 0
+                ? newProjectName || folderNameFromPath(newProjectPath) || 'Selected folder'
+                : 'Choose a project folder'}
+            </span>
+            <small>
+              {newProjectPath.trim().length > 0
+                ? newProjectPath
+                : 'Reverie will name the project from the folder and use that folder as the session working directory.'}
+            </small>
           </div>
-          <button className={secondaryComposerButtonClass} type="button" data-testid="choose-project-folder-button" disabled={busy} onClick={onChooseProjectFolder}>{newProjectPath.trim().length > 0 ? 'Choose different folder' : 'Choose folder…'}</button>
-          <p className={composerHintClass} data-testid="project-form-hint">Projects start from a local folder selection, not manual path entry. New sessions under the project inherit that cwd.</p>
-          <button className={primaryComposerButtonClass} type="button" data-testid="submit-project-button" disabled={busy || newProjectPath.trim().length === 0} onClick={onCreateProject}>{busy ? 'Creating…' : 'Add project'}</button>
+          <button
+            className={secondaryComposerButtonClass}
+            type="button"
+            data-testid="choose-project-folder-button"
+            disabled={busy}
+            onClick={onChooseProjectFolder}
+          >
+            {newProjectPath.trim().length > 0 ? 'Choose different folder' : 'Choose folder…'}
+          </button>
+          <p className={composerHintClass} data-testid="project-form-hint">
+            Projects start from a local folder selection, not manual path entry. New sessions under
+            the project inherit that cwd.
+          </p>
+          <button
+            className={primaryComposerButtonClass}
+            type="button"
+            data-testid="submit-project-button"
+            disabled={busy || newProjectPath.trim().length === 0}
+            onClick={onCreateProject}
+          >
+            {busy ? 'Creating…' : 'Add project'}
+          </button>
         </div>
       ) : null}
 
       {mode === 'focus' ? (
         <div className={creationGridClass}>
-          <p className={creationContextClass}>Project: <strong>{selectedProject?.name ?? 'General workspace'}</strong></p>
-          <label>Focus title<input data-testid="focus-title-input" value={newFocusTitle} placeholder="Terminal rendering" required onChange={event => setNewFocusTitle(event.currentTarget.value)} /></label>
-          <p className={composerHintClass} data-testid="focus-form-hint">A focus is the durable thread sessions will attach to.</p>
-          <button className={primaryComposerButtonClass} type="button" data-testid="submit-focus-button" disabled={busy || newFocusTitle.trim().length === 0} onClick={onCreateFocus}>{busy ? 'Creating…' : 'Create focus'}</button>
+          <p className={creationContextClass}>
+            Project: <strong>{selectedProject?.name ?? 'General workspace'}</strong>
+          </p>
+          <label>
+            Focus title
+            <input
+              data-testid="focus-title-input"
+              value={newFocusTitle}
+              placeholder="Terminal rendering"
+              required
+              onChange={event => setNewFocusTitle(event.currentTarget.value)}
+            />
+          </label>
+          <p className={composerHintClass} data-testid="focus-form-hint">
+            A focus is the durable thread sessions will attach to.
+          </p>
+          <button
+            className={primaryComposerButtonClass}
+            type="button"
+            data-testid="submit-focus-button"
+            disabled={busy || newFocusTitle.trim().length === 0}
+            onClick={onCreateFocus}
+          >
+            {busy ? 'Creating…' : 'Create focus'}
+          </button>
         </div>
       ) : null}
 
       {mode === 'session' ? (
         <div className={creationGridClass}>
-          <p className={creationContextClass}>Focus: <strong>{selectedFocus?.title ?? 'Choose a focus first'}</strong></p>
-          <label>Session title<input data-testid="session-title-input" value={newSessionTitle} placeholder={`${agentLabel(newSessionAgentKind)} session`} onChange={event => setNewSessionTitle(event.currentTarget.value)} /></label>
-          <label>Working directory<input data-testid="session-cwd-input" value={newSessionCwd} required onChange={event => setNewSessionCwd(event.currentTarget.value)} /></label>
-          <p className={composerHintClass} data-testid="session-form-hint">{sessionBlocker ?? `${selectedDetection?.displayName ?? 'Selected CLI'} will launch from this directory.`}</p>
-          <div className={selectedCliSummaryClass({ available: selectedDetection?.available ?? false })} data-testid="selected-cli-summary">
+          <p className={creationContextClass}>
+            Focus: <strong>{selectedFocus?.title ?? 'Choose a focus first'}</strong>
+          </p>
+          <label>
+            Session title
+            <input
+              data-testid="session-title-input"
+              value={newSessionTitle}
+              placeholder={`${agentLabel(newSessionAgentKind)} session`}
+              onChange={event => setNewSessionTitle(event.currentTarget.value)}
+            />
+          </label>
+          <label>
+            Working directory
+            <input
+              data-testid="session-cwd-input"
+              value={newSessionCwd}
+              required
+              onChange={event => setNewSessionCwd(event.currentTarget.value)}
+            />
+          </label>
+          <p className={composerHintClass} data-testid="session-form-hint">
+            {sessionBlocker ??
+              `${selectedDetection?.displayName ?? 'Selected CLI'} will launch from this directory.`}
+          </p>
+          <div
+            className={selectedCliSummaryClass({
+              available: selectedDetection?.available ?? false,
+            })}
+            data-testid="selected-cli-summary"
+          >
             <span>Selected agent</span>
             <strong>{selectedDetection?.displayName ?? 'No CLI selected'}</strong>
             <small>{selectedCliSummary}</small>
           </div>
           <div className={cliChoiceHeaderClass}>
             <span>Choose agent CLI</span>
-            <small data-testid="cli-availability-summary">{availableCliCount === 0 ? 'No supported CLIs detected' : `${availableCliCount} of ${cliDetections.length} detected`}</small>
+            <small data-testid="cli-availability-summary">
+              {availableCliCount === 0
+                ? 'No supported CLIs enabled'
+                : `${availableCliCount} of ${visibleDetections.length} ready`}
+            </small>
           </div>
-          <div className={cliChoiceGridClass} data-testid="cli-choice-list" aria-label="Detected CLI choices">
-            {cliDetections.map(detection => {
+          <div
+            className={cliChoiceGridClass}
+            data-testid="cli-choice-list"
+            aria-label="Detected CLI choices"
+          >
+            {visibleDetections.map(detection => {
               const active = detection.kind === newSessionAgentKind;
-              const detectedText = detection.executable ?? detection.candidates[0] ?? 'Detected on PATH';
+              const detectedText =
+                detection.executable ?? detection.candidates[0] ?? 'Detected on PATH';
               return (
                 <button
                   key={detection.kind}
@@ -145,14 +246,22 @@ export function CreationComposer({
                   data-available={detection.available ? 'true' : 'false'}
                   data-selected={active ? 'true' : 'false'}
                   aria-pressed={active}
-                  title={detection.available ? `${detection.displayName} detected at ${detectedText}` : `${detection.displayName} is not installed or not on PATH`}
+                  title={
+                    detection.available
+                      ? `${detection.displayName} detected at ${detectedText}`
+                      : `${detection.displayName} is not installed or not on PATH`
+                  }
                   disabled={!detection.available}
                   onClick={() => setNewSessionAgentKind(detection.kind)}
                 >
                   <AgentGlyph kind={detection.kind} />
                   <span>
                     <strong>{detection.displayName}</strong>
-                    <small>{detection.available ? detectedText : `Missing: ${detection.candidates.join(', ')}`}</small>
+                    <small>
+                      {detection.available
+                        ? detectedText
+                        : `Missing: ${detection.candidates.join(', ')}`}
+                    </small>
                   </span>
                   <em>{active ? 'Selected' : detection.available ? 'Ready' : 'Unavailable'}</em>
                 </button>
@@ -160,10 +269,29 @@ export function CreationComposer({
             })}
           </div>
           {availableCliCount === 0 ? (
-            <p className={cliEmptyHelpClass} data-testid="cli-empty-help">Reverie can still organize projects and focuses, but sessions stay disabled until at least one supported agent CLI is installed and detected.</p>
+            <p className={cliEmptyHelpClass} data-testid="cli-empty-help">
+              Reverie can still organize projects and focuses, but sessions stay disabled until at
+              least one supported agent CLI is installed and detected.
+            </p>
           ) : null}
-          <label className={checkRowClass}><input data-testid="session-dangerous-checkbox" type="checkbox" checked={newSessionDangerousMode} onChange={event => setNewSessionDangerousMode(event.currentTarget.checked)} /> Enable YOLO for this session</label>
-          <button className={primaryComposerButtonClass} type="button" data-testid="submit-session-button" disabled={busy || !canCreateSession} onClick={onCreateSession}>{busy ? 'Creating…' : 'Create session'}</button>
+          <label className={checkRowClass}>
+            <input
+              data-testid="session-dangerous-checkbox"
+              type="checkbox"
+              checked={newSessionDangerousMode}
+              onChange={event => setNewSessionDangerousMode(event.currentTarget.checked)}
+            />{' '}
+            Enable YOLO for this session
+          </label>
+          <button
+            className={primaryComposerButtonClass}
+            type="button"
+            data-testid="submit-session-button"
+            disabled={busy || !canCreateSession}
+            onClick={onCreateSession}
+          >
+            {busy ? 'Creating…' : 'Create session'}
+          </button>
         </div>
       ) : null}
     </section>
@@ -186,7 +314,12 @@ const creationHeaderClass = css({
   justifyContent: 'space-between',
   gap: '12px',
   color: 'var(--text)',
-  '& span': { fontSize: '12px', letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--text-3)' },
+  '& span': {
+    fontSize: '12px',
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
+    color: 'var(--text-3)',
+  },
   '& button': {
     border: '1px solid var(--line)',
     borderRadius: '999px',
@@ -250,7 +383,14 @@ const folderPickerCardClass = css({
   color: 'var(--text)',
   '& svg': { color: 'var(--text-3)', gridRow: '1 / span 2' },
   '& span': { fontSize: '14px', fontWeight: 650 },
-  '& small': { color: 'var(--text-3)', fontSize: '11.5px', lineHeight: 1.45, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  '& small': {
+    color: 'var(--text-3)',
+    fontSize: '11.5px',
+    lineHeight: 1.45,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
 });
 
 function selectedCliSummaryClass({ available }: { available: boolean }) {
@@ -266,9 +406,19 @@ function selectedCliSummaryClass({ available }: { available: boolean }) {
     background: available
       ? 'linear-gradient(135deg, color-mix(in srgb, var(--surface-hi) 78%, transparent), color-mix(in srgb, var(--accent) 8%, transparent))'
       : 'var(--surface-1)',
-    '& span': { color: 'var(--text-3)', fontSize: '11px', letterSpacing: '0.08em', textTransform: 'uppercase' },
+    '& span': {
+      color: 'var(--text-3)',
+      fontSize: '11px',
+      letterSpacing: '0.08em',
+      textTransform: 'uppercase',
+    },
     '& strong': { color: 'var(--text)', fontSize: '13px' },
-    '& small': { gridColumn: '1 / -1', color: available ? 'var(--text-2)' : 'var(--text-4)', fontSize: '11.5px', lineHeight: 1.45 },
+    '& small': {
+      gridColumn: '1 / -1',
+      color: available ? 'var(--text-2)' : 'var(--text-4)',
+      fontSize: '11.5px',
+      lineHeight: 1.45,
+    },
   });
 }
 

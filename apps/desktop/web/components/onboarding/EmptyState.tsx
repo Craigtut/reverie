@@ -25,7 +25,10 @@ export function EmptyState({
   workspaceDefaultDangerousMode: boolean;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
-  const availableCliCount = cliDetections.filter(detection => detection.available).length;
+  // Only detected, switched-on CLIs are real choices; hide the ones the user
+  // turned off so onboarding mirrors what session creation will offer.
+  const visibleDetections = cliDetections.filter(detection => detection.enabled);
+  const availableCliCount = visibleDetections.filter(detection => detection.available).length;
   const onboardingGridClass = css({
     width: 'min(860px, calc(100vw - 380px))',
     display: 'grid',
@@ -42,7 +45,8 @@ export function EmptyState({
     padding: '28px',
     borderRadius: '28px',
     border: '1px solid var(--line)',
-    background: 'linear-gradient(135deg, color-mix(in srgb, var(--surface-2) 72%, transparent), color-mix(in srgb, var(--surface-1) 88%, transparent))',
+    background:
+      'linear-gradient(135deg, color-mix(in srgb, var(--surface-2) 72%, transparent), color-mix(in srgb, var(--surface-1) 88%, transparent))',
     boxShadow: 'var(--shadow)',
     '& p': { maxWidth: '520px', lineHeight: 1.7, textAlign: 'left' },
   });
@@ -113,24 +117,51 @@ export function EmptyState({
 
   return (
     <div className={emptyStateClass} data-testid="onboarding-panel">
-      <motion.div className={emptyCenterClass} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.28 }}>
+      <motion.div
+        className={emptyCenterClass}
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.28 }}
+      >
         <div className={onboardingGridClass}>
           <section className={onboardingHeroClass} data-testid="onboarding-hero">
-            <span className={onboardingKickerClass}><TerminalWindow size={14} /> First run</span>
+            <span className={onboardingKickerClass}>
+              <TerminalWindow size={14} /> First run
+            </span>
             <DotMatrixWord />
-            <p>Start by giving Reverie one real working context. Create a project for folder-backed work, or keep it general when the agent session is not tied to a repo.</p>
+            <p>
+              Start by giving Reverie one real working context. Create a project for folder-backed
+              work, or keep it general when the agent session is not tied to a repo.
+            </p>
             <div className={emptyActionsClass}>
-              <button type="button" data-testid="empty-create-project-button" onClick={createProject}><Plus size={14} /> Create project</button>
-              <button type="button" data-testid="empty-create-focus-button" onClick={createFocus}><Plus size={14} /> General focus</button>
-              <button type="button" data-testid="empty-settings-button" onClick={openSettings}><GearSix size={14} /> Settings</button>
+              <button
+                type="button"
+                data-testid="empty-create-project-button"
+                onClick={createProject}
+              >
+                <Plus size={14} /> Create project
+              </button>
+              <button type="button" data-testid="empty-create-focus-button" onClick={createFocus}>
+                <Plus size={14} /> General focus
+              </button>
+              <button type="button" data-testid="empty-settings-button" onClick={openSettings}>
+                <GearSix size={14} /> Settings
+              </button>
             </div>
           </section>
 
           <aside className={onboardingStepsClass} data-testid="onboarding-steps">
             <div className={onboardingStepClass} data-testid="onboarding-safety-step">
               <strong>Auto-approve default</strong>
-              <span>Off by default. New sessions launch with full prompts unless you choose otherwise. You can override per session anytime.</span>
-              <div className={onboardingSafetyToggleClass} role="radiogroup" aria-label="Auto-approve default">
+              <span>
+                Off by default. New sessions launch with full prompts unless you choose otherwise.
+                You can override per session anytime.
+              </span>
+              <div
+                className={onboardingSafetyToggleClass}
+                role="radiogroup"
+                aria-label="Auto-approve default"
+              >
                 <button
                   type="button"
                   role="radio"
@@ -168,7 +199,7 @@ export function EmptyState({
             <div className={onboardingCliClass} data-testid="onboarding-cli-summary">
               <span>{availableCliCount} CLI choices available in this harness</span>
               <div className={cliChoiceGridClass}>
-                {cliDetections.map(detection => (
+                {visibleDetections.map(detection => (
                   <button
                     key={detection.kind}
                     type="button"
@@ -181,7 +212,11 @@ export function EmptyState({
                     <AgentGlyph kind={detection.kind} />
                     <span>
                       <strong>{detection.displayName}</strong>
-                      <small>{detection.available ? 'Fixture-detected' : `Missing: ${detection.candidates.join(', ')}`}</small>
+                      <small>
+                        {detection.available
+                          ? 'Fixture-detected'
+                          : `Missing: ${detection.candidates.join(', ')}`}
+                      </small>
                     </span>
                   </button>
                 ))}
@@ -201,7 +236,8 @@ const emptyStateClass = css({
   display: 'grid',
   placeItems: 'center',
   overflow: 'hidden',
-  background: 'radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--dot-ambient) 18%, transparent), transparent 42%), var(--bg)',
+  background:
+    'radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--dot-ambient) 18%, transparent), transparent 42%), var(--bg)',
   '&::before': {
     content: '""',
     position: 'absolute',

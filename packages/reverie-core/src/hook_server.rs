@@ -17,7 +17,8 @@ use std::{
     collections::HashMap,
     io::Read,
     net::SocketAddr,
-    sync::{Arc, Mutex,
+    sync::{
+        Arc, Mutex,
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -32,6 +33,7 @@ use crate::activity::{
     ActivityError, ActivityState, ActivityStatus, ErrorCategory, ExitReason, FinalExit,
     PermissionRequest,
 };
+use crate::domain::SessionId;
 
 const ACTIVITY_VERSION: u32 = 1;
 
@@ -90,6 +92,18 @@ impl HookServerControl {
     }
 }
 
+/// Read-only view onto the bridge that the hook server needs to assemble
+/// `additionalContext` responses for `UserPromptSubmit` hooks. Implemented
+/// by [`crate::connection_service::ConnectionService`] so the hook server
+/// does not have to depend on the full service surface.
+pub trait HookPushSource: Send + Sync {
+    /// Return a short textual summary of inbound, undelivered messages for
+    /// `reverie_session_id` across its currently-open connections. Empty
+    /// string means no nudge; a non-empty string is injected verbatim as
+    /// `additionalContext` on Claude/Codex's `UserPromptSubmit` response.
+    fn pre_turn_nudge_for(&self, reverie_session_id: SessionId) -> String;
+}
+
 /// Handle returned by [`start_hook_server`]. Drain `events` for translated
 /// updates. The server stops when the handle is dropped: tiny_http's accept
 /// loop is unblocked, the worker exits, and the bound socket closes.
@@ -128,8 +142,19 @@ impl Drop for HookServerHandle {
 }
 
 /// Bind a localhost HTTP server on an OS-assigned port and start translating
-/// incoming hook POSTs into [`HookActivityUpdate`]s.
+/// incoming hook POSTs into [`HookActivityUpdate`]s. The `push_source` is
+/// consulted on `UserPromptSubmit` hooks to inject `additionalContext` into
+/// the reply so Claude / Codex agents see pending inter-agent messages at
+/// the top of their next turn. Pass `None` to keep the legacy 204 reply.
 pub fn start_hook_server() -> Result<HookServerHandle> {
+    start_hook_server_with(None)
+}
+
+/// Variant of [`start_hook_server`] that wires a connection-bridge push
+/// source for pre-turn message delivery.
+pub fn start_hook_server_with(
+    push_source: Option<Arc<dyn HookPushSource>>,
+) -> Result<HookServerHandle> {
     let server = Server::http("127.0.0.1:0")
         .map_err(|err| anyhow!("failed to bind hook HTTP server: {err}"))?;
     let server = Arc::new(server);
@@ -144,14 +169,24 @@ pub fn start_hook_server() -> Result<HookServerHandle> {
 
     let (tx, rx) = mpsc::channel::<HookActivityUpdate>();
     let sequences: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-    let auth: Arc<Mutex<HashMap<(HookSource, String), String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let auth: Arc<Mutex<HashMap<(HookSource, String), String>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     let worker_server = Arc::clone(&server);
     let worker_sequences = Arc::clone(&sequences);
     let worker_auth = Arc::clone(&auth);
+    let worker_push = push_source.clone();
     let worker = thread::Builder::new()
         .name("reverie-hook-http-server".to_owned())
-        .spawn(move || run_request_loop(worker_server, worker_sequences, worker_auth, tx))
+        .spawn(move || {
+            run_request_loop(
+                worker_server,
+                worker_sequences,
+                worker_auth,
+                tx,
+                worker_push,
+            )
+        })
         .context("spawning hook HTTP worker thread")?;
 
     Ok(HookServerHandle {
@@ -172,6 +207,7 @@ fn run_request_loop(
     sequences: Arc<Mutex<HashMap<String, u64>>>,
     auth: Arc<Mutex<HashMap<(HookSource, String), String>>>,
     tx: Sender<HookActivityUpdate>,
+    push_source: Option<Arc<dyn HookPushSource>>,
 ) {
     for mut request in server.incoming_requests() {
         let url = request.url().to_owned();
@@ -229,11 +265,58 @@ fn run_request_loop(
             }
         };
 
-        if let Some(update) = translate(source, reverie_session_id, &payload, &sequences) {
+        // Record activity translation for either source first; the response
+        // body only matters for UserPromptSubmit, but other hook events
+        // still drive the activity stream.
+        if let Some(update) = translate(source, reverie_session_id.clone(), &payload, &sequences) {
             let _ = tx.send(update);
+        }
+
+        // UserPromptSubmit is the entry point Reverie uses to inject
+        // additionalContext for pending inter-agent messages. If we have a
+        // push source and the payload is a UserPromptSubmit, fetch the
+        // nudge for the relevant Reverie session and reply with the
+        // hook-specific body. Anything else still gets a 204.
+        let event_name = payload
+            .get("hook_event_name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if event_name == "UserPromptSubmit" {
+            if let Some(source) = push_source.as_ref() {
+                if let Ok(session_id) = SessionId::parse_str(&reverie_session_id) {
+                    let nudge = source.pre_turn_nudge_for(session_id);
+                    if !nudge.is_empty() {
+                        let body = build_user_prompt_submit_response(&nudge);
+                        let response = Response::from_string(body.to_string())
+                            .with_status_code(StatusCode(200))
+                            .with_header(
+                                tiny_http::Header::from_bytes(
+                                    &b"Content-Type"[..],
+                                    &b"application/json"[..],
+                                )
+                                .expect("static header"),
+                            );
+                        let _ = request.respond(response);
+                        continue;
+                    }
+                }
+            }
         }
         let _ = request.respond(simple_response(204, ""));
     }
+}
+
+/// Build the JSON body Reverie sends back for a `UserPromptSubmit` hook.
+/// Format works for both Claude Code (which reads `hookSpecificOutput`) and
+/// Codex CLI (which reads the same shape). `additionalContext` is the
+/// agent-visible string.
+fn build_user_prompt_submit_response(additional_context: &str) -> Value {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": additional_context,
+        }
+    })
 }
 
 /// Extract `(source, token)` from a request URL of the form
@@ -329,9 +412,13 @@ fn translate_claude(
             envelope.tool_name.as_deref().unwrap_or("tool"),
             envelope.tool_input.as_ref(),
         ),
-        "PostToolUse" | "PreToolUse" | "SessionStart" | "UserPromptSubmit" => {
-            build_simple_state(&session_id, timestamp, sequence, cwd, ActivityStatus::Working)
-        }
+        "PostToolUse" | "PreToolUse" | "SessionStart" | "UserPromptSubmit" => build_simple_state(
+            &session_id,
+            timestamp,
+            sequence,
+            cwd,
+            ActivityStatus::Working,
+        ),
         "Stop" => build_simple_state(
             &session_id,
             timestamp,
@@ -358,7 +445,13 @@ fn translate_claude(
         // Unknown but well-formed events advance liveness rather than vanishing:
         // treat them as a Working heartbeat so the dashboard does not stick on a
         // stale state when a CLI emits a hook we do not model yet.
-        _ => build_simple_state(&session_id, timestamp, sequence, cwd, ActivityStatus::Working),
+        _ => build_simple_state(
+            &session_id,
+            timestamp,
+            sequence,
+            cwd,
+            ActivityStatus::Working,
+        ),
     };
 
     Some(HookActivityUpdate::State {
@@ -389,9 +482,13 @@ fn translate_codex(
             envelope.tool_name.as_deref().unwrap_or("tool"),
             envelope.tool_input.as_ref(),
         ),
-        "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit" => {
-            build_simple_state(&session_id, timestamp, sequence, cwd, ActivityStatus::Working)
-        }
+        "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit" => build_simple_state(
+            &session_id,
+            timestamp,
+            sequence,
+            cwd,
+            ActivityStatus::Working,
+        ),
         "Stop" => build_simple_state(
             &session_id,
             timestamp,
@@ -401,7 +498,13 @@ fn translate_codex(
         ),
         // Mirror translate_claude: unknown but well-formed events become a
         // Working heartbeat instead of being silently dropped.
-        _ => build_simple_state(&session_id, timestamp, sequence, cwd, ActivityStatus::Working),
+        _ => build_simple_state(
+            &session_id,
+            timestamp,
+            sequence,
+            cwd,
+            ActivityStatus::Working,
+        ),
     };
 
     Some(HookActivityUpdate::State {
@@ -580,7 +683,18 @@ fn unix_secs_to_ymdhms(mut secs: u64) -> (u64, u32, u32, u32, u32, u32) {
     }
     let leap = is_leap_year(year);
     let month_lengths = [
-        31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
     let mut month: u32 = 1;
     for (idx, length) in month_lengths.iter().enumerate() {
@@ -768,8 +882,8 @@ mod tests {
     #[test]
     fn unregistered_token_returns_401() {
         let handle = start_hook_server().expect("server starts");
-        let body = serde_json::json!({"hook_event_name":"Stop","session_id":"x","cwd":"/"})
-            .to_string();
+        let body =
+            serde_json::json!({"hook_event_name":"Stop","session_id":"x","cwd":"/"}).to_string();
         let response = post_hook(handle.port(), "/hooks/claude/never-registered", &body);
         assert!(response.starts_with("HTTP/1.1 401"), "response: {response}");
         assert!(handle.events.try_recv().is_err());
@@ -778,10 +892,13 @@ mod tests {
     #[test]
     fn revoke_blocks_further_posts() {
         let handle = started_with_token(HookSource::ClaudeCode);
-        let body = serde_json::json!({"hook_event_name":"Stop","session_id":"x","cwd":"/"})
-            .to_string();
+        let body =
+            serde_json::json!({"hook_event_name":"Stop","session_id":"x","cwd":"/"}).to_string();
         let response = post_hook(handle.port(), &claude_path(), &body);
-        assert!(response.starts_with("HTTP/1.1 204"), "first call: {response}");
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "first call: {response}"
+        );
 
         handle
             .control
@@ -865,5 +982,75 @@ mod tests {
             }
             other => panic!("expected State, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 7: UserPromptSubmit -> additionalContext push delivery
+    // -----------------------------------------------------------------
+
+    /// Stub push source for tests: returns a canned nudge string.
+    struct StubPushSource(String);
+    impl HookPushSource for StubPushSource {
+        fn pre_turn_nudge_for(&self, _: SessionId) -> String {
+            self.0.clone()
+        }
+    }
+
+    fn started_with_push(source: HookSource, push: Arc<dyn HookPushSource>) -> HookServerHandle {
+        // Register a real Reverie session id (UUID) so the hook server can
+        // parse it before consulting the push source.
+        let session_uuid = uuid::Uuid::from_bytes([0xAB; 16]).to_string();
+        let handle = start_hook_server_with(Some(push)).expect("server starts");
+        handle
+            .control
+            .register_session(source, TEST_TOKEN.to_owned(), session_uuid);
+        handle
+    }
+
+    #[test]
+    fn user_prompt_submit_returns_additional_context_when_push_source_has_nudge() {
+        let push = Arc::new(StubPushSource("You have 1 unread message.".to_owned()));
+        let handle = started_with_push(
+            HookSource::ClaudeCode,
+            push.clone() as Arc<dyn HookPushSource>,
+        );
+        let response = post_hook(
+            handle.port(),
+            &claude_path(),
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"native-sess","cwd":"/repo"}"#,
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "expected 200 OK, got {response}"
+        );
+        let body_start = response.rfind("\r\n\r\n").expect("response has body");
+        let body = &response[body_start + 4..];
+        let parsed: Value = serde_json::from_str(body).expect("body is JSON");
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "You have 1 unread message."
+        );
+        assert_eq!(
+            parsed["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+    }
+
+    #[test]
+    fn user_prompt_submit_falls_back_to_204_when_nudge_is_empty() {
+        let push = Arc::new(StubPushSource(String::new()));
+        let handle = started_with_push(
+            HookSource::CodexCli,
+            push.clone() as Arc<dyn HookPushSource>,
+        );
+        let response = post_hook(
+            handle.port(),
+            &codex_path(),
+            r#"{"hook_event_name":"UserPromptSubmit","session_id":"native-c","cwd":"/repo"}"#,
+        );
+        assert!(
+            response.starts_with("HTTP/1.1 204"),
+            "expected 204 when nudge is empty, got {response}"
+        );
     }
 }

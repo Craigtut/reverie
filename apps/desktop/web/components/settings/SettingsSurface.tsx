@@ -2,7 +2,12 @@ import { CaretRight, Moon, Sun } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import type { CreateSessionRecordRequest } from '../../domain';
-import { useUiStore } from '../../store';
+import { useAgentCliEnablement } from '../../hooks/useAgentClis';
+import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
+import { useShellStore, useUiStore } from '../../store';
+import { AgentsSection } from './AgentsSection';
+import { BridgeInstallationSection } from './BridgeInstallationSection';
+import { ConnectionPolicySection } from './ConnectionPolicySection';
 
 // The settings surface: appearance (theme) + default new-session preferences.
 // Theme is read straight from the UI store; the new-session prefs are shared
@@ -20,6 +25,12 @@ export function SettingsSurface({
 }) {
   const theme = useUiStore(s => s.theme);
   const setTheme = useUiStore(s => s.setTheme);
+  const detections = useShellStore(s => s.agentCliDetections);
+
+  // The bridge status lives here, not inside the bridge section, so disabling a
+  // CLI (which removes its bridge on the backend) can refresh those rows.
+  const bridge = useBridgeInstallationStatus();
+  const enablement = useAgentCliEnablement(() => void bridge.refresh());
 
   return (
     <div className={settingsSurfaceClass} data-testid="settings-surface">
@@ -30,12 +41,16 @@ export function SettingsSurface({
         </header>
 
         <section className={settingsGroupClass} aria-labelledby="settings-appearance-label">
-          <h2 id="settings-appearance-label" className={settingsGroupLabelClass}>Appearance</h2>
+          <h2 id="settings-appearance-label" className={settingsGroupLabelClass}>
+            Appearance
+          </h2>
           <ul className={settingsListClass}>
             <li className={settingsRowClass}>
               <div className={settingsRowTextClass}>
                 <span className={settingsRowTitleClass}>Theme</span>
-                <span className={settingsRowHelpClass}>The same warm-neutral palette in either mode.</span>
+                <span className={settingsRowHelpClass}>
+                  The same warm-neutral palette in either mode.
+                </span>
               </div>
               <div className={themeSegmentedClass} role="radiogroup" aria-label="Theme">
                 <button
@@ -66,7 +81,9 @@ export function SettingsSurface({
         </section>
 
         <section className={settingsGroupClass} aria-labelledby="settings-sessions-label">
-          <h2 id="settings-sessions-label" className={settingsGroupLabelClass}>Sessions</h2>
+          <h2 id="settings-sessions-label" className={settingsGroupLabelClass}>
+            Sessions
+          </h2>
           <ul className={settingsListClass}>
             <li className={settingsRowClass}>
               <div className={settingsRowTextClass}>
@@ -78,11 +95,22 @@ export function SettingsSurface({
                   className={settingsSelectClass}
                   value={newSessionAgentKind}
                   data-testid="settings-default-agent"
-                  onChange={event => setNewSessionAgentKind(event.currentTarget.value as CreateSessionRecordRequest['agentKind'])}
+                  onChange={event =>
+                    setNewSessionAgentKind(
+                      event.currentTarget.value as CreateSessionRecordRequest['agentKind'],
+                    )
+                  }
                 >
-                  <option value="cortex_code">Cortex Code</option>
-                  <option value="codex_cli">Codex CLI</option>
-                  <option value="claude_code">Claude Code</option>
+                  {detections.map(detection => {
+                    const usable = detection.available && detection.enabled;
+                    const suffix = usable ? '' : detection.available ? ' (off)' : ' (not detected)';
+                    return (
+                      <option key={detection.kind} value={detection.kind} disabled={!usable}>
+                        {detection.displayName}
+                        {suffix}
+                      </option>
+                    );
+                  })}
                 </select>
                 <CaretRight size={12} weight="bold" />
               </div>
@@ -90,7 +118,9 @@ export function SettingsSurface({
             <li className={settingsRowClass}>
               <div className={settingsRowTextClass}>
                 <span className={settingsRowTitleClass}>Enable YOLO for new sessions</span>
-                <span className={settingsRowHelpClass}>Skip per-tool approvals when launching a new session.</span>
+                <span className={settingsRowHelpClass}>
+                  Skip per-tool approvals when launching a new session.
+                </span>
               </div>
               <button
                 type="button"
@@ -107,6 +137,22 @@ export function SettingsSurface({
             </li>
           </ul>
         </section>
+
+        <AgentsSection
+          detections={detections}
+          pending={enablement.pending}
+          error={enablement.error}
+          onToggle={(kind, enabled) => void enablement.toggle(kind, enabled)}
+        />
+        <BridgeInstallationSection
+          detections={detections}
+          status={bridge.status}
+          loading={bridge.loading}
+          error={bridge.error}
+          install={cli => void bridge.install(cli)}
+          uninstall={cli => void bridge.uninstall(cli)}
+        />
+        <ConnectionPolicySection />
       </div>
     </div>
   );
@@ -254,7 +300,10 @@ const settingsSelectClass = css({
   outline: 'none',
   transition: 'border-color 140ms ease, background 140ms ease',
   _hover: { borderColor: 'var(--line-strong)' },
-  _focusVisible: { borderColor: 'var(--line-strong)', boxShadow: '0 0 0 3px color-mix(in srgb, var(--text) 8%, transparent)' },
+  _focusVisible: {
+    borderColor: 'var(--line-strong)',
+    boxShadow: '0 0 0 3px color-mix(in srgb, var(--text) 8%, transparent)',
+  },
 });
 
 const settingsSwitchClass = css({

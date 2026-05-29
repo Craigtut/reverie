@@ -302,7 +302,13 @@ mod tests {
     fn delete_session_reports_not_found() {
         let repo = seeded();
         let err = repo.delete_session(SessionId::new_v4()).unwrap_err();
-        assert!(matches!(err, PersistenceError::NotFound { kind: "session", .. }));
+        assert!(matches!(
+            err,
+            PersistenceError::NotFound {
+                kind: "session",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -310,8 +316,12 @@ mod tests {
         let repo = seeded();
         let focus = Focus::general("General", 0);
         repo.upsert_focus(&focus).unwrap();
-        let mut session =
-            Session::new(focus.id, "Cortex", AgentKind::CortexCode, PathBuf::from("/c"));
+        let mut session = Session::new(
+            focus.id,
+            "Cortex",
+            AgentKind::CortexCode,
+            PathBuf::from("/c"),
+        );
         session.mark_restorable(crate::domain::NativeSessionRef::cortex("native-7", None));
         repo.upsert_session(&session).unwrap();
 
@@ -327,8 +337,7 @@ mod tests {
         repo.upsert_project(&project).unwrap();
         let focus = Focus::for_project(project.id, "Terminal", 10);
         repo.upsert_focus(&focus).unwrap();
-        let session =
-            Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/repo"));
+        let session = Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/repo"));
         repo.upsert_session(&session).unwrap();
 
         repo.archive_project_cascade(project.id).unwrap();
@@ -342,7 +351,15 @@ mod tests {
     #[test]
     fn archive_project_cascade_reports_not_found() {
         let repo = seeded();
-        let err = repo.archive_project_cascade(ProjectId::new_v4()).unwrap_err();
-        assert!(matches!(err, PersistenceError::NotFound { kind: "project", .. }));
+        let err = repo
+            .archive_project_cascade(ProjectId::new_v4())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PersistenceError::NotFound {
+                kind: "project",
+                ..
+            }
+        ));
     }
 }

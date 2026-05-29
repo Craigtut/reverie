@@ -94,6 +94,8 @@ export interface ShellWorkspace {
   name: string;
   generalLabel: string;
   defaultDangerousMode: boolean;
+  // Agent CLIs the user has switched off. Absent/empty means all enabled.
+  disabledAgentKinds?: AgentKind[];
 }
 
 export interface ShellProject {
@@ -138,7 +140,12 @@ export interface ShellSession {
 }
 
 // Mirrors reverie-core's ActivityStatus enum (snake_case wire format).
-export type ActivityStatus = 'working' | 'awaiting_input' | 'awaiting_permission' | 'done' | 'error';
+export type ActivityStatus =
+  | 'working'
+  | 'awaiting_input'
+  | 'awaiting_permission'
+  | 'done'
+  | 'error';
 
 export interface ActivityPermissionRequest {
   id: string;
@@ -149,7 +156,13 @@ export interface ActivityPermissionRequest {
 }
 
 export interface ActivityError {
-  category: 'rate_limit' | 'authentication' | 'network' | 'context_overflow' | 'cancelled' | 'other';
+  category:
+    | 'rate_limit'
+    | 'authentication'
+    | 'network'
+    | 'context_overflow'
+    | 'cancelled'
+    | 'other';
   message: string;
   recoverable: boolean;
   occurredAt: string;
@@ -162,7 +175,12 @@ export interface ActivityState {
   updatedAt: string;
   sequence: number;
   cwd: string;
-  turn?: { id: string; status: 'running' | 'completed' | 'aborted'; startedAt: string; endedAt?: string | null } | null;
+  turn?: {
+    id: string;
+    status: 'running' | 'completed' | 'aborted';
+    startedAt: string;
+    endedAt?: string | null;
+  } | null;
   activeTools?: {
     toolCallId: string;
     toolName: string;
@@ -180,7 +198,10 @@ export interface ActivityState {
 // (HTTP hook receiver) updates; the `source` discriminator says which.
 export type SessionActivitySource = 'cortex_code' | 'claude_code' | 'codex_cli';
 export type SessionActivityEventPayload =
-  | { kind: 'updated'; payload: { source: SessionActivitySource; nativeSessionId: string; state: ActivityState } }
+  | {
+      kind: 'updated';
+      payload: { source: SessionActivitySource; nativeSessionId: string; state: ActivityState };
+    }
   | { kind: 'removed'; payload: { source: SessionActivitySource; nativeSessionId: string } };
 
 export interface CreateProjectRequest {
@@ -225,11 +246,23 @@ export interface AgentCliDetection {
   displayName: string;
   executable?: string | null;
   candidates: string[];
+  // Detected on this machine (installed and on PATH / at a known location).
   available: boolean;
+  // User has this CLI switched on. Enabled by default; only an explicit
+  // toggle-off in settings sets this false. A CLI must be both `available`
+  // and `enabled` to be offered as a session agent.
+  enabled: boolean;
 }
 
 export type PaletteEntry =
-  | { kind: 'focus'; id: string; title: string; projectId: string | null; projectName: string | null; sessionCount: number }
+  | {
+      kind: 'focus';
+      id: string;
+      title: string;
+      projectId: string | null;
+      projectName: string | null;
+      sessionCount: number;
+    }
   | { kind: 'session'; session: ShellSession; breadcrumb: string; activity: ActivityState | null };
 
 export type DashboardStatus = 'attention' | 'live' | 'recent';

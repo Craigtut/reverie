@@ -1,11 +1,11 @@
 [workspace]
-members = ["packages/reverie-core", "packages/reverie-persistence"]
+members = ["apps/reverie-bridge", "packages/reverie-core", "packages/reverie-persistence"]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.93"
-license = "UNLICENSED"
+license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -19,4 +19,6 @@ notify-debouncer-full = "0.6"
 tempfile = "3"
 tiny_http = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }
+toml = "0.8"
+toml_edit = "0.22"
 reverie-core = { path = "packages/reverie-core" }

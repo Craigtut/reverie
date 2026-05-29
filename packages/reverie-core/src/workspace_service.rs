@@ -44,6 +44,7 @@ impl WorkspaceService {
             name: "Local workspace".to_owned(),
             general_label: "General".to_owned(),
             default_dangerous_mode: false,
+            disabled_agent_kinds: Vec::new(),
         };
         self.repo.ensure_seeded(&seed)?;
         self.normalize_sessions()?;
@@ -163,6 +164,39 @@ impl WorkspaceService {
         Ok(self.repo.load_snapshot()?)
     }
 
+    /// Switch a single agent CLI on or off for the workspace. Enabling removes
+    /// it from the disabled set; disabling adds it. Idempotent. A disabled CLI
+    /// is never offered as a session agent and never has its config files
+    /// written; the caller is responsible for the latter (removing any bridge
+    /// install), since the bridge installer lives outside the core crate.
+    pub fn set_agent_cli_enabled(
+        &self,
+        kind: AgentKind,
+        enabled: bool,
+    ) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        let disabled = &mut workspace.disabled_agent_kinds;
+        if enabled {
+            disabled.retain(|existing| *existing != kind);
+        } else if !disabled.contains(&kind) {
+            disabled.push(kind);
+        }
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// The set of agent kinds the user has switched off. Read by the command
+    /// layer to mark detections and to refuse bridge installs for off CLIs.
+    pub fn disabled_agent_kinds(&self) -> Result<Vec<AgentKind>> {
+        Ok(self.repo.load_snapshot()?.workspace.disabled_agent_kinds)
+    }
+
+    /// Whether a given CLI is enabled (the common-case query). Absent from the
+    /// disabled set means enabled.
+    pub fn is_agent_cli_enabled(&self, kind: AgentKind) -> Result<bool> {
+        Ok(!self.disabled_agent_kinds()?.contains(&kind))
+    }
+
     pub fn remove_session(&self, session_id: SessionId) -> Result<WorkspaceSnapshot> {
         self.repo.delete_session(session_id)?;
         Ok(self.repo.load_snapshot()?)
@@ -223,8 +257,9 @@ impl WorkspaceService {
         cortex_home: PathBuf,
     ) -> Result<WorkspaceSnapshot> {
         let cortex_session_id = required_text(cortex_session_id, "Cortex session id")?;
-        let metadata_path = metadata_path
-            .unwrap_or_else(|| CortexSessionMetadata::metadata_path(&cortex_home, &cortex_session_id));
+        let metadata_path = metadata_path.unwrap_or_else(|| {
+            CortexSessionMetadata::metadata_path(&cortex_home, &cortex_session_id)
+        });
         let encoded = std::fs::read_to_string(&metadata_path).with_context(|| {
             format!(
                 "failed to read Cortex session metadata at {}",
@@ -426,7 +461,10 @@ impl WorkspaceService {
             .into_iter()
             .find(|adapter| adapter.kind() == session.agent_kind)
             .with_context(|| {
-                format!("no built-in adapter registered for {:?}", session.agent_kind)
+                format!(
+                    "no built-in adapter registered for {:?}",
+                    session.agent_kind
+                )
             })?;
         let executable_path = require_detected(adapter.as_ref())?;
         build_spawn_spec(
@@ -545,7 +583,9 @@ mod tests {
     }
 
     fn make_focus(service: &WorkspaceService) -> FocusId {
-        let snapshot = service.create_focus(None, "General".to_owned(), None).unwrap();
+        let snapshot = service
+            .create_focus(None, "General".to_owned(), None)
+            .unwrap();
         snapshot.focuses[0].id
     }
 
@@ -558,10 +598,53 @@ mod tests {
     }
 
     #[test]
+    fn set_agent_cli_enabled_toggles_the_disabled_set_idempotently() {
+        let (_repo, service) = service();
+        // Everything starts enabled.
+        assert!(
+            service
+                .snapshot()
+                .unwrap()
+                .workspace
+                .disabled_agent_kinds
+                .is_empty()
+        );
+        assert!(service.is_agent_cli_enabled(AgentKind::ClaudeCode).unwrap());
+
+        // Disabling adds it; disabling again is a no-op (no duplicates).
+        service
+            .set_agent_cli_enabled(AgentKind::ClaudeCode, false)
+            .unwrap();
+        let snapshot = service
+            .set_agent_cli_enabled(AgentKind::ClaudeCode, false)
+            .unwrap();
+        assert_eq!(
+            snapshot.workspace.disabled_agent_kinds,
+            vec![AgentKind::ClaudeCode]
+        );
+        assert!(!service.is_agent_cli_enabled(AgentKind::ClaudeCode).unwrap());
+
+        // Other CLIs stay enabled.
+        assert!(service.is_agent_cli_enabled(AgentKind::CortexCode).unwrap());
+
+        // Re-enabling removes it.
+        let snapshot = service
+            .set_agent_cli_enabled(AgentKind::ClaudeCode, true)
+            .unwrap();
+        assert!(snapshot.workspace.disabled_agent_kinds.is_empty());
+    }
+
+    #[test]
     fn create_project_validates_name_and_unique_path() {
         let (_repo, service) = service();
-        assert!(service.create_project("  ".to_owned(), "/repo".into()).is_err());
-        service.create_project("Reverie".to_owned(), "/repo".into()).unwrap();
+        assert!(
+            service
+                .create_project("  ".to_owned(), "/repo".into())
+                .is_err()
+        );
+        service
+            .create_project("Reverie".to_owned(), "/repo".into())
+            .unwrap();
         let dup = service.create_project("Other".to_owned(), "/repo".into());
         assert!(dup.is_err(), "duplicate non-archived path must be rejected");
     }
@@ -572,8 +655,12 @@ mod tests {
         let unknown = service.create_focus(Some(ProjectId::new_v4()), "X".to_owned(), None);
         assert!(unknown.is_err());
 
-        service.create_focus(None, "First".to_owned(), None).unwrap();
-        let snapshot = service.create_focus(None, "Second".to_owned(), None).unwrap();
+        service
+            .create_focus(None, "First".to_owned(), None)
+            .unwrap();
+        let snapshot = service
+            .create_focus(None, "Second".to_owned(), None)
+            .unwrap();
         let general: Vec<i64> = snapshot
             .focuses
             .iter()
@@ -597,7 +684,13 @@ mod tests {
 
         let focus = make_focus(&service);
         let snapshot = service
-            .create_session(focus, "S".to_owned(), AgentKind::CortexCode, "/tmp".into(), None)
+            .create_session(
+                focus,
+                "S".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp".into(),
+                None,
+            )
             .unwrap();
         assert_eq!(snapshot.sessions.len(), 1);
         assert!(snapshot.sessions[0].tab_visible);
@@ -609,7 +702,13 @@ mod tests {
         let (_repo, service) = service();
         let focus = make_focus(&service);
         let snapshot = service
-            .create_session(focus, "S".to_owned(), AgentKind::CortexCode, "/tmp".into(), None)
+            .create_session(
+                focus,
+                "S".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp".into(),
+                None,
+            )
             .unwrap();
         let id = snapshot.sessions[0].id;
 
@@ -685,9 +784,7 @@ mod tests {
         assert_eq!(session.launch_mode, LaunchMode::Resume);
         assert_eq!(session.status, SessionStatus::Restorable);
         assert_eq!(
-            session
-                .native_session_ref
-                .and_then(|r| r.session_id),
+            session.native_session_ref.and_then(|r| r.session_id),
             Some("native-1".to_owned())
         );
     }
@@ -723,9 +820,17 @@ mod tests {
             .unwrap()
         };
 
-        assert!(service.record_session_activity("native-9", state(5)).unwrap());
+        assert!(
+            service
+                .record_session_activity("native-9", state(5))
+                .unwrap()
+        );
         // Older sequence is dropped.
-        assert!(!service.record_session_activity("native-9", state(3)).unwrap());
+        assert!(
+            !service
+                .record_session_activity("native-9", state(3))
+                .unwrap()
+        );
         // Unknown native id matches nothing.
         assert!(!service.record_session_activity("nope", state(7)).unwrap());
 
@@ -738,7 +843,13 @@ mod tests {
         let (_repo, service) = service();
         let focus = make_focus(&service);
         let id = service
-            .create_session(focus, "Claude".to_owned(), AgentKind::ClaudeCode, "/tmp".into(), None)
+            .create_session(
+                focus,
+                "Claude".to_owned(),
+                AgentKind::ClaudeCode,
+                "/tmp".into(),
+                None,
+            )
             .unwrap()
             .sessions[0]
             .id;
@@ -747,7 +858,11 @@ mod tests {
             r#"{"version":1,"sessionId":"claude-native","status":"working","updatedAt":"t","sequence":1,"cwd":"/tmp"}"#,
         )
         .unwrap();
-        assert!(service.record_session_activity_by_id(id, "claude-native", state).unwrap());
+        assert!(
+            service
+                .record_session_activity_by_id(id, "claude-native", state)
+                .unwrap()
+        );
 
         let session = service.snapshot().unwrap().sessions[0].clone();
         assert_eq!(
@@ -759,7 +874,9 @@ mod tests {
     #[test]
     fn archive_project_cascade_hides_sessions() {
         let (_repo, service) = service();
-        let snapshot = service.create_project("Reverie".to_owned(), "/repo".into()).unwrap();
+        let snapshot = service
+            .create_project("Reverie".to_owned(), "/repo".into())
+            .unwrap();
         let project_id = snapshot.projects[0].id;
         let focus_snapshot = service
             .create_focus(Some(project_id), "Terminal".to_owned(), None)
@@ -771,15 +888,42 @@ mod tests {
             .unwrap()
             .id;
         let session_id = service
-            .create_session(focus_id, "S".to_owned(), AgentKind::CortexCode, "/repo".into(), None)
+            .create_session(
+                focus_id,
+                "S".to_owned(),
+                AgentKind::CortexCode,
+                "/repo".into(),
+                None,
+            )
             .unwrap()
             .sessions[0]
             .id;
 
         let snapshot = service.archive_project(project_id).unwrap();
-        assert!(snapshot.projects.iter().find(|p| p.id == project_id).unwrap().archived);
-        assert!(snapshot.focuses.iter().find(|f| f.id == focus_id).unwrap().archived);
-        assert!(!snapshot.sessions.iter().find(|s| s.id == session_id).unwrap().tab_visible);
+        assert!(
+            snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .unwrap()
+                .archived
+        );
+        assert!(
+            snapshot
+                .focuses
+                .iter()
+                .find(|f| f.id == focus_id)
+                .unwrap()
+                .archived
+        );
+        assert!(
+            !snapshot
+                .sessions
+                .iter()
+                .find(|s| s.id == session_id)
+                .unwrap()
+                .tab_visible
+        );
     }
 
     #[test]
@@ -787,15 +931,27 @@ mod tests {
         let (_repo, service) = service();
         let focus = make_focus(&service);
         let id = service
-            .create_session(focus, "Cortex".to_owned(), AgentKind::CortexCode, "/tmp".into(), None)
+            .create_session(
+                focus,
+                "Cortex".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp".into(),
+                None,
+            )
             .unwrap()
             .sessions[0]
             .id;
         // The Cortex adapter discovers nothing without a home to scan.
-        assert!(!service
-            .discover_and_attach_native_session(id, Some(0), None)
-            .unwrap());
-        assert!(service.snapshot().unwrap().sessions[0].native_session_ref.is_none());
+        assert!(
+            !service
+                .discover_and_attach_native_session(id, Some(0), None)
+                .unwrap()
+        );
+        assert!(
+            service.snapshot().unwrap().sessions[0]
+                .native_session_ref
+                .is_none()
+        );
     }
 
     #[test]
@@ -822,9 +978,11 @@ mod tests {
             )
             .unwrap();
         // A session that already has a ref is skipped even with a home set.
-        assert!(!service
-            .discover_and_attach_native_session(id, Some(0), Some("/nonexistent".into()))
-            .unwrap());
+        assert!(
+            !service
+                .discover_and_attach_native_session(id, Some(0), Some("/nonexistent".into()))
+                .unwrap()
+        );
     }
 
     #[test]

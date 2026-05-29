@@ -1,0 +1,6 @@
+# Format + lint only the staged files (Biome for web, rustfmt for Rust).
+npx lint-staged
+
+# Project typecheck (Panda codegen + tsc --noEmit). Catches type errors before commit.
+# If this ever feels too slow, move it to a .husky/pre-push hook instead.
+npm run typecheck

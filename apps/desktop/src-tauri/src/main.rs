@@ -1,7 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod activity_bridge;
+#[cfg(unix)]
+mod bridge;
+#[cfg(unix)]
+mod bridge_installer;
 mod commands;
+#[cfg(unix)]
+mod connection_commands;
 mod state;
 mod terminal;
 
@@ -9,7 +15,7 @@ use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
 
 use reverie_core::WorkspaceService;
 use reverie_core::activity_watcher::watch_cortex_activity;
-use reverie_core::hook_server::start_hook_server;
+use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
 use reverie_persistence::SqliteWorkspaceRepository;
 use tauri::Manager;
 
@@ -98,11 +104,17 @@ fn main() {
                 .path()
                 .app_data_dir()?
                 .join("workspace-shell.v1.sqlite3");
-            let repository = SqliteWorkspaceRepository::open(&store_path)
-                .map_err(|err| anyhow::anyhow!("failed to open Reverie database: {err}"))?;
-            let service = WorkspaceService::new(std::sync::Arc::new(repository));
+            let repository = std::sync::Arc::new(
+                SqliteWorkspaceRepository::open(&store_path)
+                    .map_err(|err| anyhow::anyhow!("failed to open Reverie database: {err}"))?,
+            );
+            let service = WorkspaceService::new(repository.clone());
             service.ensure_seeded()?;
             app.manage(service);
+            // Stash the repository for the bridge to share. We keep it as
+            // managed state so background threads can still hold an Arc to
+            // it without going through a Tauri command boundary.
+            app.manage(repository.clone());
 
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
@@ -130,12 +142,51 @@ fn main() {
                 eprintln!("[reverie] Cortex home not located; activity watcher disabled");
             }
 
+            // Start the inter-agent connection bridge FIRST so we can hand
+            // its ConnectionService into the hook server below as the
+            // pre-turn push source. The Unix-socket listener spawned here
+            // is what the `reverie-bridge` helper (run as a stdio MCP
+            // child by each agent CLI) connects back to.
+            // See docs/technical/inter-agent-connections.md.
+            #[cfg(unix)]
+            let connection_service_for_push: Option<
+                std::sync::Arc<dyn HookPushSource>,
+            > = {
+                let socket_path = bridge::default_socket_path();
+                let repo_for_bridge: std::sync::Arc<dyn reverie_core::ConnectionRepository> =
+                    repository.clone();
+                match bridge::start_bridge(socket_path, repo_for_bridge) {
+                    Ok((service, info)) => {
+                        let push = service.clone() as std::sync::Arc<dyn HookPushSource>;
+                        app.manage(service);
+                        app.manage(info);
+                        Some(push)
+                    }
+                    Err(error) => {
+                        eprintln!("[reverie] inter-agent bridge disabled: {error:#}");
+                        None
+                    }
+                }
+            };
+            #[cfg(not(unix))]
+            let connection_service_for_push: Option<
+                std::sync::Arc<dyn HookPushSource>,
+            > = None;
+
             // Start the localhost hook HTTP server. Claude Code and Codex CLI
             // hook ingestion is available once we have a non-invasive attachment
             // path. We intentionally do not redirect CLAUDE_CONFIG_DIR/CODEX_HOME
             // because those env vars also move each CLI's auth/config home.
+            // When the connection bridge is up, the hook server uses it to
+            // respond to UserPromptSubmit hooks with `additionalContext`
+            // carrying pending inter-agent messages.
             app.manage(HookTokenRegistry::default());
-            match start_hook_server() {
+            let hook_server_result = if connection_service_for_push.is_some() {
+                start_hook_server_with(connection_service_for_push.clone())
+            } else {
+                start_hook_server()
+            };
+            match hook_server_result {
                 Ok(handle) => {
                     let control = handle.control.clone();
                     app.manage(HookServerInfo { port: control.port });
@@ -159,6 +210,7 @@ fn main() {
             commands::ghostty_frame_sequence,
             commands::workspace_shell,
             commands::list_agent_clis,
+            commands::set_agent_cli_enabled,
             commands::choose_project_folder,
             commands::create_project,
             commands::create_focus,
@@ -179,7 +231,49 @@ fn main() {
             commands::scroll_terminal_viewport_to_top,
             commands::scroll_terminal_viewport_to_bottom,
             commands::terminate_session,
-            commands::record_render_metrics
+            commands::record_render_metrics,
+            #[cfg(unix)]
+            connection_commands::bridge_installation_status,
+            #[cfg(unix)]
+            connection_commands::install_cortex_bridge_command,
+            #[cfg(unix)]
+            connection_commands::uninstall_cortex_bridge_command,
+            #[cfg(unix)]
+            connection_commands::install_codex_bridge_command,
+            #[cfg(unix)]
+            connection_commands::uninstall_codex_bridge_command,
+            #[cfg(unix)]
+            connection_commands::install_claude_bridge_command,
+            #[cfg(unix)]
+            connection_commands::uninstall_claude_bridge_command,
+            #[cfg(unix)]
+            connection_commands::list_pending_connection_requests,
+            #[cfg(unix)]
+            connection_commands::accept_connection_request,
+            #[cfg(unix)]
+            connection_commands::deny_connection_request,
+            #[cfg(unix)]
+            connection_commands::list_session_connections,
+            #[cfg(unix)]
+            connection_commands::close_connection_command,
+            #[cfg(unix)]
+            connection_commands::user_open_connection,
+            #[cfg(unix)]
+            connection_commands::connection_transcript,
+            #[cfg(unix)]
+            connection_commands::connection_policy,
+            #[cfg(unix)]
+            connection_commands::set_connection_policy,
+            #[cfg(unix)]
+            connection_commands::set_focus_policy_override,
+            #[cfg(unix)]
+            connection_commands::focus_policy_override,
+            #[cfg(unix)]
+            connection_commands::pair_recently_denied,
+            #[cfg(unix)]
+            connection_commands::block_session_pair,
+            #[cfg(unix)]
+            connection_commands::clear_session_pair_block,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Reverie desktop shell");

@@ -1,0 +1,30 @@
+[package]
+name = "reverie-bridge"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "reverie_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "reverie-bridge"
+path = "src/main.rs"
+
+[[bin]]
+name = "reverie-bridge-preturn-hook"
+path = "src/preturn_hook.rs"
+
+[dependencies]
+anyhow.workspace = true
+reverie-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "author": "Craig Tuttle",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "npm run dev:desktop",
     "run": "npm run dev:desktop",
@@ -25,7 +30,12 @@
     "typecheck": "npm run panda && tsc --noEmit",
     "test:unit": "vitest run",
     "test:unit:watch": "vitest",
-    "check:frontend": "npm run typecheck && npm run build:web",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "prepare": "husky",
+    "check:frontend": "npm run lint && npm run typecheck && npm run build:web",
     "check:rust": "cargo test && PATH=\"/opt/homebrew/opt/zig@0.15/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml && PATH=\"/opt/homebrew/opt/zig@0.15/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "check": "npm run check:frontend && npm run check:rust",
     "test": "npm run check"
@@ -39,12 +49,21 @@
     "zustand": "^5.0.14"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.16",
+    "@commitlint/cli": "^21.0.2",
+    "@commitlint/config-conventional": "^21.0.2",
     "@pandacss/dev": "^1.4.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.0.5",
     "typescript": "^5.9.3",
     "vite": "^7.2.4",
     "vitest": "^4.1.7"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,css}": "biome check --write --no-errors-on-unmatched --files-ignore-unknown=true",
+    "*.rs": "rustfmt --edition 2024"
   }
 }

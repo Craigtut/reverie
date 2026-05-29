@@ -20,13 +20,18 @@ export function fallbackShellSnapshot(): WorkspaceShellSnapshot {
 }
 
 export function sessionsForProject(projectId: string | null, shell: WorkspaceShellSnapshot) {
-  const focusIds = new Set(shell.focuses.filter(focus => focus.projectId === projectId).map(focus => focus.id));
+  const focusIds = new Set(
+    shell.focuses.filter(focus => focus.projectId === projectId).map(focus => focus.id),
+  );
   return shell.sessions.filter(session => focusIds.has(session.focusId));
 }
 
 // The cwd a new session should default to: the focus's project folder when the
 // focus is project-backed, otherwise the user's home directory.
-export function defaultCwdForFocus(focus: ShellFocus | null, shell: WorkspaceShellSnapshot): string {
+export function defaultCwdForFocus(
+  focus: ShellFocus | null,
+  shell: WorkspaceShellSnapshot,
+): string {
   if (!focus?.projectId) return USER_HOME;
   return shell.projects.find(project => project.id === focus.projectId)?.path ?? USER_HOME;
 }
@@ -51,6 +56,7 @@ export function fallbackAgentCliDetections(): AgentCliDetection[] {
       executable: 'cortex',
       candidates: ['cortex'],
       available: true,
+      enabled: true,
     },
     {
       kind: 'claude_code',
@@ -58,6 +64,7 @@ export function fallbackAgentCliDetections(): AgentCliDetection[] {
       executable: 'claude',
       candidates: ['claude'],
       available: true,
+      enabled: true,
     },
     {
       kind: 'codex_cli',
@@ -65,6 +72,7 @@ export function fallbackAgentCliDetections(): AgentCliDetection[] {
       executable: 'codex',
       candidates: ['codex'],
       available: true,
+      enabled: true,
     },
   ];
 }
