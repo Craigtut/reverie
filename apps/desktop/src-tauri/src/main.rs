@@ -1,11 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod terminal_backend;
-mod terminal_runtime;
+mod terminal;
 
 use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reverie_core::activity::ActivityState;
 use reverie_core::activity_watcher::{
     CortexActivityStream, CortexActivityUpdate, watch_cortex_activity,
@@ -22,8 +21,8 @@ use reverie_core::{
 use reverie_persistence::SqliteWorkspaceRepository;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
-use terminal_backend::GhosttyTerminalState;
-use terminal_runtime::{TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest};
+use terminal::ghostty::GhosttyTerminalState;
+use terminal::runtime::{TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest};
 
 const PROOF_COLS: u16 = 120;
 const PROOF_ROWS: u16 = 36;
