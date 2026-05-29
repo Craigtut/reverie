@@ -56,6 +56,10 @@ function AgentRow({
   onToggle: (kind: AgentKind, enabled: boolean) => void;
 }) {
   const { kind, displayName, available, enabled, executable, candidates } = detection;
+  // The title + status pill already say everything most people need; the
+  // resolved binary (or, when missing, the locations we searched) lives in a
+  // hover tooltip so the detail is there for the curious without cluttering
+  // the row.
   const detail = available
     ? (executable ?? candidates[0] ?? 'Detected on PATH')
     : `Looked for: ${candidates.join(', ') || 'no known locations'}`;
@@ -65,11 +69,9 @@ function AgentRow({
       className={rowClass}
       data-testid={`agent-cli-row-${kind}`}
       data-available={available ? 'on' : 'off'}
+      title={detail}
     >
-      <div className={rowTextClass}>
-        <span className={rowTitleClass}>{displayName}</span>
-        <span className={rowHelpClass}>{detail}</span>
-      </div>
+      <span className={rowTitleClass}>{displayName}</span>
 
       <span
         className={statusClass}
@@ -143,18 +145,12 @@ const rowClass = css({
   _first: { borderTop: 'none' },
   '&[data-available="off"]': { opacity: 0.62 },
 });
-const rowTextClass = css({ display: 'grid', gap: '4px', minWidth: 0 });
 const rowTitleClass = css({
+  minWidth: 0,
   fontSize: '13.5px',
   fontWeight: 500,
   color: 'var(--text)',
   letterSpacing: '-0.005em',
-});
-const rowHelpClass = css({
-  fontSize: '12px',
-  color: 'var(--text-3)',
-  fontFamily: 'var(--font-mono)',
-  wordBreak: 'break-all',
 });
 const statusClass = css({
   fontSize: '11px',
