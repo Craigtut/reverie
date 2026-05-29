@@ -99,6 +99,13 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         Ok(scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total)
     }
 
+    /// Total rows currently held (scrollback + viewport). For a headless replay
+    /// terminal sized to hold the whole transcript, this is the session's full
+    /// rendered height at the replayed width.
+    pub fn total_rows(&self) -> Result<usize> {
+        Ok(self.terminal.total_rows()?)
+    }
+
     /// Scroll the viewport so screen row `row` is visible, aimed about a third
     /// down from the top for context. Implemented as a delta because
     /// libghostty-vt exposes only relative/top/bottom scrolling.

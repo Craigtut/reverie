@@ -36,6 +36,8 @@ type TerminalSurfaceHandle = Pick<
   | 'toggleFindCase'
   | 'findNext'
   | 'findPrev'
+  | 'historyViewing'
+  | 'viewFullHistory'
 >;
 
 export interface TerminalSurfaceProps {
@@ -107,7 +109,20 @@ export function TerminalSurface({
         >
           {shortenCwd(session.cwd)}
         </Typography>
-        {!terminalLiveFollow ? (
+        {!terminal.historyViewing ? (
+          <button
+            type="button"
+            className={followLiveButtonClass}
+            data-testid="view-history-button"
+            onClick={terminal.viewFullHistory}
+            title="Scroll the whole session, back to the beginning"
+          >
+            <Typography as="span" variant="tiny" tone="inherit">
+              Full history
+            </Typography>
+          </button>
+        ) : null}
+        {!terminalLiveFollow || terminal.historyViewing ? (
           <button
             type="button"
             className={followLiveButtonClass}
@@ -306,6 +321,10 @@ const surfaceViewportClass = css({
   minHeight: 0,
   height: '100%',
   overflow: 'auto',
+  // Reserve the scrollbar gutter so entering the full-history view (which grows
+  // the spacer past the viewport and reveals a scrollbar) never narrows the
+  // content width, which would otherwise fire a spurious resize.
+  scrollbarGutter: 'stable',
   background: 'transparent',
 });
 

@@ -194,6 +194,23 @@ impl TerminalSessionRuntime {
             .and_then(|guard| guard.clone())
     }
 
+    /// Read a session's entire durable transcript (empty when none is stored).
+    /// Used by the deep-history replay engine.
+    pub fn read_full_transcript(&self, session_id: SessionId) -> Result<Vec<u8>> {
+        let Some(store) = self.transcript_store() else {
+            return Ok(Vec::new());
+        };
+        let len = store
+            .transcript_len(session_id)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        store
+            .read_transcript_range(session_id, 0, len)
+            .map_err(|err| anyhow::anyhow!(err.to_string()))
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<TerminalSessionRecord>> {
         let mut records = self
             .sessions

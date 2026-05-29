@@ -86,6 +86,10 @@ export async function invokeBrowserFixture<T>(
       return undefined as T;
     case 'search_terminal':
       return searchFixtureTerminal(args) as T;
+    case 'terminal_history_info':
+      return historyInfoFixture(args) as T;
+    case 'terminal_history_window':
+      return historyWindowFixture(args) as T;
     case 'record_render_metrics':
       return undefined as T;
     case 'open_url': {
@@ -346,6 +350,26 @@ function terminateFixtureSession(args?: Record<string, unknown>) {
   terminal.cancelled = true;
   finishFixtureTerminal(terminalId, false);
   return undefined;
+}
+
+// The fixture has no replay engine; it serves the last injected/streamed frame
+// as the whole "history" (keyed by session id in the harness via the active
+// terminal's frame). Good enough to exercise the history-view UI flow.
+function fixtureSessionFrame(): TerminalFrame | undefined {
+  // The harness drives a single active terminal; return its last frame.
+  const frames = [...lastFixtureFrames.values()];
+  return frames[frames.length - 1];
+}
+
+function historyInfoFixture(_args?: Record<string, unknown>) {
+  const frame = fixtureSessionFrame();
+  return { totalRows: frame ? frame.rows.length : 0 };
+}
+
+function historyWindowFixture(args?: Record<string, unknown>) {
+  const startRow = Number(args?.startRow ?? 0);
+  const frame = fixtureSessionFrame() ?? { dirty: 'full', rows: [] };
+  return { startRow, frame };
 }
 
 function searchFixtureTerminal(args?: Record<string, unknown>) {

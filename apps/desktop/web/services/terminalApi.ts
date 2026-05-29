@@ -1,5 +1,6 @@
 import { invoke } from './runtime';
 import type { GhosttyFrameSequencePayload, RenderMetrics, StartSessionRequest } from '../domain';
+import type { TerminalFrame } from '../terminalTypes';
 
 // Typed wrappers over the terminal/session-runtime commands: launching and
 // terminating native sessions, writing input, resizing, scrolling the
@@ -56,6 +57,35 @@ export interface TerminalSearchResult {
 
 export function searchTerminal(terminalId: string, query: string, caseSensitive: boolean) {
   return invoke<TerminalSearchResult>('search_terminal', { terminalId, query, caseSensitive });
+}
+
+// Deep history (the full persisted transcript), keyed by SESSION id so it works
+// for live, exited, and restored sessions.
+export interface TerminalHistoryInfo {
+  totalRows: number;
+}
+
+export interface TerminalHistoryWindow {
+  startRow: number;
+  frame: TerminalFrame;
+}
+
+export function terminalHistoryInfo(sessionId: string, cols: number, rows: number) {
+  return invoke<TerminalHistoryInfo>('terminal_history_info', { sessionId, cols, rows });
+}
+
+export function terminalHistoryWindow(
+  sessionId: string,
+  startRow: number,
+  cols: number,
+  rows: number,
+) {
+  return invoke<TerminalHistoryWindow>('terminal_history_window', {
+    sessionId,
+    startRow,
+    cols,
+    rows,
+  });
 }
 
 export function fetchGhosttyFrameSequence() {

@@ -18,6 +18,8 @@ import {
   scrollTerminalViewportToRow,
   searchTerminal,
   startSession,
+  terminalHistoryInfo,
+  terminalHistoryWindow,
   writeTerminalInput,
   type TerminalSearchMatch,
 } from '../services/terminalApi';
@@ -43,7 +45,11 @@ import type {
 } from '../domain';
 import { createSession } from '../services/shellApi';
 import { TERMINAL_SURFACE, percentile } from '../terminal-canvas-renderer';
-import { SCROLL_FOLLOW_EPSILON_PX, terminalSurfaceForBounds } from '../terminalScrollback';
+import {
+  SCROLL_FOLLOW_EPSILON_PX,
+  type TerminalSurface,
+  terminalSurfaceForBounds,
+} from '../terminalScrollback';
 import { useNavigationStore, useShellStore, useTerminalStore } from '../store';
 import { openExternalUrl } from '../services/openApi';
 import { createTerminalController, type TerminalController } from '../terminal/terminalController';
@@ -146,6 +152,8 @@ export function useTerminalSession(params: {
   const [find, setFind] = useState<FindState>(initialFind);
   const findRef = useRef<FindState>(initialFind);
   const findDebounceRef = useRef<number>(0);
+  // Whether the full-history (deep scroll) view is showing.
+  const [historyViewing, setHistoryViewing] = useState(false);
   function updateFind(patch: Partial<FindState>) {
     findRef.current = { ...findRef.current, ...patch };
     setFind(findRef.current);
@@ -174,6 +182,10 @@ export function useTerminalSession(params: {
   useEffect(() => {
     controller.resetInteraction();
     closeFind();
+    if (controller.isHistoryMode()) {
+      controller.exitHistory();
+      setHistoryViewing(false);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- session id is the trigger
   }, [selectedSession?.id]);
 
@@ -220,7 +232,14 @@ export function useTerminalSession(params: {
 
       controller.setSurface(next);
       useTerminalStore.getState().setTerminalSurface(next);
-      controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
+      // In the full-history view, re-replay the transcript at the new width so a
+      // resize reflows deep history rather than clobbering it back to the live
+      // frame (the live repaint path is width-correct only for the live band).
+      if (controller.isHistoryMode()) {
+        void loadFullHistory(next);
+      } else {
+        controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
+      }
 
       const terminalId = useTerminalStore.getState().activeTerminalId;
       if (terminalId && isTauriRuntime) {
@@ -852,12 +871,44 @@ export function useTerminalSession(params: {
   }
 
   function followLiveTerminalOutput() {
+    // "Jump to latest" also leaves the full-history view.
+    if (controller.isHistoryMode()) {
+      controller.exitHistory();
+      setHistoryViewing(false);
+      controller.paintCurrent(useNavigationStore.getState().selectedSessionId);
+    }
     controller.setLiveFollow(true);
     void sendTerminalViewportToBottom();
     requestAnimationFrame(() => {
       controller.scrollToTail();
       controller.focusCanvas();
     });
+  }
+
+  // Fetch the full persisted transcript replayed at `surface`'s width and hand it
+  // to the controller's history view. Returns whether the load succeeded. Shared
+  // by the initial "Full history" entry and the resize reflow (deep history is
+  // width-dependent, so a resize must re-replay at the new width).
+  async function loadFullHistory(surface: TerminalSurface) {
+    const sessionId = useNavigationStore.getState().selectedSessionId;
+    if (!sessionId) return false;
+    try {
+      const info = await terminalHistoryInfo(sessionId, surface.cols, surface.rows);
+      const totalRows = Math.max(info.totalRows, surface.rows);
+      const windowResult = await terminalHistoryWindow(sessionId, 0, surface.cols, totalRows);
+      controller.enterHistory(windowResult.frame);
+      return true;
+    } catch (error) {
+      writeLog(`View full history failed: ${errorMessage(error)}`);
+      return false;
+    }
+  }
+
+  // Load the full persisted transcript (deep history) and show it as a
+  // scrollable view, so the user can scroll back to the very beginning, beyond
+  // Ghostty's in-memory cap and across restarts.
+  async function viewFullHistory() {
+    if (await loadFullHistory(controller.getSurface())) setHistoryViewing(true);
   }
 
   // Newly-created sessions launch as soon as the terminal surface mounts.
@@ -912,6 +963,8 @@ export function useTerminalSession(params: {
     toggleFindCase,
     findNext: () => moveFind(1),
     findPrev: () => moveFind(-1),
+    historyViewing,
+    viewFullHistory,
     clearSurface: () => controller.clear(),
     dropSession: (sessionId: string) => controller.dropSession(sessionId),
   };

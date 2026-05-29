@@ -240,6 +240,8 @@ fn main() {
             commands::scroll_terminal_viewport_to_bottom,
             commands::scroll_terminal_viewport_to_row,
             commands::search_terminal,
+            commands::terminal_history_info,
+            commands::terminal_history_window,
             commands::terminate_session,
             commands::record_render_metrics,
             commands::open_url,

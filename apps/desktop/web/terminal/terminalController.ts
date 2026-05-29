@@ -80,6 +80,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
   // While find is navigating, pin the viewport (don't auto-jump to the tail on
   // new output) so the active match stays put.
   let searchActive = false;
+  // History view: the composite is the full replayed transcript (deep history),
+  // virtualized by the scroll spacer so the user can scroll to row 0. Live
+  // frames are cached but not painted until the view is exited.
+  let historyMode = false;
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
 
@@ -364,13 +368,40 @@ export function createTerminalController(options: TerminalControllerOptions) {
   // built view, so off-screen output costs nothing on the main thread.
   function ingestFrame(sessionId: string, frame: TerminalFrame, isActive: boolean) {
     latestFrames[sessionId] = frame;
-    if (isActive) {
+    // In history view we keep showing the replayed transcript; live frames are
+    // cached (so exiting resumes correctly) but do not repaint.
+    if (isActive && !historyMode) {
       const next = buildSessionTerminalView(sessionViews[sessionId], frame, surface);
       sessionViews[sessionId] = next;
       applyView(next);
-    } else {
+    } else if (!isActive) {
       delete sessionViews[sessionId];
     }
+  }
+
+  // Enter the full-history view: paint the replayed transcript frame (all rows)
+  // and size the spacer to it, so the frontend scrollbar scrolls the whole
+  // session. Lands at the bottom (most recent), continuous with the live tail;
+  // the user scrolls up toward row 0.
+  function enterHistory(frame: TerminalFrame) {
+    historyMode = true;
+    clearInteractionState();
+    lastComposite = frame;
+    needsFullPaint = true;
+    lastStartRow = null;
+    setLiveFollow(false);
+    onScrollbackRowCount(Math.max(0, frame.rows.length - surface.rows));
+    updateSpacer(frame.rows.length, surface);
+    requestAnimationFrame(() => {
+      const viewport = els.viewport;
+      if (viewport) viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      paintWindow(frame, surface);
+    });
+  }
+
+  function exitHistory() {
+    historyMode = false;
+    clearInteractionState();
   }
 
   function setLiveFollow(live: boolean) {
@@ -526,6 +557,11 @@ export function createTerminalController(options: TerminalControllerOptions) {
     // backend match's absolute row to a composite (viewport-local) row.
     getViewportOffset(): number {
       return lastComposite?.scrollback?.viewportOffset ?? 0;
+    },
+    enterHistory,
+    exitHistory,
+    isHistoryMode() {
+      return historyMode;
     },
   };
 }

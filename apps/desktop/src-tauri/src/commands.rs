@@ -562,6 +562,55 @@ pub(crate) fn search_terminal(
         .map_err(|err| err.to_string())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TerminalHistoryInfo {
+    total_rows: usize,
+}
+
+/// The full rendered row count of a session's durable transcript at a width.
+/// Works for live, exited, and restored sessions (history is replayed from the
+/// persisted bytes, not the live PTY).
+#[tauri::command]
+pub(crate) fn terminal_history_info(
+    runtime: State<'_, TerminalSessionRuntime>,
+    session_id: SessionId,
+    cols: u16,
+    rows: u16,
+) -> Result<TerminalHistoryInfo, String> {
+    let transcript = runtime
+        .read_full_transcript(session_id)
+        .map_err(|err| err.to_string())?;
+    let total_rows = crate::terminal::history::history_total_rows(&transcript, cols, rows)
+        .map_err(|err| err.to_string())?;
+    Ok(TerminalHistoryInfo { total_rows })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TerminalHistoryWindow {
+    start_row: usize,
+    frame: TerminalFrame,
+}
+
+/// Render a window of the session's transcript at `start_row` (absolute row,
+/// from the top of the whole history) by replaying the persisted bytes.
+#[tauri::command]
+pub(crate) fn terminal_history_window(
+    runtime: State<'_, TerminalSessionRuntime>,
+    session_id: SessionId,
+    start_row: usize,
+    cols: u16,
+    rows: u16,
+) -> Result<TerminalHistoryWindow, String> {
+    let transcript = runtime
+        .read_full_transcript(session_id)
+        .map_err(|err| err.to_string())?;
+    let frame = crate::terminal::history::history_window(&transcript, cols, rows, start_row)
+        .map_err(|err| err.to_string())?;
+    Ok(TerminalHistoryWindow { start_row, frame })
+}
+
 #[tauri::command]
 pub(crate) fn terminate_session(
     runtime: State<'_, TerminalSessionRuntime>,
