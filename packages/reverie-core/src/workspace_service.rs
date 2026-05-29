@@ -255,11 +255,12 @@ impl WorkspaceService {
         Ok(self.repo.load_snapshot()?)
     }
 
-    /// Attach a discovered native session ref, moving the session to resume /
-    /// restorable. Guards that the kind and cwd still match so an async
-    /// discovery can't clobber a session that changed out from under it. Skips
-    /// silently (Ok) if a ref is already attached. This is the generic seam the
-    /// adapter-driven post-launch discovery (Phase 4) calls.
+    /// Attach a native session ref to a session, moving it to resume /
+    /// restorable. Overwrites any existing ref: the explicit Cortex capture
+    /// re-attaches deliberately, and the auto-discovery path
+    /// ([`Self::discover_and_attach_native_session`]) skips already-attached
+    /// sessions before calling this. Guards that the kind and cwd still match so
+    /// an attach can't clobber a session that changed out from under it.
     pub fn attach_native_session(
         &self,
         session_id: SessionId,
@@ -271,9 +272,6 @@ impl WorkspaceService {
             .repo
             .get_session(session_id)?
             .ok_or_else(|| anyhow!("unknown Reverie session {session_id}"))?;
-        if session.native_session_ref.is_some() {
-            return Ok(());
-        }
         if session.agent_kind != expected_kind {
             bail!(
                 "cannot attach {:?} native session to {:?} session",
@@ -827,5 +825,45 @@ mod tests {
         assert!(!service
             .discover_and_attach_native_session(id, Some(0), Some("/nonexistent".into()))
             .unwrap());
+    }
+
+    #[test]
+    fn attach_native_session_overwrites_an_existing_ref() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(
+                focus,
+                "Cortex".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp/reverie".into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        service
+            .attach_native_session(
+                id,
+                "/tmp/reverie".into(),
+                NativeSessionRef::cortex("first", None),
+                AgentKind::CortexCode,
+            )
+            .unwrap();
+        // The explicit Cortex capture re-attaches deliberately; a second attach
+        // must replace the existing ref rather than silently no-op.
+        service
+            .attach_native_session(
+                id,
+                "/tmp/reverie".into(),
+                NativeSessionRef::cortex("second", None),
+                AgentKind::CortexCode,
+            )
+            .unwrap();
+        let session = service.snapshot().unwrap().sessions[0].clone();
+        assert_eq!(
+            session.native_session_ref.and_then(|r| r.session_id),
+            Some("second".to_owned())
+        );
     }
 }
