@@ -4,6 +4,7 @@ import { css } from '../../styled-system/css';
 import { useConnectionRequests } from '../../hooks/useConnectionsState';
 import { blockSessionPair, pairRecentlyDenied } from '../../services/connectionsApi';
 import type { Connection } from '../../domain';
+import { Typography } from '../primitives/Typography';
 
 const REPEAT_BLOCK_SECONDS = 600;
 
@@ -83,21 +84,61 @@ function RequestCard({
       data-repeat={isRepeat ? 'on' : 'off'}
     >
       <header className={cardHeaderClass}>
-        <span className={kickerClass}>
+        <Typography
+          as="span"
+          variant="tiny"
+          tone="faint"
+          uppercase
+          style={{ letterSpacing: '0.12em' }}
+        >
           {isRepeat ? 'Connection requested again' : 'Connection requested'}
-        </span>
-        {connection.topic ? <span className={topicClass}>{connection.topic}</span> : null}
+        </Typography>
+        {connection.topic ? (
+          <Typography
+            as="span"
+            variant="caption"
+            tone="muted"
+            className={topicClass}
+            style={{ fontStyle: 'italic' }}
+          >
+            {connection.topic}
+          </Typography>
+        ) : null}
       </header>
       <p className={routeClass}>
-        <code className={sessionTagClass} title={initiator}>
+        <Typography
+          as="code"
+          variant="caption"
+          tone="muted"
+          className={sessionTagClass}
+          title={initiator}
+          style={{ fontFamily: 'var(--font-mono)' }}
+        >
           {short(initiator)}
-        </code>
-        <span aria-hidden> → </span>
-        <code className={sessionTagClass} title={target}>
+        </Typography>
+        <Typography as="span" variant="caption" tone="inherit" aria-hidden>
+          {' → '}
+        </Typography>
+        <Typography
+          as="code"
+          variant="caption"
+          tone="muted"
+          className={sessionTagClass}
+          title={target}
+          style={{ fontFamily: 'var(--font-mono)' }}
+        >
           {short(target)}
-        </code>
+        </Typography>
       </p>
-      <p className={reasonClass}>"{connection.reasonOpened}"</p>
+      <Typography
+        as="p"
+        variant="smallBody"
+        tone="default"
+        className={reasonClass}
+        style={{ lineHeight: '1.55', fontStyle: 'italic' }}
+      >
+        "{connection.reasonOpened}"
+      </Typography>
       <footer className={footerClass}>
         {isRepeat ? (
           <button
@@ -111,7 +152,9 @@ function RequestCard({
             data-testid="connection-block"
             title="Stop further requests from this source for 10 minutes"
           >
-            Block 10 min
+            <Typography as="span" variant="caption" tone="inherit">
+              Block 10 min
+            </Typography>
           </button>
         ) : null}
         <button
@@ -120,7 +163,9 @@ function RequestCard({
           onClick={() => onDeny(null)}
           data-testid="connection-deny"
         >
-          Deny
+          <Typography as="span" variant="caption" tone="inherit">
+            Deny
+          </Typography>
         </button>
         <button
           type="button"
@@ -128,7 +173,9 @@ function RequestCard({
           onClick={onAccept}
           data-testid="connection-accept"
         >
-          Allow connection
+          <Typography as="span" variant="caption" tone="inherit">
+            Allow connection
+          </Typography>
         </button>
       </footer>
     </article>
@@ -163,16 +210,7 @@ const cardHeaderClass = css({
   justifyContent: 'space-between',
   gap: '12px',
 });
-const kickerClass = css({
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-});
 const topicClass = css({
-  color: 'var(--text-2)',
-  fontSize: '12px',
-  fontStyle: 'italic',
   maxWidth: '50%',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -180,26 +218,17 @@ const topicClass = css({
 });
 const routeClass = css({
   margin: 0,
-  fontSize: '13px',
-  color: 'var(--text)',
   display: 'flex',
   alignItems: 'center',
   gap: '6px',
 });
 const sessionTagClass = css({
-  fontFamily: 'var(--font-mono)',
-  fontSize: '11px',
   padding: '2px 8px',
   borderRadius: '999px',
   background: 'var(--surface-hover, rgba(0,0,0,0.05))',
-  color: 'var(--text-2)',
 });
 const reasonClass = css({
   margin: 0,
-  fontSize: '14px',
-  color: 'var(--text)',
-  lineHeight: '1.55',
-  fontStyle: 'italic',
 });
 const footerClass = css({
   display: 'flex',
@@ -211,7 +240,6 @@ const denyButtonClass = css({
   border: '1px solid var(--line)',
   background: 'transparent',
   color: 'var(--text-2)',
-  fontSize: '12px',
   padding: '6px 14px',
   borderRadius: '999px',
   cursor: 'pointer',
@@ -222,18 +250,15 @@ const allowButtonClass = css({
   border: '1px solid var(--text)',
   background: 'var(--text)',
   color: 'var(--surface-0, white)',
-  fontSize: '12px',
   padding: '6px 14px',
   borderRadius: '999px',
   cursor: 'pointer',
-  fontWeight: 500,
 });
 const blockButtonClass = css({
   appearance: 'none',
   border: '1px solid currentColor',
   background: 'transparent',
   color: 'var(--status-warning, #b03f1f)',
-  fontSize: '12px',
   padding: '6px 14px',
   borderRadius: '999px',
   cursor: 'pointer',

@@ -9,6 +9,7 @@ import {
   onConnectionStateChange,
 } from '../../services/connectionsApi';
 import type { Connection, ConnectionMessage } from '../../domain';
+import { Typography } from '../primitives/Typography';
 
 /**
  * Modal-ish overlay listing every connection for a session, with each
@@ -88,8 +89,18 @@ export function ConnectionPanel({
       <div className={panelClass}>
         <header className={panelHeaderClass}>
           <div>
-            <span className={kickerClass}>Connections</span>
-            <h2 className={titleClass}>For this session</h2>
+            <Typography
+              as="span"
+              variant="tiny"
+              tone="faint"
+              uppercase
+              style={{ letterSpacing: '0.12em' }}
+            >
+              Connections
+            </Typography>
+            <Typography as="h2" variant="subtitle" tone="default" style={{ marginTop: '4px' }}>
+              For this session
+            </Typography>
           </div>
           <button
             type="button"
@@ -101,12 +112,21 @@ export function ConnectionPanel({
           </button>
         </header>
         {error ? (
-          <p className={errorClass} role="alert">
+          <Typography
+            as="p"
+            variant="smallBody"
+            tone="inherit"
+            className={errorClass}
+            role="alert"
+            style={{ color: 'var(--status-warning, #b03f1f)' }}
+          >
             {error}
-          </p>
+          </Typography>
         ) : null}
         {ordered.length === 0 ? (
-          <p className={emptyClass}>No connections yet for this session.</p>
+          <Typography as="p" variant="smallBody" tone="faint" className={emptyClass}>
+            No connections yet for this session.
+          </Typography>
         ) : (
           <ul className={listClass}>
             {ordered.map(connection => (
@@ -137,7 +157,9 @@ export function ConnectionPanel({
                       }}
                       data-testid={`connection-disconnect-${connection.id}`}
                     >
-                      Disconnect
+                      <Typography as="span" variant="caption" tone="inherit">
+                        Disconnect
+                      </Typography>
                     </button>
                   </div>
                 ) : null}
@@ -153,31 +175,88 @@ export function ConnectionPanel({
 function ConnectionHeader({ connection }: { connection: Connection }) {
   return (
     <header className={connectionHeaderClass}>
-      <span className={statusPillClass} data-status={connection.status}>
+      <Typography
+        as="span"
+        variant="tiny"
+        tone="inherit"
+        uppercase
+        className={statusPillClass}
+        data-status={connection.status}
+        style={{ letterSpacing: '0.06em' }}
+      >
         {connection.status}
-      </span>
-      <span className={topicLineClass} title={connection.reasonOpened}>
+      </Typography>
+      <Typography
+        as="span"
+        variant="smallBody"
+        tone="default"
+        className={topicLineClass}
+        title={connection.reasonOpened}
+      >
         {connection.topic ?? connection.reasonOpened}
-      </span>
+      </Typography>
     </header>
   );
 }
 
 function Transcript({ messages, emptyHint }: { messages: ConnectionMessage[]; emptyHint: string }) {
   if (messages.length === 0) {
-    return <p className={transcriptEmptyClass}>{emptyHint}</p>;
+    return (
+      <Typography
+        as="p"
+        variant="caption"
+        tone="faint"
+        className={transcriptEmptyClass}
+        style={{ fontStyle: 'italic' }}
+      >
+        {emptyHint}
+      </Typography>
+    );
   }
   return (
     <ol className={transcriptClass}>
       {messages.map(message => (
         <li key={message.id} className={messageClass}>
           <header className={messageHeaderClass}>
-            <code title={message.fromSession}>{shortId(message.fromSession)}</code>
-            <span aria-hidden> → </span>
-            <code title={message.toSession}>{shortId(message.toSession)}</code>
-            <time dateTime={message.sentAt}>{message.sentAt}</time>
+            <Typography
+              as="code"
+              variant="caption"
+              tone="muted"
+              title={message.fromSession}
+              style={{ fontFamily: 'var(--font-mono)' }}
+            >
+              {shortId(message.fromSession)}
+            </Typography>
+            <Typography as="span" variant="caption" tone="faint" aria-hidden>
+              {' → '}
+            </Typography>
+            <Typography
+              as="code"
+              variant="caption"
+              tone="muted"
+              title={message.toSession}
+              style={{ fontFamily: 'var(--font-mono)' }}
+            >
+              {shortId(message.toSession)}
+            </Typography>
+            <Typography
+              as="time"
+              variant="caption"
+              tone="faint"
+              style={{ fontFamily: 'var(--font-mono)' }}
+            >
+              {message.sentAt}
+            </Typography>
           </header>
-          <p className={messageBodyClass}>{message.body}</p>
+          <Typography
+            as="p"
+            variant="smallBody"
+            tone="default"
+            className={messageBodyClass}
+            style={{ lineHeight: '1.55', whiteSpace: 'pre-wrap' }}
+          >
+            {message.body}
+          </Typography>
         </li>
       ))}
     </ol>
@@ -215,18 +294,6 @@ const panelHeaderClass = css({
   alignItems: 'center',
   justifyContent: 'space-between',
 });
-const kickerClass = css({
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-});
-const titleClass = css({
-  margin: '4px 0 0',
-  fontSize: '20px',
-  fontWeight: 500,
-  color: 'var(--text)',
-});
 const closeButtonClass = css({
   appearance: 'none',
   background: 'transparent',
@@ -241,14 +308,10 @@ const closeButtonClass = css({
 });
 const errorClass = css({
   margin: '12px 24px',
-  color: 'var(--status-warning, #b03f1f)',
-  fontSize: '13px',
 });
 const emptyClass = css({
   margin: 0,
   padding: '32px 24px',
-  color: 'var(--text-3)',
-  fontSize: '14px',
 });
 const listClass = css({
   listStyle: 'none',
@@ -268,9 +331,6 @@ const statusPillClass = css({
   display: 'inline-block',
   padding: '2px 8px',
   borderRadius: '999px',
-  fontSize: '10.5px',
-  letterSpacing: '0.06em',
-  textTransform: 'uppercase',
   border: '1px solid var(--line)',
   color: 'var(--text-2)',
   '&[data-status="open"]': {
@@ -281,17 +341,12 @@ const statusPillClass = css({
   '&[data-status="denied"]': { color: 'var(--status-warning, #b03f1f)' },
 });
 const topicLineClass = css({
-  fontSize: '14px',
-  color: 'var(--text)',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 });
 const transcriptEmptyClass = css({
   margin: 0,
-  fontSize: '12px',
-  color: 'var(--text-3)',
-  fontStyle: 'italic',
 });
 const transcriptClass = css({
   margin: 0,
@@ -312,21 +367,10 @@ const messageHeaderClass = css({
   display: 'flex',
   alignItems: 'baseline',
   gap: '6px',
-  fontSize: '11px',
-  color: 'var(--text-3)',
-  fontFamily: 'var(--font-mono)',
-  '& code': {
-    fontSize: '11px',
-    color: 'var(--text-2)',
-  },
   '& time': { marginLeft: 'auto' },
 });
 const messageBodyClass = css({
   margin: 0,
-  fontSize: '13px',
-  color: 'var(--text)',
-  lineHeight: '1.55',
-  whiteSpace: 'pre-wrap',
 });
 const actionRowClass = css({ display: 'flex', justifyContent: 'flex-end' });
 const disconnectButtonClass = css({
@@ -334,7 +378,6 @@ const disconnectButtonClass = css({
   border: '1px solid currentColor',
   background: 'transparent',
   color: 'var(--status-warning, #b03f1f)',
-  fontSize: '12px',
   padding: '6px 14px',
   borderRadius: '999px',
   cursor: 'pointer',

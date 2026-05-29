@@ -4,6 +4,7 @@ import { css } from '../../styled-system/css';
 import { listSessionConnections } from '../../services/connectionsApi';
 import { onConnectionStateChange } from '../../services/connectionsApi';
 import type { Connection } from '../../domain';
+import { Typography } from '../primitives/Typography';
 
 /**
  * Persistent chip on a session card that shows how many open connections
@@ -63,10 +64,12 @@ export function ConnectionChip({
       data-testid={`connection-chip-${sessionId}`}
       aria-label={`${openCount} open connection${openCount === 1 ? '' : 's'}`}
     >
-      <span className={iconClass} aria-hidden>
+      <Typography as="span" variant="caption" tone="inherit" aria-hidden style={{ lineHeight: 1 }}>
         ↔
-      </span>
-      <span>{openCount}</span>
+      </Typography>
+      <Typography as="span" variant="caption" tone="inherit">
+        {openCount}
+      </Typography>
     </button>
   );
 }
@@ -81,8 +84,6 @@ const chipClass = css({
   background: 'var(--surface-hover, rgba(0,0,0,0.05))',
   border: '1px solid var(--line-faint)',
   color: 'var(--text-2)',
-  fontSize: '11px',
-  fontWeight: 500,
   cursor: 'pointer',
   transition: 'background 120ms ease, color 120ms ease',
   '&:hover': {
@@ -90,4 +91,3 @@ const chipClass = css({
     color: 'var(--text)',
   },
 });
-const iconClass = css({ fontSize: '12px', lineHeight: 1 });
