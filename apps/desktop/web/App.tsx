@@ -86,7 +86,6 @@ import type {
 import {
   TERMINAL_SURFACE,
   createTerminalCanvasRenderer,
-  makeSyntheticFrame,
   percentile,
 } from './terminal-canvas-renderer';
 import {
@@ -101,8 +100,6 @@ import type { TerminalFrame, TerminalModes, TerminalRenderer, TerminalRow } from
 import { maybeRunHarnessSmokeTest } from './harnessSmoke';
 
 
-const BENCH_FRAMES = 360;
-const DIRTY_ROWS_PER_FRAME = 8;
 
 // Opacity of the terminal's default background. 0 lets the shell background
 // (gradient + dot field) show fully through so the session feels painted onto
@@ -622,81 +619,6 @@ export function App() {
 
   useAppFocus();
 
-  async function runSyntheticBenchmark({ dirtyOnly }: { dirtyOnly: boolean }): Promise<RenderMetrics> {
-    const renderer = requireRenderer();
-    const timings: number[] = [];
-    let cellsDrawn = 0;
-    const started = performance.now();
-
-    for (let frameIndex = 0; frameIndex < BENCH_FRAMES; frameIndex += 1) {
-      const frame = makeSyntheticFrame(frameIndex, {
-        cols: renderer.cols,
-        rows: renderer.rows,
-        dirtyRowsPerFrame: DIRTY_ROWS_PER_FRAME,
-        dirtyOnly,
-      });
-      const frameStarted = performance.now();
-      renderer.paintFrame(frame);
-      const frameEnded = performance.now();
-      timings.push(frameEnded - frameStarted);
-      cellsDrawn += frame.rows.reduce((sum, row) => sum + row.cells.length, 0);
-
-      if (frameIndex % 30 === 0) {
-        await new Promise(requestAnimationFrame);
-      }
-    }
-
-    const elapsed = performance.now() - started;
-    return {
-      mode: dirtyOnly ? 'synthetic dirty-row patch' : 'synthetic full-frame repaint',
-      frames: BENCH_FRAMES,
-      cellsDrawn,
-      elapsedMs: elapsed,
-      avgFrameMs: average(timings),
-      p95FrameMs: percentile(timings, 0.95),
-      maxFrameMs: Math.max(...timings),
-      cellsPerSecond: cellsDrawn / (elapsed / 1000),
-    };
-  }
-
-  async function runGhosttyBridgeBenchmark(): Promise<RenderMetrics> {
-    requireRenderer();
-    const fetchStarted = performance.now();
-    const payload = await invoke<GhosttyFrameSequencePayload>('ghostty_frame_sequence');
-    const fetchElapsed = performance.now() - fetchStarted;
-    const timings: number[] = [];
-    let cellsDrawn = 0;
-    resetTerminalScrollback();
-    const renderStarted = performance.now();
-
-    for (let frameIndex = 0; frameIndex < payload.frames.length; frameIndex += 1) {
-      const frame = payload.frames[frameIndex];
-      const frameStarted = performance.now();
-      paintTerminalFrame(frame);
-      const frameEnded = performance.now();
-      timings.push(frameEnded - frameStarted);
-      cellsDrawn += frame.rows.reduce((sum, row) => sum + row.cells.length, 0);
-
-      if (frameIndex % 12 === 0) {
-        await new Promise(requestAnimationFrame);
-      }
-    }
-
-    const renderElapsed = performance.now() - renderStarted;
-    return {
-      mode: 'Ghostty frame bridge',
-      frames: payload.frames.length,
-      cellsDrawn,
-      elapsedMs: renderElapsed,
-      avgFrameMs: average(timings),
-      p95FrameMs: percentile(timings, 0.95),
-      maxFrameMs: Math.max(...timings),
-      cellsPerSecond: cellsDrawn / (renderElapsed / 1000),
-      bridgeMs: fetchElapsed,
-      outputBytes: payload.output_bytes,
-    };
-  }
-
   async function attachRuntimeSessionListeners(terminalId: string, session: ShellSession): Promise<() => void> {
     requireRenderer();
     const timings: number[] = [];
@@ -1059,29 +981,6 @@ export function App() {
     }
   }
 
-  async function launchSelectedRuntimeSession() {
-    if (!selectedSession) {
-      writeLog('Select a Reverie shell session before launching.');
-      return;
-    }
-    await launchRuntimeSession(selectedSession);
-  }
-
-  async function terminateActiveTerminal() {
-    if (!activeTerminalId) return;
-
-    setBusy(true);
-    try {
-      await invoke('terminate_session', { terminalId: activeTerminalId });
-      writeLog(`Terminate requested for terminal ${shortId(activeTerminalId)}.`);
-    } catch (error) {
-      writeLog(`Terminate failed: ${errorMessage(error)}`);
-      throw error;
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function sendTerminalInput(input: string) {
     if (!activeTerminalId || !terminalInputArmed || input.length === 0) return;
 
@@ -1198,32 +1097,6 @@ export function App() {
       throw new Error('Terminal renderer is not mounted yet');
     }
     return renderer;
-  }
-
-  async function runSyntheticProof() {
-    setSurfaceMode('terminal');
-    setBusy(true);
-    try {
-      const full = await runSyntheticBenchmark({ dirtyOnly: false });
-      const dirty = await runSyntheticBenchmark({ dirtyOnly: true });
-      setMetrics([full, dirty]);
-      writeLog(`Paint proof complete: avg=${full.avgFrameMs.toFixed(3)}ms p95=${full.p95FrameMs.toFixed(3)}ms.`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function runGhosttyBridgeProof() {
-    setSurfaceMode('terminal');
-    setBusy(true);
-    try {
-      const result = await runGhosttyBridgeBenchmark();
-      setMetrics([result]);
-      await recordMetrics(result);
-      writeLog(`Ghostty bridge complete: frames=${result.frames} avg=${result.avgFrameMs.toFixed(3)}ms p95=${result.p95FrameMs.toFixed(3)}ms.`);
-    } finally {
-      setBusy(false);
-    }
   }
 
   function activateSessionTerminal(session: ShellSession): boolean {
