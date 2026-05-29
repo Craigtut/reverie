@@ -15,6 +15,7 @@
 
 use std::{
     collections::HashMap,
+    io::Read,
     net::SocketAddr,
     sync::{Arc, Mutex,
         mpsc::{self, Receiver, Sender},
@@ -161,6 +162,11 @@ pub fn start_hook_server() -> Result<HookServerHandle> {
     })
 }
 
+/// Upper bound on hook request bodies. Claude/Codex hook envelopes are small
+/// JSON objects; anything larger on this localhost endpoint is malformed or
+/// hostile and is rejected rather than buffered.
+const MAX_HOOK_BODY_BYTES: usize = 64 * 1024;
+
 fn run_request_loop(
     server: Arc<Server>,
     sequences: Arc<Mutex<HashMap<String, u64>>>,
@@ -192,9 +198,27 @@ fn run_request_loop(
             continue;
         };
 
+        // Cap the body twice: by the declared Content-Length, and again by the
+        // bytes actually read, in case the length is absent or lies.
+        if request
+            .body_length()
+            .is_some_and(|len| len > MAX_HOOK_BODY_BYTES)
+        {
+            let _ = request.respond(simple_response(413, "payload too large"));
+            continue;
+        }
         let mut body = String::new();
-        if request.as_reader().read_to_string(&mut body).is_err() {
+        if request
+            .as_reader()
+            .take((MAX_HOOK_BODY_BYTES + 1) as u64)
+            .read_to_string(&mut body)
+            .is_err()
+        {
             let _ = request.respond(simple_response(400, "invalid utf-8 body"));
+            continue;
+        }
+        if body.len() > MAX_HOOK_BODY_BYTES {
+            let _ = request.respond(simple_response(413, "payload too large"));
             continue;
         }
         let payload: Value = match serde_json::from_str(&body) {
@@ -331,7 +355,10 @@ fn translate_claude(
                 .unwrap_or_else(|| "Claude Code reported an error".to_owned()),
         ),
         "SessionEnd" => build_state_done(&session_id, timestamp, sequence, cwd, ExitReason::Eof),
-        _ => return None,
+        // Unknown but well-formed events advance liveness rather than vanishing:
+        // treat them as a Working heartbeat so the dashboard does not stick on a
+        // stale state when a CLI emits a hook we do not model yet.
+        _ => build_simple_state(&session_id, timestamp, sequence, cwd, ActivityStatus::Working),
     };
 
     Some(HookActivityUpdate::State {
@@ -372,7 +399,9 @@ fn translate_codex(
             cwd,
             ActivityStatus::AwaitingInput,
         ),
-        _ => return None,
+        // Mirror translate_claude: unknown but well-formed events become a
+        // Working heartbeat instead of being silently dropped.
+        _ => build_simple_state(&session_id, timestamp, sequence, cwd, ActivityStatus::Working),
     };
 
     Some(HookActivityUpdate::State {
@@ -762,5 +791,79 @@ mod tests {
             response.starts_with("HTTP/1.1 401"),
             "after revoke: {response}"
         );
+    }
+
+    #[test]
+    fn oversized_body_returns_413_without_emitting() {
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let filler = "x".repeat(MAX_HOOK_BODY_BYTES + 1024);
+        let body = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "s-big",
+            "cwd": "/repo",
+            "message": filler
+        })
+        .to_string();
+        assert!(body.len() > MAX_HOOK_BODY_BYTES);
+
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 413"), "response: {response}");
+        assert!(handle.events.try_recv().is_err());
+    }
+
+    #[test]
+    fn unknown_claude_event_becomes_working_heartbeat() {
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({
+            "hook_event_name": "NotifyCompaction",
+            "session_id": "claude-unknown",
+            "cwd": "/repo"
+        })
+        .to_string();
+
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+
+        match wait_for_update(&handle) {
+            HookActivityUpdate::State {
+                source,
+                native_session_id,
+                state,
+                ..
+            } => {
+                assert_eq!(source, HookSource::ClaudeCode);
+                assert_eq!(native_session_id, "claude-unknown");
+                assert_eq!(state.status, ActivityStatus::Working);
+            }
+            other => panic!("expected State, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_codex_event_becomes_working_heartbeat() {
+        let handle = started_with_token(HookSource::CodexCli);
+        let body = serde_json::json!({
+            "hook_event_name": "NotifyCompaction",
+            "session_id": "codex-unknown",
+            "cwd": "/repo"
+        })
+        .to_string();
+
+        let response = post_hook(handle.port(), &codex_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+
+        match wait_for_update(&handle) {
+            HookActivityUpdate::State {
+                source,
+                native_session_id,
+                state,
+                ..
+            } => {
+                assert_eq!(source, HookSource::CodexCli);
+                assert_eq!(native_session_id, "codex-unknown");
+                assert_eq!(state.status, ActivityStatus::Working);
+            }
+            other => panic!("expected State, got {other:?}"),
+        }
     }
 }
