@@ -1437,6 +1437,88 @@ mod tests {
     }
 
     #[test]
+    fn request_connection_returns_existing_pending_for_same_pair() {
+        // Phase-7 review fix: a second request_connection call before the
+        // first decides must return the existing Pending rather than stack
+        // a duplicate request.
+        let svc = service();
+        let focus = focus_id(0x10);
+        register(
+            &svc,
+            session_id(0x01),
+            address(AgentKind::ClaudeCode, None, (focus, "F"), "C"),
+        );
+        register(
+            &svc,
+            session_id(0x02),
+            address(AgentKind::CortexCode, None, (focus, "F"), "X"),
+        );
+
+        let first = svc
+            .request_connection(session_id(0x01), session_id(0x02), "r", "t0", "t10")
+            .unwrap();
+        let (conn_id, request_id) = match first {
+            RequestOutcome::Pending {
+                connection_id,
+                request_id,
+            } => (connection_id, request_id),
+            other => panic!("expected Pending, got {other:?}"),
+        };
+
+        let second = svc
+            .request_connection(session_id(0x01), session_id(0x02), "r-again", "t1", "t11")
+            .unwrap();
+        match second {
+            RequestOutcome::Pending {
+                connection_id,
+                request_id: second_request_id,
+            } => {
+                assert_eq!(connection_id, conn_id, "same connection record returned");
+                assert_eq!(
+                    second_request_id, request_id,
+                    "same request id returned, no duplicate registered"
+                );
+            }
+            other => panic!("expected Pending dedupe, got {other:?}"),
+        }
+        assert_eq!(svc.list_pending_requests().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_messages_does_not_stamp_delivery() {
+        // Phase-7 review fix: a UI panel reading the transcript must not
+        // consume the agent-facing delivery signal.
+        let svc = service();
+        let focus = focus_id(0x10);
+        register(
+            &svc,
+            session_id(0x01),
+            address(AgentKind::ClaudeCode, None, (focus, "F"), "C"),
+        );
+        register(
+            &svc,
+            session_id(0x02),
+            address(AgentKind::CortexCode, None, (focus, "F"), "X"),
+        );
+        let conn = svc
+            .user_open(session_id(0x01), session_id(0x02), "r", "t0")
+            .unwrap();
+        svc.send_message(session_id(0x01), conn, "hello", "t1")
+            .unwrap();
+        let transcript = svc.list_messages(session_id(0x01), conn, 0).unwrap();
+        assert_eq!(transcript.len(), 1);
+        assert!(
+            transcript[0].delivered_at.is_none(),
+            "list_messages must not stamp delivered_at"
+        );
+        let inbound = svc
+            .pending_messages(session_id(0x02), conn, 0, "t2")
+            .unwrap();
+        assert_eq!(inbound.len(), 1);
+        assert_eq!(inbound[0].delivered_at.as_deref(), Some("t2"));
+    }
+
+    #[test]
     fn request_connection_rejects_self_request() {
         let svc = service();
         register(
