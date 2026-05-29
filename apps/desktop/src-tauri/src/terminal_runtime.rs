@@ -56,7 +56,6 @@ pub struct TerminalStreamRequest {
     pub spawn_spec: TerminalSpawnSpec,
     pub max_scrollback: usize,
     pub target_frames: Option<usize>,
-    pub legacy_proof_events: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -157,10 +156,7 @@ impl TerminalSessionRuntime {
                 terminal_id: Some(request.terminal_id),
                 message: failure_message,
             };
-            let _ = app.emit("terminal_failed", failure.clone());
-            if request.legacy_proof_events {
-                let _ = app.emit("reverie-terminal-stream-failed", failure);
-            }
+            let _ = app.emit("terminal_failed", failure);
         });
 
         Ok(terminal_id)
@@ -255,10 +251,7 @@ impl TerminalSessionRuntime {
             target_frames: request.target_frames,
         };
         app.emit("session_status_changed", started_payload.clone())?;
-        app.emit("terminal_stream_started", started_payload.clone())?;
-        if request.legacy_proof_events {
-            app.emit("reverie-terminal-stream-started", started_payload)?;
-        }
+        app.emit("terminal_stream_started", started_payload)?;
 
         let started = Instant::now();
         let mut bytes_read = 0_usize;
@@ -288,7 +281,6 @@ impl TerminalSessionRuntime {
                     bytes_since_last_frame,
                     started,
                     &mut terminal,
-                    request.legacy_proof_events,
                 )?;
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
@@ -333,7 +325,6 @@ impl TerminalSessionRuntime {
                     bytes_since_last_frame,
                     started,
                     &mut terminal,
-                    request.legacy_proof_events,
                 )?;
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
@@ -355,7 +346,6 @@ impl TerminalSessionRuntime {
                 bytes_since_last_frame,
                 started,
                 &mut terminal,
-                request.legacy_proof_events,
             )?;
             total_emit_ms += emit_ms;
             max_emit_ms = max_emit_ms.max(emit_ms);
@@ -392,10 +382,7 @@ impl TerminalSessionRuntime {
         persist_cortex_session_after_launch(&app, request.session_id, launch_started_ms);
         persist_shell_session_finished(&app, request.session_id, child_success);
         app.emit("terminal_exit", finished.clone())?;
-        app.emit("session_status_changed", finished.clone())?;
-        if request.legacy_proof_events {
-            app.emit("reverie-terminal-stream-finished", finished)?;
-        }
+        app.emit("session_status_changed", finished)?;
 
         Ok(())
     }
@@ -544,7 +531,6 @@ fn emit_terminal_frame_event(
     chunk_bytes: usize,
     started: Instant,
     terminal: &mut GhosttyTerminalState<'_, '_>,
-    legacy_proof_events: bool,
 ) -> Result<f64> {
     let event = TerminalFrameEvent {
         session_id,
@@ -557,10 +543,7 @@ fn emit_terminal_frame_event(
     };
 
     let emit_started = Instant::now();
-    app.emit("terminal_frame", event.clone())?;
-    if legacy_proof_events {
-        app.emit("reverie-terminal-stream-frame", event)?;
-    }
+    app.emit("terminal_frame", event)?;
 
     Ok(emit_started.elapsed().as_secs_f64() * 1000.0)
 }
@@ -754,7 +737,6 @@ mod tests {
             },
             max_scrollback: 100,
             target_frames: Some(1),
-            legacy_proof_events: false,
         };
 
         runtime.register_starting(&request).unwrap();

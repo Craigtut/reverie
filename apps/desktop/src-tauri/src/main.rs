@@ -30,7 +30,6 @@ use terminal_runtime::{TerminalSessionRecord, TerminalSessionRuntime, TerminalSt
 const PROOF_COLS: u16 = 120;
 const PROOF_ROWS: u16 = 36;
 const PROOF_FRAMES: usize = 180;
-const STREAM_FRAMES: usize = 240;
 const WINDOW_CORNER_RADIUS: f64 = 44.0;
 
 #[cfg(target_os = "macos")]
@@ -389,7 +388,6 @@ fn start_session(
                 spawn_spec,
                 max_scrollback: request.max_scrollback.unwrap_or(10_000),
                 target_frames: None,
-                legacy_proof_events: false,
             },
         )
         .map_err(|err| err.to_string())
@@ -438,28 +436,6 @@ fn assert_safe_cli_env(
     }
 
     Ok(())
-}
-
-#[tauri::command]
-fn start_live_pty_stream_proof(
-    app: AppHandle,
-    runtime: State<'_, TerminalSessionRuntime>,
-) -> Result<(), String> {
-    let spec = live_stream_spawn_spec().map_err(|err| err.to_string())?;
-    runtime
-        .spawn_session_stream(
-            app,
-            TerminalStreamRequest {
-                session_id: None,
-                terminal_id: TerminalId::new_v4(),
-                spawn_spec: spec,
-                max_scrollback: STREAM_FRAMES + PROOF_ROWS as usize + 100,
-                target_frames: Some(STREAM_FRAMES),
-                legacy_proof_events: true,
-            },
-        )
-        .map(|_| ())
-        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -648,7 +624,6 @@ fn main() {
             archive_project,
             capture_cortex_session,
             start_session,
-            start_live_pty_stream_proof,
             list_terminal_sessions,
             write_terminal_input,
             resize_terminal,
@@ -874,40 +849,6 @@ fn build_ghostty_frame_sequence() -> Result<GhosttyFrameSequence> {
         output_bytes,
         frames,
     })
-}
-
-fn live_stream_spawn_spec() -> Result<TerminalSpawnSpec> {
-    let script = live_stream_script();
-    let cwd = env::current_dir().context("failed to resolve current directory for proof PTY")?;
-    let mut command = CommandSpec::new("/bin/sh", cwd);
-    command.args.push("-lc".to_owned());
-    command.args.push(script);
-
-    Ok(TerminalSpawnSpec {
-        command,
-        cols: PROOF_COLS,
-        rows: PROOF_ROWS,
-        title: Some("Live PTY stream proof".to_owned()),
-    })
-}
-
-fn live_stream_script() -> String {
-    format!(
-        r#"printf '\033[2J\033[H\033[1;36mReverie live PTY -> Ghostty -> Tauri event stream\033[0m\r\n'
-printf 'controlled shell output, dirty-row canvas rendering, bridge cadence metrics\r\n'
-i=1
-while [ $i -le {frames} ]; do
-  r=$((96 + (i * 3) % 128))
-  g=$((160 + (i * 5) % 80))
-  b=$((208 + (i * 7) % 48))
-  printf '\033[38;2;%s;%s;%smtauri-live-stream-%03d\033[0m payload: PTY bytes -> Ghostty state -> Tauri event -> Canvas dirty rows café 🚀\r\n' "$r" "$g" "$b" "$i"
-  if [ $((i % 4)) -eq 0 ]; then sleep 0.005; fi
-  i=$((i + 1))
-done
-printf '\033[1;32mtauri-live-stream-complete\033[0m\r\n'
-"#,
-        frames = STREAM_FRAMES
-    )
 }
 
 #[cfg(test)]
