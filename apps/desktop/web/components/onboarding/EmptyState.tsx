@@ -6,6 +6,7 @@ import type { AgentCliDetection } from '../../domain';
 import { DotMatrixWord } from '../brand';
 import { AgentGlyph } from '../glyphs';
 import { cliChoiceClass, cliChoiceGridClass } from '../primitives/cliChoice';
+import { Typography } from '../primitives/Typography';
 
 // First-run onboarding panel shown when the workspace has no focuses yet:
 // the brand wordmark, the create-project/focus/settings actions, the
@@ -48,16 +49,14 @@ export function EmptyState({
     background:
       'linear-gradient(135deg, color-mix(in srgb, var(--surface-2) 72%, transparent), color-mix(in srgb, var(--surface-1) 88%, transparent))',
     boxShadow: 'var(--shadow)',
-    '& p': { maxWidth: '520px', lineHeight: 1.7, textAlign: 'left' },
+  });
+  const onboardingProseClass = css({
+    maxWidth: '520px',
   });
   const onboardingKickerClass = css({
     display: 'inline-flex',
     alignItems: 'center',
     gap: '8px',
-    color: 'var(--text-3)',
-    fontSize: '12px',
-    letterSpacing: '0.08em',
-    textTransform: 'uppercase',
   });
   const onboardingStepsClass = css({
     display: 'grid',
@@ -71,8 +70,6 @@ export function EmptyState({
     border: '1px solid var(--line)',
     background: 'color-mix(in srgb, var(--surface-1) 78%, transparent)',
     textAlign: 'left',
-    '& strong': { color: 'var(--text)', fontSize: '13px' },
-    '& span': { color: 'var(--text-3)', fontSize: '12px', lineHeight: 1.55 },
   });
   const onboardingSafetyToggleClass = css({
     display: 'inline-flex',
@@ -92,8 +89,6 @@ export function EmptyState({
       border: 0,
       background: 'transparent',
       color: 'var(--text-3)',
-      fontSize: '11.5px',
-      fontWeight: 500,
       cursor: 'pointer',
       transition: 'background 140ms ease, color 140ms ease',
     },
@@ -112,7 +107,6 @@ export function EmptyState({
     display: 'grid',
     gap: '8px',
     paddingTop: '2px',
-    '& > span': { color: 'var(--text-3)', fontSize: '12px', textAlign: 'left' },
   });
 
   return (
@@ -125,38 +119,63 @@ export function EmptyState({
       >
         <div className={onboardingGridClass}>
           <section className={onboardingHeroClass} data-testid="onboarding-hero">
-            <span className={onboardingKickerClass}>
+            <Typography
+              as="span"
+              variant="caption"
+              tone="faint"
+              uppercase
+              className={onboardingKickerClass}
+              style={{ letterSpacing: '0.08em' }}
+            >
               <TerminalWindow size={14} /> First run
-            </span>
+            </Typography>
             <DotMatrixWord />
-            <p>
+            <Typography
+              as="p"
+              variant="smallBody"
+              tone="inherit"
+              align="left"
+              className={onboardingProseClass}
+              style={{ lineHeight: 1.7 }}
+            >
               Start by giving Reverie one real working context. Create a project for folder-backed
               work, or keep it general when the agent session is not tied to a repo.
-            </p>
+            </Typography>
             <div className={emptyActionsClass}>
               <button
                 type="button"
                 data-testid="empty-create-project-button"
                 onClick={createProject}
               >
-                <Plus size={14} /> Create project
+                <Plus size={14} />{' '}
+                <Typography as="span" variant="smallBody" tone="inherit">
+                  Create project
+                </Typography>
               </button>
               <button type="button" data-testid="empty-create-focus-button" onClick={createFocus}>
-                <Plus size={14} /> General focus
+                <Plus size={14} />{' '}
+                <Typography as="span" variant="smallBody" tone="inherit">
+                  General focus
+                </Typography>
               </button>
               <button type="button" data-testid="empty-settings-button" onClick={openSettings}>
-                <GearSix size={14} /> Settings
+                <GearSix size={14} />{' '}
+                <Typography as="span" variant="smallBody" tone="inherit">
+                  Settings
+                </Typography>
               </button>
             </div>
           </section>
 
           <aside className={onboardingStepsClass} data-testid="onboarding-steps">
             <div className={onboardingStepClass} data-testid="onboarding-safety-step">
-              <strong>Auto-approve default</strong>
-              <span>
+              <Typography as="strong" variant="smallBodyAlt" tone="default">
+                Auto-approve default
+              </Typography>
+              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
                 Off by default. New sessions launch with full prompts unless you choose otherwise.
                 You can override per session anytime.
-              </span>
+              </Typography>
               <div
                 className={onboardingSafetyToggleClass}
                 role="radiogroup"
@@ -170,7 +189,9 @@ export function EmptyState({
                   data-testid="onboarding-safety-off"
                   onClick={() => onSetWorkspaceDefaultDangerousMode(false)}
                 >
-                  Off
+                  <Typography as="span" variant="caption" tone="inherit">
+                    Off
+                  </Typography>
                 </button>
                 <button
                   type="button"
@@ -180,24 +201,41 @@ export function EmptyState({
                   data-testid="onboarding-safety-on"
                   onClick={() => onSetWorkspaceDefaultDangerousMode(true)}
                 >
-                  <ShieldWarning size={11} /> Auto-approve
+                  <ShieldWarning size={11} />{' '}
+                  <Typography as="span" variant="caption" tone="inherit">
+                    Auto-approve
+                  </Typography>
                 </button>
               </div>
             </div>
             <div className={onboardingStepClass}>
-              <strong>1. Project</strong>
-              <span>Optional folder-backed context for long-running work.</span>
+              <Typography as="strong" variant="smallBodyAlt" tone="default">
+                1. Project
+              </Typography>
+              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
+                Optional folder-backed context for long-running work.
+              </Typography>
             </div>
             <div className={onboardingStepClass}>
-              <strong>2. Focus</strong>
-              <span>The human-sized thread inside a project or workspace.</span>
+              <Typography as="strong" variant="smallBodyAlt" tone="default">
+                2. Focus
+              </Typography>
+              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
+                The human-sized thread inside a project or workspace.
+              </Typography>
             </div>
             <div className={onboardingStepClass}>
-              <strong>3. Session</strong>
-              <span>Choose a detected CLI, set the cwd, then launch or resume.</span>
+              <Typography as="strong" variant="smallBodyAlt" tone="default">
+                3. Session
+              </Typography>
+              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
+                Choose a detected CLI, set the cwd, then launch or resume.
+              </Typography>
             </div>
             <div className={onboardingCliClass} data-testid="onboarding-cli-summary">
-              <span>{availableCliCount} CLI choices available in this harness</span>
+              <Typography as="span" variant="caption" tone="faint" align="left">
+                {availableCliCount} CLI choices available in this harness
+              </Typography>
               <div className={cliChoiceGridClass}>
                 {visibleDetections.map(detection => (
                   <button
