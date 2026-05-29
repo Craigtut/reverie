@@ -1,0 +1,67 @@
+name: Release
+
+# Pushing a version tag (e.g. v0.1.0) kicks off the release builds.
+on:
+  push:
+    tags:
+      - "v*"
+
+# Bundling works: the macOS .app/.dmg builds with libghostty-vt.dylib bundled
+# into Contents/Frameworks and resolved via a baked rpath (no runtime
+# DYLD_LIBRARY_PATH). See docs/technical/packaging-and-distribution.md.
+#
+# To produce SIGNED + NOTARIZED macOS builds, add the Apple secrets referenced
+# below under repo Settings > Secrets and variables > Actions. Without them the
+# build still succeeds but is only ad-hoc signed (users hit Gatekeeper warnings).
+# Reverie targets macOS (Apple Silicon) only.
+
+permissions:
+  contents: write # needed to create the GitHub Release and upload assets
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release (macOS, Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      # libghostty-vt requires the Zig 0.15.x toolchain to build.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - run: npm ci
+      # Build the web assets up front so frontendDist exists before bundling.
+      - name: Build web assets
+        run: npm run build:web
+      - name: Build and publish the desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS code signing + notarization: add these secrets to produce a
+          # signed, notarized build. Without them the build is only ad-hoc signed.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop/src-tauri
+          args: --target aarch64-apple-darwin
+          tagName: ${{ github.ref_name }}
+          releaseName: Reverie ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false

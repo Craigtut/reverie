@@ -1,0 +1,35 @@
+name: Bug report
+description: Something is not working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to file a report. Please fill in what you can.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: When I ..., Reverie ... but I expected ...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Reverie
+        2. ...
+        3. See the issue
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Reverie version / commit
+      placeholder: 0.1.0 or a git commit SHA
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, the agent CLI involved (Claude Code, Codex, Cortex), etc.

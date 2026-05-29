@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an idea or improvement for Reverie
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Ideas are welcome. Reverie is a calm, local-first agentic workspace, not an IDE, so please keep that framing in mind.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the need or friction, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Reverie to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

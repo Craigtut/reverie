@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend (lint, typecheck, build, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Hard gate: lint rules are clean today, so this blocks NEW lint errors.
+      - name: Biome lint
+        run: npx biome lint .
+      # Hard gate: the repo has a one-time Biome-formatted baseline, so this
+      # blocks any unformatted code. Run `npm run format` to fix locally.
+      - name: Biome format check
+        run: npx biome format .
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm run test:unit
+      - name: Build web
+        run: npm run build:web
+
+  rust-core:
+    name: Rust core (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    # The root workspace (reverie-core, persistence, bridge) is pure Rust and
+    # does NOT link libghostty-vt, so it needs no Zig toolchain.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Soft gate until a one-time `cargo fmt` baseline lands. Flip to false after.
+      - name: rustfmt check
+        run: cargo fmt --check
+        continue-on-error: true
+      # clippy fails on errors; warnings stay advisory for now. Add `-- -D warnings`
+      # once the tree is warning-clean to make warnings a hard gate.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+      - name: test
+        run: cargo test --workspace
+
+  desktop:
+    name: Desktop crate (macOS)
+    # Reverie targets macOS (Apple Silicon) only. macos-latest runners are arm64.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # libghostty-vt requires the Zig 0.15.x toolchain to build.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - name: rustfmt check
+        run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --check
+        continue-on-error: true
+      - name: clippy
+        run: cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets
+      - name: Build desktop crate
+        run: cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml
+      # No DYLD_LIBRARY_PATH needed: cargo injects the build-output library path
+      # for the test binary it launches.
+      - name: Test desktop crate
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
