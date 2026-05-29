@@ -206,3 +206,5 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     createSessionForSelection,
   };
 }
+
+export type CreationForm = ReturnType<typeof useCreationForm>;

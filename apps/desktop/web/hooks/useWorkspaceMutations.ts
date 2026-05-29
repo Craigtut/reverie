@@ -207,3 +207,5 @@ export function useWorkspaceMutations({ model, terminal, selectSessionTab }: Wor
     archiveProjectRecord,
   };
 }
+
+export type WorkspaceMutations = ReturnType<typeof useWorkspaceMutations>;

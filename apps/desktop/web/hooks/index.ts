@@ -10,5 +10,8 @@ export type { TerminalSession } from './useTerminalSession';
 export { useWorkspaceModel } from './useWorkspaceModel';
 export type { WorkspaceModel } from './useWorkspaceModel';
 export { useShellNavigation } from './useShellNavigation';
+export type { ShellNavigation } from './useShellNavigation';
 export { useCreationForm } from './useCreationForm';
+export type { CreationForm } from './useCreationForm';
 export { useWorkspaceMutations } from './useWorkspaceMutations';
+export type { WorkspaceMutations } from './useWorkspaceMutations';

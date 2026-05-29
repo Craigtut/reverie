@@ -105,3 +105,5 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
 
   return { selectSessionTab, goToDashboard, openSessionFromDashboard, openFocus, openSessionHistory };
 }
+
+export type ShellNavigation = ReturnType<typeof useShellNavigation>;
