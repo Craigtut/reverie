@@ -39,7 +39,7 @@ pub use domain::{
     AgentKind, Focus, NativeSessionRef, Project, Session, SessionStatus, WorkspaceSettings,
 };
 pub use terminal::{
-    TerminalBackend, TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors,
+    TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors,
     TerminalCursor, TerminalCursorStyle, TerminalDirtyState, TerminalEvent, TerminalFrame,
     TerminalFramePatch, TerminalId, TerminalPosition, TerminalRow, TerminalSnapshot,
     TerminalSpawnSpec, TerminalUnderline,

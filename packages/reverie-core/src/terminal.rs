@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -186,20 +185,6 @@ pub enum TerminalEvent {
         terminal_id: TerminalId,
         exit_code: Option<i32>,
     },
-}
-
-/// Terminal service boundary used by the app layer.
-///
-/// Implementations may be backed by Ghostty VT state, another renderer, or a
-/// test double. Reverie's product/domain model should never depend on which
-/// backend is active.
-pub trait TerminalBackend {
-    fn spawn(&mut self, spec: TerminalSpawnSpec) -> Result<TerminalId>;
-    fn write_input(&mut self, terminal_id: TerminalId, bytes: &[u8]) -> Result<()>;
-    fn resize(&mut self, terminal_id: TerminalId, cols: u16, rows: u16) -> Result<()>;
-    fn snapshot(&self, terminal_id: TerminalId) -> Result<TerminalSnapshot>;
-    fn drain_events(&mut self, terminal_id: TerminalId) -> Result<Vec<TerminalEvent>>;
-    fn terminate(&mut self, terminal_id: TerminalId) -> Result<()>;
 }
 
 #[cfg(test)]
