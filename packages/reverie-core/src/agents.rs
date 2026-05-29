@@ -48,6 +48,16 @@ pub struct LaunchContext {
     pub executable_path: Option<PathBuf>,
 }
 
+/// Inputs for adapter-driven native-session discovery after a launch.
+/// `agent_home` is the CLI's home directory (e.g. `CORTEX_HOME`), resolved by
+/// the shell so core stays free of environment lookups for it.
+#[derive(Clone, Debug)]
+pub struct DiscoveryContext {
+    pub cwd: PathBuf,
+    pub launched_after_ms: Option<i64>,
+    pub agent_home: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterDetection {
@@ -96,6 +106,15 @@ pub trait AgentAdapter: Send + Sync {
 
     fn dangerous_mode_arg(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Discover the native session this CLI created for `ctx.cwd`, if any.
+    /// Defaults to no discovery: adapters that record sessions on disk (Cortex
+    /// today; Claude/Codex JSONL scanners are still TODO) override this. The
+    /// caller only persists the returned ref; it does not interpret it.
+    fn discover_native_session(&self, ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
+        let _ = ctx;
+        Ok(None)
     }
 }
 
@@ -297,6 +316,22 @@ impl AgentAdapter for CortexAdapter {
 
     fn dangerous_mode_arg(&self) -> Option<&'static str> {
         Some("--yolo")
+    }
+
+    fn discover_native_session(&self, ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
+        let Some(cortex_home) = ctx.agent_home.as_ref() else {
+            return Ok(None);
+        };
+        match CortexSessionMetadata::discover_latest_for_cwd(
+            cortex_home,
+            &ctx.cwd,
+            ctx.launched_after_ms,
+        )? {
+            Some(discovery) => Ok(Some(
+                discovery.metadata.into_native_ref(discovery.metadata_path),
+            )),
+            None => Ok(None),
+        }
     }
 }
 
@@ -759,5 +794,38 @@ mod tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("reverie-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn cortex_adapter_discovers_native_session_via_context() {
+        let root = temp_root("cortex-adapter-discovery");
+        let cortex_home = root.join(".cortex");
+        let cwd = root.join("project");
+        fs::create_dir_all(&cwd).unwrap();
+        write_cortex_meta(&cortex_home, "sess-1", &cwd, 2_000);
+
+        let adapter = CortexAdapter;
+        let native = adapter
+            .discover_native_session(&DiscoveryContext {
+                cwd: cwd.clone(),
+                launched_after_ms: Some(1_000),
+                agent_home: Some(cortex_home),
+            })
+            .unwrap()
+            .expect("matching Cortex session is discovered");
+        assert_eq!(native.kind, AgentKind::CortexCode);
+        assert_eq!(native.session_id.as_deref(), Some("sess-1"));
+
+        // No agent_home means no filesystem discovery.
+        let none = adapter
+            .discover_native_session(&DiscoveryContext {
+                cwd,
+                launched_after_ms: None,
+                agent_home: None,
+            })
+            .unwrap();
+        assert!(none.is_none());
+
+        let _ = fs::remove_dir_all(root);
     }
 }

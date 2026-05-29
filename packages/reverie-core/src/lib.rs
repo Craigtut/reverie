@@ -35,7 +35,7 @@ pub use hook_server::{
 };
 pub use agents::{
     AdapterDetection, AgentAdapter, CommandSpec, CortexAdapter, CortexSessionDiscovery,
-    CortexSessionMetadata, LaunchContext,
+    CortexSessionMetadata, DiscoveryContext, LaunchContext,
 };
 pub use domain::{
     AgentKind, Focus, NativeSessionRef, Project, Session, SessionStatus, Workspace,

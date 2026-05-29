@@ -14,7 +14,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::activity::ActivityState;
 use crate::agents::{
-    CortexSessionMetadata, build_spawn_spec, built_in_adapters, require_detected,
+    CortexSessionMetadata, DiscoveryContext, build_spawn_spec, built_in_adapters, require_detected,
 };
 use crate::domain::{
     AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, Session,
@@ -295,6 +295,46 @@ impl WorkspaceService {
         }
         self.repo.upsert_session(&session)?;
         Ok(())
+    }
+
+    /// Run adapter-driven native-session discovery for a just-launched session
+    /// and attach the result if found. No-op (`Ok(false)`) when the session
+    /// already has a native ref or its adapter has no filesystem discovery.
+    /// `agent_home` is the relevant CLI home (e.g. CORTEX_HOME), resolved by the
+    /// caller so core stays out of environment lookups.
+    pub fn discover_and_attach_native_session(
+        &self,
+        session_id: SessionId,
+        launched_after_ms: Option<i64>,
+        agent_home: Option<PathBuf>,
+    ) -> Result<bool> {
+        let Some(session) = self.repo.get_session(session_id)? else {
+            return Ok(false);
+        };
+        if session.native_session_ref.is_some() {
+            return Ok(false);
+        }
+        let Some(adapter) = built_in_adapters()
+            .into_iter()
+            .find(|adapter| adapter.kind() == session.agent_kind)
+        else {
+            return Ok(false);
+        };
+        let context = DiscoveryContext {
+            cwd: session.cwd.clone(),
+            launched_after_ms,
+            agent_home,
+        };
+        let Some(native_session_ref) = adapter.discover_native_session(&context)? else {
+            return Ok(false);
+        };
+        self.attach_native_session(
+            session_id,
+            session.cwd.clone(),
+            native_session_ref,
+            session.agent_kind,
+        )?;
+        Ok(true)
     }
 
     /// Persist the latest activity for whichever session owns `native_session_id`.
@@ -742,5 +782,50 @@ mod tests {
         assert!(snapshot.projects.iter().find(|p| p.id == project_id).unwrap().archived);
         assert!(snapshot.focuses.iter().find(|f| f.id == focus_id).unwrap().archived);
         assert!(!snapshot.sessions.iter().find(|s| s.id == session_id).unwrap().tab_visible);
+    }
+
+    #[test]
+    fn discover_and_attach_is_noop_without_agent_home() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(focus, "Cortex".to_owned(), AgentKind::CortexCode, "/tmp".into(), None)
+            .unwrap()
+            .sessions[0]
+            .id;
+        // The Cortex adapter discovers nothing without a home to scan.
+        assert!(!service
+            .discover_and_attach_native_session(id, Some(0), None)
+            .unwrap());
+        assert!(service.snapshot().unwrap().sessions[0].native_session_ref.is_none());
+    }
+
+    #[test]
+    fn discover_and_attach_skips_session_with_existing_ref() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(
+                focus,
+                "Cortex".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp/reverie".into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        service
+            .attach_native_session(
+                id,
+                "/tmp/reverie".into(),
+                NativeSessionRef::cortex("n", None),
+                AgentKind::CortexCode,
+            )
+            .unwrap();
+        // A session that already has a ref is skipped even with a home set.
+        assert!(!service
+            .discover_and_attach_native_session(id, Some(0), Some("/nonexistent".into()))
+            .unwrap());
     }
 }
