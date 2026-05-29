@@ -8,6 +8,7 @@ import type {
 } from '../../domain';
 import { AgentGlyph, SessionStatusGlyph } from '../glyphs';
 import { ConnectionChip } from '../connections';
+import { Typography } from '../primitives/Typography';
 import { useConnectionPanelStore } from '../../store';
 
 // A single session card on the dashboard: agent glyph + live status glyph,
@@ -60,16 +61,34 @@ export function SessionDashboardCard({
           <ConnectionChip sessionId={session.id} onOpenPanel={openConnectionPanel} />
         </span>
       </div>
-      <div className={dashboardCardTitleClass}>{agentTabLabel(session)}</div>
-      <div className={dashboardCardBreadcrumbClass}>{breadcrumb}</div>
-      <div className={dashboardCardStatusClass}>{statusLabel}</div>
+      <Typography as="div" variant="smallBody" tone="default" className={dashboardCardTitleClass}>
+        {agentTabLabel(session)}
+      </Typography>
+      <Typography as="div" variant="caption" tone="faint" className={dashboardCardBreadcrumbClass}>
+        {breadcrumb}
+      </Typography>
+      <Typography
+        as="div"
+        variant="tiny"
+        tone="faint"
+        uppercase
+        style={{ letterSpacing: '0.06em' }}
+      >
+        {statusLabel}
+      </Typography>
       {permission ? (
-        <div
+        <Typography
+          as="div"
+          variant="caption"
+          tone="warn"
           className={dashboardCardPermissionClass}
+          style={{
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+          }}
           data-testid="dashboard-card-permission-summary"
         >
           {permission.displaySummary}
-        </div>
+        </Typography>
       ) : null}
     </div>
   );
@@ -115,11 +134,8 @@ const chipSlotClass = css({
   marginLeft: 'auto',
 });
 
+// Layout only; size/weight/color come from the Typography variant + tone.
 const dashboardCardTitleClass = css({
-  fontSize: '14px',
-  fontWeight: 500,
-  color: 'var(--text)',
-  letterSpacing: '-0.005em',
   width: '100%',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -127,32 +143,19 @@ const dashboardCardTitleClass = css({
 });
 
 const dashboardCardBreadcrumbClass = css({
-  fontSize: '11px',
-  color: 'var(--text-3)',
   width: '100%',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 });
 
-const dashboardCardStatusClass = css({
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.06em',
-  textTransform: 'uppercase',
-  color: 'var(--text-3)',
-});
-
 const dashboardCardPermissionClass = css({
   marginTop: '2px',
   width: '100%',
   padding: '6px 8px',
-  fontSize: '11.5px',
-  color: 'var(--warn)',
   background: 'color-mix(in srgb, var(--warn) 10%, transparent)',
   border: '1px solid color-mix(in srgb, var(--warn) 28%, transparent)',
   borderRadius: '8px',
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',

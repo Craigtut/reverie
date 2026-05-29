@@ -3,8 +3,15 @@ import { Warning } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import { activityForSession, classifyForDashboard } from '../../domain';
-import type { ActivityState, AgentCliDetection, SessionTerminalBinding, ShellSession, WorkspaceShellSnapshot } from '../../domain';
+import type {
+  ActivityState,
+  AgentCliDetection,
+  SessionTerminalBinding,
+  ShellSession,
+  WorkspaceShellSnapshot,
+} from '../../domain';
 import { EmptyState } from '../onboarding';
+import { Typography } from '../primitives/Typography';
 import { DashboardRail } from './DashboardRail';
 
 // The default surface: partitions visible sessions across attention / live /
@@ -71,22 +78,50 @@ export function DashboardSurface({
       >
         <header className={dashboardHeaderClass}>
           <div>
-            <p className={dashboardKickerClass}>Workspace</p>
-            <h1 className={dashboardTitleClass}>{shell.workspace.name}</h1>
+            <Typography
+              as="p"
+              variant="tiny"
+              tone="faint"
+              uppercase
+              style={{ letterSpacing: '0.12em' }}
+            >
+              Workspace
+            </Typography>
+            <Typography as="h1" variant="subtitle" tone="default" className={dashboardTitleClass}>
+              {shell.workspace.name}
+            </Typography>
           </div>
           <div className={dashboardCountsClass}>
-            <span data-tone={live.length > 0 ? 'live' : 'idle'} data-testid="dashboard-live-count">
+            <Typography
+              as="span"
+              variant="caption"
+              tone="muted"
+              data-tone={live.length > 0 ? 'live' : 'idle'}
+              data-testid="dashboard-live-count"
+            >
               <i style={{ background: live.length > 0 ? 'var(--good)' : 'var(--text-4)' }} />
               {live.length} live
-            </span>
-            <span data-tone={attention.length > 0 ? 'attention' : 'idle'} data-testid="dashboard-attention-count">
+            </Typography>
+            <Typography
+              as="span"
+              variant="caption"
+              tone="muted"
+              data-tone={attention.length > 0 ? 'attention' : 'idle'}
+              data-testid="dashboard-attention-count"
+            >
               <i style={{ background: attention.length > 0 ? 'var(--warn)' : 'var(--text-4)' }} />
               {attention.length} need attention
-            </span>
-            <span data-tone="recent" data-testid="dashboard-recent-count">
+            </Typography>
+            <Typography
+              as="span"
+              variant="caption"
+              tone="muted"
+              data-tone="recent"
+              data-testid="dashboard-recent-count"
+            >
               <i style={{ background: 'var(--text-4)' }} />
               {recent.length} recent
-            </span>
+            </Typography>
           </div>
         </header>
 
@@ -168,21 +203,9 @@ const dashboardHeaderClass = css({
   flexWrap: 'wrap',
 });
 
-const dashboardKickerClass = css({
-  margin: 0,
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-  color: 'var(--text-3)',
-});
-
+// Layout only; the title's size + color come from the Typography variant + tone.
 const dashboardTitleClass = css({
   margin: '4px 0 0',
-  fontSize: '22px',
-  fontWeight: 500,
-  letterSpacing: '-0.012em',
-  color: 'var(--text)',
 });
 
 const dashboardCountsClass = css({
@@ -195,9 +218,6 @@ const dashboardCountsClass = css({
     alignItems: 'center',
     gap: '7px',
     padding: '5px 11px',
-    fontSize: '11.5px',
-    fontWeight: 500,
-    color: 'var(--text-2)',
     background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
     border: '1px solid var(--line)',
     borderRadius: '999px',

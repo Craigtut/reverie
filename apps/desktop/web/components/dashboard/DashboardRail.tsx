@@ -2,7 +2,14 @@ import type { ReactNode } from 'react';
 
 import { css } from '../../styled-system/css';
 import { activityForSession } from '../../domain';
-import type { ActivityState, DashboardStatus, SessionTerminalBinding, ShellSession, WorkspaceShellSnapshot } from '../../domain';
+import type {
+  ActivityState,
+  DashboardStatus,
+  SessionTerminalBinding,
+  ShellSession,
+  WorkspaceShellSnapshot,
+} from '../../domain';
+import { Typography } from '../primitives/Typography';
 import { SessionDashboardCard } from './SessionDashboardCard';
 
 // One labelled rail of dashboard cards (attention / live / recent).
@@ -29,8 +36,18 @@ export function DashboardRail({
     <section className={dashboardRailClass} data-tone={tone} data-testid={`dashboard-rail-${tone}`}>
       <header className={dashboardRailHeaderClass}>
         {icon ? <span data-testid={`dashboard-rail-icon-${tone}`}>{icon}</span> : null}
-        <h2 style={tone === 'attention' ? { color: 'var(--warn)' } : undefined}>{title}</h2>
-        <span className={dashboardRailCountClass}>{sessions.length}</span>
+        <Typography
+          as="h2"
+          variant="caption"
+          tone={tone === 'attention' ? 'warn' : 'faint'}
+          uppercase
+          style={{ letterSpacing: '0.10em' }}
+        >
+          {title}
+        </Typography>
+        <Typography as="span" variant="caption" tone="ghost" className={dashboardRailCountClass}>
+          {sessions.length}
+        </Typography>
       </header>
       <div className={dashboardCardsClass}>
         {sessions.map(session => (
@@ -64,19 +81,10 @@ const dashboardRailHeaderClass = css({
     display: 'inline-flex',
     color: 'var(--warn)',
   },
-  '& h2': {
-    margin: 0,
-    fontSize: '11px',
-    fontWeight: 500,
-    letterSpacing: '0.10em',
-    textTransform: 'uppercase',
-    color: 'var(--text-3)',
-  },
 });
 
+// Residual only (tabular figures); size + color come from the variant + tone.
 const dashboardRailCountClass = css({
-  fontSize: '11px',
-  color: 'var(--text-4)',
   fontVariantNumeric: 'tabular-nums',
 });
 
