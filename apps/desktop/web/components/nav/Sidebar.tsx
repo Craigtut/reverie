@@ -2,8 +2,15 @@ import { CircleDashed, Folder, GearSix, House, MagnifyingGlass, Plus } from '@ph
 import { css, cx } from '../../styled-system/css';
 import { rimLitPanelClass } from '../../themes/surfaces';
 import { sessionsForProject } from '../../domain';
-import type { CreationMode, ShellFocus, ShellProject, SurfaceMode, WorkspaceShellSnapshot } from '../../domain';
+import type {
+  CreationMode,
+  ShellFocus,
+  ShellProject,
+  SurfaceMode,
+  WorkspaceShellSnapshot,
+} from '../../domain';
 import { TrafficLights } from '../chrome';
+import { Typography } from '../primitives/Typography';
 import { ProjectGroup } from './ProjectGroup';
 import { FocusRow } from './FocusRow';
 
@@ -48,7 +55,11 @@ export function Sidebar({
   onOpenSettings,
 }: SidebarProps) {
   return (
-    <aside className={cx(rimLitPanelClass, leftPanelClass)} aria-label="Reverie navigation" data-testid="left-panel">
+    <aside
+      className={cx(rimLitPanelClass, leftPanelClass)}
+      aria-label="Reverie navigation"
+      data-testid="left-panel"
+    >
       <div className={titlebarClass} data-tauri-drag-region>
         <TrafficLights />
       </div>
@@ -61,8 +72,12 @@ export function Sidebar({
         onClick={onOpenCommandPalette}
       >
         <MagnifyingGlass size={14} />
-        <span className={searchPlaceholderClass}>Search focuses, sessions…</span>
-        <span className={searchShortcutClass}>⌘K</span>
+        <Typography as="span" variant="smallBody" tone="faint" className={searchPlaceholderClass}>
+          Search focuses, sessions…
+        </Typography>
+        <Typography as="span" variant="tiny" tone="faint" className={searchShortcutClass}>
+          ⌘K
+        </Typography>
       </button>
 
       <nav className={navClass} data-testid="workspace-nav">
@@ -74,9 +89,19 @@ export function Sidebar({
           onClick={onGoToDashboard}
         >
           <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
-          <span className={homeRowLabelClass}>Home</span>
+          <Typography as="span" variant="smallBody" tone="inherit" className={homeRowLabelClass}>
+            Home
+          </Typography>
           {liveSessionCount > 0 ? (
-            <span className={homeRowMetaClass} data-testid="home-nav-live-count">{liveSessionCount} live</span>
+            <Typography
+              as="span"
+              variant="tiny"
+              tone="faint"
+              className={homeRowMetaClass}
+              data-testid="home-nav-live-count"
+            >
+              {liveSessionCount} live
+            </Typography>
           ) : null}
         </button>
 
@@ -87,75 +112,117 @@ export function Sidebar({
           active={selectedProjectId === null && surfaceMode !== 'dashboard'}
           onProjectClick={() => onSelectProject(null)}
         >
-          {shell.focuses.filter(focus => !focus.archived && !focus.projectId).map(focus => (
-            <FocusRow
-              key={focus.id}
-              focus={focus}
-              count={shell.sessions.filter(session => session.focusId === focus.id).length}
-              active={focus.id === selectedFocusId}
-              live={shell.sessions.some(session => session.focusId === focus.id && session.status === 'running')}
-              onClick={() => onOpenFocus(null, focus.id)}
-              onHistory={event => {
-                event.stopPropagation();
-                onOpenSessionHistory(null, focus.id);
-              }}
-              onRemoveFocus={event => {
-                event.stopPropagation();
-                onArchiveFocus(focus);
-              }}
-            />
-          ))}
-          <button className={addFocusRowClass} type="button" data-testid="create-focus-button" disabled={busy || !canUseAppServices} onClick={() => onOpenCreation('focus', null)}>
+          {shell.focuses
+            .filter(focus => !focus.archived && !focus.projectId)
+            .map(focus => (
+              <FocusRow
+                key={focus.id}
+                focus={focus}
+                count={shell.sessions.filter(session => session.focusId === focus.id).length}
+                active={focus.id === selectedFocusId}
+                live={shell.sessions.some(
+                  session => session.focusId === focus.id && session.status === 'running',
+                )}
+                onClick={() => onOpenFocus(null, focus.id)}
+                onHistory={event => {
+                  event.stopPropagation();
+                  onOpenSessionHistory(null, focus.id);
+                }}
+                onRemoveFocus={event => {
+                  event.stopPropagation();
+                  onArchiveFocus(focus);
+                }}
+              />
+            ))}
+          <button
+            className={addFocusRowClass}
+            type="button"
+            data-testid="create-focus-button"
+            disabled={busy || !canUseAppServices}
+            onClick={() => onOpenCreation('focus', null)}
+          >
             <Plus size={13} />
-            <span>New focus</span>
+            <Typography as="span" variant="smallBody" tone="inherit">
+              New focus
+            </Typography>
           </button>
         </ProjectGroup>
 
         <div className={sectionLabelClass}>
-          <span>Projects</span>
-          <button type="button" title="Add project" data-testid="add-project-button" disabled={busy || !canUseAppServices} onClick={() => onOpenCreation('project')}><Plus size={13} /></button>
+          <Typography
+            as="span"
+            variant="tiny"
+            tone="faint"
+            uppercase
+            style={{ letterSpacing: '0.08em' }}
+          >
+            Projects
+          </Typography>
+          <button
+            type="button"
+            title="Add project"
+            data-testid="add-project-button"
+            disabled={busy || !canUseAppServices}
+            onClick={() => onOpenCreation('project')}
+          >
+            <Plus size={13} />
+          </button>
         </div>
 
-        {shell.projects.filter(project => !project.archived).map(project => {
-          const projectFocuses = shell.focuses.filter(focus => !focus.archived && focus.projectId === project.id);
-          return (
-            <ProjectGroup
-              key={project.id}
-              icon={<Folder size={15} />}
-              title={project.name}
-              count={sessionsForProject(project.id, shell).length}
-              active={selectedProjectId === project.id}
-              onProjectClick={() => onSelectProject(project.id)}
-              onRemoveProject={event => {
-                event.stopPropagation();
-                onArchiveProject(project);
-              }}
-            >
-              {projectFocuses.map(focus => (
-                <FocusRow
-                  key={focus.id}
-                  focus={focus}
-                  count={shell.sessions.filter(session => session.focusId === focus.id).length}
-                  active={focus.id === selectedFocusId}
-                  live={shell.sessions.some(session => session.focusId === focus.id && session.status === 'running')}
-                  onClick={() => onOpenFocus(project.id, focus.id)}
-                  onHistory={event => {
-                    event.stopPropagation();
-                    onOpenSessionHistory(project.id, focus.id);
-                  }}
-                  onRemoveFocus={event => {
-                    event.stopPropagation();
-                    onArchiveFocus(focus);
-                  }}
-                />
-              ))}
-              <button className={addFocusRowClass} type="button" data-testid="create-project-focus-button" disabled={busy || !canUseAppServices} onClick={() => onOpenCreation('focus', project.id)}>
-                <Plus size={13} />
-                <span>New focus</span>
-              </button>
-            </ProjectGroup>
-          );
-        })}
+        {shell.projects
+          .filter(project => !project.archived)
+          .map(project => {
+            const projectFocuses = shell.focuses.filter(
+              focus => !focus.archived && focus.projectId === project.id,
+            );
+            return (
+              <ProjectGroup
+                key={project.id}
+                icon={<Folder size={15} />}
+                title={project.name}
+                count={sessionsForProject(project.id, shell).length}
+                active={selectedProjectId === project.id}
+                onProjectClick={() => onSelectProject(project.id)}
+                onRemoveProject={event => {
+                  event.stopPropagation();
+                  onArchiveProject(project);
+                }}
+              >
+                {projectFocuses.map(focus => (
+                  <FocusRow
+                    key={focus.id}
+                    focus={focus}
+                    count={shell.sessions.filter(session => session.focusId === focus.id).length}
+                    active={focus.id === selectedFocusId}
+                    live={shell.sessions.some(
+                      session => session.focusId === focus.id && session.status === 'running',
+                    )}
+                    onClick={() => onOpenFocus(project.id, focus.id)}
+                    onHistory={event => {
+                      event.stopPropagation();
+                      onOpenSessionHistory(project.id, focus.id);
+                    }}
+                    onRemoveFocus={event => {
+                      event.stopPropagation();
+                      onArchiveFocus(focus);
+                    }}
+                  />
+                ))}
+                <button
+                  className={addFocusRowClass}
+                  type="button"
+                  data-testid="create-project-focus-button"
+                  disabled={busy || !canUseAppServices}
+                  onClick={() => onOpenCreation('focus', project.id)}
+                >
+                  <Plus size={13} />
+                  <Typography as="span" variant="smallBody" tone="inherit">
+                    New focus
+                  </Typography>
+                </button>
+              </ProjectGroup>
+            );
+          })}
       </nav>
 
       <div className={leftFooterClass}>
@@ -167,7 +234,9 @@ export function Sidebar({
           onClick={onOpenSettings}
         >
           <GearSix size={15} weight={surfaceMode === 'settings' ? 'fill' : 'regular'} />
-          <span>Settings</span>
+          <Typography as="span" variant="smallBody" tone="inherit">
+            Settings
+          </Typography>
         </button>
       </div>
     </aside>
@@ -214,16 +283,12 @@ const searchClass = css({
 const searchPlaceholderClass = css({
   flex: 1,
   minWidth: 0,
-  fontSize: '13px',
-  color: 'var(--text-3)',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 });
 
 const searchShortcutClass = css({
-  fontSize: '10.5px',
-  color: 'var(--text-3)',
   padding: '1px 5px',
   border: '1px solid var(--line)',
   borderRadius: '4px',
@@ -261,9 +326,6 @@ function homeRowClass({ active }: { active: boolean }) {
     cursor: 'pointer',
     userSelect: 'none',
     textAlign: 'left',
-    fontSize: '13px',
-    fontWeight: 500,
-    letterSpacing: '-0.005em',
     transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
     _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
     '& svg': { color: active ? 'var(--text)' : 'var(--text-3)', flexShrink: 0 },
@@ -279,8 +341,6 @@ const homeRowLabelClass = css({
 });
 
 const homeRowMetaClass = css({
-  fontSize: '10.5px',
-  color: 'var(--text-3)',
   fontVariantNumeric: 'tabular-nums',
   padding: '1px 7px',
   border: '1px solid var(--line)',
@@ -306,11 +366,6 @@ const sectionLabelClass = css({
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
   '& button': {
     color: 'var(--text-3)',
     width: '18px',
@@ -345,12 +400,15 @@ function settingsNavRowClass({ active }: { active: boolean }) {
     cursor: 'pointer',
     userSelect: 'none',
     textAlign: 'left',
-    fontSize: '13px',
-    fontWeight: 500,
-    letterSpacing: '-0.005em',
     transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
     _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
     '& svg': { color: active ? 'var(--text)' : 'var(--text-3)', flexShrink: 0 },
-    '& span': { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    '& span': {
+      flex: 1,
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+    },
   });
 }

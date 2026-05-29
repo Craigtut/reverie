@@ -10,7 +10,8 @@ export const navRowActionWrapClass = css({
   alignItems: 'center',
   gap: '2px',
   width: '100%',
-  '&:not(:hover) [data-testid="remove-project-button"], &:not(:hover) [data-testid="remove-focus-button"]': { opacity: 0 },
+  '&:not(:hover) [data-testid="remove-project-button"], &:not(:hover) [data-testid="remove-focus-button"]':
+    { opacity: 0 },
 });
 
 export const navRowActionClass = css({
@@ -26,18 +27,16 @@ export const navRowActionClass = css({
   _hover: { color: 'var(--text)', background: 'var(--surface-2)' },
 });
 
+// Layout only; size/weight come from the Typography variant the row renders.
 export const rowLabelClass = css({
   flex: 1,
   minWidth: 0,
-  fontSize: '13px',
-  fontWeight: 450,
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 });
 
+// Residual only (tabular figures); size + color come from the variant + tone.
 export const rowMetaClass = css({
-  fontSize: '11px',
-  color: 'var(--text-4)',
   fontVariantNumeric: 'tabular-nums',
 });

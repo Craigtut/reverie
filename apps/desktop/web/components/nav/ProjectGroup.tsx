@@ -2,10 +2,19 @@ import type { MouseEvent, ReactNode } from 'react';
 import { CaretRight, X } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
+import { Typography } from '../primitives/Typography';
 import { navRowActionClass, navRowActionWrapClass, rowLabelClass, rowMetaClass } from './navStyles';
 
 // A collapsible project header in the left nav, with its focuses nested beneath.
-export function ProjectGroup({ icon, title, count, active, onProjectClick, onRemoveProject, children }: {
+export function ProjectGroup({
+  icon,
+  title,
+  count,
+  active,
+  onProjectClick,
+  onRemoveProject,
+  children,
+}: {
   icon: ReactNode;
   title: string;
   count: number;
@@ -18,13 +27,25 @@ export function ProjectGroup({ icon, title, count, active, onProjectClick, onRem
     <div className={projectGroupClass}>
       <div className={navRowActionWrapClass}>
         <button className={projectRowClass({ active })} type="button" onClick={onProjectClick}>
-          <span className={caretClass}><CaretRight size={11} weight="bold" /></span>
+          <span className={caretClass}>
+            <CaretRight size={11} weight="bold" />
+          </span>
           {icon}
-          <span className={rowLabelClass}>{title}</span>
-          <span className={rowMetaClass}>{count || ''}</span>
+          <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
+            {title}
+          </Typography>
+          <Typography as="span" variant="caption" tone="ghost" className={rowMetaClass}>
+            {count || ''}
+          </Typography>
         </button>
         {onRemoveProject ? (
-          <button className={navRowActionClass} type="button" onClick={onRemoveProject} title={`Remove project ${title}`} data-testid="remove-project-button">
+          <button
+            className={navRowActionClass}
+            type="button"
+            onClick={onRemoveProject}
+            title={`Remove project ${title}`}
+            data-testid="remove-project-button"
+          >
             <X size={11} />
           </button>
         ) : null}

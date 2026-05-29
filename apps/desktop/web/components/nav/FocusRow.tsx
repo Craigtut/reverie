@@ -3,11 +3,20 @@ import { TerminalWindow, X } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import type { ShellFocus } from '../../domain';
+import { Typography } from '../primitives/Typography';
 import { navRowActionClass, navRowActionWrapClass, rowLabelClass, rowMetaClass } from './navStyles';
 
 // A focus row in the left nav: live dot + title + session count, with
 // hover-revealed history and remove actions.
-export function FocusRow({ focus, count, active, live, onClick, onHistory, onRemoveFocus }: {
+export function FocusRow({
+  focus,
+  count,
+  active,
+  live,
+  onClick,
+  onHistory,
+  onRemoveFocus,
+}: {
   focus: ShellFocus;
   count: number;
   active: boolean;
@@ -20,13 +29,29 @@ export function FocusRow({ focus, count, active, live, onClick, onHistory, onRem
     <div className={navRowActionWrapClass}>
       <button className={focusRowClass({ active })} type="button" onClick={onClick}>
         <span className={focusDotClass({ live })} />
-        <span className={rowLabelClass}>{focus.title}</span>
-        <span className={rowMetaClass}>{count || ''}</span>
+        <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
+          {focus.title}
+        </Typography>
+        <Typography as="span" variant="caption" tone="ghost" className={rowMetaClass}>
+          {count || ''}
+        </Typography>
       </button>
-      <button className={navRowActionClass} type="button" onClick={onHistory} title={`View session history for ${focus.title}`} data-testid="focus-session-history-button">
+      <button
+        className={navRowActionClass}
+        type="button"
+        onClick={onHistory}
+        title={`View session history for ${focus.title}`}
+        data-testid="focus-session-history-button"
+      >
         <TerminalWindow size={12} />
       </button>
-      <button className={navRowActionClass} type="button" onClick={onRemoveFocus} title={`Remove focus ${focus.title}`} data-testid="remove-focus-button">
+      <button
+        className={navRowActionClass}
+        type="button"
+        onClick={onRemoveFocus}
+        title={`Remove focus ${focus.title}`}
+        data-testid="remove-focus-button"
+      >
         <X size={11} />
       </button>
     </div>
@@ -47,17 +72,19 @@ function focusRowClass({ active }: { active: boolean }) {
     textAlign: 'left',
     position: 'relative',
     _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
-    '&::before': active ? {
-      content: '""',
-      position: 'absolute',
-      left: '-8px',
-      top: '50%',
-      transform: 'translateY(-50%)',
-      width: '3px',
-      height: '16px',
-      background: 'var(--text)',
-      borderRadius: '2px',
-    } : {},
+    '&::before': active
+      ? {
+          content: '""',
+          position: 'absolute',
+          left: '-8px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          width: '3px',
+          height: '16px',
+          background: 'var(--text)',
+          borderRadius: '2px',
+        }
+      : {},
   });
 }
 
