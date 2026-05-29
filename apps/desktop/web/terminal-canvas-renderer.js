@@ -2,9 +2,9 @@ const DEFAULT_CELL_WIDTH = 9;
 const DEFAULT_CELL_HEIGHT = 18;
 const DEFAULT_FONT_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 const DEFAULT_FONT_SIZE = 14;
-const DEFAULT_FOREGROUND = '#d8dee9';
-const DEFAULT_BACKGROUND = '#0b1020';
-const DEFAULT_CURSOR = '#eceff4';
+const DEFAULT_FOREGROUND = '#e8e1d7';
+const DEFAULT_BACKGROUND = '#060605';
+const DEFAULT_CURSOR = '#f0e8dc';
 const PALETTE = [
   '#d8dee9', '#88c0d0', '#a3be8c', '#ebcb8b', '#d08770', '#b48ead', '#81a1c1'
 ];
@@ -36,6 +36,7 @@ export function createTerminalCanvasRenderer(canvas, options = {}) {
 
   ctx.scale(dpr, dpr);
   ctx.textBaseline = 'top';
+  ctx.textRendering = 'geometricPrecision';
   setFont(false);
 
   function setFont(bold) {
@@ -45,11 +46,11 @@ export function createTerminalCanvasRenderer(canvas, options = {}) {
   function colorToCss(color, fallback) {
     if (!color) return fallback;
     if (typeof color === 'string') return color;
-    return `rgb(${color.r} ${color.g} ${color.b})`;
+    return `rgb(${color.r}, ${color.g}, ${color.b})`;
   }
 
   function underlineEnabled(cell) {
-    return cell.underline || cell.style?.underline !== 'none';
+    return Boolean(cell.underline || (cell.style && cell.style.underline !== 'none'));
   }
 
   function cellBold(cell) {
@@ -64,14 +65,95 @@ export function createTerminalCanvasRenderer(canvas, options = {}) {
   }
 
   function rowsToPaint(frame) {
+    if (frame.dirty === 'clean') return [];
     if (frame.dirty === 'full') return frame.rows;
     const dirtyRows = frame.rows.filter(row => row.dirty);
-    return dirtyRows.length > 0 ? dirtyRows : frame.rows;
+    return dirtyRows;
   }
 
-  function clear() {
-    ctx.fillStyle = defaultBackground;
+  function clear(backgroundColor) {
+    ctx.fillStyle = colorToCss(backgroundColor, defaultBackground);
     ctx.fillRect(0, 0, cols * cellWidth, rows * cellHeight);
+  }
+
+  function paintBlockGlyph(text, x, y, color) {
+    const halfWidth = Math.ceil(cellWidth / 2);
+    const halfHeight = Math.ceil(cellHeight / 2);
+    ctx.fillStyle = color;
+
+    switch (text) {
+      case '█':
+        ctx.fillRect(x, y, cellWidth, cellHeight);
+        return true;
+      case '▀':
+        ctx.fillRect(x, y, cellWidth, halfHeight);
+        return true;
+      case '▄':
+        ctx.fillRect(x, y + Math.floor(cellHeight / 2), cellWidth, halfHeight);
+        return true;
+      case '▌':
+        ctx.fillRect(x, y, halfWidth, cellHeight);
+        return true;
+      case '▐':
+        ctx.fillRect(x + Math.floor(cellWidth / 2), y, halfWidth, cellHeight);
+        return true;
+      case '▖':
+        ctx.fillRect(x, y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
+        return true;
+      case '▗':
+        ctx.fillRect(x + Math.floor(cellWidth / 2), y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
+        return true;
+      case '▘':
+        ctx.fillRect(x, y, halfWidth, halfHeight);
+        return true;
+      case '▝':
+        ctx.fillRect(x + Math.floor(cellWidth / 2), y, halfWidth, halfHeight);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  function cellAt(frame, rowIndex, col) {
+    return frame.rows.find(row => row.index === rowIndex)?.cells.find(cell => cell.col === col);
+  }
+
+  function paintCursor(frame, foreground, background) {
+    const cursor = cursorPosition(frame.cursor);
+    if (!frame.cursor?.visible || !cursor) return;
+
+    const x = cursor.col * cellWidth;
+    const y = cursor.row * cellHeight;
+    const cursorColor = colorToCss(frame.colors?.cursor, defaultCursor);
+    const style = frame.cursor.style ?? 'block';
+
+    if (style === 'bar') {
+      ctx.fillStyle = cursorColor;
+      ctx.fillRect(x, y + 1, 2, cellHeight - 2);
+      return;
+    }
+
+    if (style === 'underline') {
+      ctx.fillStyle = cursorColor;
+      ctx.fillRect(x, y + cellHeight - 3, cellWidth, 2);
+      return;
+    }
+
+    if (style === 'block_hollow') {
+      ctx.strokeStyle = cursorColor;
+      ctx.strokeRect(x + 0.5, y + 0.5, cellWidth - 1, cellHeight - 1);
+      return;
+    }
+
+    ctx.fillStyle = cursorColor;
+    ctx.fillRect(x, y, cellWidth, cellHeight);
+
+    const cell = cellAt(frame, cursor.row, cursor.col);
+    if (cell?.text && cell.text !== ' ') {
+      ctx.fillStyle = background === cursorColor ? foreground : background;
+      setFont(cellBold(cell));
+      ctx.fillText(cell.text, x, y + 1);
+    }
   }
 
   function paintFrame(frame) {
@@ -84,15 +166,21 @@ export function createTerminalCanvasRenderer(canvas, options = {}) {
       ctx.fillRect(0, row.index * cellHeight, cols * cellWidth, cellHeight);
 
       for (const cell of row.cells) {
-        const bg = colorToCss(cell.bg, background);
+        const inverse = Boolean(cell.style?.inverse);
+        const fg = inverse ? colorToCss(cell.bg, background) : colorToCss(cell.fg, foreground);
+        const bg = inverse ? colorToCss(cell.fg, foreground) : colorToCss(cell.bg, background);
         if (bg !== background) {
           ctx.fillStyle = bg;
           ctx.fillRect(cell.col * cellWidth, row.index * cellHeight, cellWidth, cellHeight);
         }
 
-        ctx.fillStyle = colorToCss(cell.fg, foreground);
-        setFont(cellBold(cell));
-        ctx.fillText(cell.text, cell.col * cellWidth, row.index * cellHeight + 1);
+        const x = cell.col * cellWidth;
+        const y = row.index * cellHeight;
+        if (!paintBlockGlyph(cell.text, x, y, fg)) {
+          ctx.fillStyle = fg;
+          setFont(cellBold(cell));
+          ctx.fillText(cell.text, x, y + 1);
+        }
 
         if (underlineEnabled(cell)) {
           ctx.fillRect(cell.col * cellWidth, row.index * cellHeight + cellHeight - 3, cellWidth, 1);
@@ -100,11 +188,7 @@ export function createTerminalCanvasRenderer(canvas, options = {}) {
       }
     }
 
-    const cursor = cursorPosition(frame.cursor);
-    if (frame.cursor?.visible && cursor) {
-      ctx.strokeStyle = colorToCss(frame.colors?.cursor, defaultCursor);
-      ctx.strokeRect(cursor.col * cellWidth + 0.5, cursor.row * cellHeight + 0.5, cellWidth - 1, cellHeight - 1);
-    }
+    paintCursor(frame, foreground, background);
   }
 
   return {

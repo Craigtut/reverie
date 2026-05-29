@@ -94,7 +94,7 @@ async function runEmptyOnboardingScenario() {
 
   await waitFor(() => !queryByTestId('creation-composer'), 'session creation closes the composer');
   await expectTestId('terminal-body', 'created session opens the terminal body');
-  await waitForTextIncludes('terminal-status-label', 'Harness Codex Session', 'created Codex session starts its own terminal runtime');
+  await waitForTextIncludes('terminal-status-label', 'Running', 'created Codex session starts its own terminal runtime');
   assertDocumentIncludes('Harness Smoke Focus', 'created focus is visible in the shell');
   assertTextIncludes('terminal-meta-strip', 'Harness Codex Session', 'created session title is visible in terminal metadata');
   const codexTerminalId = await waitForTerminalId('created Codex session receives its own terminal id');
@@ -115,21 +115,24 @@ async function runEmptyOnboardingScenario() {
   await clickSessionTabWithText('Codex');
   await waitFor(() => requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') === codexTerminalId, 'clicking Codex tab reattaches its original terminal id');
   assertions.push('clicking Codex tab reattaches its original terminal id');
-  await clickSessionTabWithText('Claude Code');
+  await clickSessionTabWithText('Claude Parallel');
   await waitFor(() => requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') === claudeTerminalId, 'clicking Claude tab reattaches its original terminal id');
   assertions.push('clicking Claude tab reattaches its original terminal id');
 
   await closeActiveSessionTab();
-  await waitFor(() => ![...document.querySelectorAll('[data-testid="session-tab"]')].some(tab => tab.textContent?.includes('Claude Code')), 'closing a top tab hides it from active tabs');
+  await waitFor(() => ![...document.querySelectorAll('[data-testid="session-tab"]')].some(tab => tab.textContent?.includes('Claude Parallel')), 'closing a top tab hides it from active tabs');
   assertions.push('closing a top tab hides it from active tabs');
   await clickTestId('focus-session-history-button');
   await expectTestId('session-history-surface', 'focus history opens on the right stage');
   await waitFor(() => Boolean(document.querySelector('[data-testid="session-history-row"][data-tab-visible="false"]')), 'closed tab remains in focus session history');
   assertions.push('closed tab remains in focus session history');
   await clickTestId('restore-session-tab-button');
-  await clickSessionTabWithText('Claude Code');
-  await waitFor(() => requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') === claudeTerminalId, 'restored tab reattaches its original terminal id');
-  assertions.push('restored tab reattaches its original terminal id');
+  await clickSessionTabWithText('Claude Parallel');
+  await waitFor(() => {
+    const restoredTerminalId = requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') ?? '';
+    return restoredTerminalId.length > 0 && restoredTerminalId !== claudeTerminalId;
+  }, 'restored tab starts a fresh resumable terminal runtime');
+  assertions.push('restored tab starts a fresh resumable terminal runtime');
 
   window.location.replace(`${window.location.origin}${window.location.pathname}?fixture=empty&harnessSmoke=empty-onboarding&harnessStage=assert-persisted`);
   await new Promise<void>(() => {});
@@ -156,7 +159,7 @@ async function runPartialCliScenario() {
   await clickTestId('submit-session-button');
 
   await waitFor(() => !queryByTestId('creation-composer'), 'partial CLI session creation closes the composer');
-  await waitForTextIncludes('terminal-status-label', 'Harness Claude Session', 'created Claude session starts its own terminal runtime');
+  await waitForTextIncludes('terminal-status-label', 'Running', 'created Claude session starts its own terminal runtime');
   assertDocumentIncludes('Harness General Focus', 'General workspace focus is visible after creation');
   assertTextIncludes('terminal-meta-strip', 'Harness Claude Session', 'Claude session title is visible in terminal metadata');
 }
@@ -183,13 +186,22 @@ async function runAssertPersistedScenario() {
   await waitFor(() => !queryByTestId('onboarding-panel'), 'persisted empty fixture does not return to onboarding');
   await waitForDocumentIncludes('reverie', 'folder-selected project persists across a browser reload');
   await waitForDocumentIncludes('Harness Smoke Focus', 'focus persists across a browser reload');
-  await expectTestId('terminal-body', 'persisted created session opens terminal body after reload');
+  await expectTestId('dashboard-surface', 'persisted workspace opens to the dashboard after reload');
+  await waitFor(() => {
+    const card = [...document.querySelectorAll<HTMLElement>('[data-testid="dashboard-session-card"]')]
+      .find(candidate => candidate.textContent?.includes('Harness Codex Session'));
+    if (!card) return false;
+    card.click();
+    return true;
+  }, 'persisted Codex session is visible on the dashboard after reload');
+  assertions.push('persisted Codex session is visible on the dashboard after reload');
+  await expectTestId('terminal-body', 'persisted created session opens terminal body from dashboard after reload');
   await waitForTextIncludes('terminal-meta-strip', 'Harness Codex Session', 'session persists across a browser reload');
   await waitFor(() => {
     const activeTab = document.querySelector('[data-testid="session-tab"][data-active="true"]');
     return Boolean(activeTab?.textContent?.includes('Codex'));
-  }, 'persisted Codex session tab stays selected after reload');
-  assertions.push('persisted Codex session tab stays selected after reload');
+  }, 'persisted Codex session tab becomes selected after dashboard open');
+  assertions.push('persisted Codex session tab becomes selected after dashboard open');
 }
 
 async function waitForTerminalId(label: string) {

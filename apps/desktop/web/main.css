@@ -1,5 +1,9 @@
 @layer reset, base, tokens, recipes, utilities;
 
+html, body, #root {
+  background: transparent;
+}
+
 .terminal-canvas {
   position: absolute;
   top: 0;
@@ -8,7 +12,7 @@
   width: 1080px;
   max-width: none;
   transform-origin: 0 0;
-  background: var(--terminal-bg, #060605);
+  background: transparent;
   outline: none;
 }
 
@@ -46,4 +50,13 @@
   @keyframes reverie-glyph-attention-pulse {
     0%, 100% { opacity: 1; }
   }
+}
+
+/* When Reverie is not the focused app, freeze the breathing/attention glyph
+ * motion so a backgrounded window stops driving per-frame compositing. The
+ * inner i[data-core] dots are unique to the session glyph. Animations resume
+ * seamlessly on focus because play-state is paused, not cleared. */
+[data-app-focused="false"] [data-state="working"] i[data-core="true"],
+[data-app-focused="false"] [data-state="attention"] i[data-core="true"] {
+  animation-play-state: paused;
 }

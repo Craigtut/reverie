@@ -24,6 +24,8 @@ export interface TerminalRow {
 
 export interface TerminalCursor {
   visible?: boolean;
+  blinking?: boolean;
+  style?: 'block' | 'block_hollow' | 'bar' | 'underline';
   row?: number;
   col?: number;
   position?: {
@@ -32,10 +34,29 @@ export interface TerminalCursor {
   };
 }
 
+export interface TerminalModes {
+  cursorKeyApplication?: boolean;
+  keypadKeyApplication?: boolean;
+  bracketedPaste?: boolean;
+  syncOutput?: boolean;
+  mouseTracking?: boolean;
+  kittyKeyboardFlags?: number;
+}
+
+export interface TerminalScrollback {
+  totalRows?: number;
+  scrollbackRows?: number;
+  viewportOffset?: number;
+  viewportRows?: number;
+  atBottom?: boolean;
+}
+
 export interface TerminalFrame {
-  dirty?: 'full' | 'partial';
+  dirty?: 'clean' | 'full' | 'partial';
   rows: TerminalRow[];
   cursor?: TerminalCursor;
+  modes?: TerminalModes;
+  scrollback?: TerminalScrollback;
   colors?: {
     foreground?: TerminalColor;
     background?: TerminalColor;
@@ -48,7 +69,7 @@ export interface TerminalRenderer {
   rows: number;
   cellWidth: number;
   cellHeight: number;
-  clear: () => void;
+  clear: (background?: TerminalColor) => void;
   paintFrame: (frame: TerminalFrame) => void;
   rowsToPaint: (frame: TerminalFrame) => TerminalRow[];
 }

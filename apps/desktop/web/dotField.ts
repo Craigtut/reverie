@@ -3,10 +3,15 @@
 // The product's signature texture: dots represent agents and activity. One
 // primitive is configured by variant for every surface that needs the motif
 // (ambient background, launching hero, dashboard constellation, card glyphs).
-// Performance is non-negotiable: a static dot layer is cached on an offscreen
-// canvas and blitted once per frame; only transient effects (dashes, the
-// breathing pulse) redraw per-frame. DPR is capped at 2, the loop pauses when
-// the tab is hidden, and prefers-reduced-motion disables movement entirely.
+// Performance is non-negotiable, and this surface is full-window, so it must
+// never repaint when nothing is moving. A static dot layer is cached on an
+// offscreen canvas. The ambient field is event-driven: it draws the static
+// layer once, then runs a rAF loop only while a dash is alive, and even then it
+// repaints just the row-band each dash occupies (never the whole window). Dash
+// spawns are scheduled with a timer instead of polling every frame. The
+// breathing launch variant animates the full field, so it keeps a continuous
+// loop while visible. DPR is capped at 2, both loops stop when the tab is
+// hidden, and prefers-reduced-motion disables all movement (static only).
 
 export type DotFieldVariant = 'ambient' | 'launching';
 
@@ -18,7 +23,7 @@ export interface DotFieldHandle {
   /** Re-measure the canvas, regenerate cells, and rebuild the static layer.
    *  Call after theme changes so dot colors track the current CSS variables. */
   refresh(): void;
-  /** Tear down the rAF loop, observers, and listeners. */
+  /** Tear down the rAF loop, observers, timers, and listeners. */
   destroy(): void;
 }
 
@@ -35,6 +40,11 @@ interface Dash {
   len: number;
   t0: number;
   dur: number;
+}
+
+interface Band {
+  y0: number;
+  h: number;
 }
 
 const MAX_DPR = 2;
@@ -97,8 +107,11 @@ export function createDotField(
   let cells: Cell[] = [];
   let staticLayer: HTMLCanvasElement | null = null;
   let dashes: Dash[] = [];
-  let lastDashSpawn = 0;
+  // Row-bands painted last frame; restored to the static layer before the next
+  // frame so a moving dash never leaves a trail and we never clear the window.
+  let prevBands: Band[] = [];
   let raf = 0;
+  let dashTimer = 0;
   let hidden = document.visibilityState === 'hidden';
 
   function readDotColor(): { r: number; g: number; b: number } {
@@ -159,6 +172,34 @@ export function createDotField(
     staticLayer = layer;
   }
 
+  /** Paint the whole static layer to the visible canvas. Used for the idle
+   *  steady state and for the continuously-animated breath variant. */
+  function drawStaticFull() {
+    if (cssWidth === 0) return;
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+    if (staticLayer) ctx.drawImage(staticLayer, 0, 0, cssWidth, cssHeight);
+  }
+
+  /** Restore one full-width row-band from the static layer (erases a dash). */
+  function restoreBand(band: Band) {
+    if (band.h <= 0) return;
+    ctx.clearRect(0, band.y0, cssWidth, band.h);
+    if (staticLayer) {
+      ctx.drawImage(
+        staticLayer,
+        0, band.y0 * dpr, cssWidth * dpr, band.h * dpr,
+        0, band.y0, cssWidth, band.h,
+      );
+    }
+  }
+
+  function dashBand(dash: Dash): Band {
+    const halfDot = tuning.dotSize / 2;
+    const top = Math.max(0, Math.floor(dash.y - halfDot - 1));
+    const bottom = Math.min(cssHeight, Math.ceil(dash.y + halfDot + 1));
+    return { y0: top, h: Math.max(0, bottom - top) };
+  }
+
   function resize() {
     const rect = canvas.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
@@ -168,13 +209,14 @@ export function createDotField(
     canvas.height = Math.max(1, Math.floor(cssHeight * dpr));
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     regenerateCells();
+    // Geometry changed: drop transient dashes and repaint the static base.
+    dashes = [];
+    prevBands = [];
+    drawStaticFull();
   }
 
-  function maybeSpawnDash(now: number) {
-    if (tuning.dashesPerSecond <= 0) return;
+  function spawnDash(now: number) {
     if (dashes.length >= MAX_DASHES) return;
-    if (now - lastDashSpawn < 1000 / tuning.dashesPerSecond) return;
-    lastDashSpawn = now;
     const fromLeft = Math.random() < 0.5;
     const rows = Math.max(1, Math.floor(cssHeight / tuning.spacing));
     const y = (Math.floor(Math.random() * rows) + 0.5) * tuning.spacing;
@@ -189,65 +231,137 @@ export function createDotField(
     });
   }
 
-  function frame(now: number) {
-    if (hidden || cssWidth === 0) {
-      raf = requestAnimationFrame(frame);
-      return;
+  function scheduleNextDash() {
+    if (tuning.dashesPerSecond <= 0 || reducedMotion || hidden) return;
+    if (dashTimer) return;
+    const interval = 1000 / tuning.dashesPerSecond;
+    dashTimer = window.setTimeout(onDashTick, interval);
+  }
+
+  function onDashTick() {
+    dashTimer = 0;
+    if (!hidden && !reducedMotion) {
+      spawnDash(performance.now());
+      if (!raf) raf = requestAnimationFrame(dashFrame);
     }
+    scheduleNextDash();
+  }
 
-    ctx.clearRect(0, 0, cssWidth, cssHeight);
+  // Ambient loop: runs only while a dash is alive, and touches only the
+  // row-bands the dashes occupy. When the last dash expires it restores the
+  // final bands and stops, leaving the static layer on screen.
+  function dashFrame(now: number) {
+    raf = 0;
+    if (hidden || cssWidth === 0) return;
 
-    if (staticLayer) {
-      ctx.drawImage(staticLayer, 0, 0, cssWidth, cssHeight);
-    }
+    // Erase last frame's bands and this frame's bands (deduped) back to static.
+    const bands = mergeBands([...prevBands, ...dashes.map(dashBand)]);
+    for (const band of bands) restoreBand(band);
 
-    if (tuning.breath && !reducedMotion) {
-      const cx = cssWidth / 2;
-      const cy = cssHeight / 2;
-      const radius = Math.min(cssWidth, cssHeight) * 0.45;
-      const pulse = 0.5 + 0.5 * Math.sin((now / 1000) * BREATH_PERIOD_HZ * 2 * Math.PI);
-      const color = readDotColor();
-      ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${0.18 + 0.32 * pulse})`;
-      const baseSize = tuning.dotSize;
-      for (const cell of cells) {
-        const dx = cell.x - cx;
-        const dy = cell.y - cy;
-        const d = Math.hypot(dx, dy);
-        if (d > radius) continue;
-        const k = 1 - d / radius;
-        const size = baseSize + 2.2 * k * pulse;
-        ctx.fillRect(cell.x - size / 2, cell.y - size / 2, size, size);
+    const color = readDotColor();
+    const halfDot = tuning.dotSize / 2;
+    const newBands: Band[] = [];
+    for (let i = dashes.length - 1; i >= 0; i--) {
+      const dash = dashes[i];
+      const age = now - dash.t0;
+      const k = age / dash.dur;
+      if (k >= 1) {
+        dashes.splice(i, 1);
+        continue;
       }
+      const x = dash.startX + dash.vx * (age / 1000);
+      const fade = 1 - k * k;
+      ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${0.55 * fade})`;
+      ctx.fillRect(x, dash.y - halfDot, dash.len, tuning.dotSize);
+      newBands.push(dashBand(dash));
+    }
+    prevBands = newBands;
+
+    if (dashes.length > 0) {
+      raf = requestAnimationFrame(dashFrame);
+    }
+  }
+
+  // Launching loop: the breath touches the full field, so this redraws the
+  // whole surface each frame. It only runs while visible and not reduced.
+  function breathFrame(now: number) {
+    raf = 0;
+    if (hidden || cssWidth === 0) return;
+
+    drawStaticFull();
+
+    const cx = cssWidth / 2;
+    const cy = cssHeight / 2;
+    const radius = Math.min(cssWidth, cssHeight) * 0.45;
+    const pulse = 0.5 + 0.5 * Math.sin((now / 1000) * BREATH_PERIOD_HZ * 2 * Math.PI);
+    const color = readDotColor();
+    ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${0.18 + 0.32 * pulse})`;
+    const baseSize = tuning.dotSize;
+    for (const cell of cells) {
+      const dx = cell.x - cx;
+      const dy = cell.y - cy;
+      const d = Math.hypot(dx, dy);
+      if (d > radius) continue;
+      const k = 1 - d / radius;
+      const size = baseSize + 2.2 * k * pulse;
+      ctx.fillRect(cell.x - size / 2, cell.y - size / 2, size, size);
     }
 
-    if (!reducedMotion && tuning.dashesPerSecond > 0) {
-      maybeSpawnDash(now);
-      const color = readDotColor();
-      const halfDot = tuning.dotSize / 2;
-      for (let i = dashes.length - 1; i >= 0; i--) {
-        const d = dashes[i];
-        const age = now - d.t0;
-        const k = age / d.dur;
-        if (k >= 1) {
-          dashes.splice(i, 1);
-          continue;
-        }
-        const x = d.startX + d.vx * (age / 1000);
-        const fade = 1 - k * k;
-        ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${0.55 * fade})`;
-        ctx.fillRect(x, d.y - halfDot, d.len, tuning.dotSize);
-      }
-    }
+    raf = requestAnimationFrame(breathFrame);
+  }
 
-    raf = requestAnimationFrame(frame);
+  function mergeBands(bands: Band[]): Band[] {
+    const merged: Band[] = [];
+    for (const band of bands) {
+      if (band.h <= 0) continue;
+      const existing = merged.find(other => other.y0 === band.y0 && other.h === band.h);
+      if (!existing) merged.push(band);
+    }
+    return merged;
+  }
+
+  // Pick the right loop/timer for the variant and current state. Idempotent.
+  function start() {
+    drawStaticFull();
+    if (hidden) return;
+    if (tuning.breath) {
+      if (!reducedMotion && !raf) raf = requestAnimationFrame(breathFrame);
+    } else {
+      scheduleNextDash();
+    }
+  }
+
+  function stop() {
+    if (raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+    if (dashTimer) {
+      clearTimeout(dashTimer);
+      dashTimer = 0;
+    }
   }
 
   function onVisibility() {
-    hidden = document.visibilityState === 'hidden';
+    const nowHidden = document.visibilityState === 'hidden';
+    if (nowHidden === hidden) return;
+    hidden = nowHidden;
+    if (hidden) {
+      stop();
+      dashes = [];
+      prevBands = [];
+    } else {
+      start();
+    }
   }
 
   function onReducedMotion(event: MediaQueryListEvent) {
     reducedMotion = event.matches;
+    stop();
+    dashes = [];
+    prevBands = [];
+    drawStaticFull();
+    if (!reducedMotion) start();
   }
 
   let ro: ResizeObserver | null = null;
@@ -261,14 +375,18 @@ export function createDotField(
   reducedMotionMq.addEventListener('change', onReducedMotion);
 
   resize();
-  raf = requestAnimationFrame(frame);
+  start();
 
   return {
     refresh() {
       regenerateCells();
+      // Repaint the whole field so a theme change recolors every dot at once,
+      // not just the row-bands a dash happens to touch. Drop stale band state.
+      prevBands = [];
+      drawStaticFull();
     },
     destroy() {
-      cancelAnimationFrame(raf);
+      stop();
       ro?.disconnect();
       window.removeEventListener('resize', resize);
       document.removeEventListener('visibilitychange', onVisibility);

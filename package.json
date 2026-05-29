@@ -23,6 +23,8 @@
     "preview": "vite preview --host 127.0.0.1 --port 1420",
     "panda": "panda codegen && panda cssgen --outfile apps/desktop/web/styled-system/styles.css",
     "typecheck": "npm run panda && tsc --noEmit",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
     "check:frontend": "npm run typecheck && npm run build:web",
     "check:rust": "cargo test && PATH=\"/opt/homebrew/opt/zig@0.15/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml && PATH=\"/opt/homebrew/opt/zig@0.15/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "check": "npm run check:frontend && npm run check:rust",
@@ -33,7 +35,8 @@
     "@tauri-apps/api": "^2.8.0",
     "motion": "^12.23.24",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@pandacss/dev": "^1.4.1",
@@ -41,6 +44,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
     "typescript": "^5.9.3",
-    "vite": "^7.2.4"
+    "vite": "^7.2.4",
+    "vitest": "^4.1.7"
   }
 }

@@ -1,0 +1,7 @@
+// Hooks barrel: effectful shell behaviors extracted from the App component.
+// Each hook owns its own store wiring, so the shell just calls them.
+
+export { useAppFocus } from './useAppFocus';
+export { useCommandPalette } from './useCommandPalette';
+export { useSessionActivity } from './useSessionActivity';
+export { useAgentClis } from './useAgentClis';
