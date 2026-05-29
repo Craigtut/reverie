@@ -1,6 +1,7 @@
 import { css } from '../../styled-system/css';
 import { POLICY_LABELS, type ConnectionPolicy } from '../../domain';
 import { useConnectionPolicy } from '../../hooks/useConnectionsState';
+import { Typography } from '../primitives/Typography';
 
 const POLICIES: ConnectionPolicy[] = [
   'always_ask',
@@ -13,16 +14,25 @@ export function ConnectionPolicySection() {
   const { policy, error, update } = useConnectionPolicy();
   return (
     <section className={sectionClass} aria-labelledby="settings-connection-policy-label">
-      <h2 id="settings-connection-policy-label" className={sectionLabelClass}>
+      <Typography
+        as="h2"
+        id="settings-connection-policy-label"
+        variant="tiny"
+        tone="faint"
+        uppercase
+        style={{ letterSpacing: '0.12em' }}
+      >
         Connection policy
-      </h2>
-      <p className={sectionHelpClass}>
+      </Typography>
+      <Typography as="p" variant="smallBody" tone="muted" style={{ lineHeight: 1.55 }}>
         How Reverie handles a connection request between two of your sessions. Cross-project
         requests always require explicit accept regardless of policy.
-      </p>
+      </Typography>
       {error ? (
         <p className={errorClass} role="alert">
-          {error}
+          <Typography as="span" variant="smallBody" tone="inherit">
+            {error}
+          </Typography>
         </p>
       ) : null}
       <ul className={listClass} role="radiogroup" aria-label="Connection policy">
@@ -42,8 +52,12 @@ export function ConnectionPolicySection() {
                 />
                 <span className={radioDotClass} aria-hidden />
                 <span className={radioTextClass}>
-                  <span className={radioTitleClass}>{labels.title}</span>
-                  <span className={radioHelpClass}>{labels.help}</span>
+                  <Typography as="span" variant="smallBody" tone="default">
+                    {labels.title}
+                  </Typography>
+                  <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
+                    {labels.help}
+                  </Typography>
                 </span>
               </label>
             </li>
@@ -55,27 +69,12 @@ export function ConnectionPolicySection() {
 }
 
 const sectionClass = css({ display: 'grid', gap: '12px' });
-const sectionLabelClass = css({
-  margin: 0,
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-  fontWeight: 500,
-});
-const sectionHelpClass = css({
-  margin: 0,
-  color: 'var(--text-2)',
-  fontSize: '13px',
-  lineHeight: '1.55',
-});
 const errorClass = css({
   margin: 0,
   padding: '8px 12px',
   borderRadius: '8px',
   background: 'var(--status-warning-soft, rgba(220, 110, 70, 0.12))',
   color: 'var(--status-warning, #b03f1f)',
-  fontSize: '13px',
 });
 const listClass = css({
   listStyle: 'none',
@@ -129,13 +128,3 @@ const radioDotClass = css({
   // object, so we extend the radioRowClass with the matching child rule.
 });
 const radioTextClass = css({ display: 'grid', gap: '3px', minWidth: 0 });
-const radioTitleClass = css({
-  fontSize: '14px',
-  color: 'var(--text)',
-  fontWeight: 500,
-});
-const radioHelpClass = css({
-  fontSize: '12px',
-  color: 'var(--text-3)',
-  lineHeight: '1.5',
-});

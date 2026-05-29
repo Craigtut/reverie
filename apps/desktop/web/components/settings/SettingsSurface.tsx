@@ -6,6 +6,7 @@ import type { CreateSessionRecordRequest } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
 import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
 import { useShellStore, useUiStore } from '../../store';
+import { Typography } from '../primitives/Typography';
 import { AgentsSection } from './AgentsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
 
@@ -36,21 +37,45 @@ export function SettingsSurface({
     <div className={settingsSurfaceClass} data-testid="settings-surface">
       <div className={settingsScrollClass}>
         <header className={settingsHeaderClass}>
-          <span className={settingsKickerClass}>Settings</span>
-          <h1 className={settingsTitleClass}>Settings</h1>
+          <Typography
+            as="span"
+            variant="caption"
+            tone="faint"
+            uppercase
+            style={{ letterSpacing: '0.12em' }}
+          >
+            Settings
+          </Typography>
+          <Typography as="h1" variant="title" tone="default" style={{ letterSpacing: '-0.035em' }}>
+            Settings
+          </Typography>
         </header>
 
         <section className={settingsGroupClass} aria-labelledby="settings-appearance-label">
-          <h2 id="settings-appearance-label" className={settingsGroupLabelClass}>
+          <Typography
+            as="h2"
+            id="settings-appearance-label"
+            variant="tiny"
+            tone="faint"
+            uppercase
+            style={{ letterSpacing: '0.12em' }}
+          >
             Appearance
-          </h2>
+          </Typography>
           <ul className={settingsListClass}>
             <li className={settingsRowClass}>
               <div className={settingsRowTextClass}>
-                <span className={settingsRowTitleClass}>Theme</span>
-                <span className={settingsRowHelpClass}>
+                <Typography
+                  as="span"
+                  variant="smallBody"
+                  tone="default"
+                  style={{ letterSpacing: '-0.005em' }}
+                >
+                  Theme
+                </Typography>
+                <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
                   The same warm-neutral palette in either mode.
-                </span>
+                </Typography>
               </div>
               <div className={themeSegmentedClass} role="radiogroup" aria-label="Theme">
                 <button
@@ -81,14 +106,30 @@ export function SettingsSurface({
         </section>
 
         <section className={settingsGroupClass} aria-labelledby="settings-sessions-label">
-          <h2 id="settings-sessions-label" className={settingsGroupLabelClass}>
+          <Typography
+            as="h2"
+            id="settings-sessions-label"
+            variant="tiny"
+            tone="faint"
+            uppercase
+            style={{ letterSpacing: '0.12em' }}
+          >
             Sessions
-          </h2>
+          </Typography>
           <ul className={settingsListClass}>
             <li className={settingsRowClass}>
               <div className={settingsRowTextClass}>
-                <span className={settingsRowTitleClass}>Default agent</span>
-                <span className={settingsRowHelpClass}>The CLI new sessions start with.</span>
+                <Typography
+                  as="span"
+                  variant="smallBody"
+                  tone="default"
+                  style={{ letterSpacing: '-0.005em' }}
+                >
+                  Default agent
+                </Typography>
+                <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
+                  The CLI new sessions start with.
+                </Typography>
               </div>
               <div className={settingsSelectWrapClass}>
                 <select
@@ -117,10 +158,17 @@ export function SettingsSurface({
             </li>
             <li className={settingsRowClass}>
               <div className={settingsRowTextClass}>
-                <span className={settingsRowTitleClass}>Enable YOLO for new sessions</span>
-                <span className={settingsRowHelpClass}>
+                <Typography
+                  as="span"
+                  variant="smallBody"
+                  tone="default"
+                  style={{ letterSpacing: '-0.005em' }}
+                >
+                  Enable YOLO for new sessions
+                </Typography>
+                <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
                   Skip per-tool approvals when launching a new session.
-                </span>
+                </Typography>
               </div>
               <button
                 type="button"
@@ -186,33 +234,9 @@ const settingsHeaderClass = css({
   marginBottom: '4px',
 });
 
-const settingsKickerClass = css({
-  color: 'var(--text-3)',
-  fontSize: '11px',
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-});
-
-const settingsTitleClass = css({
-  margin: 0,
-  fontSize: '32px',
-  letterSpacing: '-0.035em',
-  color: 'var(--text)',
-  fontWeight: 500,
-});
-
 const settingsGroupClass = css({
   display: 'grid',
   gap: '12px',
-});
-
-const settingsGroupLabelClass = css({
-  margin: 0,
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-  fontWeight: 500,
 });
 
 const settingsListClass = css({
@@ -238,19 +262,6 @@ const settingsRowTextClass = css({
   minWidth: 0,
   display: 'grid',
   gap: '3px',
-});
-
-const settingsRowTitleClass = css({
-  color: 'var(--text)',
-  fontSize: '13.5px',
-  fontWeight: 500,
-  letterSpacing: '-0.005em',
-});
-
-const settingsRowHelpClass = css({
-  color: 'var(--text-3)',
-  fontSize: '12px',
-  lineHeight: 1.5,
 });
 
 const themeSegmentedClass = css({

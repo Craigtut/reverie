@@ -6,6 +6,7 @@ import type {
   BridgeStatusReport,
 } from '../../domain';
 import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
+import { Typography } from '../primitives/Typography';
 
 // The "Agents" settings block: one row per supported CLI showing whether it
 // is detected on this machine and, when it is, a switch to turn it on or
@@ -33,16 +34,25 @@ export function AgentsSection({
 }) {
   return (
     <section className={sectionClass} aria-labelledby="settings-agents-label">
-      <h2 id="settings-agents-label" className={sectionLabelClass}>
+      <Typography
+        as="h2"
+        id="settings-agents-label"
+        variant="tiny"
+        tone="faint"
+        uppercase
+        style={{ letterSpacing: '0.12em' }}
+      >
         Agents
-      </h2>
-      <p className={sectionHelpClass}>
+      </Typography>
+      <Typography as="p" variant="smallBody" tone="muted" style={{ lineHeight: 1.55 }}>
         The agent CLIs Reverie found on this machine. Turn one off to hide it everywhere new
         sessions are created and to keep Reverie out of its config files.
-      </p>
+      </Typography>
       {error ? (
         <p className={errorClass} role="alert">
-          {error}
+          <Typography as="span" variant="smallBody" tone="inherit">
+            {error}
+          </Typography>
         </p>
       ) : null}
       <ul className={listClass}>
@@ -97,11 +107,9 @@ function AgentRow({
     : `Looked for: ${candidates.join(', ') || 'no known locations'}`;
 
   const showReverieTools = available && enabled;
-  const toolsInstalled =
-    bridgeEntry !== null &&
-    bridgeEntry.mcpInstalled &&
-    bridgeEntry.hookInstalled &&
-    !bridgeEntry.mismatchedPaths;
+  const toolsInstalled = Boolean(
+    bridgeEntry?.mcpInstalled && bridgeEntry.hookInstalled && !bridgeEntry.mismatchedPaths,
+  );
 
   return (
     <li
@@ -111,15 +119,28 @@ function AgentRow({
       title={detail}
     >
       <div className={rowMainClass}>
-        <span className={rowTitleClass}>{displayName}</span>
+        <Typography
+          as="span"
+          variant="smallBody"
+          tone="default"
+          className={rowTitleClass}
+          style={{ letterSpacing: '-0.005em' }}
+        >
+          {displayName}
+        </Typography>
 
-        <span
+        <Typography
+          as="span"
+          variant="caption"
+          tone="inherit"
+          uppercase
           className={statusClass}
+          style={{ letterSpacing: '0.06em' }}
           data-tone={available ? 'on' : 'off'}
           data-testid={`agent-cli-status-${kind}`}
         >
           {available ? 'Detected' : 'Not detected'}
-        </span>
+        </Typography>
 
         {available ? (
           <button
@@ -145,25 +166,37 @@ function AgentRow({
       {showReverieTools ? (
         bridgeEntry === null ? (
           // Status hasn't loaded yet; muted hint keeps the row from jumping.
-          <span
+          <Typography
+            as="span"
+            variant="caption"
+            tone="inherit"
             className={toolsHintClass}
+            style={{ letterSpacing: '0.02em' }}
             data-tone="muted"
             data-testid={`agent-cli-tools-${kind}`}
           >
             Checking Reverie tools…
-          </span>
+          </Typography>
         ) : toolsInstalled ? (
-          <span
+          <Typography
+            as="span"
+            variant="caption"
+            tone="inherit"
             className={toolsHintClass}
+            style={{ letterSpacing: '0.02em' }}
             data-tone="ok"
             data-testid={`agent-cli-tools-${kind}`}
             title={bridgeEntry.mismatchedPaths ? 'Different bridge path detected' : undefined}
           >
             ✓ Reverie tools installed
-          </span>
+          </Typography>
         ) : (
-          <span
+          <Typography
+            as="span"
+            variant="caption"
+            tone="inherit"
             className={toolsHintClass}
+            style={{ letterSpacing: '0.02em' }}
             data-tone="missing"
             data-testid={`agent-cli-tools-${kind}`}
           >
@@ -175,9 +208,11 @@ function AgentRow({
               onClick={() => onRetryInstall(kind)}
               data-testid={`agent-cli-tools-retry-${kind}`}
             >
-              {bridgeBusy ? 'Installing…' : 'Install Reverie tools'}
+              <Typography as="span" variant="caption" tone="inherit">
+                {bridgeBusy ? 'Installing…' : 'Install Reverie tools'}
+              </Typography>
             </button>
-          </span>
+          </Typography>
         )
       ) : null}
     </li>
@@ -185,27 +220,12 @@ function AgentRow({
 }
 
 const sectionClass = css({ display: 'grid', gap: '12px' });
-const sectionLabelClass = css({
-  margin: 0,
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  letterSpacing: '0.12em',
-  textTransform: 'uppercase',
-  fontWeight: 500,
-});
-const sectionHelpClass = css({
-  margin: 0,
-  color: 'var(--text-2)',
-  fontSize: '13px',
-  lineHeight: '1.55',
-});
 const errorClass = css({
   margin: 0,
   padding: '8px 12px',
   borderRadius: '8px',
   background: 'var(--status-warning-soft, rgba(220, 110, 70, 0.12))',
   color: 'var(--status-warning, #b03f1f)',
-  fontSize: '13px',
 });
 const listClass = css({
   listStyle: 'none',
@@ -230,8 +250,6 @@ const rowMainClass = css({
   gap: '16px',
 });
 const toolsHintClass = css({
-  fontSize: '11.5px',
-  letterSpacing: '0.02em',
   color: 'var(--text-3)',
   display: 'inline-flex',
   alignItems: 'center',
@@ -248,20 +266,12 @@ const installRetryClass = css({
   textDecoration: 'underline',
   textUnderlineOffset: '2px',
   cursor: 'pointer',
-  fontSize: 'inherit',
   '&:disabled': { opacity: 0.6, cursor: 'wait' },
 });
 const rowTitleClass = css({
   minWidth: 0,
-  fontSize: '13.5px',
-  fontWeight: 500,
-  color: 'var(--text)',
-  letterSpacing: '-0.005em',
 });
 const statusClass = css({
-  fontSize: '11px',
-  letterSpacing: '0.06em',
-  textTransform: 'uppercase',
   color: 'var(--text-3)',
   '&[data-tone="on"]': { color: 'var(--status-ok, #2f7a3f)' },
 });
