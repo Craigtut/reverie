@@ -1,5 +1,6 @@
+import { USER_HOME } from './constants';
 import { shortId } from './format';
-import type { AgentCliDetection, ShellSession, WorkspaceShellSnapshot } from './types';
+import type { AgentCliDetection, ShellFocus, ShellSession, WorkspaceShellSnapshot } from './types';
 
 // Pure helpers over the session/shell model: breadcrumbs, labels, fallbacks,
 // and project/session filtering.
@@ -21,6 +22,13 @@ export function fallbackShellSnapshot(): WorkspaceShellSnapshot {
 export function sessionsForProject(projectId: string | null, shell: WorkspaceShellSnapshot) {
   const focusIds = new Set(shell.focuses.filter(focus => focus.projectId === projectId).map(focus => focus.id));
   return shell.sessions.filter(session => focusIds.has(session.focusId));
+}
+
+// The cwd a new session should default to: the focus's project folder when the
+// focus is project-backed, otherwise the user's home directory.
+export function defaultCwdForFocus(focus: ShellFocus | null, shell: WorkspaceShellSnapshot): string {
+  if (!focus?.projectId) return USER_HOME;
+  return shell.projects.find(project => project.id === focus.projectId)?.path ?? USER_HOME;
 }
 
 export function sessionBreadcrumb(session: ShellSession, shell: WorkspaceShellSnapshot): string {
