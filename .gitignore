@@ -11,6 +11,9 @@ apps/desktop/src-tauri/gen/
 apps/desktop/src-tauri/.tauri/
 apps/desktop/src-tauri/target/
 
+# Staged native libraries copied in for bundling (beforeBundleCommand output)
+apps/desktop/src-tauri/frameworks/
+
 # Frontend build output
 apps/desktop/web/dist/
 dist/
