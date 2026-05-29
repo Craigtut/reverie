@@ -12,7 +12,9 @@ pub mod domain;
 pub mod hook_config;
 pub mod hook_server;
 pub mod pty;
+pub mod repository;
 pub mod terminal;
+pub mod workspace_service;
 
 pub use activity::{
     ActiveTool, ActivityError, ActivityEvent, ActivityEventKind, ActivityState, ActivityStatus,
@@ -45,3 +47,7 @@ pub use terminal::{
     TerminalFramePatch, TerminalId, TerminalPosition, TerminalRow, TerminalSnapshot,
     TerminalSpawnSpec, TerminalUnderline,
 };
+pub use repository::{
+    InMemoryWorkspaceRepository, PersistenceError, RepoResult, WorkspaceRepository,
+};
+pub use workspace_service::WorkspaceService;

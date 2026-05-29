@@ -7,7 +7,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{AgentKind, NativeSessionRef, SessionId};
+use crate::domain::{AgentKind, LaunchMode, NativeSessionRef, Session, SessionId};
+use crate::terminal::TerminalSpawnSpec;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CommandSpec {
@@ -459,6 +460,60 @@ pub fn built_in_adapters() -> Vec<Box<dyn AgentAdapter>> {
         Box::new(CodexCliAdapter),
         Box::new(CortexAdapter),
     ]
+}
+
+/// Build the terminal spawn spec for a session, choosing the adapter's resume
+/// or new-launch command. Pure given the session, the workspace dangerous-mode
+/// default, the terminal dimensions, the resolved executable, and the adapter:
+/// it lives next to the adapters it drives, not in the persistence layer.
+pub fn build_spawn_spec(
+    session: &Session,
+    workspace_default_dangerous_mode: bool,
+    cols: u16,
+    rows: u16,
+    executable_path: PathBuf,
+    adapter: &dyn AgentAdapter,
+) -> Result<TerminalSpawnSpec> {
+    if cols == 0 || rows == 0 {
+        bail!("terminal launch requires non-zero dimensions");
+    }
+    if session.agent_kind != adapter.kind() {
+        bail!(
+            "cannot launch {:?} session through {} adapter",
+            session.agent_kind,
+            adapter.display_name()
+        );
+    }
+
+    let context = LaunchContext {
+        session_id: session.id,
+        cwd: session.cwd.clone(),
+        dangerous_mode: session
+            .dangerous_mode_override
+            .unwrap_or(workspace_default_dangerous_mode),
+        model: None,
+        executable_path: Some(executable_path),
+    };
+    let should_resume =
+        session.launch_mode == LaunchMode::Resume || session.native_session_ref.is_some();
+    let command = if should_resume {
+        let native = session.native_session_ref.as_ref().ok_or_else(|| {
+            anyhow!(
+                "{} resume requested for session {} but no native session ref is attached",
+                adapter.display_name(),
+                session.id
+            )
+        })?;
+        adapter.build_resume_command(&context, native)?
+    } else {
+        adapter.build_new_command(&context)?
+    };
+
+    let mut spec = TerminalSpawnSpec::new(command);
+    spec.cols = cols;
+    spec.rows = rows;
+    spec.title = Some(format!("{} · {}", session.title, adapter.display_name()));
+    Ok(spec)
 }
 
 fn same_logical_path(left: &Path, right: &Path) -> bool {
