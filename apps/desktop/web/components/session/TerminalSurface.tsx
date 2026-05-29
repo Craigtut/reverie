@@ -8,6 +8,7 @@ import type {
   WorkspaceShellSnapshot,
 } from '../../domain';
 import type { TerminalSession } from '../../hooks';
+import { Typography } from '../primitives/Typography';
 import { SessionLaunchOverlay } from './SessionLaunchOverlay';
 
 // The slice of the terminal session handle this surface binds: the DOM refs and
@@ -59,16 +60,66 @@ export function TerminalSurface({
   onLaunch,
 }: TerminalSurfaceProps) {
   return (
-    <div className={terminalBodyClass} data-testid="terminal-body" data-session-id={session.id} data-terminal-id={terminalBinding?.terminalId ?? ''}>
-      <div className={terminalMetaStripClass} data-testid="terminal-meta-strip" data-session-id={session.id} data-terminal-id={terminalBinding?.terminalId ?? ''}>
-        <span className={metaStripBreadcrumbClass}>{sessionBreadcrumb(session, shell)} · {session.title}</span>
-        <span data-testid="terminal-status-label" className={metaStripStatusClass}>{runningLabel}</span>
-        <span className={metaStripCwdClass} title={session.cwd}>{shortenCwd(session.cwd)}</span>
+    <div
+      className={terminalBodyClass}
+      data-testid="terminal-body"
+      data-session-id={session.id}
+      data-terminal-id={terminalBinding?.terminalId ?? ''}
+    >
+      <div
+        className={terminalMetaStripClass}
+        data-testid="terminal-meta-strip"
+        data-session-id={session.id}
+        data-terminal-id={terminalBinding?.terminalId ?? ''}
+      >
+        <Typography as="span" variant="caption" tone="muted" className={metaStripBreadcrumbClass}>
+          {sessionBreadcrumb(session, shell)} · {session.title}
+        </Typography>
+        <Typography
+          as="span"
+          variant="tiny"
+          tone="faint"
+          uppercase
+          data-testid="terminal-status-label"
+          className={metaStripStatusClass}
+          style={{ letterSpacing: '0.08em' }}
+        >
+          {runningLabel}
+        </Typography>
+        <Typography
+          as="span"
+          variant="tiny"
+          tone="faint"
+          className={metaStripCwdClass}
+          title={session.cwd}
+          style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
+        >
+          {shortenCwd(session.cwd)}
+        </Typography>
         {!terminalLiveFollow ? (
-          <button type="button" className={followLiveButtonClass} data-testid="follow-live-button" onClick={terminal.followLiveTerminalOutput}>Jump to latest</button>
+          <button
+            type="button"
+            className={followLiveButtonClass}
+            data-testid="follow-live-button"
+            onClick={terminal.followLiveTerminalOutput}
+          >
+            <Typography as="span" variant="tiny" tone="inherit">
+              Jump to latest
+            </Typography>
+          </button>
         ) : null}
-        <span data-testid="scrollback-row-count" hidden>{scrollbackRowCount.toLocaleString()} / {scrollbackMaxRows.toLocaleString()}</span>
-        <span data-testid="follow-live-state" hidden>{terminalLiveFollow ? 'live' : 'history'}</span>
+        <Typography
+          as="span"
+          variant="caption"
+          tone="faint"
+          data-testid="scrollback-row-count"
+          hidden
+        >
+          {scrollbackRowCount.toLocaleString()} / {scrollbackMaxRows.toLocaleString()}
+        </Typography>
+        <Typography as="span" variant="caption" tone="faint" data-testid="follow-live-state" hidden>
+          {terminalLiveFollow ? 'live' : 'history'}
+        </Typography>
       </div>
       {permissionRequest ? (
         <div
@@ -78,14 +129,47 @@ export function TerminalSurface({
         >
           <ShieldWarning size={14} weight="fill" />
           <div className={permissionBannerBodyClass}>
-            <strong>{agentLabel(session.agentKind)} wants to {permissionRequest.toolName}</strong>
-            <span data-testid="session-permission-banner-summary">{permissionRequest.displaySummary}</span>
+            <Typography as="strong" variant="caption" tone="default">
+              {agentLabel(session.agentKind)} wants to {permissionRequest.toolName}
+            </Typography>
+            <Typography
+              as="span"
+              variant="caption"
+              tone="muted"
+              data-testid="session-permission-banner-summary"
+              className={permissionBannerSummaryClass}
+              style={{
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+              }}
+            >
+              {permissionRequest.displaySummary}
+            </Typography>
           </div>
-          <span className={permissionBannerHintClass}>Respond in the terminal</span>
+          <Typography
+            as="span"
+            variant="tiny"
+            tone="warn"
+            uppercase
+            className={permissionBannerHintClass}
+            style={{ letterSpacing: '0.08em' }}
+          >
+            Respond in the terminal
+          </Typography>
         </div>
       ) : null}
-      <div ref={terminal.surfaceViewportRef} className={surfaceViewportClass} data-testid="terminal-viewport" onScroll={terminal.handleTerminalScroll} onWheel={terminal.handleTerminalWheel} onMouseDown={terminal.focusTerminalCanvas}>
-        <div ref={terminal.terminalScrollSpacerRef} className={terminalScrollSpacerClass} data-testid="terminal-scroll-spacer">
+      <div
+        ref={terminal.surfaceViewportRef}
+        className={surfaceViewportClass}
+        data-testid="terminal-viewport"
+        onScroll={terminal.handleTerminalScroll}
+        onWheel={terminal.handleTerminalWheel}
+        onMouseDown={terminal.focusTerminalCanvas}
+      >
+        <div
+          ref={terminal.terminalScrollSpacerRef}
+          className={terminalScrollSpacerClass}
+          data-testid="terminal-scroll-spacer"
+        >
           <canvas
             ref={terminal.canvasRef}
             className="terminal-canvas"
@@ -130,8 +214,6 @@ const permissionBannerClass = css({
   padding: '8px 14px',
   background: 'color-mix(in srgb, var(--warn) 12%, transparent)',
   borderBottom: '1px solid color-mix(in srgb, var(--warn) 28%, transparent)',
-  color: 'var(--text)',
-  fontSize: '12px',
   '& > svg': { color: 'var(--warn)', flexShrink: 0 },
 });
 
@@ -141,23 +223,15 @@ const permissionBannerBodyClass = css({
   gap: '2px',
   minWidth: 0,
   flex: 1,
-  '& strong': { fontWeight: 500, color: 'var(--text)' },
-  '& span': {
-    fontSize: '11.5px',
-    color: 'var(--text-2)',
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
+});
+
+const permissionBannerSummaryClass = css({
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
 });
 
 const permissionBannerHintClass = css({
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
-  color: 'var(--warn)',
   flexShrink: 0,
 });
 
@@ -167,16 +241,12 @@ const terminalMetaStripClass = css({
   gap: '12px',
   padding: '8px 14px',
   borderBottom: '1px solid color-mix(in srgb, var(--line) 60%, transparent)',
-  color: 'var(--text-3)',
-  fontSize: '11.5px',
   whiteSpace: 'nowrap',
   overflowX: 'auto',
   '& [hidden]': { display: 'none' },
 });
 
 const metaStripBreadcrumbClass = css({
-  color: 'var(--text-2)',
-  fontWeight: 500,
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   minWidth: 0,
@@ -184,18 +254,10 @@ const metaStripBreadcrumbClass = css({
 });
 
 const metaStripStatusClass = css({
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
   flexShrink: 0,
 });
 
 const metaStripCwdClass = css({
-  color: 'var(--text-3)',
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-  fontSize: '10.5px',
   marginLeft: 'auto',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -208,8 +270,6 @@ const followLiveButtonClass = css({
   borderRadius: '999px',
   padding: '3px 9px',
   cursor: 'pointer',
-  fontSize: '10.5px',
-  fontWeight: 500,
   flexShrink: 0,
   transition: 'color 140ms ease, border-color 140ms ease',
   _hover: { color: 'var(--text)', borderColor: 'var(--line-strong)' },

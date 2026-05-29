@@ -3,12 +3,26 @@ import { Plus } from '@phosphor-icons/react';
 import { css } from '../../styled-system/css';
 import { agentLabel, shortId } from '../../domain';
 import type { ShellFocus, ShellSession } from '../../domain';
-import { dangerComposerButtonClass, primaryComposerButtonClass, secondaryComposerButtonClass } from '../primitives/buttons';
+import {
+  dangerComposerButtonClass,
+  primaryComposerButtonClass,
+  secondaryComposerButtonClass,
+} from '../primitives/buttons';
+import { Typography } from '../primitives/Typography';
 
 // Full session history for a focus: every session ever created under it
 // (active tabs + closed tabs), with restore / delete actions and a new-session
 // button. Closed-tab sessions keep their record so they can be resumed.
-export function SessionHistorySurface({ focus, sessions, visibleCount, hiddenCount, onRestore, onDelete, onCreateSession, busy }: {
+export function SessionHistorySurface({
+  focus,
+  sessions,
+  visibleCount,
+  hiddenCount,
+  onRestore,
+  onDelete,
+  onCreateSession,
+  busy,
+}: {
   focus: ShellFocus | null;
   sessions: ShellSession[];
   visibleCount: number;
@@ -22,40 +36,128 @@ export function SessionHistorySurface({ focus, sessions, visibleCount, hiddenCou
     <div className={sessionHistorySurfaceClass} data-testid="session-history-surface">
       <div className={sessionHistoryHeaderClass}>
         <div>
-          <p>Focus session history</p>
-          <h2>{focus?.title ?? 'No focus selected'}</h2>
-          <span>{sessions.length} total · {visibleCount} active tabs · {hiddenCount} closed tabs</span>
+          <Typography
+            as="p"
+            variant="caption"
+            tone="faint"
+            uppercase
+            style={{ letterSpacing: '0.14em' }}
+          >
+            Focus session history
+          </Typography>
+          <Typography
+            as="h2"
+            variant="title"
+            tone="default"
+            style={{ margin: '6px 0', letterSpacing: '-0.04em' }}
+          >
+            {focus?.title ?? 'No focus selected'}
+          </Typography>
+          <Typography as="span" variant="caption" tone="faint">
+            {sessions.length} total · {visibleCount} active tabs · {hiddenCount} closed tabs
+          </Typography>
         </div>
-        <button className={primaryComposerButtonClass} type="button" onClick={onCreateSession} disabled={busy || !focus}>
-          <Plus size={14} /> New session
+        <button
+          className={primaryComposerButtonClass}
+          type="button"
+          onClick={onCreateSession}
+          disabled={busy || !focus}
+        >
+          <Plus size={14} />{' '}
+          <Typography as="span" variant="smallBodyAlt" tone="inherit">
+            New session
+          </Typography>
         </button>
       </div>
 
       <div className={sessionHistoryListClass}>
         {sessions.length === 0 ? (
-          <div className={sessionHistoryEmptyClass} data-testid="session-history-empty">No sessions have been created under this focus yet.</div>
-        ) : sessions.map(session => {
-          const tabVisible = session.tabVisible !== false;
-          return (
-            <div className={sessionHistoryRowClass} key={session.id} data-testid="session-history-row" data-session-id={session.id} data-tab-visible={tabVisible ? 'true' : 'false'}>
-              <div>
-                <strong>{session.title}</strong>
-                <span>{agentLabel(session.agentKind)} · {session.status.replace(/_/g, ' ')} · {shortId(session.id)}</span>
-                <small>{session.cwd}</small>
-              </div>
-              <div className={sessionHistoryActionsClass}>
-                {tabVisible ? <span className={activeTabPillClass}>Active tab</span> : (
-                  <button className={secondaryComposerButtonClass} type="button" data-testid="restore-session-tab-button" onClick={() => onRestore(session)} disabled={busy}>
-                    Restore tab
+          <Typography
+            as="div"
+            variant="smallBody"
+            tone="faint"
+            className={sessionHistoryEmptyClass}
+            data-testid="session-history-empty"
+          >
+            No sessions have been created under this focus yet.
+          </Typography>
+        ) : (
+          sessions.map(session => {
+            const tabVisible = session.tabVisible !== false;
+            return (
+              <div
+                className={sessionHistoryRowClass}
+                key={session.id}
+                data-testid="session-history-row"
+                data-session-id={session.id}
+                data-tab-visible={tabVisible ? 'true' : 'false'}
+              >
+                <div>
+                  <Typography
+                    as="strong"
+                    variant="smallBodyAlt"
+                    tone="default"
+                    className={sessionHistoryTitleClass}
+                  >
+                    {session.title}
+                  </Typography>
+                  <Typography
+                    as="span"
+                    variant="caption"
+                    tone="faint"
+                    className={sessionHistoryMetaClass}
+                  >
+                    {agentLabel(session.agentKind)} · {session.status.replace(/_/g, ' ')} ·{' '}
+                    {shortId(session.id)}
+                  </Typography>
+                  <Typography
+                    as="small"
+                    variant="caption"
+                    tone="faint"
+                    className={sessionHistoryPathClass}
+                  >
+                    {session.cwd}
+                  </Typography>
+                </div>
+                <div className={sessionHistoryActionsClass}>
+                  {tabVisible ? (
+                    <Typography
+                      as="span"
+                      variant="caption"
+                      tone="muted"
+                      className={activeTabPillClass}
+                    >
+                      Active tab
+                    </Typography>
+                  ) : (
+                    <button
+                      className={secondaryComposerButtonClass}
+                      type="button"
+                      data-testid="restore-session-tab-button"
+                      onClick={() => onRestore(session)}
+                      disabled={busy}
+                    >
+                      <Typography as="span" variant="smallBodyAlt" tone="inherit">
+                        Restore tab
+                      </Typography>
+                    </button>
+                  )}
+                  <button
+                    className={dangerComposerButtonClass}
+                    type="button"
+                    data-testid="delete-session-button"
+                    onClick={() => onDelete(session)}
+                    disabled={busy}
+                  >
+                    <Typography as="span" variant="smallBodyAlt" tone="inherit">
+                      Delete
+                    </Typography>
                   </button>
-                )}
-                <button className={dangerComposerButtonClass} type="button" data-testid="delete-session-button" onClick={() => onDelete(session)} disabled={busy}>
-                  Delete
-                </button>
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })
+        )}
       </div>
     </div>
   );
@@ -74,9 +176,6 @@ const sessionHistoryHeaderClass = css({
   gap: '24px',
   alignItems: 'flex-start',
   marginBottom: '22px',
-  '& p': { margin: 0, color: 'var(--text-3)', textTransform: 'uppercase', letterSpacing: '0.14em', fontSize: '11px', fontWeight: 700 },
-  '& h2': { margin: '6px 0', fontSize: '30px', letterSpacing: '-0.04em' },
-  '& span': { color: 'var(--text-3)', fontSize: '12px' },
 });
 
 const sessionHistoryListClass = css({
@@ -94,9 +193,24 @@ const sessionHistoryRowClass = css({
   borderRadius: '18px',
   background: 'color-mix(in srgb, var(--surface-2) 72%, transparent)',
   boxShadow: '0 18px 50px rgba(0,0,0,0.16)',
-  '& strong': { display: 'block', fontSize: '14px' },
-  '& span': { display: 'block', marginTop: '4px', color: 'var(--text-3)', fontSize: '12px' },
-  '& small': { display: 'block', marginTop: '3px', color: 'var(--text-3)', fontSize: '11px', maxWidth: '540px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+});
+
+const sessionHistoryTitleClass = css({
+  display: 'block',
+});
+
+const sessionHistoryMetaClass = css({
+  display: 'block',
+  marginTop: '4px',
+});
+
+const sessionHistoryPathClass = css({
+  display: 'block',
+  marginTop: '3px',
+  maxWidth: '540px',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
 });
 
 const sessionHistoryActionsClass = css({
@@ -109,7 +223,6 @@ const sessionHistoryEmptyClass = css({
   padding: '18px',
   border: '1px dashed var(--line)',
   borderRadius: '18px',
-  color: 'var(--text-3)',
 });
 
 const activeTabPillClass = css({
@@ -117,8 +230,6 @@ const activeTabPillClass = css({
   padding: '0 10px',
   border: '1px solid var(--line)',
   borderRadius: '999px',
-  display: 'inline-flex !important',
+  display: 'inline-flex',
   alignItems: 'center',
-  color: 'var(--text-2) !important',
-  fontSize: '11px !important',
 });

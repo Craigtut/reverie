@@ -3,6 +3,7 @@ import { css } from '../../styled-system/css';
 import { agentTabLabel } from '../../domain';
 import type { ShellSession } from '../../domain';
 import { AgentGlyph } from '../glyphs';
+import { Typography } from '../primitives/Typography';
 
 export interface SessionTabsBarProps {
   visibleSessions: ShellSession[];
@@ -51,8 +52,12 @@ export function SessionTabsBar({
             onClick={() => onSelectSession(session)}
           >
             <AgentGlyph kind={session.agentKind} />
-            <span>{agentTabLabel(session)}</span>
-            {session.status === 'running' || session.id === runningSessionId ? <i className={runningDotClass} /> : null}
+            <Typography as="span" variant="caption" tone="inherit">
+              {agentTabLabel(session)}
+            </Typography>
+            {session.status === 'running' || session.id === runningSessionId ? (
+              <i className={runningDotClass} />
+            ) : null}
             <span
               className={tabCloseClass}
               role="button"
@@ -69,10 +74,25 @@ export function SessionTabsBar({
           </button>
         ))}
         {visibleSessions.length === 0 ? (
-          <div className={emptyTabsHintClass} data-testid="empty-session-tabs">No sessions in this focus</div>
+          <Typography
+            as="div"
+            variant="caption"
+            tone="faint"
+            className={emptyTabsHintClass}
+            data-testid="empty-session-tabs"
+          >
+            No sessions in this focus
+          </Typography>
         ) : null}
         <span className={tabDividerClass} />
-        <button className={newTabClass} type="button" data-testid="create-session-button" disabled={busy || !canUseAppServices || !canCreateSession} onClick={onCreateSession} title="New session">
+        <button
+          className={newTabClass}
+          type="button"
+          data-testid="create-session-button"
+          disabled={busy || !canUseAppServices || !canCreateSession}
+          onClick={onCreateSession}
+          title="New session"
+        >
           <Plus size={14} />
         </button>
       </div>
@@ -92,7 +112,9 @@ export function SessionTabsBar({
           onClick={onToggleDangerousMode}
         >
           <ShieldWarning size={14} />
-          {effectiveDangerousMode ? 'Auto-approve · on' : 'Auto-approve · off'}
+          <Typography as="span" variant="caption" tone="inherit">
+            {effectiveDangerousMode ? 'Auto-approve · on' : 'Auto-approve · off'}
+          </Typography>
         </button>
       </div>
     </div>
@@ -137,8 +159,6 @@ function tabClass({ active }: { active: boolean }) {
     boxShadow: active ? 'inset 0 1px 0 rgba(255,255,255,0.035)' : 'none',
     cursor: 'pointer',
     whiteSpace: 'nowrap',
-    fontSize: '12px',
-    fontWeight: 500,
     transition: 'background 0.15s ease, color 0.15s ease',
     _hover: { color: 'var(--text)' },
     '& > span:nth-child(2)': { overflow: 'hidden', textOverflow: 'ellipsis' },
@@ -168,9 +188,7 @@ const tabCloseClass = css({
 });
 
 const emptyTabsHintClass = css({
-  color: 'var(--text-3)',
   padding: '0 8px',
-  fontSize: '12px',
 });
 
 const tabDividerClass = css({
@@ -215,8 +233,6 @@ function autoApproveChipClass({ warn }: { warn: boolean }) {
     color: warn ? 'var(--warn)' : 'var(--text-2)',
     background: 'var(--surface-1)',
     boxShadow: 'var(--shadow)',
-    fontSize: '11.5px',
-    fontWeight: 500,
     whiteSpace: 'nowrap',
   });
 }

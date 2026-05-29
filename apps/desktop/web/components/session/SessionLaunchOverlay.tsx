@@ -4,11 +4,17 @@ import { css } from '../../styled-system/css';
 import { agentLabel, agentTabLabel, launchButtonLabel } from '../../domain';
 import type { ShellSession } from '../../domain';
 import { DotField } from '../chrome';
+import { Typography } from '../primitives/Typography';
 
 // Covers the terminal surface for a selected-but-not-running session: an idle
 // state with a launch/resume button, and a launching state with the breathing
 // dot field. Returns null when no session is selected.
-export function SessionLaunchOverlay({ session, launching, disabled, onLaunch }: {
+export function SessionLaunchOverlay({
+  session,
+  launching,
+  disabled,
+  onLaunch,
+}: {
   session: ShellSession | null;
   launching: boolean;
   disabled: boolean;
@@ -18,15 +24,38 @@ export function SessionLaunchOverlay({ session, launching, disabled, onLaunch }:
 
   if (launching) {
     return (
-      <div className={launchOverlayClass} data-testid="session-launch-overlay" data-state="launching">
+      <div
+        className={launchOverlayClass}
+        data-testid="session-launch-overlay"
+        data-state="launching"
+      >
         <div className={launchCardClass} data-state="launching">
           <div className={launchFieldClass}>
             <DotField variant="launching" />
           </div>
-          <span className={launchingLabelClass} data-testid="session-launching-label">
+          <Typography
+            as="span"
+            variant="caption"
+            tone="muted"
+            uppercase
+            className={launchingLabelClass}
+            data-testid="session-launching-label"
+            style={{ letterSpacing: '0.08em' }}
+          >
             Launching {agentLabel(session.agentKind)}
-          </span>
-          <span className={launchCardMetaClass}>{session.cwd}</span>
+          </Typography>
+          <Typography
+            as="span"
+            variant="caption"
+            tone="faint"
+            className={launchCardMetaClass}
+            style={{
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+              lineHeight: 1.5,
+            }}
+          >
+            {session.cwd}
+          </Typography>
         </div>
       </div>
     );
@@ -36,10 +65,21 @@ export function SessionLaunchOverlay({ session, launching, disabled, onLaunch }:
   return (
     <div className={launchOverlayClass} data-testid="session-launch-overlay" data-state="idle">
       <div className={launchCardClass} data-state="idle">
-        <span className={launchCardTitleClass}>{agentTabLabel(session)}</span>
-        <span className={launchCardMetaClass}>
+        <Typography as="span" variant="smallBody" tone="default">
+          {agentTabLabel(session)}
+        </Typography>
+        <Typography
+          as="span"
+          variant="caption"
+          tone="faint"
+          className={launchCardMetaClass}
+          style={{
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            lineHeight: 1.5,
+          }}
+        >
           {agentLabel(session.agentKind)} · {session.cwd}
-        </span>
+        </Typography>
         <button
           type="button"
           className={primaryLaunchButtonClass}
@@ -48,7 +88,14 @@ export function SessionLaunchOverlay({ session, launching, disabled, onLaunch }:
           onClick={onLaunch}
         >
           <Play size={13} weight="fill" />
-          {label}
+          <Typography
+            as="span"
+            variant="caption"
+            tone="inherit"
+            style={{ letterSpacing: '0.01em' }}
+          >
+            {label}
+          </Typography>
         </button>
       </div>
     </div>
@@ -82,19 +129,8 @@ const launchCardClass = css({
   backdropFilter: 'blur(10px)',
 });
 
-const launchCardTitleClass = css({
-  fontSize: '14px',
-  fontWeight: 500,
-  color: 'var(--text)',
-  letterSpacing: '-0.005em',
-});
-
 const launchCardMetaClass = css({
-  fontSize: '11px',
-  color: 'var(--text-3)',
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
   wordBreak: 'break-all',
-  lineHeight: 1.5,
 });
 
 const primaryLaunchButtonClass = css({
@@ -108,9 +144,6 @@ const primaryLaunchButtonClass = css({
   color: 'var(--bg)',
   border: 0,
   cursor: 'pointer',
-  fontWeight: 500,
-  fontSize: '12.5px',
-  letterSpacing: '0.01em',
   transition: 'transform 140ms cubic-bezier(0.22, 1, 0.36, 1), opacity 140ms ease',
   '&:hover': { transform: 'translateY(-1px)' },
   '&:active': { transform: 'translateY(0)' },
@@ -128,9 +161,4 @@ const launchFieldClass = css({
 const launchingLabelClass = css({
   position: 'relative',
   zIndex: 1,
-  fontSize: '11.5px',
-  fontWeight: 500,
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
-  color: 'var(--text-2)',
 });
