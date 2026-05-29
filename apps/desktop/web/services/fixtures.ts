@@ -17,6 +17,9 @@ const runningTerminals = new Map<
   { sessionId: string; cancelled: boolean; startedAt: number; framesEmitted: number }
 >();
 const fixtureStorageKey = makeFixtureStorageKey();
+// Test-only record of terminal input writes, surfaced on the window hook so the
+// harness can assert "send to input" / "ask an agent" seeded the right text.
+const recordedTerminalInputs: Array<{ terminalId: string; input: string }> = [];
 let fixtureShell: WorkspaceShellSnapshot = loadFixtureShellSnapshot();
 // CLIs the user has switched off in the harness. Drives the same enabled/
 // disabled behavior as the real workspace pref so the settings toggle and the
@@ -56,8 +59,12 @@ export async function invokeBrowserFixture<T>(
       return startFixtureSession(args) as T;
     case 'terminate_session':
       return terminateFixtureSession(args) as T;
-    case 'write_terminal_input':
+    case 'write_terminal_input': {
+      const terminalId = readDirectArg<string>(args, 'terminalId');
+      const input = (args?.input as string) ?? '';
+      recordedTerminalInputs.push({ terminalId, input });
       return undefined as T;
+    }
     case 'resize_terminal':
       return undefined as T;
     case 'scroll_terminal_viewport':
@@ -68,6 +75,14 @@ export async function invokeBrowserFixture<T>(
       return undefined as T;
     case 'record_render_metrics':
       return undefined as T;
+    case 'open_url': {
+      // In the browser harness there is no system opener; open a new tab so a
+      // human can see the link resolve. The desktop build routes this to the
+      // opener plugin instead.
+      const url = readDirectArg<string>(args, 'url');
+      if (url && typeof window !== 'undefined') window.open(url, '_blank', 'noopener,noreferrer');
+      return undefined as T;
+    }
     default:
       throw new Error(`Browser fixture does not implement Tauri command: ${command}`);
   }
@@ -392,6 +407,59 @@ function emit<T>(eventName: string, payload: T) {
   for (const handler of [...handlers]) {
     handler({ payload });
   }
+}
+
+// Build a deterministic frame from plain text lines (one cell per character).
+// Used by the test hook below so the harness + manual checks can drive known
+// content (e.g. a URL) instead of the random synthetic stream.
+function frameFromLines(lines: string[], cols: number, rows: number): TerminalFrame {
+  const rowModels = Array.from({ length: rows }, (_, index) => {
+    const text = lines[index] ?? '';
+    const cells = [];
+    for (let col = 0; col < Math.min(cols, text.length); col += 1) {
+      cells.push({ col, text: text[col] });
+    }
+    return { index, dirty: true, cells };
+  });
+  return {
+    dirty: 'full',
+    rows: rowModels,
+    cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+    scrollback: {
+      totalRows: rows,
+      scrollbackRows: 0,
+      viewportOffset: 0,
+      viewportRows: rows,
+      atBottom: true,
+    },
+  };
+}
+
+// Test-only hook (browser fixture builds): lets the harness + manual checks push
+// a known terminal frame to the active terminal so selection/link assertions are
+// deterministic. No-op outside a browser.
+if (typeof window !== 'undefined') {
+  (window as unknown as { __REVERIE_FIXTURE__?: unknown }).__REVERIE_FIXTURE__ = {
+    // Freeze the synthetic stream without ending the session, so an injected
+    // frame is not overwritten and the frame listener stays attached.
+    stopStream(terminalId: string) {
+      const terminal = runningTerminals.get(terminalId);
+      if (terminal) terminal.cancelled = true;
+    },
+    emitTerminalFrame(terminalId: string, lines: string[], cols = 120, rows = 36) {
+      emit('terminal_frame', {
+        terminalId,
+        seq: 9999,
+        bytesRead: 0,
+        chunkBytes: 0,
+        rustElapsedMs: 0,
+        frame: frameFromLines(lines, cols, rows),
+      });
+    },
+    recordedInputs() {
+      return recordedTerminalInputs.slice();
+    },
+  };
 }
 
 function readRequest<T>(args?: Record<string, unknown>) {

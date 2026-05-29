@@ -13,6 +13,7 @@ mod terminal;
 
 use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
 
+use reverie_core::TranscriptStore;
 use reverie_core::WorkspaceService;
 use reverie_core::activity_watcher::watch_cortex_activity;
 use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
@@ -99,6 +100,7 @@ fn main() {
     install_dev_panic_logger();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let store_path = app
                 .path()
@@ -115,6 +117,12 @@ fn main() {
             // managed state so background threads can still hold an Arc to
             // it without going through a Tauri command boundary.
             app.manage(repository.clone());
+
+            // Wire the durable transcript sink into the terminal runtime so each
+            // product session's raw PTY output is persisted for full-history
+            // scrollback + search.
+            app.state::<TerminalSessionRuntime>()
+                .set_transcript_store(repository.clone() as std::sync::Arc<dyn TranscriptStore>);
 
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
@@ -232,6 +240,7 @@ fn main() {
             commands::scroll_terminal_viewport_to_bottom,
             commands::terminate_session,
             commands::record_render_metrics,
+            commands::open_url,
             #[cfg(unix)]
             connection_commands::bridge_installation_status,
             #[cfg(unix)]

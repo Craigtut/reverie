@@ -1,4 +1,13 @@
-import { useEffect, useRef, type ClipboardEvent, type KeyboardEvent, type MouseEvent, type UIEvent, type WheelEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type KeyboardEvent,
+  type MouseEvent,
+  type UIEvent,
+  type WheelEvent,
+} from 'react';
 
 import { listen, type UnlistenFn } from '../services/runtime';
 import {
@@ -11,6 +20,7 @@ import {
 } from '../services/terminalApi';
 import {
   DEFAULT_TERMINAL_SCROLLBACK_ROWS,
+  USER_HOME,
   average,
   errorMessage,
   shortId,
@@ -18,6 +28,7 @@ import {
   terminalWheelDeltaRows,
 } from '../domain';
 import type {
+  CreateSessionRecordRequest,
   RenderMetrics,
   ShellSession,
   StartSessionRequest,
@@ -26,10 +37,27 @@ import type {
   TerminalFramePayload,
   TerminalStreamStartedPayload,
 } from '../domain';
+import { createSession } from '../services/shellApi';
 import { TERMINAL_SURFACE, percentile } from '../terminal-canvas-renderer';
 import { SCROLL_FOLLOW_EPSILON_PX, terminalSurfaceForBounds } from '../terminalScrollback';
-import { useNavigationStore, useTerminalStore } from '../store';
+import { useNavigationStore, useShellStore, useTerminalStore } from '../store';
+import { openExternalUrl } from '../services/openApi';
 import { createTerminalController, type TerminalController } from '../terminal/terminalController';
+import {
+  buildActionContext,
+  buildMenuItems,
+  createTerminalInteraction,
+  registerDefaultInteractions,
+  resolveTopTarget,
+  type ActionContextDeps,
+  type ContextMenuContext,
+  type InteractionProbe,
+  type MenuModel,
+  type TerminalInteraction,
+} from '../terminal/interaction';
+
+// Register the built-in resolvers + actions once, before any menu is built.
+registerDefaultInteractions();
 
 // React binding for the terminal island. Owns the imperative TerminalController,
 // wires the canvas/viewport DOM, runs the paint/resize effects, subscribes to the
@@ -60,23 +88,57 @@ export function useTerminalSession(params: {
   }
   const controller = controllerRef.current;
 
+  // The input island: pointer-driven selection + the right-click menu. It reads
+  // paint state from the controller and writes selection ranges back. The
+  // contextmenu callback is dispatched through a ref so it always sees the latest
+  // services without recreating the (long-lived) interaction controller.
+  const contextMenuHandlerRef = useRef<(context: ContextMenuContext) => void>(() => {});
+  const interactionRef = useRef<TerminalInteraction | null>(null);
+  if (interactionRef.current === null) {
+    interactionRef.current = createTerminalInteraction({
+      port: controller,
+      onContextMenu: context => contextMenuHandlerRef.current(context),
+      onActivateLink: href => {
+        void openExternalUrl(href).catch(error =>
+          writeLog(`Open link failed: ${errorMessage(error)}`),
+        );
+      },
+    });
+  }
+  const interaction = interactionRef.current;
+  const [contextMenu, setContextMenu] = useState<MenuModel | null>(null);
+
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
   const creationMode = useNavigationStore(s => s.creationMode);
 
   // Keep the controller pointed at the live DOM elements (they mount/unmount as
-  // the terminal surface shows/hides).
+  // the terminal surface shows/hides), and bind/unbind the pointer island to the
+  // live canvas alongside it.
   useEffect(() => {
     controller.attach({
       canvas: canvasRef.current,
       viewport: surfaceViewportRef.current,
       spacer: terminalScrollSpacerRef.current,
     });
+    if (canvasRef.current) interaction.attach();
+    else interaction.detach();
   });
+
+  // Switching the displayed session drops any active selection/hover. Without
+  // this, a selection made in session A would pin session B's viewport
+  // (shouldAutoFollow stays false) and Copy/Send-to-input would read B at A's
+  // coordinates. Keyed on the session id only, so a resize repaint never clears.
+  useEffect(() => {
+    controller.resetInteraction();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- session id is the trigger
+  }, [selectedSession?.id]);
 
   // First paint.
   useEffect(() => {
     controller.paintCurrent(useNavigationStore.getState().selectedSessionId);
-    writeLog('Ready. Reverie shell is using the floating-panel UI direction; terminal rendering remains a Canvas island.');
+    writeLog(
+      'Ready. Reverie shell is using the floating-panel UI direction; terminal rendering remains a Canvas island.',
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only
   }, []);
 
@@ -84,7 +146,9 @@ export function useTerminalSession(params: {
   useEffect(() => {
     if (surfaceMode !== 'terminal') return;
     controller.resetRenderer();
-    requestAnimationFrame(() => controller.paintCurrent(useNavigationStore.getState().selectedSessionId));
+    requestAnimationFrame(() =>
+      controller.paintCurrent(useNavigationStore.getState().selectedSessionId),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [surfaceMode]);
 
@@ -94,7 +158,9 @@ export function useTerminalSession(params: {
       return;
     }
     controller.resetRenderer();
-    requestAnimationFrame(() => controller.paintCurrent(useNavigationStore.getState().selectedSessionId));
+    requestAnimationFrame(() =>
+      controller.paintCurrent(useNavigationStore.getState().selectedSessionId),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creationMode, selectedSession?.id, surfaceMode]);
 
@@ -135,11 +201,15 @@ export function useTerminalSession(params: {
     try {
       await recordRenderMetrics(result);
     } catch (error) {
-      if (isTauriRuntime) writeLog(`Unable to record metrics through Tauri: ${errorMessage(error)}`);
+      if (isTauriRuntime)
+        writeLog(`Unable to record metrics through Tauri: ${errorMessage(error)}`);
     }
   }
 
-  async function attachRuntimeSessionListeners(terminalId: string, session: ShellSession): Promise<() => void> {
+  async function attachRuntimeSessionListeners(
+    terminalId: string,
+    session: ShellSession,
+  ): Promise<() => void> {
     controller.requireRenderer();
     const timings: number[] = [];
     const interEventTimings: number[] = [];
@@ -178,7 +248,10 @@ export function useTerminalSession(params: {
     }
 
     function setSessionTerminalInputReady(inputArmed: boolean) {
-      store.setSessionTerminalBindings(current => ({ ...current, [session.id]: { terminalId, inputArmed } }));
+      store.setSessionTerminalBindings(current => ({
+        ...current,
+        [session.id]: { terminalId, inputArmed },
+      }));
       if (useTerminalStore.getState().activeTerminalId === terminalId) {
         store.setTerminalInputArmed(inputArmed);
       }
@@ -195,83 +268,95 @@ export function useTerminalSession(params: {
       store.setRunningSessionId(current => (current === session.id ? null : current));
     }
 
-    unlisteners.push(await listen<TerminalStreamStartedPayload>('terminal_stream_started', event => {
-      if (event.payload.terminalId !== terminalId) return;
-      startedPayload = event.payload;
-      receiveStarted = performance.now();
-      setSessionTerminalInputReady(true);
-      requestAnimationFrame(() => controller.focusCanvas());
-      writeLog(`Runtime session started: terminal=${shortId(terminalId)} session=${shortId(session.id)} cols=${startedPayload.cols} rows=${startedPayload.rows}.`);
-      void loadWorkspaceShell();
-    }));
+    unlisteners.push(
+      await listen<TerminalStreamStartedPayload>('terminal_stream_started', event => {
+        if (event.payload.terminalId !== terminalId) return;
+        startedPayload = event.payload;
+        receiveStarted = performance.now();
+        setSessionTerminalInputReady(true);
+        requestAnimationFrame(() => controller.focusCanvas());
+        writeLog(
+          `Runtime session started: terminal=${shortId(terminalId)} session=${shortId(session.id)} cols=${startedPayload.cols} rows=${startedPayload.rows}.`,
+        );
+        void loadWorkspaceShell();
+      }),
+    );
 
-    unlisteners.push(await listen<TerminalFramePayload>('terminal_frame', event => {
-      const payload = event.payload;
-      if (payload.terminalId !== terminalId) return;
+    unlisteners.push(
+      await listen<TerminalFramePayload>('terminal_frame', event => {
+        const payload = event.payload;
+        if (payload.terminalId !== terminalId) return;
 
-      const now = performance.now();
-      if (receiveStarted === null) receiveStarted = now;
-      if (lastEventAt !== null) interEventTimings.push(now - lastEventAt);
-      lastEventAt = now;
+        const now = performance.now();
+        if (receiveStarted === null) receiveStarted = now;
+        if (lastEventAt !== null) interEventTimings.push(now - lastEventAt);
+        lastEventAt = now;
 
-      if (payload.seq !== expectedSeq) droppedFrames += Math.max(0, payload.seq - expectedSeq);
-      expectedSeq = payload.seq + 1;
-      framesReceived += 1;
-      pendingTerminalFramePayload = payload;
-      if (!terminalFrameRaf) terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrame);
-    }));
+        if (payload.seq !== expectedSeq) droppedFrames += Math.max(0, payload.seq - expectedSeq);
+        expectedSeq = payload.seq + 1;
+        framesReceived += 1;
+        pendingTerminalFramePayload = payload;
+        if (!terminalFrameRaf) terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrame);
+      }),
+    );
 
-    unlisteners.push(await listen<TerminalExitPayload>('terminal_exit', event => {
-      const finished = event.payload;
-      if (finished.terminalId !== terminalId) return;
+    unlisteners.push(
+      await listen<TerminalExitPayload>('terminal_exit', event => {
+        const finished = event.payload;
+        if (finished.terminalId !== terminalId) return;
 
-      if (pendingTerminalFramePayload) {
-        if (terminalFrameRaf) {
-          cancelAnimationFrame(terminalFrameRaf);
-          terminalFrameRaf = 0;
+        if (pendingTerminalFramePayload) {
+          if (terminalFrameRaf) {
+            cancelAnimationFrame(terminalFrameRaf);
+            terminalFrameRaf = 0;
+          }
+          paintPendingTerminalFrame();
         }
-        paintPendingTerminalFrame();
-      }
-      const receiveElapsed = receiveStarted === null ? 0 : performance.now() - receiveStarted;
-      cleanup();
-      clearActiveTerminal();
-      const result: RenderMetrics = {
-        mode: 'Cortex adapter terminal session',
-        terminalId,
-        frames: finished.framesEmitted,
-        framesReceived,
-        droppedFrames,
-        chunksRead: finished.chunksRead,
-        cellsDrawn,
-        elapsedMs: receiveElapsed,
-        avgFrameMs: average(timings),
-        p95FrameMs: percentile(timings, 0.95),
-        maxFrameMs: Math.max(0, ...timings),
-        cellsPerSecond: cellsDrawn / Math.max(0.001, receiveElapsed / 1000),
-        outputBytes: finished.bytesRead,
-        rustElapsedMs: finished.rustElapsedMs,
-        totalEmitMs: finished.totalEmitMs,
-        avgEmitMs: finished.avgEmitMs,
-        maxEmitMs: finished.maxEmitMs,
-        avgInterEventMs: average(interEventTimings),
-        p95InterEventMs: percentile(interEventTimings, 0.95),
-        maxInterEventMs: Math.max(0, ...interEventTimings),
-        childSuccess: finished.childSuccess,
-        targetFrames: startedPayload?.targetFrames ?? undefined,
-      };
-      writeLog(`Runtime session exited: terminal=${shortId(terminalId)} received=${result.framesReceived}/${result.frames} chunks=${result.chunksRead}.`);
-      void recordMetrics(result);
-      void loadWorkspaceShell();
-    }));
+        const receiveElapsed = receiveStarted === null ? 0 : performance.now() - receiveStarted;
+        cleanup();
+        clearActiveTerminal();
+        const result: RenderMetrics = {
+          mode: 'Cortex adapter terminal session',
+          terminalId,
+          frames: finished.framesEmitted,
+          framesReceived,
+          droppedFrames,
+          chunksRead: finished.chunksRead,
+          cellsDrawn,
+          elapsedMs: receiveElapsed,
+          avgFrameMs: average(timings),
+          p95FrameMs: percentile(timings, 0.95),
+          maxFrameMs: Math.max(0, ...timings),
+          cellsPerSecond: cellsDrawn / Math.max(0.001, receiveElapsed / 1000),
+          outputBytes: finished.bytesRead,
+          rustElapsedMs: finished.rustElapsedMs,
+          totalEmitMs: finished.totalEmitMs,
+          avgEmitMs: finished.avgEmitMs,
+          maxEmitMs: finished.maxEmitMs,
+          avgInterEventMs: average(interEventTimings),
+          p95InterEventMs: percentile(interEventTimings, 0.95),
+          maxInterEventMs: Math.max(0, ...interEventTimings),
+          childSuccess: finished.childSuccess,
+          targetFrames: startedPayload?.targetFrames ?? undefined,
+        };
+        writeLog(
+          `Runtime session exited: terminal=${shortId(terminalId)} received=${result.framesReceived}/${result.frames} chunks=${result.chunksRead}.`,
+        );
+        void recordMetrics(result);
+        void loadWorkspaceShell();
+      }),
+    );
 
-    unlisteners.push(await listen<TerminalFailedPayload>('terminal_failed', event => {
-      const failedTerminalId = event.payload?.terminalId;
-      if (failedTerminalId && failedTerminalId !== terminalId) return;
-      cleanup();
-      clearActiveTerminal();
-      writeLog(`Runtime session failed: ${event.payload?.message || 'terminal session failed'}`);
-      void loadWorkspaceShell();
-    }));
+    unlisteners.push(
+      await listen<TerminalFailedPayload>('terminal_failed', event => {
+        const failedTerminalId = event.payload?.terminalId;
+        if (failedTerminalId && failedTerminalId !== terminalId) return;
+        cleanup();
+        clearActiveTerminal();
+        writeLog(`Runtime session failed: ${event.payload?.message || 'terminal session failed'}`);
+        void loadWorkspaceShell();
+      }),
+    );
 
     return cleanup;
   }
@@ -327,7 +412,10 @@ export function useTerminalSession(params: {
         rows: surface.rows,
         maxScrollback: DEFAULT_TERMINAL_SCROLLBACK_ROWS,
       };
-      store.setSessionTerminalBindings(current => ({ ...current, [session.id]: { terminalId, inputArmed: false } }));
+      store.setSessionTerminalBindings(current => ({
+        ...current,
+        [session.id]: { terminalId, inputArmed: false },
+      }));
       store.setTerminalInputArmed(false);
       store.setActiveTerminalId(terminalId);
       store.setRunningSessionId(session.id);
@@ -387,11 +475,56 @@ export function useTerminalSession(params: {
     }
   }
 
+  async function copySelectionToClipboard(): Promise<boolean> {
+    const text = controller.getSelectionText();
+    if (!text) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (error) {
+      writeLog(`Copy failed: ${errorMessage(error)}`);
+      return false;
+    }
+  }
+
   function handleTerminalKeyDown(event: KeyboardEvent<HTMLCanvasElement>) {
+    // Selection-aware shortcuts take precedence while a selection exists. We do
+    // not intercept a plain Ctrl-C (that stays SIGINT); copy is Cmd-C (macOS) or
+    // Ctrl-Shift-C, matching terminal convention.
+    if (controller.hasSelection()) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        controller.clearSelection();
+        return;
+      }
+      const isCopyKey = event.key === 'c' || event.key === 'C';
+      const copyCombo =
+        (event.metaKey && !event.ctrlKey && isCopyKey) ||
+        (event.ctrlKey && event.shiftKey && isCopyKey);
+      if (copyCombo) {
+        event.preventDefault();
+        void copySelectionToClipboard();
+        return;
+      }
+    }
+
     const input = terminalInputForKey(event, controller.getLastFrameModes());
     if (!input || !inputReady()) return;
     event.preventDefault();
+    // Typing into the terminal drops any selection (standard terminal behavior),
+    // which also lets tail-follow resume instead of staying pinned mid-scroll.
+    controller.clearSelection();
     void sendTerminalInput(input);
+  }
+
+  // Send pasted text to the terminal, wrapping in bracketed-paste markers when
+  // the app requested that mode. Shared by the paste event + the menu action.
+  async function pasteTextToTerminal(text: string) {
+    if (!inputReady() || !text) return;
+    const input = controller.getLastFrameModes()?.bracketedPaste
+      ? `\x1b[200~${text}\x1b[201~`
+      : text;
+    await sendTerminalInput(input);
   }
 
   function handleTerminalPaste(event: ClipboardEvent<HTMLCanvasElement>) {
@@ -399,9 +532,123 @@ export function useTerminalSession(params: {
     const text = event.clipboardData.getData('text');
     if (!text) return;
     event.preventDefault();
-    const input = controller.getLastFrameModes()?.bracketedPaste ? `\x1b[200~${text}\x1b[201~` : text;
-    void sendTerminalInput(input);
+    void pasteTextToTerminal(text);
   }
+
+  // Resolve once the newly-launched session's terminal input is armed, then
+  // write the seed prompt into it. Bounded so a session that never arms (launch
+  // failure) does not hang the caller.
+  function seedPromptWhenArmed(sessionId: string, text: string, timeoutMs = 8000): Promise<void> {
+    return new Promise(resolve => {
+      const tryWrite = () => {
+        const binding = useTerminalStore.getState().sessionTerminalBindings[sessionId];
+        if (!binding?.inputArmed) return false;
+        void writeTerminalInput(binding.terminalId, text);
+        return true;
+      };
+      if (tryWrite()) {
+        resolve();
+        return;
+      }
+      const unsubscribe = useTerminalStore.subscribe(() => {
+        if (tryWrite()) {
+          unsubscribe();
+          resolve();
+        }
+      });
+      window.setTimeout(() => {
+        unsubscribe();
+        resolve();
+      }, timeoutMs);
+    });
+  }
+
+  // "Ask an agent about this": spin up a new session under the current focus,
+  // seeded with the text. The new session inherits the current session's agent
+  // kind + cwd so the context matches. The prompt is typed into the new session
+  // but not auto-submitted, keeping it explicit/calm.
+  async function askAgentAbout(text: string) {
+    const focusId =
+      useNavigationStore.getState().selectedFocusId ?? selectedSession?.focusId ?? null;
+    if (!focusId) {
+      writeLog('Ask an agent: select a focus first.');
+      return;
+    }
+    // ShellSession.agentKind is a free string; coerce to the request's enum.
+    const agentKind =
+      (selectedSession?.agentKind as CreateSessionRecordRequest['agentKind']) ?? 'cortex_code';
+    const cwd = selectedSession?.cwd ?? USER_HOME;
+    const preview = text.replace(/\s+/g, ' ').trim().slice(0, 40);
+    const request: CreateSessionRecordRequest = {
+      focusId,
+      title: preview ? `Ask: ${preview}` : 'Ask an agent',
+      agentKind,
+      cwd,
+      dangerousModeOverride: false,
+    };
+    try {
+      const snapshot = await createSession(request);
+      const created = snapshot.sessions[snapshot.sessions.length - 1];
+      useShellStore.getState().setShell(snapshot);
+      if (!created) return;
+      useNavigationStore.getState().setSelectedSessionId(created.id);
+      autostartSession(created);
+      await seedPromptWhenArmed(created.id, text);
+      writeLog(`Asked a new ${agentKind} session about the selection.`);
+    } catch (error) {
+      writeLog(`Ask an agent failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Services the menu actions run against. Built fresh per menu open so values
+  // like input-readiness are current.
+  function buildMenuActionDeps(): ActionContextDeps {
+    return {
+      pasteText: pasteTextToTerminal,
+      sendInput: sendTerminalInput,
+      selectAll: () => interaction.selectAll(),
+      clearSelection: () => controller.clearSelection(),
+      openExternal: href => openExternalUrl(href),
+      askAgent: prompt => askAgentAbout(prompt),
+      canSendInput: () => inputReady(),
+    };
+  }
+
+  // Resolve the right-click target and assemble the menu model.
+  function buildContextMenu(menuContext: ContextMenuContext) {
+    menuContext.event.preventDefault();
+    const composite = controller.getComposite();
+    if (!composite) {
+      setContextMenu(null);
+      return;
+    }
+    const event = menuContext.event;
+    const probe: InteractionProbe = {
+      cell: menuContext.cell,
+      frame: composite,
+      surface: controller.getSurface(),
+      selection: menuContext.selection,
+      selectionText: controller.getSelectionText(),
+      modifiers: {
+        shift: event.shiftKey,
+        meta: event.metaKey,
+        ctrl: event.ctrlKey,
+        alt: event.altKey,
+      },
+    };
+    const target = resolveTopTarget(probe);
+    if (!target) {
+      setContextMenu(null);
+      return;
+    }
+    const items = buildMenuItems(target, buildActionContext(buildMenuActionDeps()));
+    if (items.length === 0) {
+      setContextMenu(null);
+      return;
+    }
+    setContextMenu({ open: true, x: event.clientX, y: event.clientY, items });
+  }
+  contextMenuHandlerRef.current = buildContextMenu;
 
   function focusTerminalCanvas(event?: MouseEvent<HTMLElement>) {
     event?.preventDefault();
@@ -415,7 +662,9 @@ export function useTerminalSession(params: {
       return;
     }
     const viewport = event.currentTarget;
-    const following = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
+    const following =
+      viewport.scrollTop + viewport.clientHeight >=
+      viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
     controller.setLiveFollow(following);
   }
 
@@ -445,12 +694,17 @@ export function useTerminalSession(params: {
       if (!canvasRef.current || !surfaceViewportRef.current) {
         attempts += 1;
         if (attempts <= 12) window.setTimeout(tryLaunch, 25);
-        else writeLog(`Autostart session delayed: terminal surface did not mount for ${session.title}.`);
+        else
+          writeLog(
+            `Autostart session delayed: terminal surface did not mount for ${session.title}.`,
+          );
         return;
       }
       controller.resetRenderer();
       controller.paintCurrent(useNavigationStore.getState().selectedSessionId);
-      void launchSession(session).catch(error => writeLog(`Autostart session failed: ${errorMessage(error)}`));
+      void launchSession(session).catch(error =>
+        writeLog(`Autostart session failed: ${errorMessage(error)}`),
+      );
     };
     window.setTimeout(tryLaunch, 0);
   }
@@ -468,6 +722,8 @@ export function useTerminalSession(params: {
     launchSession,
     activateSession,
     autostartSession,
+    contextMenu,
+    closeContextMenu: () => setContextMenu(null),
     clearSurface: () => controller.clear(),
     dropSession: (sessionId: string) => controller.dropSession(sessionId),
   };

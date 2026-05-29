@@ -64,12 +64,28 @@ export interface TerminalFrame {
   };
 }
 
+// A horizontal run of cells on one painted (window-local) row, used to draw
+// selection highlight and link underlines on top of the glyph layer.
+export interface RowSpan {
+  row: number; // window-local row index (0..displayRows)
+  startCol: number; // inclusive
+  endCol: number; // exclusive
+}
+
+// Optional decorations the renderer paints over the glyphs. All spans are
+// window-local; the controller translates them from buffer coordinates.
+export interface TerminalOverlay {
+  selection?: RowSpan[];
+  links?: RowSpan[];
+  hoverLink?: RowSpan;
+}
+
 export interface TerminalRenderer {
   cols: number;
   rows: number;
   cellWidth: number;
   cellHeight: number;
   clear: (background?: TerminalColor) => void;
-  paintFrame: (frame: TerminalFrame) => void;
+  paintFrame: (frame: TerminalFrame, overlay?: TerminalOverlay) => void;
   rowsToPaint: (frame: TerminalFrame) => TerminalRow[];
 }

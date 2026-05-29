@@ -1,4 +1,12 @@
-import type { TerminalCell, TerminalColor, TerminalCursor, TerminalFrame, TerminalRenderer, TerminalRow } from './terminalTypes';
+import type {
+  TerminalCell,
+  TerminalColor,
+  TerminalCursor,
+  TerminalFrame,
+  TerminalOverlay,
+  TerminalRenderer,
+  TerminalRow,
+} from './terminalTypes';
 
 const DEFAULT_CELL_WIDTH = 9;
 const DEFAULT_CELL_HEIGHT = 18;
@@ -12,9 +20,14 @@ const DEFAULT_CURSOR = '#f0e8dc';
 // background shows through, values between = a tint. Cells with an explicit
 // non-default background are always painted opaque regardless of this.
 const DEFAULT_BACKGROUND_OPACITY = 1;
-const PALETTE = [
-  '#d8dee9', '#88c0d0', '#a3be8c', '#ebcb8b', '#d08770', '#b48ead', '#81a1c1',
-];
+// Selection highlight is a translucent tint of the foreground (monochrome, no
+// status color) laid over the glyphs so selected text stays legible.
+const SELECTION_ALPHA = 0.26;
+// Link underline is drawn at the foreground color; the hovered link gets a
+// slightly thicker rule.
+const LINK_UNDERLINE_HEIGHT = 1;
+const HOVER_LINK_UNDERLINE_HEIGHT = 2;
+const PALETTE = ['#d8dee9', '#88c0d0', '#a3be8c', '#ebcb8b', '#d08770', '#b48ead', '#81a1c1'];
 
 export const TERMINAL_SURFACE = Object.freeze({
   cols: 120,
@@ -49,7 +62,10 @@ export function createTerminalCanvasRenderer(
   const defaultForeground = options.foreground ?? DEFAULT_FOREGROUND;
   const defaultBackground = options.background ?? DEFAULT_BACKGROUND;
   const defaultCursor = options.cursor ?? DEFAULT_CURSOR;
-  const backgroundOpacity = Math.min(1, Math.max(0, options.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY));
+  const backgroundOpacity = Math.min(
+    1,
+    Math.max(0, options.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY),
+  );
   const opaqueBackground = backgroundOpacity >= 1;
   const dpr = window.devicePixelRatio || 1;
   // An opaque background can use a faster non-alpha buffer; any transparency or
@@ -110,7 +126,13 @@ export function createTerminalCanvasRenderer(
   // opaque draws a solid fill; otherwise the region is cleared to transparent
   // first (so glyph antialiasing never accumulates across repaints) and an
   // optional tint is laid down at the configured opacity.
-  function paintDefaultBackground(x: number, y: number, width: number, height: number, color: string) {
+  function paintDefaultBackground(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    color: string,
+  ) {
     if (opaqueBackground) {
       ctx.fillStyle = color;
       ctx.fillRect(x, y, width, height);
@@ -128,7 +150,13 @@ export function createTerminalCanvasRenderer(
   }
 
   function clear(backgroundColor?: TerminalColor) {
-    paintDefaultBackground(0, 0, cols * cellWidth, rows * cellHeight, colorToCss(backgroundColor, defaultBackground));
+    paintDefaultBackground(
+      0,
+      0,
+      cols * cellWidth,
+      rows * cellHeight,
+      colorToCss(backgroundColor, defaultBackground),
+    );
   }
 
   function paintBlockGlyph(text: string, x: number, y: number, color: string) {
@@ -156,7 +184,12 @@ export function createTerminalCanvasRenderer(
         ctx.fillRect(x, y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
         return true;
       case '▗':
-        ctx.fillRect(x + Math.floor(cellWidth / 2), y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
+        ctx.fillRect(
+          x + Math.floor(cellWidth / 2),
+          y + Math.floor(cellHeight / 2),
+          halfWidth,
+          halfHeight,
+        );
         return true;
       case '▘':
         ctx.fillRect(x, y, halfWidth, halfHeight);
@@ -211,7 +244,51 @@ export function createTerminalCanvasRenderer(
     }
   }
 
-  function paintFrame(frame: TerminalFrame) {
+  // Draw selection highlight + link underlines on top of the glyph layer. Only
+  // spans on rows that were actually repainted this frame are drawn, so partial
+  // (dirty-row) paints never re-tint an already-tinted row. The controller
+  // forces a full paint whenever the selection or hover changes, so a changed
+  // overlay always lands on freshly painted rows.
+  function paintOverlay(overlay: TerminalOverlay, paintedRows: Set<number>, foreground: string) {
+    const selection = overlay.selection ?? [];
+    if (selection.length > 0) {
+      const previousAlpha = ctx.globalAlpha;
+      ctx.globalAlpha = SELECTION_ALPHA;
+      ctx.fillStyle = foreground;
+      for (const span of selection) {
+        if (!paintedRows.has(span.row)) continue;
+        const x = span.startCol * cellWidth;
+        const width = (span.endCol - span.startCol) * cellWidth;
+        if (width > 0) ctx.fillRect(x, span.row * cellHeight, width, cellHeight);
+      }
+      ctx.globalAlpha = previousAlpha;
+    }
+
+    const links = overlay.links ?? [];
+    ctx.fillStyle = foreground;
+    for (const span of links) {
+      if (!paintedRows.has(span.row)) continue;
+      const x = span.startCol * cellWidth;
+      const width = (span.endCol - span.startCol) * cellWidth;
+      if (width > 0)
+        ctx.fillRect(x, span.row * cellHeight + cellHeight - 2, width, LINK_UNDERLINE_HEIGHT);
+    }
+
+    const hover = overlay.hoverLink;
+    if (hover && paintedRows.has(hover.row)) {
+      const x = hover.startCol * cellWidth;
+      const width = (hover.endCol - hover.startCol) * cellWidth;
+      if (width > 0)
+        ctx.fillRect(
+          x,
+          hover.row * cellHeight + cellHeight - 2,
+          width,
+          HOVER_LINK_UNDERLINE_HEIGHT,
+        );
+    }
+  }
+
+  function paintFrame(frame: TerminalFrame, overlay?: TerminalOverlay) {
     const paintRows = rowsToPaint(frame);
     const foreground = colorToCss(frame.colors?.foreground, defaultForeground);
     const background = colorToCss(frame.colors?.background, defaultBackground);
@@ -243,6 +320,11 @@ export function createTerminalCanvasRenderer(
     }
 
     paintCursor(frame, foreground, background);
+
+    if (overlay) {
+      const paintedRows = new Set(paintRows.map(row => row.index));
+      paintOverlay(overlay, paintedRows, foreground);
+    }
   }
 
   return {
@@ -256,12 +338,15 @@ export function createTerminalCanvasRenderer(
   };
 }
 
-export function makeSyntheticFrame(frameIndex: number, options: {
-  cols?: number;
-  rows?: number;
-  dirtyRowsPerFrame?: number;
-  dirtyOnly?: boolean;
-} = {}): TerminalFrame {
+export function makeSyntheticFrame(
+  frameIndex: number,
+  options: {
+    cols?: number;
+    rows?: number;
+    dirtyRowsPerFrame?: number;
+    dirtyOnly?: boolean;
+  } = {},
+): TerminalFrame {
   const cols = options.cols ?? TERMINAL_SURFACE.cols;
   const rowsCount = options.rows ?? TERMINAL_SURFACE.rows;
   const dirtyRowsPerFrame = options.dirtyRowsPerFrame ?? 8;
@@ -270,7 +355,7 @@ export function makeSyntheticFrame(frameIndex: number, options: {
   const dirtyStart = frameIndex % rowsCount;
 
   for (let row = 0; row < rowsCount; row += 1) {
-    const dirty = !dirtyOnly || ((row + rowsCount - dirtyStart) % rowsCount) < dirtyRowsPerFrame;
+    const dirty = !dirtyOnly || (row + rowsCount - dirtyStart) % rowsCount < dirtyRowsPerFrame;
     const cells: TerminalCell[] = [];
 
     if (dirty) {

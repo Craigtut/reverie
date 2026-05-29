@@ -1,8 +1,21 @@
 import { createTerminalCanvasRenderer } from '../terminal-canvas-renderer';
-import { SCROLL_FOLLOW_EPSILON_PX, frameForSurface, type TerminalSurface } from '../terminalScrollback';
+import {
+  SCROLL_FOLLOW_EPSILON_PX,
+  frameForSurface,
+  type TerminalSurface,
+} from '../terminalScrollback';
 import type { SessionTerminalView } from '../domain';
-import type { TerminalFrame, TerminalModes, TerminalRenderer } from '../terminalTypes';
+import type {
+  TerminalFrame,
+  TerminalModes,
+  TerminalOverlay,
+  TerminalRenderer,
+} from '../terminalTypes';
 import { buildSessionTerminalView, computePaintWindow, emptyTerminalView } from './frameModel';
+import { rowPlainText, selectionText } from './interaction/selectionModel';
+import { rowSpanInWindow, selectionWindowSpans } from './interaction/overlayPaint';
+import { detectLinks } from './interaction/linkProvider';
+import type { BufferCell, BufferLinkSpan, RowSpan, SelectionRange } from './interaction/types';
 
 // Opacity of the terminal's default background. 0 lets the shell gradient + dot
 // field show through so the session feels painted onto the surface.
@@ -20,7 +33,11 @@ export interface TerminalControllerOptions {
   onScrollbackRowCount: (count: number) => void;
   onLiveFollow: (live: boolean) => void;
   // Injectable for tests; defaults to the real Canvas renderer.
-  createRenderer?: (canvas: HTMLCanvasElement, surface: TerminalSurface, displayRows: number) => TerminalRenderer;
+  createRenderer?: (
+    canvas: HTMLCanvasElement,
+    surface: TerminalSurface,
+    displayRows: number,
+  ) => TerminalRenderer;
 }
 
 // The imperative terminal island: owns the Canvas renderer, the DOM elements,
@@ -30,8 +47,14 @@ export interface TerminalControllerOptions {
 // drives the session lifecycle.
 export function createTerminalController(options: TerminalControllerOptions) {
   const { onScrollbackRowCount, onLiveFollow } = options;
-  const createRenderer = options.createRenderer
-    ?? ((canvas, surface, displayRows) => createTerminalCanvasRenderer(canvas, { ...surface, rows: displayRows, backgroundOpacity: TERMINAL_BACKGROUND_OPACITY }));
+  const createRenderer =
+    options.createRenderer ??
+    ((canvas, surface, displayRows) =>
+      createTerminalCanvasRenderer(canvas, {
+        ...surface,
+        rows: displayRows,
+        backgroundOpacity: TERMINAL_BACKGROUND_OPACITY,
+      }));
 
   let els: TerminalDomRefs = { canvas: null, viewport: null, spacer: null };
   let surface: TerminalSurface = options.surface;
@@ -42,6 +65,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let lastStartRow: number | null = null;
   let liveFollow = true;
   let autoScrolling = false;
+  // Interaction overlay state, all in buffer (composite-frame) coordinates so it
+  // survives scrolling. The interaction controller drives these; paintWindow
+  // translates them into window-local spans for the renderer.
+  let selection: SelectionRange | null = null;
+  let links: BufferLinkSpan[] = [];
+  let hoverLink: BufferLinkSpan | null = null;
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
 
@@ -51,7 +80,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
     return renderer;
   }
 
-  function ensureRenderer(forSurface: TerminalSurface, displayRows: number): TerminalRenderer | null {
+  function ensureRenderer(
+    forSurface: TerminalSurface,
+    displayRows: number,
+  ): TerminalRenderer | null {
     if (!renderer || renderer.cols !== forSurface.cols || renderer.rows !== displayRows) {
       needsFullPaint = true;
       lastStartRow = null;
@@ -67,14 +99,25 @@ export function createTerminalController(options: TerminalControllerOptions) {
     spacer.style.width = `${forSurface.cols * forSurface.cellWidth}px`;
   }
 
-  function paintWindow(frame: TerminalFrame | null = lastComposite, forSurface: TerminalSurface = surface) {
+  function paintWindow(
+    frame: TerminalFrame | null = lastComposite,
+    forSurface: TerminalSurface = surface,
+  ) {
     if (!frame) return;
     const viewport = els.viewport;
-    const viewportHeight = Math.max(forSurface.cellHeight, viewport?.clientHeight ?? forSurface.rows * forSurface.cellHeight);
+    const viewportHeight = Math.max(
+      forSurface.cellHeight,
+      viewport?.clientHeight ?? forSurface.rows * forSurface.cellHeight,
+    );
     const scrollTop = viewport?.scrollTop ?? 0;
 
     const { startRow, displayRows, forceFullPaint, windowFrame } = computePaintWindow({
-      frame, surface: forSurface, scrollTop, viewportHeight, needsFullPaint, lastStartRow,
+      frame,
+      surface: forSurface,
+      scrollTop,
+      viewportHeight,
+      needsFullPaint,
+      lastStartRow,
     });
     const activeRenderer = ensureRenderer(forSurface, displayRows);
 
@@ -84,9 +127,87 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (forceFullPaint) {
       activeRenderer?.clear(windowFrame.colors?.background);
     }
-    activeRenderer?.paintFrame(windowFrame);
+    activeRenderer?.paintFrame(windowFrame, buildOverlay(startRow, displayRows, forSurface));
     needsFullPaint = false;
     lastStartRow = startRow;
+  }
+
+  // Translate the buffer-coordinate interaction state into the window-local
+  // overlay the renderer draws. Returns undefined when there is nothing to draw
+  // so the renderer can skip the overlay pass entirely.
+  function buildOverlay(
+    startRow: number,
+    displayRows: number,
+    forSurface: TerminalSurface,
+  ): TerminalOverlay | undefined {
+    const selectionSpans = selectionWindowSpans(selection, startRow, displayRows, forSurface.cols);
+    const linkSpans: RowSpan[] = [];
+    for (const link of links) {
+      const span = rowSpanInWindow(
+        link.row,
+        link.startCol,
+        link.endCol,
+        startRow,
+        displayRows,
+        forSurface.cols,
+      );
+      if (span) linkSpans.push(span);
+    }
+    const hoverSpan = hoverLink
+      ? rowSpanInWindow(
+          hoverLink.row,
+          hoverLink.startCol,
+          hoverLink.endCol,
+          startRow,
+          displayRows,
+          forSurface.cols,
+        )
+      : null;
+
+    if (selectionSpans.length === 0 && linkSpans.length === 0 && !hoverSpan) return undefined;
+    return {
+      selection: selectionSpans.length > 0 ? selectionSpans : undefined,
+      links: linkSpans.length > 0 ? linkSpans : undefined,
+      hoverLink: hoverSpan ?? undefined,
+    };
+  }
+
+  // Repaint the current window with the overlay forced onto every visible row
+  // (so a changed/cleared selection or hover never leaves stale pixels behind).
+  function repaintOverlay() {
+    needsFullPaint = true;
+    paintWindow();
+  }
+
+  function shouldAutoFollow() {
+    // An active selection pins the viewport: output keeps painting under the
+    // selection, but we never auto-jump to the tail while the user is selecting.
+    return liveFollow && selection === null;
+  }
+
+  // Rescan the composite frame for URLs so hover/underline/click have up-to-date
+  // spans. Cheap at viewport sizes (a regex per visible row). Called whenever the
+  // composite changes.
+  function recomputeLinks() {
+    if (!lastComposite) {
+      links = [];
+      return;
+    }
+    const next: BufferLinkSpan[] = [];
+    for (const row of lastComposite.rows) {
+      const text = rowPlainText(row, surface.cols);
+      for (const link of detectLinks(text)) {
+        next.push({ row: row.index, startCol: link.start, endCol: link.end, href: link.href });
+      }
+    }
+    links = next;
+  }
+
+  function linkAt(cell: BufferCell): BufferLinkSpan | null {
+    for (const link of links) {
+      if (link.row === cell.row && cell.col >= link.startCol && cell.col < link.endCol) return link;
+    }
+    return null;
   }
 
   function scrollToTail() {
@@ -97,7 +218,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
     paintWindow();
     requestAnimationFrame(() => {
       paintWindow();
-      const stillFollowing = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
+      const stillFollowing =
+        viewport.scrollTop + viewport.clientHeight >=
+        viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
       autoScrolling = false;
       setLiveFollow(stillFollowing);
     });
@@ -107,20 +230,28 @@ export function createTerminalController(options: TerminalControllerOptions) {
     lastFrame = view.lastFrame;
     lastComposite = view.compositeFrame;
     liveFollow = view.liveFollow;
+    recomputeLinks();
     onScrollbackRowCount(view.rowCount);
     onLiveFollow(view.liveFollow);
     updateSpacer(view.compositeFrame.rows.length, forSurface);
     paintWindow(view.compositeFrame, forSurface);
     requestAnimationFrame(() => {
-      if (liveFollow) scrollToTail();
+      if (shouldAutoFollow()) scrollToTail();
       else paintWindow();
     });
+  }
+
+  function clearInteractionState() {
+    selection = null;
+    links = [];
+    hoverLink = null;
   }
 
   function clear(forSurface: TerminalSurface = surface) {
     renderer = null;
     needsFullPaint = true;
     lastStartRow = null;
+    clearInteractionState();
     const view = emptyTerminalView(forSurface);
     lastFrame = null;
     lastComposite = view.compositeFrame;
@@ -134,6 +265,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     lastComposite = null;
     needsFullPaint = true;
     lastStartRow = null;
+    clearInteractionState();
     setLiveFollow(true);
     onScrollbackRowCount(0);
     updateSpacer(surface.rows, surface);
@@ -144,15 +276,19 @@ export function createTerminalController(options: TerminalControllerOptions) {
     lastFrame = surfaceFrame;
     onScrollbackRowCount(surfaceFrame.scrollback?.scrollbackRows ?? 0);
     lastComposite = surfaceFrame;
+    recomputeLinks();
     updateSpacer(surfaceFrame.rows.length, surface);
     paintWindow(surfaceFrame, surface);
     requestAnimationFrame(() => {
-      if (liveFollow) scrollToTail();
+      if (shouldAutoFollow()) scrollToTail();
       else paintWindow();
     });
   }
 
-  function ensureSessionView(sessionId: string, forSurface: TerminalSurface = surface): SessionTerminalView | undefined {
+  function ensureSessionView(
+    sessionId: string,
+    forSurface: TerminalSurface = surface,
+  ): SessionTerminalView | undefined {
     const frame = latestFrames[sessionId];
     if (frame) {
       const view = buildSessionTerminalView(sessionViews[sessionId], frame, forSurface);
@@ -197,10 +333,18 @@ export function createTerminalController(options: TerminalControllerOptions) {
   }
 
   return {
-    attach(next: TerminalDomRefs) { els = next; },
-    setSurface(next: TerminalSurface) { surface = next; },
-    getSurface() { return surface; },
-    resetRenderer() { renderer = null; },
+    attach(next: TerminalDomRefs) {
+      els = next;
+    },
+    setSurface(next: TerminalSurface) {
+      surface = next;
+    },
+    getSurface() {
+      return surface;
+    },
+    resetRenderer() {
+      renderer = null;
+    },
     requireRenderer(): TerminalRenderer {
       const active = renderer ?? mountRenderer();
       if (!active) throw new Error('Terminal renderer is not mounted yet');
@@ -224,11 +368,87 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete sessionViews[sessionId];
       delete latestFrames[sessionId];
     },
-    focusCanvas() { els.canvas?.focus(); },
-    getLastFrameModes(): TerminalModes | undefined { return lastFrame?.modes; },
-    isLiveFollow() { return liveFollow; },
+    focusCanvas() {
+      els.canvas?.focus();
+    },
+    getLastFrameModes(): TerminalModes | undefined {
+      return lastFrame?.modes;
+    },
+    isLiveFollow() {
+      return liveFollow;
+    },
     setLiveFollow,
-    isAutoScrolling() { return autoScrolling; },
+    isAutoScrolling() {
+      return autoScrolling;
+    },
+
+    // --- Interaction layer surface (read state + drive the overlay) ---
+    // The painted window origin (buffer row of the top painted row); hit-testing
+    // adds the window-local row to this to land in composite coordinates.
+    getStartRow(): number {
+      return lastStartRow ?? 0;
+    },
+    getComposite(): TerminalFrame | null {
+      return lastComposite;
+    },
+    getViewport(): HTMLDivElement | null {
+      return els.viewport;
+    },
+    getCanvas(): HTMLCanvasElement | null {
+      return els.canvas;
+    },
+    getSelection(): SelectionRange | null {
+      return selection;
+    },
+    hasSelection(): boolean {
+      return selection !== null;
+    },
+    setSelection(range: SelectionRange | null) {
+      selection = range;
+      repaintOverlay();
+    },
+    clearSelection() {
+      if (selection === null) return;
+      selection = null;
+      repaintOverlay();
+      // No explicit scroll here: shouldAutoFollow() becomes true again, so the
+      // next streamed frame resumes tail-follow on its own. Clearing a selection
+      // never yanks the viewport.
+    },
+    // Drop the selection + hover when the displayed session changes, so a stale
+    // selection (in the previous session's coordinates) never pins the new
+    // session's viewport or leaks into its copied text. Links are frame-derived
+    // and rebuilt by recomputeLinks on the next applied view, so they are left
+    // alone here.
+    resetInteraction() {
+      if (selection === null && hoverLink === null) return;
+      selection = null;
+      hoverLink = null;
+      repaintOverlay();
+    },
+    getSelectionText(): string {
+      if (!selection || !lastComposite) return '';
+      return selectionText(lastComposite, selection, surface.cols);
+    },
+    setLinks(next: BufferLinkSpan[]) {
+      links = next;
+      repaintOverlay();
+    },
+    getLinks(): BufferLinkSpan[] {
+      return links;
+    },
+    linkAt,
+    setHoverLink(next: BufferLinkSpan | null) {
+      const sameRow =
+        hoverLink &&
+        next &&
+        hoverLink.row === next.row &&
+        hoverLink.startCol === next.startCol &&
+        hoverLink.endCol === next.endCol;
+      if (sameRow || (!hoverLink && !next)) return;
+      hoverLink = next;
+      repaintOverlay();
+    },
   };
 }
 

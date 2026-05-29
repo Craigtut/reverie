@@ -24,6 +24,11 @@ const scenarios = [
     query: 'fixture=empty&cli=none&resetFixture=1&harnessSmoke=no-cli',
     profileGroup: 'no-cli',
   },
+  {
+    name: 'terminal-interaction',
+    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-interaction',
+    profileGroup: 'terminal-interaction',
+  },
 ];
 
 const chromePath = resolveChromePath();
@@ -60,18 +65,24 @@ async function ensureHarnessServer() {
 
   const harnessUrl = new URL(ROOT_URL);
   const viteBin = path.join(process.cwd(), 'node_modules', 'vite', 'bin', 'vite.js');
-  const child = spawn(process.execPath, [viteBin, '--host', harnessUrl.hostname, '--port', harnessUrl.port || '1421', '--strictPort'], {
-    cwd: process.cwd(),
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child = spawn(
+    process.execPath,
+    [viteBin, '--host', harnessUrl.hostname, '--port', harnessUrl.port || '1421', '--strictPort'],
+    {
+      cwd: process.cwd(),
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
   child.stdout.on('data', chunk => process.stdout.write(chunk));
   child.stderr.on('data', chunk => process.stderr.write(chunk));
 
   const started = Date.now();
   while (Date.now() - started < SERVER_TIMEOUT_MS) {
     if (child.exitCode !== null) {
-      throw new Error(`Harness dev server exited before it became reachable with code ${child.exitCode}`);
+      throw new Error(
+        `Harness dev server exited before it became reachable with code ${child.exitCode}`,
+      );
     }
     if (await canReachHarness()) return child;
     await delay(250);
@@ -119,9 +130,14 @@ async function runChromeScenario({ name, url, profileDir }) {
     throw new Error(`Chrome exited with code ${code} for ${name}\n${stderr}`);
   }
 
-  if (!stdout.includes('id="reverie-harness-smoke-result"') || !stdout.includes('data-harness-smoke="passed"')) {
+  if (
+    !stdout.includes('id="reverie-harness-smoke-result"') ||
+    !stdout.includes('data-harness-smoke="passed"')
+  ) {
     const resultSnippet = extractResultSnippet(stdout);
-    throw new Error(`Harness smoke scenario failed: ${name}\n${resultSnippet || stdout.slice(-3000)}\n${stderr}`);
+    throw new Error(
+      `Harness smoke scenario failed: ${name}\n${resultSnippet || stdout.slice(-3000)}\n${stderr}`,
+    );
   }
 
   console.log(`✓ ${name}`);
@@ -148,7 +164,11 @@ function runProcessUntil(command, args, timeoutMs, isDone) {
       if (settled) return;
       settled = true;
       child.kill('SIGKILL');
-      reject(new Error(`Timed out running ${command}\n${extractResultSnippet(stdout) || stdout.slice(-3000)}\n${stderr}`));
+      reject(
+        new Error(
+          `Timed out running ${command}\n${extractResultSnippet(stdout) || stdout.slice(-3000)}\n${stderr}`,
+        ),
+      );
     }, timeoutMs);
 
     child.stdout.on('data', chunk => {
@@ -187,7 +207,9 @@ function resolveChromePath() {
 
   const found = candidates.find(candidate => existsSync(candidate));
   if (!found) {
-    throw new Error('Unable to find a local Chromium browser. Set CHROME_PATH to run Reverie harness smoke tests.');
+    throw new Error(
+      'Unable to find a local Chromium browser. Set CHROME_PATH to run Reverie harness smoke tests.',
+    );
   }
   return found;
 }

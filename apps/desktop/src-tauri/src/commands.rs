@@ -17,6 +17,7 @@ use reverie_core::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 #[cfg(unix)]
 use crate::bridge::{BridgeInfo, mint_session_secret};
@@ -558,6 +559,20 @@ pub(crate) fn record_render_metrics(metrics: serde_json::Value) -> Result<(), St
     let encoded = serde_json::to_string(&metrics).map_err(|err| err.to_string())?;
     println!("REVERIE_RENDER_METRICS {encoded}");
     Ok(())
+}
+
+/// Open a URL in the user's default browser. Outward-facing, so the scheme is
+/// allowlisted to http/https here (the renderer only ever detects those, but we
+/// enforce it on the trusted side too).
+#[tauri::command]
+pub(crate) fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    let scheme = url.to_ascii_lowercase();
+    if !(scheme.starts_with("http://") || scheme.starts_with("https://")) {
+        return Err(format!("Refusing to open non-http(s) URL: {url}"));
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|err| err.to_string())
 }
 
 fn cortex_home_dir() -> Result<PathBuf, String> {

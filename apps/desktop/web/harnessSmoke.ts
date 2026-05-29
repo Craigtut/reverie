@@ -1,4 +1,4 @@
-type HarnessScenario = 'empty-onboarding' | 'partial-cli' | 'no-cli';
+type HarnessScenario = 'empty-onboarding' | 'partial-cli' | 'no-cli' | 'terminal-interaction';
 
 type HarnessResult = {
   scenario: HarnessScenario;
@@ -11,7 +11,9 @@ let harnessSmokeStarted = false;
 const assertions: string[] = [];
 
 export function maybeRunHarnessSmokeTest() {
-  const scenario = new URLSearchParams(window.location.search).get('harnessSmoke') as HarnessScenario | null;
+  const scenario = new URLSearchParams(window.location.search).get(
+    'harnessSmoke',
+  ) as HarnessScenario | null;
   if (!scenario || harnessSmokeStarted) return;
 
   harnessSmokeStarted = true;
@@ -21,7 +23,7 @@ export function maybeRunHarnessSmokeTest() {
         scenario,
         status: 'failed',
         assertions: [...assertions],
-        error: error instanceof Error ? error.stack ?? error.message : String(error),
+        error: error instanceof Error ? (error.stack ?? error.message) : String(error),
       });
     });
   }, 0);
@@ -41,6 +43,9 @@ async function runHarnessSmokeScenario(scenario: HarnessScenario) {
     case 'no-cli':
       await runNoCliScenario();
       break;
+    case 'terminal-interaction':
+      await runTerminalInteractionScenario();
+      break;
     default:
       throw new Error(`Unknown harness smoke scenario: ${scenario}`);
   }
@@ -56,85 +61,164 @@ async function runEmptyOnboardingScenario() {
   }
 
   await expectTestId('onboarding-panel', 'empty fixture starts on onboarding');
-  expectAllCliChoicesAvailable('onboarding-cli-choice', 3, 'onboarding CLI summary exposes all supported CLIs');
+  expectAllCliChoicesAvailable(
+    'onboarding-cli-choice',
+    3,
+    'onboarding CLI summary exposes all supported CLIs',
+  );
 
   await clickTestId('empty-create-project-button');
   await expectComposerMode('project');
   expectAbsentTestId('session-tabs', 'project creation hides session tabs');
   expectAbsentTestId('terminal-controls', 'project creation hides terminal controls');
   expectAbsentTestId('terminal-body', 'project creation hides the terminal body');
-  expectDisabled('submit-project-button', true, 'project submit starts disabled until a folder is selected');
+  expectDisabled(
+    'submit-project-button',
+    true,
+    'project submit starts disabled until a folder is selected',
+  );
   await clickTestId('choose-project-folder-button');
-  await waitFor(() => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true', 'project folder picker records a selected folder');
+  await waitFor(
+    () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
+    'project folder picker records a selected folder',
+  );
   assertions.push('project folder picker records a selected folder');
-  await waitFor(() => !isDisabled(requireTestId('submit-project-button')), 'project submit enables after folder selection');
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-project-button')),
+    'project submit enables after folder selection',
+  );
   await clickTestId('submit-project-button');
 
   await expectComposerMode('focus');
   expectAbsentTestId('session-tabs', 'focus creation hides session tabs');
   expectAbsentTestId('terminal-controls', 'focus creation hides terminal controls');
   expectAbsentTestId('terminal-body', 'focus creation hides the terminal body');
-  expectDisabled('submit-focus-button', true, 'focus submit starts disabled until a focus title is filled');
+  expectDisabled(
+    'submit-focus-button',
+    true,
+    'focus submit starts disabled until a focus title is filled',
+  );
   fillInput('focus-title-input', 'Harness Smoke Focus');
-  await waitFor(() => !isDisabled(requireTestId('submit-focus-button')), 'focus submit enables after title entry');
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-focus-button')),
+    'focus submit enables after title entry',
+  );
   await clickTestId('submit-focus-button');
 
   await expectComposerMode('session');
   expectAbsentTestId('session-tabs', 'session creation hides session tabs');
   expectAbsentTestId('terminal-controls', 'session creation hides terminal controls');
   expectAbsentTestId('terminal-body', 'session creation hides the previous terminal body');
-  assertTextIncludes('cli-availability-summary', '3 of 3 detected', 'session composer reports all CLIs detected');
-  assertInputValue('session-cwd-input', '/Users/user/Code/reverie', 'project-backed session inherits the selected project folder cwd');
+  assertTextIncludes(
+    'cli-availability-summary',
+    '3 of 3 detected',
+    'session composer reports all CLIs detected',
+  );
+  assertInputValue(
+    'session-cwd-input',
+    '/Users/user/Code/reverie',
+    'project-backed session inherits the selected project folder cwd',
+  );
   await clickCliChoice('codex_cli');
   expectCliSelected('codex_cli', 'Codex can be selected for a new session');
-  assertTextIncludes('selected-cli-summary', 'Codex CLI is ready', 'selected CLI summary reassures that Codex is ready');
+  assertTextIncludes(
+    'selected-cli-summary',
+    'Codex CLI is ready',
+    'selected CLI summary reassures that Codex is ready',
+  );
   fillInput('session-title-input', 'Harness Codex Session');
-  await waitFor(() => !isDisabled(requireTestId('submit-session-button')), 'session submit enables after valid CLI and inherited cwd');
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-session-button')),
+    'session submit enables after valid CLI and inherited cwd',
+  );
   await clickTestId('submit-session-button');
 
   await waitFor(() => !queryByTestId('creation-composer'), 'session creation closes the composer');
   await expectTestId('terminal-body', 'created session opens the terminal body');
-  await waitForTextIncludes('terminal-status-label', 'Running', 'created Codex session starts its own terminal runtime');
+  await waitForTextIncludes(
+    'terminal-status-label',
+    'Running',
+    'created Codex session starts its own terminal runtime',
+  );
   assertDocumentIncludes('Harness Smoke Focus', 'created focus is visible in the shell');
-  assertTextIncludes('terminal-meta-strip', 'Harness Codex Session', 'created session title is visible in terminal metadata');
-  const codexTerminalId = await waitForTerminalId('created Codex session receives its own terminal id');
+  assertTextIncludes(
+    'terminal-meta-strip',
+    'Harness Codex Session',
+    'created session title is visible in terminal metadata',
+  );
+  const codexTerminalId = await waitForTerminalId(
+    'created Codex session receives its own terminal id',
+  );
 
   await clickTestId('create-session-button');
   await expectComposerMode('session');
   await clickCliChoice('claude_code');
   fillInput('session-title-input', 'Harness Claude Parallel Session');
-  await waitFor(() => !isDisabled(requireTestId('submit-session-button')), 'second session submit enables with a different CLI');
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-session-button')),
+    'second session submit enables with a different CLI',
+  );
   await clickTestId('submit-session-button');
-  await waitForTextIncludes('terminal-meta-strip', 'Harness Claude Parallel Session', 'second session becomes the active terminal');
-  const claudeTerminalId = await waitForTerminalId('created Claude session receives its own terminal id');
+  await waitForTextIncludes(
+    'terminal-meta-strip',
+    'Harness Claude Parallel Session',
+    'second session becomes the active terminal',
+  );
+  const claudeTerminalId = await waitForTerminalId(
+    'created Claude session receives its own terminal id',
+  );
   if (claudeTerminalId === codexTerminalId) {
-    throw new Error('session tabs share a terminal id; expected each session tab to own a distinct terminal process');
+    throw new Error(
+      'session tabs share a terminal id; expected each session tab to own a distinct terminal process',
+    );
   }
   assertions.push('separate session tabs own distinct terminal ids');
 
   await clickSessionTabWithText('Codex');
-  await waitFor(() => requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') === codexTerminalId, 'clicking Codex tab reattaches its original terminal id');
+  await waitFor(
+    () => requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') === codexTerminalId,
+    'clicking Codex tab reattaches its original terminal id',
+  );
   assertions.push('clicking Codex tab reattaches its original terminal id');
   await clickSessionTabWithText('Claude Parallel');
-  await waitFor(() => requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') === claudeTerminalId, 'clicking Claude tab reattaches its original terminal id');
+  await waitFor(
+    () =>
+      requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') === claudeTerminalId,
+    'clicking Claude tab reattaches its original terminal id',
+  );
   assertions.push('clicking Claude tab reattaches its original terminal id');
 
   await closeActiveSessionTab();
-  await waitFor(() => ![...document.querySelectorAll('[data-testid="session-tab"]')].some(tab => tab.textContent?.includes('Claude Parallel')), 'closing a top tab hides it from active tabs');
+  await waitFor(
+    () =>
+      ![...document.querySelectorAll('[data-testid="session-tab"]')].some(tab =>
+        tab.textContent?.includes('Claude Parallel'),
+      ),
+    'closing a top tab hides it from active tabs',
+  );
   assertions.push('closing a top tab hides it from active tabs');
   await clickTestId('focus-session-history-button');
   await expectTestId('session-history-surface', 'focus history opens on the right stage');
-  await waitFor(() => Boolean(document.querySelector('[data-testid="session-history-row"][data-tab-visible="false"]')), 'closed tab remains in focus session history');
+  await waitFor(
+    () =>
+      Boolean(
+        document.querySelector('[data-testid="session-history-row"][data-tab-visible="false"]'),
+      ),
+    'closed tab remains in focus session history',
+  );
   assertions.push('closed tab remains in focus session history');
   await clickTestId('restore-session-tab-button');
   await clickSessionTabWithText('Claude Parallel');
   await waitFor(() => {
-    const restoredTerminalId = requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') ?? '';
+    const restoredTerminalId =
+      requireTestId('terminal-meta-strip').getAttribute('data-terminal-id') ?? '';
     return restoredTerminalId.length > 0 && restoredTerminalId !== claudeTerminalId;
   }, 'restored tab starts a fresh resumable terminal runtime');
   assertions.push('restored tab starts a fresh resumable terminal runtime');
 
-  window.location.replace(`${window.location.origin}${window.location.pathname}?fixture=empty&harnessSmoke=empty-onboarding&harnessStage=assert-persisted`);
+  window.location.replace(
+    `${window.location.origin}${window.location.pathname}?fixture=empty&harnessSmoke=empty-onboarding&harnessStage=assert-persisted`,
+  );
   await new Promise<void>(() => {});
 }
 
@@ -146,22 +230,51 @@ async function runPartialCliScenario() {
   await clickTestId('submit-focus-button');
 
   await expectComposerMode('session');
-  assertInputValue('session-cwd-input', '/Users/user', 'general workspace session defaults to the home cwd');
-  assertTextIncludes('cli-availability-summary', '2 of 3 detected', 'partial CLI fixture reports only available CLIs');
+  assertInputValue(
+    'session-cwd-input',
+    '/Users/user',
+    'general workspace session defaults to the home cwd',
+  );
+  assertTextIncludes(
+    'cli-availability-summary',
+    '2 of 3 detected',
+    'partial CLI fixture reports only available CLIs',
+  );
   expectCliAvailability('codex_cli', false, 'Codex is shown unavailable in the partial fixture');
   expectDisabled(selectorForCli('codex_cli'), true, 'unavailable Codex choice is disabled');
   await clickCliChoice('claude_code');
   expectCliSelected('claude_code', 'Claude can be selected when Codex is unavailable');
-  assertTextIncludes('selected-cli-summary', 'Claude Code is ready', 'selected CLI summary updates to Claude');
+  assertTextIncludes(
+    'selected-cli-summary',
+    'Claude Code is ready',
+    'selected CLI summary updates to Claude',
+  );
   fillInput('session-title-input', 'Harness Claude Session');
   fillInput('session-cwd-input', '/Users/user');
-  await waitFor(() => !isDisabled(requireTestId('submit-session-button')), 'partial fixture can create a session with an available CLI');
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-session-button')),
+    'partial fixture can create a session with an available CLI',
+  );
   await clickTestId('submit-session-button');
 
-  await waitFor(() => !queryByTestId('creation-composer'), 'partial CLI session creation closes the composer');
-  await waitForTextIncludes('terminal-status-label', 'Running', 'created Claude session starts its own terminal runtime');
-  assertDocumentIncludes('Harness General Focus', 'General workspace focus is visible after creation');
-  assertTextIncludes('terminal-meta-strip', 'Harness Claude Session', 'Claude session title is visible in terminal metadata');
+  await waitFor(
+    () => !queryByTestId('creation-composer'),
+    'partial CLI session creation closes the composer',
+  );
+  await waitForTextIncludes(
+    'terminal-status-label',
+    'Running',
+    'created Claude session starts its own terminal runtime',
+  );
+  assertDocumentIncludes(
+    'Harness General Focus',
+    'General workspace focus is visible after creation',
+  );
+  assertTextIncludes(
+    'terminal-meta-strip',
+    'Harness Claude Session',
+    'Claude session title is visible in terminal metadata',
+  );
 }
 
 async function runNoCliScenario() {
@@ -172,36 +285,190 @@ async function runNoCliScenario() {
   await clickTestId('submit-focus-button');
 
   await expectComposerMode('session');
-  assertTextIncludes('cli-availability-summary', 'No supported CLIs detected', 'no-CLI fixture reports no supported CLIs');
-  await expectTestId('cli-empty-help', 'no-CLI fixture explains that organization can continue without session creation');
+  assertTextIncludes(
+    'cli-availability-summary',
+    'No supported CLIs detected',
+    'no-CLI fixture reports no supported CLIs',
+  );
+  await expectTestId(
+    'cli-empty-help',
+    'no-CLI fixture explains that organization can continue without session creation',
+  );
   for (const kind of ['cortex_code', 'claude_code', 'codex_cli']) {
     expectCliAvailability(kind, false, `${kind} is unavailable in the no-CLI fixture`);
     expectDisabled(selectorForCli(kind), true, `${kind} choice is disabled in the no-CLI fixture`);
   }
-  expectDisabled('submit-session-button', true, 'session creation stays disabled when no supported CLI is detected');
-  assertDocumentIncludes('Harness No CLI Focus', 'focus creation still works when no CLI is detected');
+  expectDisabled(
+    'submit-session-button',
+    true,
+    'session creation stays disabled when no supported CLI is detected',
+  );
+  assertDocumentIncludes(
+    'Harness No CLI Focus',
+    'focus creation still works when no CLI is detected',
+  );
 }
 
 async function runAssertPersistedScenario() {
-  await waitFor(() => !queryByTestId('onboarding-panel'), 'persisted empty fixture does not return to onboarding');
-  await waitForDocumentIncludes('reverie', 'folder-selected project persists across a browser reload');
+  await waitFor(
+    () => !queryByTestId('onboarding-panel'),
+    'persisted empty fixture does not return to onboarding',
+  );
+  await waitForDocumentIncludes(
+    'reverie',
+    'folder-selected project persists across a browser reload',
+  );
   await waitForDocumentIncludes('Harness Smoke Focus', 'focus persists across a browser reload');
-  await expectTestId('dashboard-surface', 'persisted workspace opens to the dashboard after reload');
+  await expectTestId(
+    'dashboard-surface',
+    'persisted workspace opens to the dashboard after reload',
+  );
   await waitFor(() => {
-    const card = [...document.querySelectorAll<HTMLElement>('[data-testid="dashboard-session-card"]')]
-      .find(candidate => candidate.textContent?.includes('Harness Codex Session'));
+    const card = [
+      ...document.querySelectorAll<HTMLElement>('[data-testid="dashboard-session-card"]'),
+    ].find(candidate => candidate.textContent?.includes('Harness Codex Session'));
     if (!card) return false;
     card.click();
     return true;
   }, 'persisted Codex session is visible on the dashboard after reload');
   assertions.push('persisted Codex session is visible on the dashboard after reload');
-  await expectTestId('terminal-body', 'persisted created session opens terminal body from dashboard after reload');
-  await waitForTextIncludes('terminal-meta-strip', 'Harness Codex Session', 'session persists across a browser reload');
+  await expectTestId(
+    'terminal-body',
+    'persisted created session opens terminal body from dashboard after reload',
+  );
+  await waitForTextIncludes(
+    'terminal-meta-strip',
+    'Harness Codex Session',
+    'session persists across a browser reload',
+  );
   await waitFor(() => {
     const activeTab = document.querySelector('[data-testid="session-tab"][data-active="true"]');
     return Boolean(activeTab?.textContent?.includes('Codex'));
   }, 'persisted Codex session tab becomes selected after dashboard open');
   assertions.push('persisted Codex session tab becomes selected after dashboard open');
+}
+
+interface FixtureHook {
+  stopStream(terminalId: string): void;
+  emitTerminalFrame(terminalId: string, lines: string[]): void;
+  recordedInputs(): Array<{ terminalId: string; input: string }>;
+}
+
+function fixtureHook(): FixtureHook {
+  const hook = (window as unknown as { __REVERIE_FIXTURE__?: FixtureHook }).__REVERIE_FIXTURE__;
+  if (!hook) throw new Error('fixture test hook (__REVERIE_FIXTURE__) is not present');
+  return hook;
+}
+
+// Exercises the terminal interaction layer end-to-end against the browser
+// fixture: drag-select, the right-click menu (selection / link / grid targets),
+// send-to-input, and link detection. A deterministic frame is injected so the
+// assertions do not depend on the random synthetic stream.
+async function runTerminalInteractionScenario() {
+  // Onboard to a single running session.
+  await clickTestId('empty-create-project-button');
+  await clickTestId('choose-project-folder-button');
+  await waitFor(
+    () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
+    'project folder is selected',
+  );
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-project-button')),
+    'project submit enables',
+  );
+  await clickTestId('submit-project-button');
+  fillInput('focus-title-input', 'Interaction Focus');
+  await waitFor(() => !isDisabled(requireTestId('submit-focus-button')), 'focus submit enables');
+  await clickTestId('submit-focus-button');
+  await clickCliChoice('codex_cli');
+  fillInput('session-title-input', 'Interaction Session');
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-session-button')),
+    'session submit enables',
+  );
+  await clickTestId('submit-session-button');
+  await expectTestId('terminal-body', 'created session opens the terminal body');
+  await waitForTextIncludes('terminal-status-label', 'Running', 'created session is running');
+  const terminalId = await waitForTerminalId('interaction session has a terminal id');
+
+  // Freeze the synthetic stream and inject a deterministic line with a URL.
+  const fixture = fixtureHook();
+  fixture.stopStream(terminalId);
+  fixture.emitTerminalFrame(terminalId, ['hello https://reverie.test/docs world']);
+  await flushDom();
+  const viewport = requireTestId('terminal-viewport');
+  viewport.scrollTop = 0;
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await flushDom();
+
+  const canvas = requireTestId<HTMLCanvasElement>('terminal-canvas');
+  const pointer = (type: string, col: number, rowPx = 9, button = 0) => {
+    const rect = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(
+      new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        pointerId: 1,
+        button,
+        clientX: rect.left + col * 9 + 1,
+        clientY: rect.top + rowPx,
+      }),
+    );
+  };
+  const contextMenu = (col: number, rowPx = 9) => {
+    const rect = canvas.getBoundingClientRect();
+    canvas.dispatchEvent(
+      new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: rect.left + col * 9 + 1,
+        clientY: rect.top + rowPx,
+      }),
+    );
+  };
+  const closeMenu = async () => {
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    await flushDom();
+  };
+
+  // Drag-select "hello" (cols 0..4).
+  pointer('pointerdown', 0);
+  pointer('pointermove', 5);
+  pointer('pointerup', 5);
+  await flushDom();
+
+  // Right-click the selection -> selection menu with copy + agent actions.
+  contextMenu(2);
+  await expectTestId('terminal-context-menu', 'right-click on a selection opens the menu');
+  await expectTestId('menu-item-copy', 'selection menu offers Copy');
+  await expectTestId('menu-item-ask-agent', 'selection menu offers Ask an agent about this');
+  await expectTestId('menu-item-send-to-input', 'selection menu offers Send to input');
+
+  // Send to input -> the selected text is written to the terminal.
+  await clickTestId('menu-item-send-to-input');
+  await waitFor(
+    () => fixture.recordedInputs().some(entry => entry.input.includes('hello')),
+    'Send to input writes the selection to the terminal',
+  );
+  assertions.push('Send to input writes the selection to the terminal');
+
+  // Right-click the URL -> link menu (link target wins over the selection).
+  contextMenu(12);
+  await expectTestId('menu-item-open-link', 'right-click on a URL offers Open link');
+  await expectTestId('menu-item-copy-link-address', 'link menu offers Copy link address');
+  await closeMenu();
+
+  // A plain click on a blank cell clears the selection; right-click there yields
+  // the empty-grid menu (Paste + Select all only, no Copy).
+  pointer('pointerdown', 2, 99);
+  pointer('pointerup', 2, 99);
+  await flushDom();
+  contextMenu(2, 99);
+  await expectTestId('menu-item-paste', 'empty-grid menu offers Paste');
+  await expectTestId('menu-item-select-all', 'empty-grid menu offers Select all');
+  expectAbsentTestId('menu-item-copy', 'empty-grid menu has no Copy');
+  await closeMenu();
 }
 
 async function waitForTerminalId(label: string) {
@@ -215,18 +482,26 @@ async function waitForTerminalId(label: string) {
 }
 
 async function clickSessionTabWithText(text: string) {
-  const tab = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="session-tab"]')]
-    .find(candidate => candidate.textContent?.includes(text));
+  const tab = [...document.querySelectorAll<HTMLButtonElement>('[data-testid="session-tab"]')].find(
+    candidate => candidate.textContent?.includes(text),
+  );
   if (!tab) throw new Error(`Could not find session tab containing ${text}`);
   tab.click();
-  await waitFor(() => tab.getAttribute('data-active') === 'true', `${text} session tab becomes active`);
+  await waitFor(
+    () => tab.getAttribute('data-active') === 'true',
+    `${text} session tab becomes active`,
+  );
   assertions.push(`${text} session tab becomes active`);
 }
 
 async function closeActiveSessionTab() {
-  const activeTab = document.querySelector<HTMLElement>('[data-testid="session-tab"][data-active="true"]');
+  const activeTab = document.querySelector<HTMLElement>(
+    '[data-testid="session-tab"][data-active="true"]',
+  );
   if (!activeTab) throw new Error('Could not find active session tab to close');
-  const closeButton = activeTab.querySelector<HTMLElement>('[data-testid="close-session-tab-button"]');
+  const closeButton = activeTab.querySelector<HTMLElement>(
+    '[data-testid="close-session-tab-button"]',
+  );
   if (!closeButton) throw new Error('Could not find active session tab close control');
   closeButton.click();
   await flushDom();
@@ -245,7 +520,10 @@ function expectAbsentTestId(testId: string, label: string) {
 }
 
 async function expectComposerMode(mode: 'project' | 'focus' | 'session') {
-  await waitFor(() => queryByTestId('creation-composer')?.getAttribute('data-mode') === mode, `${mode} composer opens`);
+  await waitFor(
+    () => queryByTestId('creation-composer')?.getAttribute('data-mode') === mode,
+    `${mode} composer opens`,
+  );
   assertions.push(`${mode} composer opens`);
 }
 
@@ -279,7 +557,9 @@ function expectCliSelected(kind: string, label: string) {
 }
 
 function expectDisabled(testIdOrSelector: string, disabled: boolean, label: string) {
-  const element = testIdOrSelector.startsWith('[') ? requireSelector(testIdOrSelector) : requireTestId(testIdOrSelector);
+  const element = testIdOrSelector.startsWith('[')
+    ? requireSelector(testIdOrSelector)
+    : requireTestId(testIdOrSelector);
   if (isDisabled(element) !== disabled) {
     throw new Error(`${label}: expected disabled=${disabled}`);
   }
@@ -289,7 +569,9 @@ function expectDisabled(testIdOrSelector: string, disabled: boolean, label: stri
 function assertTextIncludes(testId: string, text: string, label: string) {
   const element = requireTestId(testId);
   if (!element.textContent?.includes(text)) {
-    throw new Error(`${label}: expected [${testId}] to include ${JSON.stringify(text)}, got ${JSON.stringify(element.textContent ?? '')}`);
+    throw new Error(
+      `${label}: expected [${testId}] to include ${JSON.stringify(text)}, got ${JSON.stringify(element.textContent ?? '')}`,
+    );
   }
   assertions.push(label);
 }
@@ -297,7 +579,9 @@ function assertTextIncludes(testId: string, text: string, label: string) {
 function assertInputValue(testId: string, value: string, label: string) {
   const input = requireTestId<HTMLInputElement>(testId);
   if (input.value !== value) {
-    throw new Error(`${label}: expected [${testId}] value ${JSON.stringify(value)}, got ${JSON.stringify(input.value)}`);
+    throw new Error(
+      `${label}: expected [${testId}] value ${JSON.stringify(value)}, got ${JSON.stringify(input.value)}`,
+    );
   }
   assertions.push(label);
 }
@@ -341,7 +625,9 @@ function fillInput(testId: string, value: string) {
   input.focus();
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
   setter?.call(input, value);
-  input.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+  input.dispatchEvent(
+    new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }),
+  );
   input.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
@@ -380,7 +666,10 @@ function selectorForCli(kind: string) {
 }
 
 function isDisabled(element: Element) {
-  return element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement
+  return element instanceof HTMLButtonElement ||
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLSelectElement ||
+    element instanceof HTMLTextAreaElement
     ? element.disabled
     : element.hasAttribute('disabled') || element.getAttribute('aria-disabled') === 'true';
 }
@@ -395,6 +684,7 @@ function publishHarnessResult(result: HarnessResult) {
   const output = document.createElement('pre');
   output.id = 'reverie-harness-smoke-result';
   output.textContent = JSON.stringify(result, null, 2);
-  output.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:999999;max-height:45vh;margin:0;padding:12px;overflow:auto;background:#09090b;color:#f8fafc;font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;white-space:pre-wrap;';
+  output.style.cssText =
+    'position:fixed;left:0;right:0;bottom:0;z-index:999999;max-height:45vh;margin:0;padding:12px;overflow:auto;background:#09090b;color:#f8fafc;font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;white-space:pre-wrap;';
   document.body.appendChild(output);
 }

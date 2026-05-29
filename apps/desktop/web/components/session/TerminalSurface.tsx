@@ -10,6 +10,7 @@ import type {
 import type { TerminalSession } from '../../hooks';
 import { Typography } from '../primitives/Typography';
 import { SessionLaunchOverlay } from './SessionLaunchOverlay';
+import { TerminalContextMenu } from './TerminalContextMenu';
 
 // The slice of the terminal session handle this surface binds: the DOM refs and
 // the input/scroll handlers. The shell passes the whole handle; structural
@@ -25,6 +26,8 @@ type TerminalSurfaceHandle = Pick<
   | 'handleTerminalKeyDown'
   | 'handleTerminalPaste'
   | 'followLiveTerminalOutput'
+  | 'contextMenu'
+  | 'closeContextMenu'
 >;
 
 export interface TerminalSurfaceProps {
@@ -190,6 +193,7 @@ export function TerminalSurface({
           />
         ) : null}
       </div>
+      <TerminalContextMenu model={terminal.contextMenu} onClose={terminal.closeContextMenu} />
     </div>
   );
 }
