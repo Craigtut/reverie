@@ -472,3 +472,9 @@ export function useTerminalSession(params: {
     dropSession: (sessionId: string) => controller.dropSession(sessionId),
   };
 }
+
+// The handle returned by useTerminalSession: the DOM refs the React tree binds,
+// the input/scroll handlers, and the session lifecycle senders. Components that
+// render the terminal surface accept (a slice of) this so the hook stays the
+// single owner of the imperative island.
+export type TerminalSession = ReturnType<typeof useTerminalSession>;

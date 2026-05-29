@@ -6,3 +6,4 @@ export { useCommandPalette } from './useCommandPalette';
 export { useSessionActivity } from './useSessionActivity';
 export { useAgentClis } from './useAgentClis';
 export { useTerminalSession } from './useTerminalSession';
+export type { TerminalSession } from './useTerminalSession';

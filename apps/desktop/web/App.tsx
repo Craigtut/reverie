@@ -14,45 +14,22 @@ import { invoke } from './services/runtime';
 import { terminateSession } from './services/terminalApi';
 import { useActivityStore, useNavigationStore, usePaletteStore, useShellStore, useTerminalStore, useUiStore } from './store';
 import { useAgentClis, useAppFocus, useCommandPalette, useSessionActivity, useTerminalSession } from './hooks';
-import { AgentGlyph, SessionStatusGlyph } from './components/glyphs';
-import { TrafficLights, DotField } from './components/chrome';
+import { DotField } from './components/chrome';
 import { Sidebar } from './components/nav';
-import { SessionLaunchOverlay, SessionHistorySurface } from './components/session';
+import { SessionHistorySurface, SessionTabsBar, TerminalSurface } from './components/session';
 import { CommandPalette } from './components/palette';
 import { EmptyState } from './components/onboarding';
 import { DashboardSurface } from './components/dashboard';
 import { CreationComposer } from './components/creation';
 import { SettingsSurface } from './components/settings';
-import { motion } from 'motion/react';
-import {
-  CaretRight,
-  CircleDashed,
-  Folder,
-  GearSix,
-  House,
-  MagnifyingGlass,
-  Moon,
-  Play,
-  Plus,
-  ShieldWarning,
-  Sun,
-  TerminalWindow,
-  Warning,
-  X,
-} from '@phosphor-icons/react';
 
-import { css, cx } from './styled-system/css';
+import { css } from './styled-system/css';
 import { appShellClass } from './themes/appShell';
-import { rimLitPanelClass } from './themes/surfaces';
 import {
   USER_HOME,
-  sessionBreadcrumb,
-  sessionsForProject,
-  shortenCwd,
   shortId,
   folderNameFromPath,
   agentLabel,
-  agentTabLabel,
   dangerousLabel,
   activityForSession,
   errorMessage,
@@ -707,64 +684,21 @@ export function App() {
         ) : (
           <div className={activeSurfaceClass} data-testid="terminal-stage">
             {!creationMode ? (
-              <div className={topBandClass}>
-                <div className={tabsClass} data-testid="session-tabs">
-                  {visibleSessions.map(session => (
-                    <button
-                      key={session.id}
-                      className={tabClass({ active: session.id === selectedSession?.id })}
-                      type="button"
-                      data-testid="session-tab"
-                      data-session-id={session.id}
-                      data-active={session.id === selectedSession?.id ? 'true' : 'false'}
-                      onClick={() => selectSessionTab(session)}
-                    >
-                      <AgentGlyph kind={session.agentKind} />
-                      <span>{agentTabLabel(session)}</span>
-                      {session.status === 'running' || session.id === runningSessionId ? <i className={runningDotClass} /> : null}
-                      <span
-                        className={tabCloseClass}
-                        role="button"
-                        tabIndex={0}
-                        data-testid="close-session-tab-button"
-                        aria-label={`Close ${session.title} tab`}
-                        onClick={event => void hideSessionTab(event, session)}
-                        onKeyDown={event => {
-                          if (event.key === 'Enter' || event.key === ' ') void hideSessionTab(event, session);
-                        }}
-                      >
-                        <X size={12} />
-                      </span>
-                    </button>
-                  ))}
-                  {visibleSessions.length === 0 ? (
-                    <div className={emptyTabsHintClass} data-testid="empty-session-tabs">No sessions in this focus</div>
-                  ) : null}
-                  <span className={tabDividerClass} />
-                  <button className={newTabClass} type="button" data-testid="create-session-button" disabled={busy || !canUseAppServices || !selectedFocus} onClick={() => openCreation('session')} title="New session">
-                    <Plus size={14} />
-                  </button>
-                </div>
-
-                <div className={topControlsClass} data-testid="terminal-controls">
-                  <button
-                    type="button"
-                    className={autoApproveChipClass({ warn: effectiveDangerousMode })}
-                    data-testid="auto-approve-chip"
-                    aria-pressed={effectiveDangerousMode}
-                    disabled={!selectedSession || busy}
-                    title={
-                      selectedTerminalBinding
-                        ? `Click to restart this session with auto-approve ${effectiveDangerousMode ? 'off' : 'on'}.`
-                        : `Click to set auto-approve ${effectiveDangerousMode ? 'off' : 'on'} for the next launch.`
-                    }
-                    onClick={() => void toggleSelectedSessionYolo()}
-                  >
-                    <ShieldWarning size={14} />
-                    {effectiveDangerousMode ? 'Auto-approve · on' : 'Auto-approve · off'}
-                  </button>
-                </div>
-              </div>
+              <SessionTabsBar
+                visibleSessions={visibleSessions}
+                selectedSessionId={selectedSession?.id ?? null}
+                runningSessionId={runningSessionId}
+                busy={busy}
+                canUseAppServices={canUseAppServices}
+                canCreateSession={Boolean(selectedFocus)}
+                hasSelectedSession={Boolean(selectedSession)}
+                hasTerminalBinding={Boolean(selectedTerminalBinding)}
+                effectiveDangerousMode={effectiveDangerousMode}
+                onSelectSession={selectSessionTab}
+                onCloseSession={hideSessionTab}
+                onCreateSession={() => openCreation('session')}
+                onToggleDangerousMode={() => void toggleSelectedSessionYolo()}
+              />
             ) : null}
 
             {creationMode ? (
@@ -797,58 +731,24 @@ export function App() {
             ) : null}
 
             {selectedSession && !creationMode ? (
-              <div className={terminalBodyClass} data-testid="terminal-body" data-session-id={selectedSession.id} data-terminal-id={selectedTerminalBinding?.terminalId ?? ''}>
-                <div className={terminalMetaStripClass} data-testid="terminal-meta-strip" data-session-id={selectedSession.id} data-terminal-id={selectedTerminalBinding?.terminalId ?? ''}>
-                  <span className={metaStripBreadcrumbClass}>{sessionBreadcrumb(selectedSession, shell)} · {selectedSession.title}</span>
-                  <span data-testid="terminal-status-label" className={metaStripStatusClass}>{runningLabel}</span>
-                  <span className={metaStripCwdClass} title={selectedSession.cwd}>{shortenCwd(selectedSession.cwd)}</span>
-                  {!terminalLiveFollow ? (
-                    <button type="button" className={followLiveButtonClass} data-testid="follow-live-button" onClick={terminal.followLiveTerminalOutput}>Jump to latest</button>
-                  ) : null}
-                  <span data-testid="scrollback-row-count" hidden>{scrollbackRowCount.toLocaleString()} / {scrollbackContract.maxRenderedHistoryRows.toLocaleString()}</span>
-                  <span data-testid="follow-live-state" hidden>{terminalLiveFollow ? 'live' : 'history'}</span>
-                </div>
-                {selectedPermissionRequest ? (
-                  <div
-                    className={permissionBannerClass}
-                    data-testid="session-permission-banner"
-                    role="status"
-                  >
-                    <ShieldWarning size={14} weight="fill" />
-                    <div className={permissionBannerBodyClass}>
-                      <strong>{agentLabel(selectedSession?.agentKind ?? '')} wants to {selectedPermissionRequest.toolName}</strong>
-                      <span data-testid="session-permission-banner-summary">{selectedPermissionRequest.displaySummary}</span>
-                    </div>
-                    <span className={permissionBannerHintClass}>Respond in the terminal</span>
-                  </div>
-                ) : null}
-                <div ref={terminal.surfaceViewportRef} className={surfaceViewportClass} data-testid="terminal-viewport" onScroll={terminal.handleTerminalScroll} onWheel={terminal.handleTerminalWheel} onMouseDown={terminal.focusTerminalCanvas}>
-                  <div ref={terminal.terminalScrollSpacerRef} className={terminalScrollSpacerClass} data-testid="terminal-scroll-spacer">
-                    <canvas
-                      ref={terminal.canvasRef}
-                      className="terminal-canvas"
-                      data-testid="terminal-canvas"
-                      aria-label="Terminal runtime surface"
-                      tabIndex={0}
-                      onKeyDown={terminal.handleTerminalKeyDown}
-                      onPaste={terminal.handleTerminalPaste}
-                      onMouseDown={terminal.focusTerminalCanvas}
-                    />
-                  </div>
-                  {!selectedTerminalBinding ? (
-                    <SessionLaunchOverlay
-                      session={selectedSession}
-                      launching={isLaunchingSelectedSession}
-                      disabled={busy && !isLaunchingSelectedSession}
-                      onLaunch={() => {
-                        void terminal.launchSession(selectedSession).catch(error => {
-                          writeLog(`Launch failed: ${errorMessage(error)}`);
-                        });
-                      }}
-                    />
-                  ) : null}
-                </div>
-              </div>
+              <TerminalSurface
+                session={selectedSession}
+                shell={shell}
+                terminalBinding={selectedTerminalBinding}
+                runningLabel={runningLabel}
+                terminalLiveFollow={terminalLiveFollow}
+                scrollbackRowCount={scrollbackRowCount}
+                scrollbackMaxRows={scrollbackContract.maxRenderedHistoryRows}
+                permissionRequest={selectedPermissionRequest}
+                launching={isLaunchingSelectedSession}
+                busy={busy}
+                terminal={terminal}
+                onLaunch={() => {
+                  void terminal.launchSession(selectedSession).catch(error => {
+                    writeLog(`Launch failed: ${errorMessage(error)}`);
+                  });
+                }}
+              />
             ) : creationMode ? null : (
               <EmptyState
                 cliDetections={agentCliDetections}
@@ -917,277 +817,6 @@ const activeSurfaceClass = css({
   background: 'transparent',
 });
 
-const topBandClass = css({
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  gap: '16px',
-  padding: '4px 4px 12px',
-  flexShrink: 0,
-});
-
-const tabsClass = css({
-  minWidth: 0,
-  display: 'flex',
-  alignItems: 'center',
-  gap: '0',
-  overflowX: 'auto',
-  padding: '4px',
-  borderRadius: '12px',
-  border: '1px solid var(--line)',
-  background: 'var(--surface-1)',
-  boxShadow: 'var(--shadow)',
-});
-
-function tabClass({ active }: { active: boolean }) {
-  return css({
-    height: '28px',
-    minWidth: 'auto',
-    maxWidth: '174px',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '7px',
-    padding: '0 11px',
-    borderRadius: '8px',
-    color: active ? 'var(--text)' : 'var(--text-2)',
-    background: active ? 'var(--surface-3)' : 'transparent',
-    border: '0',
-    boxShadow: active ? 'inset 0 1px 0 rgba(255,255,255,0.035)' : 'none',
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-    fontSize: '12px',
-    fontWeight: 500,
-    transition: 'background 0.15s ease, color 0.15s ease',
-    _hover: { color: 'var(--text)' },
-    '& > span:nth-child(2)': { overflow: 'hidden', textOverflow: 'ellipsis' },
-  });
-}
-
-const runningDotClass = css({
-  width: '5px',
-  height: '5px',
-  borderRadius: '50%',
-  background: 'var(--good)',
-  boxShadow: '0 0 0 3px rgba(111,184,122,0.14)',
-  marginLeft: '2px',
-});
-
-const tabCloseClass = css({
-  opacity: 0.45,
-  flexShrink: 0,
-  width: '14px',
-  height: '14px',
-  padding: '1px',
-  borderRadius: '3px',
-  display: 'grid',
-  placeItems: 'center',
-  cursor: 'pointer',
-  _hover: { opacity: 1, background: 'var(--surface-hi)' },
-});
-
-const emptyTabsHintClass = css({
-  color: 'var(--text-3)',
-  padding: '0 8px',
-  fontSize: '12px',
-});
-
-const tabDividerClass = css({
-  width: '1px',
-  height: '18px',
-  background: 'var(--line)',
-  margin: '0 2px',
-  flexShrink: 0,
-});
-
-const newTabClass = css({
-  width: '26px',
-  height: '26px',
-  display: 'grid',
-  placeItems: 'center',
-  borderRadius: '8px',
-  border: '0',
-  color: 'var(--text-3)',
-  background: 'transparent',
-  cursor: 'pointer',
-  _hover: { background: 'var(--surface-3)', color: 'var(--text)' },
-  _disabled: { opacity: 0.45, cursor: 'not-allowed' },
-});
-
-const topControlsClass = css({
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'flex-end',
-  gap: '10px',
-  flexShrink: 0,
-});
-
-function autoApproveChipClass({ warn }: { warn: boolean }) {
-  return css({
-    height: '28px',
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '0 10px 0 8px',
-    borderRadius: '999px',
-    border: `1px solid ${warn ? 'color-mix(in srgb, var(--warn) 38%, transparent)' : 'var(--line)'}`,
-    color: warn ? 'var(--warn)' : 'var(--text-2)',
-    background: 'var(--surface-1)',
-    boxShadow: 'var(--shadow)',
-    fontSize: '11.5px',
-    fontWeight: 500,
-    whiteSpace: 'nowrap',
-  });
-}
-
-const launchButtonClass = css({
-  height: '28px',
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '7px',
-  padding: '0 10px',
-  borderRadius: '999px',
-  border: '1px solid var(--line)',
-  color: 'var(--text)',
-  background: 'var(--surface-1)',
-  boxShadow: 'var(--shadow)',
-  cursor: 'pointer',
-  fontSize: '11.5px',
-  fontWeight: 500,
-  _disabled: { opacity: 0.45, cursor: 'not-allowed' },
-});
-
-const terminateButtonClass = css({
-  height: '28px',
-  padding: '0 10px',
-  borderRadius: '999px',
-  border: '1px solid var(--line)',
-  color: 'var(--text-2)',
-  background: 'var(--surface-1)',
-  boxShadow: 'var(--shadow)',
-  cursor: 'pointer',
-  fontSize: '11.5px',
-  fontWeight: 500,
-  _disabled: { opacity: 0.4, cursor: 'not-allowed' },
-});
-
-const terminalBodyClass = css({
-  position: 'relative',
-  flex: 1,
-  minHeight: 0,
-  display: 'grid',
-  // meta strip | optional permission banner | viewport
-  gridTemplateRows: 'auto auto minmax(0, 1fr)',
-  overflow: 'hidden',
-  borderRadius: '0 0 22px 22px',
-  background: 'transparent',
-  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.025)',
-});
-
-const permissionBannerClass = css({
-  display: 'flex',
-  alignItems: 'center',
-  gap: '10px',
-  padding: '8px 14px',
-  background: 'color-mix(in srgb, var(--warn) 12%, transparent)',
-  borderBottom: '1px solid color-mix(in srgb, var(--warn) 28%, transparent)',
-  color: 'var(--text)',
-  fontSize: '12px',
-  '& > svg': { color: 'var(--warn)', flexShrink: 0 },
-});
-
-const permissionBannerBodyClass = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '2px',
-  minWidth: 0,
-  flex: 1,
-  '& strong': { fontWeight: 500, color: 'var(--text)' },
-  '& span': {
-    fontSize: '11.5px',
-    color: 'var(--text-2)',
-    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-});
-
-const permissionBannerHintClass = css({
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
-  color: 'var(--warn)',
-  flexShrink: 0,
-});
-
-const terminalMetaStripClass = css({
-  display: 'flex',
-  alignItems: 'center',
-  gap: '12px',
-  padding: '8px 14px',
-  borderBottom: '1px solid color-mix(in srgb, var(--line) 60%, transparent)',
-  color: 'var(--text-3)',
-  fontSize: '11.5px',
-  whiteSpace: 'nowrap',
-  overflowX: 'auto',
-  '& [hidden]': { display: 'none' },
-});
-
-const metaStripBreadcrumbClass = css({
-  color: 'var(--text-2)',
-  fontWeight: 500,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  minWidth: 0,
-  flex: '0 1 auto',
-});
-
-const metaStripStatusClass = css({
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
-  flexShrink: 0,
-});
-
-const metaStripCwdClass = css({
-  color: 'var(--text-3)',
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-  fontSize: '10.5px',
-  marginLeft: 'auto',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-});
-
-const followLiveButtonClass = css({
-  color: 'var(--text-2)',
-  border: '1px solid var(--line)',
-  background: 'transparent',
-  borderRadius: '999px',
-  padding: '3px 9px',
-  cursor: 'pointer',
-  fontSize: '10.5px',
-  fontWeight: 500,
-  flexShrink: 0,
-  transition: 'color 140ms ease, border-color 140ms ease',
-  _hover: { color: 'var(--text)', borderColor: 'var(--line-strong)' },
-});
-
-const surfaceViewportClass = css({
-  position: 'relative',
-  minHeight: 0,
-  height: '100%',
-  overflow: 'auto',
-  background: 'transparent',
-});
-
-const terminalScrollSpacerClass = css({
-  position: 'relative',
-  minHeight: '100%',
-  overflow: 'hidden',
-});
 
 
 
