@@ -3126,12 +3126,22 @@ dependencies = [
  "objc",
  "portable-pty",
  "reverie-core",
+ "reverie-persistence",
  "rfd",
- "rusqlite",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
+ "uuid",
+]
+
+[[package]]
+name = "reverie-persistence"
+version = "0.1.0"
+dependencies = [
+ "reverie-core",
+ "rusqlite",
+ "serde_json",
  "uuid",
 ]
 

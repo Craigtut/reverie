@@ -1,16 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app_shell;
 mod terminal_backend;
 mod terminal_runtime;
 
 use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
 
 use anyhow::{Context, Result};
-use app_shell::{
-    AppShellStore, CaptureCortexSessionRequest, CreateFocusRequest, CreateProjectRequest,
-    CreateSessionRequest, UpdateSessionTabVisibilityRequest, WorkspaceShellSnapshot,
-};
 use reverie_core::activity::ActivityState;
 use reverie_core::activity_watcher::{
     CortexActivityStream, CortexActivityUpdate, watch_cortex_activity,
@@ -21,7 +16,10 @@ use reverie_core::hook_server::{
     HookActivityUpdate, HookServerControl, HookServerHandle, HookSource, start_hook_server,
 };
 use reverie_core::terminal::{TerminalFrame, TerminalId};
-use reverie_core::{AdapterDetection, CommandSpec, TerminalSpawnSpec};
+use reverie_core::{
+    AdapterDetection, TerminalSpawnSpec, WorkspaceService, WorkspaceSnapshot,
+};
+use reverie_persistence::SqliteWorkspaceRepository;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use terminal_backend::GhosttyTerminalState;
@@ -173,8 +171,8 @@ fn ghostty_frame_sequence() -> Result<GhosttyFrameSequence, String> {
 }
 
 #[tauri::command]
-fn workspace_shell(store: State<'_, AppShellStore>) -> Result<WorkspaceShellSnapshot, String> {
-    store.snapshot().map_err(|err| err.to_string())
+fn workspace_shell(service: State<'_, WorkspaceService>) -> Result<WorkspaceSnapshot, String> {
+    service.snapshot().map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -227,46 +225,98 @@ fn choose_project_folder() -> Result<Option<ProjectFolderSelection>, String> {
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateProjectRequest {
+    name: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateFocusRequest {
+    project_id: Option<ProjectId>,
+    title: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSessionRequest {
+    focus_id: FocusId,
+    title: String,
+    agent_kind: AgentKind,
+    cwd: PathBuf,
+    dangerous_mode_override: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSessionTabVisibilityRequest {
+    shell_session_id: SessionId,
+    tab_visible: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureCortexSessionRequest {
+    shell_session_id: SessionId,
+    cortex_session_id: String,
+    metadata_path: Option<PathBuf>,
+}
+
 #[tauri::command]
 fn create_project(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     request: CreateProjectRequest,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store.create_project(request).map_err(|err| err.to_string())
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .create_project(request.name, request.path)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn create_focus(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     request: CreateFocusRequest,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store.create_focus(request).map_err(|err| err.to_string())
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .create_focus(request.project_id, request.title, request.description)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn create_session(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     request: CreateSessionRequest,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store.create_session(request).map_err(|err| err.to_string())
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .create_session(
+            request.focus_id,
+            request.title,
+            request.agent_kind,
+            request.cwd,
+            request.dangerous_mode_override,
+        )
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn update_session_tab_visibility(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     request: UpdateSessionTabVisibilityRequest,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store
-        .update_session_tab_visibility(request)
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_session_tab_visibility(request.shell_session_id, request.tab_visible)
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn remove_session(
     app: AppHandle,
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     session_id: SessionId,
-) -> Result<WorkspaceShellSnapshot, String> {
+) -> Result<WorkspaceSnapshot, String> {
     // Revoke any hook token tied to this session before deleting the record
     // so a still-running CLI can't keep authorizing against a now-orphaned id.
     if let (Some(control), Some(registry)) = (
@@ -277,7 +327,7 @@ fn remove_session(
             control.revoke_session(source, &token);
         }
     }
-    store
+    service
         .remove_session(session_id)
         .map_err(|err| err.to_string())
 }
@@ -291,10 +341,10 @@ struct SetSessionDangerousModeRequest {
 
 #[tauri::command]
 fn set_session_dangerous_mode(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     request: SetSessionDangerousModeRequest,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store
+) -> Result<WorkspaceSnapshot, String> {
+    service
         .set_session_dangerous_mode(request.session_id, request.dangerous_mode_override)
         .map_err(|err| err.to_string())
 }
@@ -307,59 +357,66 @@ struct SetWorkspaceDefaultDangerousModeRequest {
 
 #[tauri::command]
 fn set_workspace_default_dangerous_mode(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     request: SetWorkspaceDefaultDangerousModeRequest,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store
+) -> Result<WorkspaceSnapshot, String> {
+    service
         .set_workspace_default_dangerous_mode(request.default_dangerous_mode)
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn archive_focus(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     focus_id: FocusId,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store.archive_focus(focus_id).map_err(|err| err.to_string())
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .archive_focus(focus_id)
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn archive_project(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     project_id: ProjectId,
-) -> Result<WorkspaceShellSnapshot, String> {
-    store
+) -> Result<WorkspaceSnapshot, String> {
+    service
         .archive_project(project_id)
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn capture_cortex_session(
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     request: CaptureCortexSessionRequest,
-) -> Result<WorkspaceShellSnapshot, String> {
+) -> Result<WorkspaceSnapshot, String> {
     let cortex_home = cortex_home_dir()?;
-    store
-        .capture_cortex_session(request, cortex_home)
+    service
+        .capture_cortex_session(
+            request.shell_session_id,
+            request.cortex_session_id,
+            request.metadata_path,
+            cortex_home,
+        )
         .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn start_session(
     app: AppHandle,
-    store: State<'_, AppShellStore>,
+    service: State<'_, WorkspaceService>,
     runtime: State<'_, TerminalSessionRuntime>,
     request: StartSessionRequest,
 ) -> Result<TerminalId, String> {
     let terminal_id = request.terminal_id.unwrap_or_else(TerminalId::new_v4);
     let session_id = request.session_id;
-    let mut spawn_spec = match request.spawn_spec {
+    let spawn_spec = match request.spawn_spec {
         Some(spawn_spec) => spawn_spec,
         None => {
             let shell_session_id = session_id.ok_or_else(|| {
                 "start_session requires sessionId when spawnSpec is omitted".to_owned()
             })?;
-            store
+            service
                 .build_agent_spawn_spec(
                     shell_session_id,
                     request.cols.unwrap_or(120),
@@ -375,7 +432,7 @@ fn start_session(
     // behave like a fresh install and prompt for sign-in again. Until hooks can be
     // attached without redirecting credential homes, keep the spawn env clean.
     if let Some(shell_session_id) = session_id {
-        keep_cli_auth_env_unmodified(&store, shell_session_id, &spawn_spec)
+        keep_cli_auth_env_unmodified(&service, shell_session_id, &spawn_spec)
             .map_err(|err| err.to_string())?;
     }
 
@@ -394,11 +451,11 @@ fn start_session(
 }
 
 fn keep_cli_auth_env_unmodified(
-    store: &AppShellStore,
+    service: &WorkspaceService,
     shell_session_id: SessionId,
     spawn_spec: &TerminalSpawnSpec,
 ) -> Result<()> {
-    let snapshot = store.snapshot()?;
+    let snapshot = service.snapshot()?;
     let session = snapshot
         .sessions
         .iter()
@@ -554,7 +611,11 @@ fn main() {
                 .path()
                 .app_data_dir()?
                 .join("workspace-shell.v1.sqlite3");
-            app.manage(AppShellStore::load_or_seed(store_path)?);
+            let repository = SqliteWorkspaceRepository::open(&store_path)
+                .map_err(|err| anyhow::anyhow!("failed to open Reverie database: {err}"))?;
+            let service = WorkspaceService::new(std::sync::Arc::new(repository));
+            service.ensure_seeded()?;
+            app.manage(service);
 
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
@@ -668,7 +729,7 @@ fn forward_activity_update(
     native_session_id: String,
     state: ActivityState,
 ) {
-    if let Some(store) = app.try_state::<AppShellStore>() {
+    if let Some(store) = app.try_state::<WorkspaceService>() {
         if let Err(error) = store.record_session_activity(&native_session_id, state.clone()) {
             eprintln!("[reverie] failed to persist activity for {native_session_id}: {error:#}");
         }
@@ -684,7 +745,7 @@ fn forward_activity_update(
 }
 
 fn forward_activity_removed(app: &AppHandle, source: ActivitySource, native_session_id: String) {
-    if let Some(store) = app.try_state::<AppShellStore>() {
+    if let Some(store) = app.try_state::<WorkspaceService>() {
         if let Err(error) = store.clear_session_activity(&native_session_id) {
             eprintln!("[reverie] failed to clear activity for {native_session_id}: {error:#}");
         }
@@ -753,7 +814,7 @@ fn forward_hook_state_update(
     native_session_id: String,
     state: ActivityState,
 ) {
-    if let Some(store) = app.try_state::<AppShellStore>() {
+    if let Some(store) = app.try_state::<WorkspaceService>() {
         if let Ok(parsed) = SessionId::parse_str(reverie_session_id) {
             if let Err(error) =
                 store.record_session_activity_by_id(parsed, &native_session_id, state.clone())
@@ -780,7 +841,7 @@ fn forward_hook_removed_update(
     reverie_session_id: &str,
     native_session_id: String,
 ) {
-    if let Some(store) = app.try_state::<AppShellStore>() {
+    if let Some(store) = app.try_state::<WorkspaceService>() {
         if let Ok(parsed) = SessionId::parse_str(reverie_session_id) {
             if let Err(error) = store.clear_session_activity_by_id(parsed) {
                 eprintln!(

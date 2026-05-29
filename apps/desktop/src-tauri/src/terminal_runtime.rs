@@ -16,7 +16,7 @@ use reverie_core::terminal::{TerminalFrame, TerminalId};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::app_shell::AppShellStore;
+use reverie_core::WorkspaceService;
 use crate::terminal_backend::GhosttyTerminalState;
 
 const READ_BUFFER_BYTES: usize = 4096;
@@ -379,7 +379,7 @@ impl TerminalSessionRuntime {
             bytes_read,
             child_success,
         )?;
-        persist_cortex_session_after_launch(&app, request.session_id, launch_started_ms);
+        persist_native_session_after_launch(&app, request.session_id, launch_started_ms);
         persist_shell_session_finished(&app, request.session_id, child_success);
         app.emit("terminal_exit", finished.clone())?;
         app.emit("session_status_changed", finished)?;
@@ -633,22 +633,26 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-fn persist_cortex_session_after_launch(
+fn persist_native_session_after_launch(
     app: &AppHandle,
     session_id: Option<SessionId>,
     launch_started_ms: i64,
 ) {
-    if let (Some((store, session_id)), Some(cortex_home)) =
-        (shell_store(app, session_id), cortex_home_dir())
-    {
-        let _ =
-            store.capture_cortex_session_after_launch(session_id, cortex_home, launch_started_ms);
+    if let Some((service, session_id)) = workspace_service(app, session_id) {
+        // Adapter-driven discovery: the service resolves the session's adapter
+        // and attaches a native ref if one is found. `cortex_home_dir` supplies
+        // the Cortex home; non-Cortex adapters ignore it (no discovery yet).
+        let _ = service.discover_and_attach_native_session(
+            session_id,
+            Some(launch_started_ms),
+            cortex_home_dir(),
+        );
     }
 }
 
 fn persist_shell_session_running(app: &AppHandle, session_id: Option<SessionId>) {
-    if let Some((store, session_id)) = shell_store(app, session_id) {
-        let _ = store.mark_session_running(session_id);
+    if let Some((service, session_id)) = workspace_service(app, session_id) {
+        let _ = service.mark_session_running(session_id);
     }
 }
 
@@ -657,22 +661,22 @@ fn persist_shell_session_finished(
     session_id: Option<SessionId>,
     child_success: bool,
 ) {
-    if let Some((store, session_id)) = shell_store(app, session_id) {
-        let _ = store.mark_session_finished(session_id, child_success);
+    if let Some((service, session_id)) = workspace_service(app, session_id) {
+        let _ = service.mark_session_finished(session_id, child_success);
     }
 }
 
 fn persist_shell_session_failed(app: &AppHandle, session_id: Option<SessionId>) {
-    if let Some((store, session_id)) = shell_store(app, session_id) {
-        let _ = store.mark_session_failed(session_id);
+    if let Some((service, session_id)) = workspace_service(app, session_id) {
+        let _ = service.mark_session_failed(session_id);
     }
 }
 
-fn shell_store(
+fn workspace_service(
     app: &AppHandle,
     session_id: Option<SessionId>,
-) -> Option<(tauri::State<'_, AppShellStore>, SessionId)> {
-    Some((app.try_state::<AppShellStore>()?, session_id?))
+) -> Option<(tauri::State<'_, WorkspaceService>, SessionId)> {
+    Some((app.try_state::<WorkspaceService>()?, session_id?))
 }
 
 fn cortex_home_dir() -> Option<PathBuf> {
