@@ -12,6 +12,7 @@ import type {
 import { AgentGlyph } from '../glyphs';
 import { primaryComposerButtonClass, secondaryComposerButtonClass } from '../primitives/buttons';
 import { cliChoiceClass, cliChoiceGridClass } from '../primitives/cliChoice';
+import { Typography } from '../primitives/Typography';
 
 // The create-project / create-focus / create-session form, shown in the main
 // surface when a creation mode is active. Field state + submit handlers live in
@@ -22,9 +23,7 @@ export function CreationComposer({
   selectedProject,
   selectedFocus,
   newProjectName,
-  setNewProjectName,
   newProjectPath,
-  setNewProjectPath,
   newFocusTitle,
   setNewFocusTitle,
   newSessionTitle,
@@ -47,9 +46,7 @@ export function CreationComposer({
   selectedProject: ShellProject | null;
   selectedFocus: ShellFocus | null;
   newProjectName: string;
-  setNewProjectName: (value: string) => void;
   newProjectPath: string;
-  setNewProjectPath: (value: string) => void;
   newFocusTitle: string;
   setNewFocusTitle: (value: string) => void;
   newSessionTitle: string;
@@ -80,7 +77,7 @@ export function CreationComposer({
   const selectedExecutable =
     selectedDetection?.executable ?? selectedDetection?.candidates[0] ?? null;
   const selectedCliSummary = selectedUsable
-    ? `${selectedDetection!.displayName} is ready${selectedExecutable ? ` at ${selectedExecutable}` : ''}.`
+    ? `${selectedDetection?.displayName} is ready${selectedExecutable ? ` at ${selectedExecutable}` : ''}.`
     : selectedDetection
       ? `${selectedDetection.displayName} is not available. Reverie will not create a session with a missing CLI.`
       : 'Pick one detected CLI before creating a session.';
@@ -100,11 +97,19 @@ export function CreationComposer({
   return (
     <section className={creationComposerClass} data-testid="creation-composer" data-mode={mode}>
       <div className={creationHeaderClass}>
-        <span>
+        <Typography
+          as="span"
+          variant="caption"
+          tone="faint"
+          uppercase
+          style={{ letterSpacing: '0.08em' }}
+        >
           {mode === 'project' ? 'New project' : mode === 'focus' ? 'New focus' : 'New session'}
-        </span>
+        </Typography>
         <button type="button" data-testid="close-creation-composer" onClick={onCancel}>
-          Close
+          <Typography as="span" variant="smallBody" tone="inherit">
+            Close
+          </Typography>
         </button>
       </div>
 
@@ -116,16 +121,22 @@ export function CreationComposer({
             data-selected={newProjectPath.trim().length > 0 ? 'true' : 'false'}
           >
             <Folder size={18} />
-            <span>
+            <Typography as="span" variant="smallBodyAlt" tone="inherit">
               {newProjectPath.trim().length > 0
                 ? newProjectName || folderNameFromPath(newProjectPath) || 'Selected folder'
                 : 'Choose a project folder'}
-            </span>
-            <small>
+            </Typography>
+            <Typography
+              as="small"
+              variant="caption"
+              tone="faint"
+              truncate
+              style={{ lineHeight: 1.45 }}
+            >
               {newProjectPath.trim().length > 0
                 ? newProjectPath
                 : 'Reverie will name the project from the folder and use that folder as the session working directory.'}
-            </small>
+            </Typography>
           </div>
           <button
             className={secondaryComposerButtonClass}
@@ -136,10 +147,17 @@ export function CreationComposer({
           >
             {newProjectPath.trim().length > 0 ? 'Choose different folder' : 'Choose folder…'}
           </button>
-          <p className={composerHintClass} data-testid="project-form-hint">
+          <Typography
+            as="p"
+            variant="caption"
+            tone="faint"
+            className={composerHintClass}
+            data-testid="project-form-hint"
+            style={{ lineHeight: 1.45 }}
+          >
             Projects start from a local folder selection, not manual path entry. New sessions under
             the project inherit that cwd.
-          </p>
+          </Typography>
           <button
             className={primaryComposerButtonClass}
             type="button"
@@ -154,11 +172,16 @@ export function CreationComposer({
 
       {mode === 'focus' ? (
         <div className={creationGridClass}>
-          <p className={creationContextClass}>
-            Project: <strong>{selectedProject?.name ?? 'General workspace'}</strong>
-          </p>
+          <Typography as="p" variant="caption" tone="faint" className={creationContextClass}>
+            Project:{' '}
+            <Typography as="strong" variant="caption" tone="muted">
+              {selectedProject?.name ?? 'General workspace'}
+            </Typography>
+          </Typography>
           <label>
-            Focus title
+            <Typography as="span" variant="caption" tone="faint">
+              Focus title
+            </Typography>
             <input
               data-testid="focus-title-input"
               value={newFocusTitle}
@@ -167,9 +190,16 @@ export function CreationComposer({
               onChange={event => setNewFocusTitle(event.currentTarget.value)}
             />
           </label>
-          <p className={composerHintClass} data-testid="focus-form-hint">
+          <Typography
+            as="p"
+            variant="caption"
+            tone="faint"
+            className={composerHintClass}
+            data-testid="focus-form-hint"
+            style={{ lineHeight: 1.45 }}
+          >
             A focus is the durable thread sessions will attach to.
-          </p>
+          </Typography>
           <button
             className={primaryComposerButtonClass}
             type="button"
@@ -184,11 +214,16 @@ export function CreationComposer({
 
       {mode === 'session' ? (
         <div className={creationGridClass}>
-          <p className={creationContextClass}>
-            Focus: <strong>{selectedFocus?.title ?? 'Choose a focus first'}</strong>
-          </p>
+          <Typography as="p" variant="caption" tone="faint" className={creationContextClass}>
+            Focus:{' '}
+            <Typography as="strong" variant="caption" tone="muted">
+              {selectedFocus?.title ?? 'Choose a focus first'}
+            </Typography>
+          </Typography>
           <label>
-            Session title
+            <Typography as="span" variant="caption" tone="faint">
+              Session title
+            </Typography>
             <input
               data-testid="session-title-input"
               value={newSessionTitle}
@@ -197,7 +232,9 @@ export function CreationComposer({
             />
           </label>
           <label>
-            Working directory
+            <Typography as="span" variant="caption" tone="faint">
+              Working directory
+            </Typography>
             <input
               data-testid="session-cwd-input"
               value={newSessionCwd}
@@ -205,27 +242,65 @@ export function CreationComposer({
               onChange={event => setNewSessionCwd(event.currentTarget.value)}
             />
           </label>
-          <p className={composerHintClass} data-testid="session-form-hint">
+          <Typography
+            as="p"
+            variant="caption"
+            tone="faint"
+            className={composerHintClass}
+            data-testid="session-form-hint"
+            style={{ lineHeight: 1.45 }}
+          >
             {sessionBlocker ??
               `${selectedDetection?.displayName ?? 'Selected CLI'} will launch from this directory.`}
-          </p>
+          </Typography>
           <div
             className={selectedCliSummaryClass({
               available: selectedDetection?.available ?? false,
             })}
             data-testid="selected-cli-summary"
           >
-            <span>Selected agent</span>
-            <strong>{selectedDetection?.displayName ?? 'No CLI selected'}</strong>
-            <small>{selectedCliSummary}</small>
+            <Typography
+              as="span"
+              variant="caption"
+              tone="faint"
+              uppercase
+              style={{ letterSpacing: '0.08em' }}
+            >
+              Selected agent
+            </Typography>
+            <Typography as="strong" variant="smallBodyAlt" tone="default">
+              {selectedDetection?.displayName ?? 'No CLI selected'}
+            </Typography>
+            <Typography
+              as="small"
+              variant="caption"
+              tone={selectedDetection?.available ? 'muted' : 'ghost'}
+              className={selectedCliSummaryDetailClass}
+              style={{ lineHeight: 1.45 }}
+            >
+              {selectedCliSummary}
+            </Typography>
           </div>
           <div className={cliChoiceHeaderClass}>
-            <span>Choose agent CLI</span>
-            <small data-testid="cli-availability-summary">
+            <Typography
+              as="span"
+              variant="caption"
+              tone="faint"
+              uppercase
+              style={{ letterSpacing: '0.08em' }}
+            >
+              Choose agent CLI
+            </Typography>
+            <Typography
+              as="small"
+              variant="caption"
+              tone="ghost"
+              data-testid="cli-availability-summary"
+            >
               {availableCliCount === 0
                 ? 'No supported CLIs enabled'
                 : `${availableCliCount} of ${visibleDetections.length} ready`}
-            </small>
+            </Typography>
           </div>
           <div
             className={cliChoiceGridClass}
@@ -269,10 +344,17 @@ export function CreationComposer({
             })}
           </div>
           {availableCliCount === 0 ? (
-            <p className={cliEmptyHelpClass} data-testid="cli-empty-help">
+            <Typography
+              as="p"
+              variant="caption"
+              tone="faint"
+              className={cliEmptyHelpClass}
+              data-testid="cli-empty-help"
+              style={{ lineHeight: 1.5 }}
+            >
               Reverie can still organize projects and focuses, but sessions stay disabled until at
               least one supported agent CLI is installed and detected.
-            </p>
+            </Typography>
           ) : null}
           <label className={checkRowClass}>
             <input
@@ -281,7 +363,9 @@ export function CreationComposer({
               checked={newSessionDangerousMode}
               onChange={event => setNewSessionDangerousMode(event.currentTarget.checked)}
             />{' '}
-            Enable YOLO for this session
+            <Typography as="span" variant="smallBody" tone="inherit">
+              Enable YOLO for this session
+            </Typography>
           </label>
           <button
             className={primaryComposerButtonClass}
@@ -314,12 +398,6 @@ const creationHeaderClass = css({
   justifyContent: 'space-between',
   gap: '12px',
   color: 'var(--text)',
-  '& span': {
-    fontSize: '12px',
-    letterSpacing: '0.08em',
-    textTransform: 'uppercase',
-    color: 'var(--text-3)',
-  },
   '& button': {
     border: '1px solid var(--line)',
     borderRadius: '999px',
@@ -338,8 +416,6 @@ const creationGridClass = css({
   '& label': {
     display: 'grid',
     gap: '6px',
-    color: 'var(--text-3)',
-    fontSize: '12px',
   },
   '& input': {
     height: '34px',
@@ -354,18 +430,10 @@ const creationGridClass = css({
 });
 
 const creationContextClass = css({
-  margin: 0,
-  color: 'var(--text-3)',
-  fontSize: '12px',
   alignSelf: 'center',
-  '& strong': { color: 'var(--text-2)', fontWeight: 500 },
 });
 
 const composerHintClass = css({
-  margin: 0,
-  color: 'var(--text-3)',
-  fontSize: '11.5px',
-  lineHeight: 1.45,
   alignSelf: 'center',
 });
 
@@ -382,15 +450,6 @@ const folderPickerCardClass = css({
   background: 'rgba(0,0,0,0.18)',
   color: 'var(--text)',
   '& svg': { color: 'var(--text-3)', gridRow: '1 / span 2' },
-  '& span': { fontSize: '14px', fontWeight: 650 },
-  '& small': {
-    color: 'var(--text-3)',
-    fontSize: '11.5px',
-    lineHeight: 1.45,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
 });
 
 function selectedCliSummaryClass({ available }: { available: boolean }) {
@@ -406,21 +465,14 @@ function selectedCliSummaryClass({ available }: { available: boolean }) {
     background: available
       ? 'linear-gradient(135deg, color-mix(in srgb, var(--surface-hi) 78%, transparent), color-mix(in srgb, var(--accent) 8%, transparent))'
       : 'var(--surface-1)',
-    '& span': {
-      color: 'var(--text-3)',
-      fontSize: '11px',
-      letterSpacing: '0.08em',
-      textTransform: 'uppercase',
-    },
-    '& strong': { color: 'var(--text)', fontSize: '13px' },
-    '& small': {
-      gridColumn: '1 / -1',
-      color: available ? 'var(--text-2)' : 'var(--text-4)',
-      fontSize: '11.5px',
-      lineHeight: 1.45,
-    },
   });
 }
+
+// Layout residual for the summary detail line; size + color come from the
+// Typography variant + tone the summary renders.
+const selectedCliSummaryDetailClass = css({
+  gridColumn: '1 / -1',
+});
 
 const cliChoiceHeaderClass = css({
   gridColumn: '1 / -1',
@@ -428,23 +480,14 @@ const cliChoiceHeaderClass = css({
   justifyContent: 'space-between',
   gap: '12px',
   alignItems: 'center',
-  color: 'var(--text-3)',
-  fontSize: '11px',
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
-  '& small': { letterSpacing: '0', textTransform: 'none', color: 'var(--text-4)' },
 });
 
 const cliEmptyHelpClass = css({
   gridColumn: '1 / -1',
-  margin: 0,
   padding: '10px 12px',
   borderRadius: '14px',
   border: '1px solid var(--line)',
   background: 'var(--surface-1)',
-  color: 'var(--text-3)',
-  fontSize: '11.5px',
-  lineHeight: 1.5,
 });
 
 const checkRowClass = css({
