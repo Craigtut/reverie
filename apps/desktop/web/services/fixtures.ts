@@ -1,100 +1,22 @@
-import { makeSyntheticFrame } from './terminal-canvas-renderer';
-import type { TerminalFrame } from './terminalTypes';
+import { makeSyntheticFrame } from '../terminal-canvas-renderer';
+import type { TerminalFrame } from '../terminalTypes';
+import type { AgentCliDetection, AgentKind, WorkspaceShellSnapshot } from '../domain';
+import type { EventHandler, UnlistenFn } from './types';
 
-export type UnlistenFn = () => void;
-
-type RuntimeMode = 'tauri' | 'browser-fixture';
-type EventHandler<T> = (event: { payload: T }) => void;
-
-type FixtureAgentKind = 'claude_code' | 'codex_cli' | 'cortex_code';
-type FixtureSessionStatus = 'not_started' | 'running' | 'exited' | 'restorable' | 'restore_failed';
-
-interface FixtureFocus {
-  id: string;
-  projectId: string | null;
-  title: string;
-  description: string | null;
-  sortOrder: number;
-  archived: boolean;
-}
-
-interface FixtureSession {
-  id: string;
-  focusId: string;
-  title: string;
-  agentKind: FixtureAgentKind;
-  cwd: string;
-  nativeSessionRef: null;
-  launchMode: 'new' | 'resume';
-  dangerousModeOverride: boolean;
-  status: FixtureSessionStatus;
-  lastExitCode: number | null;
-  tabVisible: boolean;
-}
-
-interface FixtureShellSnapshot {
-  workspace: {
-    id: string;
-    name: string;
-    generalLabel: string;
-    defaultDangerousMode: boolean;
-  };
-  projects: Array<{
-    id: string;
-    name: string;
-    path: string;
-    archived: boolean;
-  }>;
-  focuses: FixtureFocus[];
-  sessions: FixtureSession[];
-}
-
-declare global {
-  interface Window {
-    __TAURI__?: unknown;
-    __TAURI_INTERNALS__?: unknown;
-    __REVERIE_BROWSER_FIXTURE__?: boolean;
-  }
-}
-
-const realTauriRuntime = typeof window !== 'undefined'
-  && Boolean(window.__TAURI_INTERNALS__ || (window.__TAURI__ && !window.__REVERIE_BROWSER_FIXTURE__));
-
-if (typeof window !== 'undefined' && !realTauriRuntime) {
-  window.__REVERIE_BROWSER_FIXTURE__ = true;
-}
+// Browser fixture backend: an in-memory, localStorage-persisted stand-in for
+// the Tauri commands + events, used by `npm run dev:harness` so the React shell
+// can run in a plain browser with no Rust process. The runtime shim
+// (services/runtime.ts) routes here whenever the real Tauri APIs are absent.
+//
+// Fixture state mirrors the real domain model (WorkspaceShellSnapshot,
+// ShellSession, ...) so there is a single source of truth for the shapes.
 
 const browserListeners = new Map<string, Set<EventHandler<unknown>>>();
 const runningTerminals = new Map<string, { sessionId: string; cancelled: boolean; startedAt: number; framesEmitted: number }>();
 const fixtureStorageKey = makeFixtureStorageKey();
-let fixtureShell: FixtureShellSnapshot = loadFixtureShellSnapshot();
+let fixtureShell: WorkspaceShellSnapshot = loadFixtureShellSnapshot();
 
-export function appRuntimeMode(): RuntimeMode {
-  return realTauriRuntime ? 'tauri' : 'browser-fixture';
-}
-
-export async function invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T> {
-  if (realTauriRuntime) {
-    const tauriCore = await import('@tauri-apps/api/core');
-    return tauriCore.invoke<T>(command, args);
-  }
-
-  return invokeBrowserFixture<T>(command, args);
-}
-
-export async function listen<T>(eventName: string, handler: EventHandler<T>): Promise<UnlistenFn> {
-  if (realTauriRuntime) {
-    const tauriEvent = await import('@tauri-apps/api/event');
-    return tauriEvent.listen<T>(eventName, handler);
-  }
-
-  const handlers = browserListeners.get(eventName) ?? new Set<EventHandler<unknown>>();
-  handlers.add(handler as EventHandler<unknown>);
-  browserListeners.set(eventName, handlers);
-  return () => handlers.delete(handler as EventHandler<unknown>);
-}
-
-async function invokeBrowserFixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+export async function invokeBrowserFixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   switch (command) {
     case 'workspace_shell':
       return clone(fixtureShell) as T;
@@ -126,11 +48,24 @@ async function invokeBrowserFixture<T>(command: string, args?: Record<string, un
       return undefined as T;
     case 'resize_terminal':
       return undefined as T;
+    case 'scroll_terminal_viewport':
+      return undefined as T;
+    case 'scroll_terminal_viewport_to_top':
+      return undefined as T;
+    case 'scroll_terminal_viewport_to_bottom':
+      return undefined as T;
     case 'record_render_metrics':
       return undefined as T;
     default:
       throw new Error(`Browser fixture does not implement Tauri command: ${command}`);
   }
+}
+
+export function subscribeFixtureEvent<T>(eventName: string, handler: EventHandler<T>): UnlistenFn {
+  const handlers = browserListeners.get(eventName) ?? new Set<EventHandler<unknown>>();
+  handlers.add(handler as EventHandler<unknown>);
+  browserListeners.set(eventName, handlers);
+  return () => handlers.delete(handler as EventHandler<unknown>);
 }
 
 function createFixtureProject(args?: Record<string, unknown>) {
@@ -176,7 +111,7 @@ function createFixtureSession(args?: Record<string, unknown>) {
   const request = readRequest<{
     focusId: string;
     title: string;
-    agentKind: 'claude_code' | 'codex_cli' | 'cortex_code';
+    agentKind: AgentKind;
     cwd: string;
     dangerousModeOverride?: boolean | null;
   }>(args);
@@ -252,9 +187,9 @@ function archiveFixtureProject(args?: Record<string, unknown>) {
   return clone(fixtureShell);
 }
 
-function listFixtureAgentClis() {
+function listFixtureAgentClis(): AgentCliDetection[] {
   const cliFixture = new URLSearchParams(window.location.search).get('cli');
-  const unavailable = new Set<FixtureAgentKind>();
+  const unavailable = new Set<AgentKind>();
   if (cliFixture === 'partial') unavailable.add('codex_cli');
   if (cliFixture === 'none') {
     unavailable.add('cortex_code');
@@ -288,12 +223,12 @@ function listFixtureAgentClis() {
 }
 
 function makeFixtureAgentCli({ kind, displayName, executable, candidates, unavailable }: {
-  kind: FixtureAgentKind;
+  kind: AgentKind;
   displayName: string;
   executable: string;
   candidates: string[];
-  unavailable: Set<FixtureAgentKind>;
-}) {
+  unavailable: Set<AgentKind>;
+}): AgentCliDetection {
   const available = !unavailable.has(kind);
   return {
     kind,
@@ -437,7 +372,7 @@ function makeFixtureStorageKey() {
   return `reverie.browserFixture.${fixtureName}.${cliName}.v1`;
 }
 
-function loadFixtureShellSnapshot() {
+function loadFixtureShellSnapshot(): WorkspaceShellSnapshot {
   if (new URLSearchParams(window.location.search).get('resetFixture') === '1') {
     window.localStorage.removeItem(fixtureStorageKey);
   }
@@ -445,7 +380,7 @@ function loadFixtureShellSnapshot() {
   const stored = window.localStorage.getItem(fixtureStorageKey);
   if (stored) {
     try {
-      const snapshot = JSON.parse(stored) as FixtureShellSnapshot;
+      const snapshot = JSON.parse(stored) as WorkspaceShellSnapshot;
       normalizeFixtureShellSnapshot(snapshot);
       persistFixtureShellSnapshot(snapshot);
       return snapshot;
@@ -463,7 +398,7 @@ function persistFixtureShellSnapshot(snapshot = fixtureShell) {
   window.localStorage.setItem(fixtureStorageKey, JSON.stringify(snapshot));
 }
 
-function normalizeFixtureShellSnapshot(snapshot: FixtureShellSnapshot) {
+function normalizeFixtureShellSnapshot(snapshot: WorkspaceShellSnapshot) {
   for (const session of snapshot.sessions) {
     session.tabVisible ??= true;
   }
@@ -473,7 +408,7 @@ function makeId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
 }
 
-function makeFixtureShellSnapshot(): FixtureShellSnapshot {
+function makeFixtureShellSnapshot(): WorkspaceShellSnapshot {
   const workspace = {
     id: 'fixture-workspace',
     name: 'Browser fixture workspace',

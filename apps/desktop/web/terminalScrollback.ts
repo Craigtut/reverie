@@ -59,7 +59,7 @@ export function frameForSurface(frame: TerminalFrame, surface: TerminalSurface):
 
     return {
       index,
-      dirty: true,
+      dirty: source?.dirty ?? true,
       cells: source?.cells.filter(cell => cell.col < surface.cols) ?? [],
     };
   });
@@ -80,7 +80,7 @@ export function frameForSurface(frame: TerminalFrame, surface: TerminalSurface):
 
   return {
     ...frame,
-    dirty: 'full',
+    dirty: frame.dirty ?? 'full',
     rows,
     cursor,
   };
@@ -154,6 +154,17 @@ export function scrolledOffRows(previousRows: TerminalRow[], nextRows: TerminalR
     return [];
   }
 
+  const maxTrustworthyScroll = Math.max(8, Math.ceil(previousRows.length / 3));
+  if (scrolledCount > maxTrustworthyScroll) {
+    return [];
+  }
+
+  const overlapSignatures = nextSignatures.slice(0, overlap);
+  const scrolledSignatures = previousSignatures.slice(0, scrolledCount);
+  if (!hasMeaningfulRows(overlapSignatures) || !hasMeaningfulRows(scrolledSignatures)) {
+    return [];
+  }
+
   return previousRows.slice(0, scrolledCount);
 }
 
@@ -176,6 +187,10 @@ function rowsShareSignatures(
 
 function rowSignature(row: TerminalRow) {
   return rowPlainText(row).trimEnd();
+}
+
+function hasMeaningfulRows(signatures: string[]) {
+  return signatures.filter(signature => signature.trim().length > 0).length >= 1;
 }
 
 function rowPlainText(row: TerminalRow) {
