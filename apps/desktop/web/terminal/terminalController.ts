@@ -32,6 +32,9 @@ export interface TerminalControllerOptions {
   // React-state sync callbacks (the controller stays framework-agnostic).
   onScrollbackRowCount: (count: number) => void;
   onLiveFollow: (live: boolean) => void;
+  // Fired after a new composite frame is applied + painted. The find feature
+  // uses it to re-map match spans to the (possibly scrolled) viewport.
+  onComposite?: () => void;
   // Injectable for tests; defaults to the real Canvas renderer.
   createRenderer?: (
     canvas: HTMLCanvasElement,
@@ -46,7 +49,7 @@ export interface TerminalControllerOptions {
 // paints. The hook (useTerminalSession) wires it to React + the stores and
 // drives the session lifecycle.
 export function createTerminalController(options: TerminalControllerOptions) {
-  const { onScrollbackRowCount, onLiveFollow } = options;
+  const { onScrollbackRowCount, onLiveFollow, onComposite } = options;
   const createRenderer =
     options.createRenderer ??
     ((canvas, surface, displayRows) =>
@@ -71,6 +74,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let selection: SelectionRange | null = null;
   let links: BufferLinkSpan[] = [];
   let hoverLink: BufferLinkSpan | null = null;
+  // Find-in-terminal overlay state, also in buffer coordinates.
+  let searchMatches: RowSpan[] = [];
+  let activeMatch: RowSpan | null = null;
+  // While find is navigating, pin the viewport (don't auto-jump to the tail on
+  // new output) so the active match stays put.
+  let searchActive = false;
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
 
@@ -164,11 +173,44 @@ export function createTerminalController(options: TerminalControllerOptions) {
         )
       : null;
 
-    if (selectionSpans.length === 0 && linkSpans.length === 0 && !hoverSpan) return undefined;
+    const searchSpans: RowSpan[] = [];
+    for (const match of searchMatches) {
+      const span = rowSpanInWindow(
+        match.row,
+        match.startCol,
+        match.endCol,
+        startRow,
+        displayRows,
+        forSurface.cols,
+      );
+      if (span) searchSpans.push(span);
+    }
+    const activeSpan = activeMatch
+      ? rowSpanInWindow(
+          activeMatch.row,
+          activeMatch.startCol,
+          activeMatch.endCol,
+          startRow,
+          displayRows,
+          forSurface.cols,
+        )
+      : null;
+
+    if (
+      selectionSpans.length === 0 &&
+      linkSpans.length === 0 &&
+      !hoverSpan &&
+      searchSpans.length === 0 &&
+      !activeSpan
+    ) {
+      return undefined;
+    }
     return {
       selection: selectionSpans.length > 0 ? selectionSpans : undefined,
       links: linkSpans.length > 0 ? linkSpans : undefined,
       hoverLink: hoverSpan ?? undefined,
+      searchMatches: searchSpans.length > 0 ? searchSpans : undefined,
+      activeMatch: activeSpan ?? undefined,
     };
   }
 
@@ -180,9 +222,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
   }
 
   function shouldAutoFollow() {
-    // An active selection pins the viewport: output keeps painting under the
-    // selection, but we never auto-jump to the tail while the user is selecting.
-    return liveFollow && selection === null;
+    // An active selection (or find navigation) pins the viewport: output keeps
+    // painting underneath, but we never auto-jump to the tail.
+    return liveFollow && selection === null && !searchActive;
   }
 
   // Rescan the composite frame for URLs so hover/underline/click have up-to-date
@@ -235,6 +277,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     onLiveFollow(view.liveFollow);
     updateSpacer(view.compositeFrame.rows.length, forSurface);
     paintWindow(view.compositeFrame, forSurface);
+    onComposite?.();
     requestAnimationFrame(() => {
       if (shouldAutoFollow()) scrollToTail();
       else paintWindow();
@@ -245,6 +288,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
     selection = null;
     links = [];
     hoverLink = null;
+    searchMatches = [];
+    activeMatch = null;
   }
 
   function clear(forSurface: TerminalSurface = surface) {
@@ -279,6 +324,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     recomputeLinks();
     updateSpacer(surfaceFrame.rows.length, surface);
     paintWindow(surfaceFrame, surface);
+    onComposite?.();
     requestAnimationFrame(() => {
       if (shouldAutoFollow()) scrollToTail();
       else paintWindow();
@@ -421,9 +467,18 @@ export function createTerminalController(options: TerminalControllerOptions) {
     // and rebuilt by recomputeLinks on the next applied view, so they are left
     // alone here.
     resetInteraction() {
-      if (selection === null && hoverLink === null) return;
+      if (
+        selection === null &&
+        hoverLink === null &&
+        searchMatches.length === 0 &&
+        activeMatch === null
+      ) {
+        return;
+      }
       selection = null;
       hoverLink = null;
+      searchMatches = [];
+      activeMatch = null;
       repaintOverlay();
     },
     getSelectionText(): string {
@@ -448,6 +503,29 @@ export function createTerminalController(options: TerminalControllerOptions) {
       if (sameRow || (!hoverLink && !next)) return;
       hoverLink = next;
       repaintOverlay();
+    },
+    // Find-in-terminal overlay: match spans (buffer coords) + the active match.
+    setSearchMatches(next: RowSpan[]) {
+      searchMatches = next;
+      repaintOverlay();
+    },
+    setActiveMatch(next: RowSpan | null) {
+      activeMatch = next;
+      repaintOverlay();
+    },
+    clearSearch() {
+      if (searchMatches.length === 0 && activeMatch === null) return;
+      searchMatches = [];
+      activeMatch = null;
+      repaintOverlay();
+    },
+    setSearchActive(active: boolean) {
+      searchActive = active;
+    },
+    // The screen-row index of the top of the current viewport, for mapping a
+    // backend match's absolute row to a composite (viewport-local) row.
+    getViewportOffset(): number {
+      return lastComposite?.scrollback?.viewportOffset ?? 0;
     },
   };
 }

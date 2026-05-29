@@ -95,7 +95,7 @@ export interface TargetResolver {
 
 // --- Actions: what can be done to a target ---
 
-export type ActionGroup = 'clipboard' | 'open' | 'search' | 'agent' | 'select';
+export type ActionGroup = 'clipboard' | 'open' | 'search' | 'agent' | 'find' | 'select';
 
 // The injected services an action runs against. This is the ONLY seam between
 // the registry (app-agnostic) and the app: the React layer builds it, closing
@@ -114,6 +114,7 @@ export interface ActionContext {
   openUrl(href: string): Promise<void>;
   sendToInput(text: string): Promise<void>;
   askAgent(prompt: string, opts?: AskAgentOptions): Promise<void>;
+  openFind(prefill?: string): void;
   clipboardWriteAvailable: boolean;
   clipboardReadAvailable: boolean;
   canSendInput: boolean;

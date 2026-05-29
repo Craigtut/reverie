@@ -15,9 +15,13 @@ import {
   resizeTerminal,
   scrollTerminalViewport,
   scrollTerminalViewportToBottom,
+  scrollTerminalViewportToRow,
+  searchTerminal,
   startSession,
   writeTerminalInput,
+  type TerminalSearchMatch,
 } from '../services/terminalApi';
+import { cycleIndex } from '../terminal/findModel';
 import {
   DEFAULT_TERMINAL_SCROLLBACK_ROWS,
   USER_HOME,
@@ -59,6 +63,19 @@ import {
 // Register the built-in resolvers + actions once, before any menu is built.
 registerDefaultInteractions();
 
+interface FindState {
+  open: boolean;
+  query: string;
+  caseSensitive: boolean;
+  matches: TerminalSearchMatch[];
+  activeIndex: number; // 0-based into matches, -1 when none
+  total: number;
+  capped: boolean;
+  busy: boolean;
+}
+
+const FIND_DEBOUNCE_MS = 120;
+
 // React binding for the terminal island. Owns the imperative TerminalController,
 // wires the canvas/viewport DOM, runs the paint/resize effects, subscribes to the
 // backend frame stream, exposes the input/scroll handlers, and drives the
@@ -78,12 +95,17 @@ export function useTerminalSession(params: {
   const surfaceViewportRef = useRef<HTMLDivElement | null>(null);
   const terminalScrollSpacerRef = useRef<HTMLDivElement | null>(null);
 
+  // Re-maps find matches onto the (possibly scrolled) viewport after each frame.
+  // Held in a ref so the long-lived controller can call the latest closure.
+  const applyFindOverlayRef = useRef<() => void>(() => {});
+
   const controllerRef = useRef<TerminalController | null>(null);
   if (controllerRef.current === null) {
     controllerRef.current = createTerminalController({
       surface: TERMINAL_SURFACE,
       onScrollbackRowCount: count => useTerminalStore.getState().setScrollbackRowCount(count),
       onLiveFollow: live => useTerminalStore.getState().setTerminalLiveFollow(live),
+      onComposite: () => applyFindOverlayRef.current(),
     });
   }
   const controller = controllerRef.current;
@@ -108,6 +130,27 @@ export function useTerminalSession(params: {
   const interaction = interactionRef.current;
   const [contextMenu, setContextMenu] = useState<MenuModel | null>(null);
 
+  // Find-in-terminal state. `findRef` is the authoritative copy so the
+  // controller's onComposite callback + async search resolution always read
+  // fresh matches; `find` drives the React find bar.
+  const initialFind: FindState = {
+    open: false,
+    query: '',
+    caseSensitive: false,
+    matches: [],
+    activeIndex: -1,
+    total: 0,
+    capped: false,
+    busy: false,
+  };
+  const [find, setFind] = useState<FindState>(initialFind);
+  const findRef = useRef<FindState>(initialFind);
+  const findDebounceRef = useRef<number>(0);
+  function updateFind(patch: Partial<FindState>) {
+    findRef.current = { ...findRef.current, ...patch };
+    setFind(findRef.current);
+  }
+
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
   const creationMode = useNavigationStore(s => s.creationMode);
 
@@ -130,6 +173,7 @@ export function useTerminalSession(params: {
   // coordinates. Keyed on the session id only, so a resize repaint never clears.
   useEffect(() => {
     controller.resetInteraction();
+    closeFind();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- session id is the trigger
   }, [selectedSession?.id]);
 
@@ -487,7 +531,135 @@ export function useTerminalSession(params: {
     }
   }
 
+  // --- Find in terminal ---
+
+  // Map the stored matches (screen-row coords) onto the current viewport and
+  // push the spans to the renderer overlay. Re-runs on every painted frame
+  // (via the controller's onComposite) so highlights track scrolling/output.
+  function applyFindOverlay() {
+    const state = findRef.current;
+    if (!state.open || state.matches.length === 0) {
+      controller.clearSearch();
+      return;
+    }
+    const offset = controller.getViewportOffset();
+    const rows = controller.getSurface().rows;
+    const spans = [];
+    for (const match of state.matches) {
+      const row = match.row - offset;
+      if (row >= 0 && row < rows) {
+        spans.push({ row, startCol: match.startCol, endCol: match.endCol });
+      }
+    }
+    controller.setSearchMatches(spans);
+    const active = state.activeIndex >= 0 ? state.matches[state.activeIndex] : undefined;
+    if (active) {
+      const activeRow = active.row - offset;
+      controller.setActiveMatch(
+        activeRow >= 0 && activeRow < rows
+          ? { row: activeRow, startCol: active.startCol, endCol: active.endCol }
+          : null,
+      );
+    } else {
+      controller.setActiveMatch(null);
+    }
+  }
+  applyFindOverlayRef.current = applyFindOverlay;
+
+  function scrollToActiveMatch() {
+    const state = findRef.current;
+    const match = state.activeIndex >= 0 ? state.matches[state.activeIndex] : undefined;
+    const terminalId = useTerminalStore.getState().activeTerminalId;
+    if (!match || !terminalId) return;
+    void scrollTerminalViewportToRow(terminalId, match.row).catch(() => {});
+    // Apply immediately so an already-visible match highlights without waiting
+    // for a frame; the scroll's frame re-applies via onComposite.
+    applyFindOverlay();
+  }
+
+  async function runSearch(query: string, caseSensitive: boolean) {
+    const terminalId = useTerminalStore.getState().activeTerminalId;
+    if (!terminalId || query.length === 0) {
+      updateFind({ matches: [], total: 0, capped: false, activeIndex: -1, busy: false });
+      controller.clearSearch();
+      return;
+    }
+    updateFind({ busy: true });
+    try {
+      const result = await searchTerminal(terminalId, query, caseSensitive);
+      const activeIndex = result.matches.length > 0 ? 0 : -1;
+      updateFind({
+        matches: result.matches,
+        total: result.total,
+        capped: result.capped,
+        activeIndex,
+        busy: false,
+      });
+      if (activeIndex >= 0) {
+        controller.setSearchActive(true);
+        scrollToActiveMatch();
+      } else {
+        controller.clearSearch();
+      }
+    } catch (error) {
+      updateFind({ busy: false });
+      writeLog(`Find failed: ${errorMessage(error)}`);
+    }
+  }
+
+  function scheduleSearch(query: string, caseSensitive: boolean) {
+    window.clearTimeout(findDebounceRef.current);
+    findDebounceRef.current = window.setTimeout(() => {
+      void runSearch(query, caseSensitive);
+    }, FIND_DEBOUNCE_MS);
+  }
+
+  function openFind(prefill?: string) {
+    const query = prefill && prefill.length > 0 ? prefill : findRef.current.query;
+    updateFind({ open: true, query });
+    controller.setSearchActive(true);
+    if (query.length > 0) void runSearch(query, findRef.current.caseSensitive);
+  }
+
+  function closeFind() {
+    window.clearTimeout(findDebounceRef.current);
+    controller.clearSearch();
+    controller.setSearchActive(false);
+    updateFind({ open: false, query: '', matches: [], total: 0, capped: false, activeIndex: -1 });
+    controller.focusCanvas();
+  }
+
+  function setFindQuery(query: string) {
+    updateFind({ query });
+    scheduleSearch(query, findRef.current.caseSensitive);
+  }
+
+  function toggleFindCase() {
+    const caseSensitive = !findRef.current.caseSensitive;
+    updateFind({ caseSensitive });
+    void runSearch(findRef.current.query, caseSensitive);
+  }
+
+  function moveFind(delta: number) {
+    const state = findRef.current;
+    if (state.matches.length === 0) return;
+    updateFind({ activeIndex: cycleIndex(state.activeIndex, state.matches.length, delta) });
+    scrollToActiveMatch();
+  }
+
   function handleTerminalKeyDown(event: KeyboardEvent<HTMLCanvasElement>) {
+    // Cmd/Ctrl-F opens the find bar (never reaches the PTY), prefilled with the
+    // current selection if any. Takes precedence over the selection shortcuts.
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      (event.key === 'f' || event.key === 'F')
+    ) {
+      event.preventDefault();
+      openFind(controller.getSelectionText() || undefined);
+      return;
+    }
+
     // Selection-aware shortcuts take precedence while a selection exists. We do
     // not intercept a plain Ctrl-C (that stays SIGINT); copy is Cmd-C (macOS) or
     // Ctrl-Shift-C, matching terminal convention.
@@ -610,6 +782,7 @@ export function useTerminalSession(params: {
       clearSelection: () => controller.clearSelection(),
       openExternal: href => openExternalUrl(href),
       askAgent: prompt => askAgentAbout(prompt),
+      openFind: prefill => openFind(prefill),
       canSendInput: () => inputReady(),
     };
   }
@@ -724,6 +897,21 @@ export function useTerminalSession(params: {
     autostartSession,
     contextMenu,
     closeContextMenu: () => setContextMenu(null),
+    find: {
+      open: find.open,
+      query: find.query,
+      caseSensitive: find.caseSensitive,
+      current: find.activeIndex >= 0 ? find.activeIndex + 1 : 0,
+      total: find.total,
+      capped: find.capped,
+      busy: find.busy,
+    },
+    openFind,
+    closeFind,
+    setFindQuery,
+    toggleFindCase,
+    findNext: () => moveFind(1),
+    findPrev: () => moveFind(-1),
     clearSurface: () => controller.clear(),
     dropSession: (sessionId: string) => controller.dropSession(sessionId),
   };

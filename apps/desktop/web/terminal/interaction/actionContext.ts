@@ -14,6 +14,7 @@ export interface ActionContextDeps {
   clearSelection(): void;
   openExternal(href: string): Promise<void>;
   askAgent(prompt: string, opts?: AskAgentOptions): Promise<void>;
+  openFind(prefill?: string): void;
   // Whether a live terminal is attached + armed (gates paste / send-to-input).
   canSendInput(): boolean;
 }
@@ -46,6 +47,7 @@ export function buildActionContext(deps: ActionContextDeps): ActionContext {
     openUrl: href => deps.openExternal(href),
     sendToInput: text => deps.sendInput(text),
     askAgent: (prompt, opts) => deps.askAgent(prompt, opts),
+    openFind: prefill => deps.openFind(prefill),
     clipboardWriteAvailable,
     clipboardReadAvailable,
     canSendInput: deps.canSendInput(),

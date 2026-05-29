@@ -23,6 +23,10 @@ const DEFAULT_BACKGROUND_OPACITY = 1;
 // Selection highlight is a translucent tint of the foreground (monochrome, no
 // status color) laid over the glyphs so selected text stays legible.
 const SELECTION_ALPHA = 0.26;
+// Search-match wash (all matches) + the active match's stronger fill. Monochrome
+// (foreground-tinted); the active match also gets a 1px outline.
+const SEARCH_MATCH_ALPHA = 0.16;
+const ACTIVE_MATCH_ALPHA = 0.34;
 // Link underline is drawn at the foreground color; the hovered link gets a
 // slightly thicker rule.
 const LINK_UNDERLINE_HEIGHT = 1;
@@ -249,6 +253,12 @@ export function createTerminalCanvasRenderer(
   // (dirty-row) paints never re-tint an already-tinted row. The controller
   // forces a full paint whenever the selection or hover changes, so a changed
   // overlay always lands on freshly painted rows.
+  function fillSpanRow(span: { row: number; startCol: number; endCol: number }) {
+    const x = span.startCol * cellWidth;
+    const width = (span.endCol - span.startCol) * cellWidth;
+    if (width > 0) ctx.fillRect(x, span.row * cellHeight, width, cellHeight);
+  }
+
   function paintOverlay(overlay: TerminalOverlay, paintedRows: Set<number>, foreground: string) {
     const selection = overlay.selection ?? [];
     if (selection.length > 0) {
@@ -256,12 +266,38 @@ export function createTerminalCanvasRenderer(
       ctx.globalAlpha = SELECTION_ALPHA;
       ctx.fillStyle = foreground;
       for (const span of selection) {
-        if (!paintedRows.has(span.row)) continue;
-        const x = span.startCol * cellWidth;
-        const width = (span.endCol - span.startCol) * cellWidth;
-        if (width > 0) ctx.fillRect(x, span.row * cellHeight, width, cellHeight);
+        if (paintedRows.has(span.row)) fillSpanRow(span);
       }
       ctx.globalAlpha = previousAlpha;
+    }
+
+    // Search matches: a lighter foreground wash for every match in view, with
+    // the active match a stronger fill plus a 1px outline (no status color, so
+    // it stays within the monochrome design rule).
+    const searchMatches = overlay.searchMatches ?? [];
+    if (searchMatches.length > 0) {
+      const previousAlpha = ctx.globalAlpha;
+      ctx.globalAlpha = SEARCH_MATCH_ALPHA;
+      ctx.fillStyle = foreground;
+      for (const span of searchMatches) {
+        if (paintedRows.has(span.row)) fillSpanRow(span);
+      }
+      ctx.globalAlpha = previousAlpha;
+    }
+    const active = overlay.activeMatch;
+    if (active && paintedRows.has(active.row)) {
+      const previousAlpha = ctx.globalAlpha;
+      ctx.globalAlpha = ACTIVE_MATCH_ALPHA;
+      ctx.fillStyle = foreground;
+      fillSpanRow(active);
+      ctx.globalAlpha = previousAlpha;
+      const x = active.startCol * cellWidth;
+      const width = (active.endCol - active.startCol) * cellWidth;
+      if (width > 0) {
+        ctx.strokeStyle = foreground;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, active.row * cellHeight + 0.5, width - 1, cellHeight - 1);
+      }
     }
 
     const links = overlay.links ?? [];

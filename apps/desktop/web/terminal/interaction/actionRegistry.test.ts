@@ -27,6 +27,7 @@ function fakeCtx(overrides: Partial<ActionContext> = {}): ActionContext {
     openUrl: async () => {},
     sendToInput: async () => {},
     askAgent: async () => {},
+    openFind: () => {},
     clipboardWriteAvailable: true,
     clipboardReadAvailable: true,
     canSendInput: true,
@@ -74,6 +75,7 @@ describe('buildMenuItems for a selection', () => {
       'search-web',
       'send-to-input',
       'ask-agent',
+      'find-selection',
       'select-all',
     ]);
   });
@@ -98,8 +100,12 @@ describe('buildMenuItems for a selection', () => {
 describe('buildMenuItems for the grid fallback', () => {
   const grid: GridTarget = { kind: 'grid', cell: { row: 0, col: 0 } };
 
-  it('offers only paste and select-all', () => {
-    expect(buildMenuItems(grid, fakeCtx()).map(i => i.id)).toEqual(['paste', 'select-all']);
+  it('offers paste, find, and select-all', () => {
+    expect(buildMenuItems(grid, fakeCtx()).map(i => i.id)).toEqual([
+      'paste',
+      'find-in-scrollback',
+      'select-all',
+    ]);
   });
 });
 

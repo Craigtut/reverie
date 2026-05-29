@@ -11,6 +11,7 @@ import type { TerminalSession } from '../../hooks';
 import { Typography } from '../primitives/Typography';
 import { SessionLaunchOverlay } from './SessionLaunchOverlay';
 import { TerminalContextMenu } from './TerminalContextMenu';
+import { TerminalFindBar } from './TerminalFindBar';
 
 // The slice of the terminal session handle this surface binds: the DOM refs and
 // the input/scroll handlers. The shell passes the whole handle; structural
@@ -28,6 +29,13 @@ type TerminalSurfaceHandle = Pick<
   | 'followLiveTerminalOutput'
   | 'contextMenu'
   | 'closeContextMenu'
+  | 'find'
+  | 'openFind'
+  | 'closeFind'
+  | 'setFindQuery'
+  | 'toggleFindCase'
+  | 'findNext'
+  | 'findPrev'
 >;
 
 export interface TerminalSurfaceProps {
@@ -192,6 +200,20 @@ export function TerminalSurface({
             onLaunch={onLaunch}
           />
         ) : null}
+        <TerminalFindBar
+          open={terminal.find.open}
+          query={terminal.find.query}
+          caseSensitive={terminal.find.caseSensitive}
+          current={terminal.find.current}
+          total={terminal.find.total}
+          capped={terminal.find.capped}
+          busy={terminal.find.busy}
+          onQueryChange={terminal.setFindQuery}
+          onToggleCase={terminal.toggleFindCase}
+          onNext={terminal.findNext}
+          onPrev={terminal.findPrev}
+          onClose={terminal.closeFind}
+        />
       </div>
       <TerminalContextMenu model={terminal.contextMenu} onClose={terminal.closeContextMenu} />
     </div>

@@ -141,6 +141,24 @@ export function registerDefaultInteractions(): void {
     invoke: (target, ctx) => ctx.askAgent(target.text),
   });
 
+  registerAction<SelectionTarget>({
+    id: 'find-selection',
+    group: 'find',
+    order: 1,
+    kinds: ['selection'],
+    label: 'Find',
+    invoke: (target, ctx) => ctx.openFind(target.text),
+  });
+
+  registerAction({
+    id: 'find-in-scrollback',
+    group: 'find',
+    order: 1,
+    kinds: ['grid', 'empty'],
+    label: 'Find in terminal',
+    invoke: (_target, ctx) => ctx.openFind(),
+  });
+
   registerAction({
     id: 'select-all',
     group: 'select',

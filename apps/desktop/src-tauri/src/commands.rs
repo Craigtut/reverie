@@ -537,6 +537,32 @@ pub(crate) fn scroll_terminal_viewport_to_bottom(
 }
 
 #[tauri::command]
+pub(crate) fn scroll_terminal_viewport_to_row(
+    runtime: State<'_, TerminalSessionRuntime>,
+    terminal_id: TerminalId,
+    row: usize,
+) -> Result<(), String> {
+    runtime
+        .scroll_terminal_to_row(terminal_id, row)
+        .map_err(|err| err.to_string())
+}
+
+const SEARCH_MAX_MATCHES: usize = 2_000;
+
+/// Substring search over the live terminal buffer (viewport + scrollback).
+#[tauri::command]
+pub(crate) fn search_terminal(
+    runtime: State<'_, TerminalSessionRuntime>,
+    terminal_id: TerminalId,
+    query: String,
+    case_sensitive: bool,
+) -> Result<crate::terminal::ghostty::TerminalSearchResult, String> {
+    runtime
+        .search_terminal(terminal_id, query, case_sensitive, SEARCH_MAX_MATCHES)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn terminate_session(
     runtime: State<'_, TerminalSessionRuntime>,
     terminal_id: TerminalId,

@@ -16,7 +16,7 @@ use reverie_core::terminal::{TerminalFrame, TerminalId};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::terminal::ghostty::GhosttyTerminalState;
+use crate::terminal::ghostty::{GhosttyTerminalState, TerminalSearchResult};
 use crate::terminal::transcript::TranscriptWriter;
 use reverie_core::WorkspaceService;
 use reverie_core::transcript::TranscriptStore;
@@ -35,12 +35,23 @@ pub struct TerminalSessionRuntime {
     transcript_store: Arc<Mutex<Option<Arc<dyn TranscriptStore>>>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalRuntimeCommand {
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     ScrollDelta(isize),
     ScrollTop,
     ScrollBottom,
+    ScrollToRow(usize),
+    // Search runs on the worker thread (which owns &mut terminal) and replies
+    // over the carried channel.
+    Search {
+        query: String,
+        case_sensitive: bool,
+        max_matches: usize,
+        reply: Sender<TerminalSearchResult>,
+    },
 }
 
 #[derive(Debug)]
@@ -238,6 +249,35 @@ impl TerminalSessionRuntime {
         self.command_sender_for(terminal_id)?
             .send(TerminalRuntimeCommand::ScrollBottom)
             .context("failed to queue terminal scroll-to-bottom command")
+    }
+
+    pub fn scroll_terminal_to_row(&self, terminal_id: TerminalId, row: usize) -> Result<()> {
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::ScrollToRow(row))
+            .context("failed to queue terminal scroll-to-row command")
+    }
+
+    /// Search the terminal's buffer. Dispatched to the worker thread (which owns
+    /// the Ghostty state) and waits for the reply.
+    pub fn search_terminal(
+        &self,
+        terminal_id: TerminalId,
+        query: String,
+        case_sensitive: bool,
+        max_matches: usize,
+    ) -> Result<TerminalSearchResult> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::Search {
+                query,
+                case_sensitive,
+                max_matches,
+                reply: reply_tx,
+            })
+            .context("failed to queue terminal search command")?;
+        reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .context("terminal search timed out")
     }
 
     pub fn terminate_session(&self, terminal_id: TerminalId) -> Result<()> {
@@ -656,6 +696,27 @@ fn apply_terminal_commands(
                 terminal.scroll_bottom();
                 viewport_state.follow_tail = true;
                 needs_frame = true;
+            }
+            TerminalRuntimeCommand::ScrollToRow(row) => {
+                terminal.scroll_to_row(row)?;
+                viewport_state.follow_tail = false;
+                needs_frame = true;
+            }
+            TerminalRuntimeCommand::Search {
+                query,
+                case_sensitive,
+                max_matches,
+                reply,
+            } => {
+                // Read-only; does not move the viewport or request a frame.
+                let result = terminal
+                    .search(&query, case_sensitive, max_matches)
+                    .unwrap_or(TerminalSearchResult {
+                        matches: Vec::new(),
+                        total: 0,
+                        capped: false,
+                    });
+                let _ = reply.send(result);
             }
         }
     }

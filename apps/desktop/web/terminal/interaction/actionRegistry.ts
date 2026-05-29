@@ -13,7 +13,7 @@ import type {
 const actions: TerminalAction[] = [];
 
 // Display order of groups in the menu; dividers are drawn between groups.
-const GROUP_ORDER: ActionGroup[] = ['clipboard', 'open', 'search', 'agent', 'select'];
+const GROUP_ORDER: ActionGroup[] = ['clipboard', 'open', 'search', 'agent', 'find', 'select'];
 
 export function registerAction<T extends InteractionTarget>(action: TerminalAction<T>): void {
   const existing = actions.findIndex(a => a.id === action.id);

@@ -1,7 +1,16 @@
 import { makeSyntheticFrame } from '../terminal-canvas-renderer';
+import { findMatchesInFrame } from '../terminal/findModel';
 import type { TerminalFrame } from '../terminalTypes';
 import type { AgentCliDetection, AgentKind, WorkspaceShellSnapshot } from '../domain';
 import type { EventHandler, UnlistenFn } from './types';
+
+// Fixture frames are authored at the default surface width; search reuses it.
+const FIXTURE_COLS = 120;
+const FIXTURE_SEARCH_MAX = 2_000;
+// The most recent frame per terminal, so the fixture `search_terminal` can scan
+// the same content the harness injected/streamed (the real backend searches the
+// live Ghostty buffer).
+const lastFixtureFrames = new Map<string, TerminalFrame>();
 
 // Browser fixture backend: an in-memory, localStorage-persisted stand-in for
 // the Tauri commands + events, used by `npm run dev:harness` so the React shell
@@ -73,6 +82,10 @@ export async function invokeBrowserFixture<T>(
       return undefined as T;
     case 'scroll_terminal_viewport_to_bottom':
       return undefined as T;
+    case 'scroll_terminal_viewport_to_row':
+      return undefined as T;
+    case 'search_terminal':
+      return searchFixtureTerminal(args) as T;
     case 'record_render_metrics':
       return undefined as T;
     case 'open_url': {
@@ -335,6 +348,22 @@ function terminateFixtureSession(args?: Record<string, unknown>) {
   return undefined;
 }
 
+function searchFixtureTerminal(args?: Record<string, unknown>) {
+  const terminalId = readDirectArg<string>(args, 'terminalId');
+  const query = (args?.query as string) ?? '';
+  const caseSensitive = Boolean(args?.caseSensitive);
+  const frame = lastFixtureFrames.get(terminalId);
+  if (!frame || query.length === 0) {
+    return { matches: [], total: 0, capped: false };
+  }
+  const all = findMatchesInFrame(frame, query, caseSensitive, FIXTURE_COLS);
+  return {
+    matches: all.slice(0, FIXTURE_SEARCH_MAX),
+    total: all.length,
+    capped: all.length > FIXTURE_SEARCH_MAX,
+  };
+}
+
 function emitFixtureFrames(terminalId: string, cols: number, rows: number) {
   const terminal = runningTerminals.get(terminalId);
   if (!terminal || terminal.cancelled) return;
@@ -342,6 +371,7 @@ function emitFixtureFrames(terminalId: string, cols: number, rows: number) {
   const seq = terminal.framesEmitted;
   const frame = makeSyntheticFrame(seq, { cols, rows, dirtyOnly: false });
   terminal.framesEmitted += 1;
+  lastFixtureFrames.set(terminalId, frame);
   emit('terminal_frame', {
     terminalId,
     seq,
@@ -447,13 +477,15 @@ if (typeof window !== 'undefined') {
       if (terminal) terminal.cancelled = true;
     },
     emitTerminalFrame(terminalId: string, lines: string[], cols = 120, rows = 36) {
+      const frame = frameFromLines(lines, cols, rows);
+      lastFixtureFrames.set(terminalId, frame);
       emit('terminal_frame', {
         terminalId,
         seq: 9999,
         bytesRead: 0,
         chunkBytes: 0,
         rustElapsedMs: 0,
-        frame: frameFromLines(lines, cols, rows),
+        frame,
       });
     },
     recordedInputs() {

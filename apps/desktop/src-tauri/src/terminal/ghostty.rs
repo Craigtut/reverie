@@ -1,4 +1,5 @@
 use anyhow::Result;
+use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::style::{RgbColor, Style, Underline as GhosttyUnderline};
 use libghostty_vt::terminal::{Mode, ScrollViewport};
@@ -8,9 +9,31 @@ use reverie_core::terminal::{
     TerminalCursorStyle, TerminalDirtyState, TerminalFrame, TerminalModes, TerminalPosition,
     TerminalRow, TerminalScrollback, TerminalUnderline,
 };
+use serde::Serialize;
 
 const DEFAULT_CELL_WIDTH_PX: u32 = 9;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 18;
+
+/// One substring match in the terminal buffer. `row` is the screen row index
+/// from the top of the current buffer (scrollback included); columns are
+/// half-open cell columns. `line_text` is the full (trimmed) row text.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSearchMatch {
+    pub row: usize,
+    pub start_col: u16,
+    pub end_col: u16,
+    pub line_text: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSearchResult {
+    pub matches: Vec<TerminalSearchMatch>,
+    /// Total matches found (may exceed `matches.len()` when capped).
+    pub total: usize,
+    pub capped: bool,
+}
 
 /// Ghostty-backed terminal state for converting VT byte streams into Reverie frames.
 ///
@@ -74,6 +97,101 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
     pub fn is_viewport_at_bottom(&self) -> Result<bool> {
         let scrollbar = self.terminal.scrollbar()?;
         Ok(scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total)
+    }
+
+    /// Scroll the viewport so screen row `row` is visible, aimed about a third
+    /// down from the top for context. Implemented as a delta because
+    /// libghostty-vt exposes only relative/top/bottom scrolling.
+    pub fn scroll_to_row(&mut self, row: usize) -> Result<()> {
+        let scrollbar = self.terminal.scrollbar()?;
+        let total = scrollbar.total as usize;
+        let len = scrollbar.len as usize;
+        let offset = scrollbar.offset as usize;
+        let max_offset = total.saturating_sub(len);
+        let target = row.saturating_sub(len / 3).min(max_offset);
+        let delta = target as isize - offset as isize;
+        if delta != 0 {
+            self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+            self.force_next_full_frame = true;
+        }
+        Ok(())
+    }
+
+    /// Substring search over the whole current buffer (viewport + scrollback) as
+    /// plain text. Case-insensitive when `case_sensitive` is false. Stops
+    /// collecting matches at `max_matches` but keeps counting (so the UI can show
+    /// "N+"). Matches are within a single rendered row (v1 does not span wraps).
+    pub fn search(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        max_matches: usize,
+    ) -> Result<TerminalSearchResult> {
+        if query.is_empty() {
+            return Ok(TerminalSearchResult {
+                matches: Vec::new(),
+                total: 0,
+                capped: false,
+            });
+        }
+        let mut formatter = Formatter::new(
+            &self.terminal,
+            FormatterOptions {
+                format: Format::Plain,
+                trim: true,
+                unwrap: false,
+            },
+        )?;
+        let len = formatter.format_len()?;
+        let mut buf = vec![0u8; len];
+        let written = formatter.format_buf(&mut buf)?;
+        buf.truncate(written);
+        let text = String::from_utf8_lossy(&buf);
+
+        let needle = if case_sensitive {
+            query.to_owned()
+        } else {
+            query.to_lowercase()
+        };
+        let mut matches = Vec::new();
+        let mut total = 0_usize;
+        let mut capped = false;
+
+        for (row, line) in text.lines().enumerate() {
+            let haystack = if case_sensitive {
+                line.to_owned()
+            } else {
+                line.to_lowercase()
+            };
+            let mut from = 0_usize;
+            while let Some(rel) = haystack[from..].find(&needle) {
+                let byte_start = from + rel;
+                let byte_end = byte_start + needle.len();
+                total += 1;
+                if matches.len() < max_matches {
+                    matches.push(TerminalSearchMatch {
+                        row,
+                        // Cell columns are char offsets (1:1 with cells for the
+                        // BMP text terminals emit; wide glyphs are approximate).
+                        start_col: haystack[..byte_start].chars().count() as u16,
+                        end_col: haystack[..byte_end].chars().count() as u16,
+                        line_text: line.to_owned(),
+                    });
+                } else {
+                    capped = true;
+                }
+                from = byte_end; // non-overlapping
+                if from >= haystack.len() {
+                    break;
+                }
+            }
+        }
+
+        Ok(TerminalSearchResult {
+            matches,
+            total,
+            capped,
+        })
     }
 
     pub fn frame(&mut self) -> Result<TerminalFrame> {

@@ -34,6 +34,30 @@ export function scrollTerminalViewportToBottom(terminalId: string) {
   return invoke('scroll_terminal_viewport_to_bottom', { terminalId });
 }
 
+export function scrollTerminalViewportToRow(terminalId: string, row: number) {
+  return invoke('scroll_terminal_viewport_to_row', { terminalId, row });
+}
+
+// One substring match in the live terminal buffer. `row` is the screen-row index
+// from the top of the buffer (scrollback included); the frontend maps it to a
+// composite/viewport row via the current frame's scrollback.viewportOffset.
+export interface TerminalSearchMatch {
+  row: number;
+  startCol: number;
+  endCol: number;
+  lineText: string;
+}
+
+export interface TerminalSearchResult {
+  matches: TerminalSearchMatch[];
+  total: number;
+  capped: boolean;
+}
+
+export function searchTerminal(terminalId: string, query: string, caseSensitive: boolean) {
+  return invoke<TerminalSearchResult>('search_terminal', { terminalId, query, caseSensitive });
+}
+
 export function fetchGhosttyFrameSequence() {
   return invoke<GhosttyFrameSequencePayload>('ghostty_frame_sequence');
 }
