@@ -17,7 +17,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::terminal::ghostty::GhosttyTerminalState;
+use crate::terminal::transcript::TranscriptWriter;
 use reverie_core::WorkspaceService;
+use reverie_core::transcript::TranscriptStore;
 
 const READ_BUFFER_BYTES: usize = 4096;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -27,6 +29,10 @@ pub struct TerminalSessionRuntime {
     sessions: Arc<Mutex<HashMap<TerminalId, TerminalSessionRecord>>>,
     controllers: Arc<Mutex<HashMap<TerminalId, PtyController>>>,
     command_senders: Arc<Mutex<HashMap<TerminalId, Sender<TerminalRuntimeCommand>>>>,
+    // The durable transcript sink, injected during app setup (after the SQLite
+    // repository exists). When present, each session's raw PTY bytes are
+    // captured for full-history scrollback + search.
+    transcript_store: Arc<Mutex<Option<Arc<dyn TranscriptStore>>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +168,21 @@ impl TerminalSessionRuntime {
         Ok(terminal_id)
     }
 
+    /// Inject the durable transcript sink. Called once during app setup after
+    /// the SQLite repository is constructed.
+    pub fn set_transcript_store(&self, store: Arc<dyn TranscriptStore>) {
+        if let Ok(mut guard) = self.transcript_store.lock() {
+            *guard = Some(store);
+        }
+    }
+
+    fn transcript_store(&self) -> Option<Arc<dyn TranscriptStore>> {
+        self.transcript_store
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<TerminalSessionRecord>> {
         let mut records = self
             .sessions
@@ -240,6 +261,20 @@ impl TerminalSessionRuntime {
         self.register_controller(request.terminal_id, controller)?;
         self.register_command_sender(request.terminal_id, command_tx)?;
 
+        // Durable transcript capture: only for real product sessions (the
+        // benchmark/proof path has no SessionId) and only when a store is wired.
+        // Best-effort: a capture failure never breaks the live terminal.
+        let transcript_writer = request.session_id.and_then(|session_id| {
+            let store = self.transcript_store()?;
+            match TranscriptWriter::spawn(store, session_id) {
+                Ok(writer) => Some(writer),
+                Err(err) => {
+                    eprintln!("[reverie] transcript capture disabled for session: {err:#}");
+                    None
+                }
+            }
+        });
+
         self.mark_running(request.terminal_id)?;
         persist_shell_session_running(&app, request.session_id);
         let started_payload = TerminalStreamStarted {
@@ -299,6 +334,11 @@ impl TerminalSessionRuntime {
                     bytes_since_last_frame += chunk.len();
 
                     terminal.write(&chunk);
+                    // Capture the raw bytes durably (the chunk is no longer
+                    // needed after the VT write). Cheap: just a channel send.
+                    if let Some(writer) = &transcript_writer {
+                        writer.append(chunk);
+                    }
                     if viewport_state.follow_tail {
                         terminal.scroll_bottom();
                     }

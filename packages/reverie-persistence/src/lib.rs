@@ -25,6 +25,7 @@ use reverie_core::domain::{
     SessionStatus, Workspace, WorkspaceId, WorkspaceSnapshot,
 };
 use reverie_core::repository::{PersistenceError, RepoResult, WorkspaceRepository};
+use reverie_core::transcript::TranscriptStore;
 
 /// Ordered schema migrations. Index `i` migrates `user_version` from `i` to
 /// `i + 1`. Never edit a shipped entry; append a new one for each change.
@@ -108,6 +109,19 @@ const MIGRATIONS: &[&str] = &[
     // detected CLI is enabled, so existing workspaces upgrade with no change
     // in behavior.
     "ALTER TABLE workspace ADD COLUMN disabled_agent_kinds TEXT NOT NULL DEFAULT '[]';",
+    // v3 -> v4: durable per-session terminal transcript. An append-only log of
+    // the raw PTY byte stream, the source of truth behind full-history
+    // scrollback + search. One row per batched chunk; `byte_offset` is the
+    // cumulative byte position so a range can be read across chunk boundaries.
+    "CREATE TABLE IF NOT EXISTS session_transcript_chunk (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        byte_offset INTEGER NOT NULL,
+        bytes BLOB NOT NULL,
+        PRIMARY KEY (session_id, seq)
+     );
+     CREATE INDEX IF NOT EXISTS idx_session_transcript_chunk_offset
+        ON session_transcript_chunk(session_id, byte_offset);",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -570,6 +584,99 @@ impl ConnectionRepository for SqliteWorkspaceRepository {
             });
         }
         Ok(())
+    }
+}
+
+impl TranscriptStore for SqliteWorkspaceRepository {
+    fn append_transcript_chunk(
+        &self,
+        session_id: SessionId,
+        seq: u64,
+        byte_offset: u64,
+        bytes: &[u8],
+    ) -> RepoResult<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO session_transcript_chunk (session_id, seq, byte_offset, bytes)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                session_id.to_string(),
+                seq as i64,
+                byte_offset as i64,
+                bytes
+            ],
+        )
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    fn transcript_len(&self, session_id: SessionId) -> RepoResult<u64> {
+        let conn = self.conn()?;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(byte_offset + LENGTH(bytes)), 0)
+                 FROM session_transcript_chunk WHERE session_id = ?1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok(total.max(0) as u64)
+    }
+
+    fn transcript_chunk_count(&self, session_id: SessionId) -> RepoResult<u64> {
+        let conn = self.conn()?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_transcript_chunk WHERE session_id = ?1",
+                params![session_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(backend)?;
+        Ok(count.max(0) as u64)
+    }
+
+    fn read_transcript_range(
+        &self,
+        session_id: SessionId,
+        start: u64,
+        len: u64,
+    ) -> RepoResult<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let end = start.saturating_add(len);
+        let conn = self.conn()?;
+        // Chunks overlapping [start, end): byte_offset < end AND byte_offset + len > start.
+        let mut statement = conn
+            .prepare(
+                "SELECT byte_offset, bytes FROM session_transcript_chunk
+                 WHERE session_id = ?1 AND byte_offset < ?2 AND byte_offset + LENGTH(bytes) > ?3
+                 ORDER BY seq",
+            )
+            .map_err(backend)?;
+        let rows = statement
+            .query_map(
+                params![session_id.to_string(), end as i64, start as i64],
+                |row| {
+                    let offset: i64 = row.get(0)?;
+                    let bytes: Vec<u8> = row.get(1)?;
+                    Ok((offset.max(0) as u64, bytes))
+                },
+            )
+            .map_err(backend)?;
+        let mut out: Vec<u8> = Vec::with_capacity(len as usize);
+        for row in rows {
+            let (chunk_start, bytes) = row.map_err(backend)?;
+            let chunk_end = chunk_start + bytes.len() as u64;
+            let copy_start = start.max(chunk_start);
+            let copy_end = end.min(chunk_end);
+            if copy_end > copy_start {
+                let from = (copy_start - chunk_start) as usize;
+                let to = (copy_end - chunk_start) as usize;
+                out.extend_from_slice(&bytes[from..to]);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1062,6 +1169,48 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(after as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn transcript_chunks_append_and_read_across_boundaries() {
+        let repo = seeded();
+        let focus = Focus::general("General", 0);
+        repo.upsert_focus(&focus).unwrap();
+        let session = Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/repo"));
+        repo.upsert_session(&session).unwrap();
+
+        // Empty transcript reports zero length + zero chunks.
+        assert_eq!(repo.transcript_len(session.id).unwrap(), 0);
+        assert_eq!(repo.transcript_chunk_count(session.id).unwrap(), 0);
+
+        // Append two chunks tracking seq + cumulative byte offset (the writer's job).
+        repo.append_transcript_chunk(session.id, 0, 0, b"hello ")
+            .unwrap();
+        repo.append_transcript_chunk(session.id, 1, 6, b"world!")
+            .unwrap();
+
+        assert_eq!(repo.transcript_len(session.id).unwrap(), 12);
+        assert_eq!(repo.transcript_chunk_count(session.id).unwrap(), 2);
+
+        // Read the whole thing, and a range that spans the chunk boundary.
+        assert_eq!(
+            repo.read_transcript_range(session.id, 0, 12).unwrap(),
+            b"hello world!"
+        );
+        assert_eq!(
+            repo.read_transcript_range(session.id, 3, 6).unwrap(),
+            b"lo wor"
+        );
+        // Past the end clamps to what exists; empty len is empty.
+        assert_eq!(
+            repo.read_transcript_range(session.id, 10, 100).unwrap(),
+            b"d!"
+        );
+        assert!(
+            repo.read_transcript_range(session.id, 0, 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     // -----------------------------------------------------------------
