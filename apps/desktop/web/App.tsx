@@ -16,7 +16,7 @@ import { useActivityStore, useNavigationStore, usePaletteStore, useShellStore, u
 import { useAgentClis, useAppFocus, useCommandPalette, useSessionActivity, useTerminalSession } from './hooks';
 import { AgentGlyph, SessionStatusGlyph } from './components/glyphs';
 import { TrafficLights, DotField } from './components/chrome';
-import { ProjectGroup, FocusRow } from './components/nav';
+import { Sidebar } from './components/nav';
 import { SessionLaunchOverlay, SessionHistorySurface } from './components/session';
 import { CommandPalette } from './components/palette';
 import { EmptyState } from './components/onboarding';
@@ -652,135 +652,27 @@ export function App() {
       <div className={windowDragStripClass} data-tauri-drag-region aria-hidden="true" />
       <DotField variant="ambient" />
 
-      <aside className={cx(rimLitPanelClass, leftPanelClass)} aria-label="Reverie navigation" data-testid="left-panel">
-        <div className={titlebarClass} data-tauri-drag-region>
-          <TrafficLights />
-        </div>
-
-        <button
-          type="button"
-          className={searchClass}
-          data-testid="focus-search"
-          aria-label="Open command palette"
-          onClick={() => setPaletteOpen(true)}
-        >
-          <MagnifyingGlass size={14} />
-          <span className={searchPlaceholderClass}>Search focuses, sessions…</span>
-          <span className={searchShortcutClass}>⌘K</span>
-        </button>
-
-        <nav className={navClass} data-testid="workspace-nav">
-          <button
-            type="button"
-            className={homeRowClass({ active: surfaceMode === 'dashboard' })}
-            data-testid="home-nav-button"
-            data-active={surfaceMode === 'dashboard' ? 'true' : 'false'}
-            onClick={goToDashboard}
-          >
-            <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
-            <span className={homeRowLabelClass}>Home</span>
-            {liveSessionCount > 0 ? (
-              <span className={homeRowMetaClass} data-testid="home-nav-live-count">{liveSessionCount} live</span>
-            ) : null}
-          </button>
-
-          <ProjectGroup
-            icon={<CircleDashed size={15} />}
-            title={shell.workspace.generalLabel}
-            count={sessionsForProject(null, shell).length}
-            active={selectedProjectId === null && surfaceMode !== 'dashboard'}
-            onProjectClick={() => {
-              setSelectedProjectId(null);
-              setSurfaceMode('terminal');
-            }}
-          >
-            {shell.focuses.filter(focus => !focus.archived && !focus.projectId).map(focus => (
-              <FocusRow
-                key={focus.id}
-                focus={focus}
-                count={shell.sessions.filter(session => session.focusId === focus.id).length}
-                active={focus.id === selectedFocus?.id}
-                live={shell.sessions.some(session => session.focusId === focus.id && session.status === 'running')}
-                onClick={() => openFocus(null, focus.id)}
-                onHistory={event => {
-                  event.stopPropagation();
-                  openSessionHistory(null, focus.id);
-                }}
-                onRemoveFocus={event => {
-                  event.stopPropagation();
-                  void archiveFocusRecord(focus);
-                }}
-              />
-            ))}
-            <button className={addFocusRowClass} type="button" data-testid="create-focus-button" disabled={busy || !canUseAppServices} onClick={() => openCreation('focus', null)}>
-              <Plus size={13} />
-              <span>New focus</span>
-            </button>
-          </ProjectGroup>
-
-          <div className={sectionLabelClass}>
-            <span>Projects</span>
-            <button type="button" title="Add project" data-testid="add-project-button" disabled={busy || !canUseAppServices} onClick={() => openCreation('project')}><Plus size={13} /></button>
-          </div>
-
-          {shell.projects.filter(project => !project.archived).map(project => {
-            const projectFocuses = shell.focuses.filter(focus => !focus.archived && focus.projectId === project.id);
-            return (
-              <ProjectGroup
-                key={project.id}
-                icon={<Folder size={15} />}
-                title={project.name}
-                count={sessionsForProject(project.id, shell).length}
-                active={selectedProjectId === project.id}
-                onProjectClick={() => {
-                  setSelectedProjectId(project.id);
-                  setSurfaceMode('terminal');
-                }}
-                onRemoveProject={event => {
-                  event.stopPropagation();
-                  void archiveProjectRecord(project);
-                }}
-              >
-                {projectFocuses.map(focus => (
-                  <FocusRow
-                    key={focus.id}
-                    focus={focus}
-                    count={shell.sessions.filter(session => session.focusId === focus.id).length}
-                    active={focus.id === selectedFocus?.id}
-                    live={shell.sessions.some(session => session.focusId === focus.id && session.status === 'running')}
-                    onClick={() => openFocus(project.id, focus.id)}
-                    onHistory={event => {
-                      event.stopPropagation();
-                      openSessionHistory(project.id, focus.id);
-                    }}
-                    onRemoveFocus={event => {
-                      event.stopPropagation();
-                      void archiveFocusRecord(focus);
-                    }}
-                  />
-                ))}
-                <button className={addFocusRowClass} type="button" data-testid="create-project-focus-button" disabled={busy || !canUseAppServices} onClick={() => openCreation('focus', project.id)}>
-                  <Plus size={13} />
-                  <span>New focus</span>
-                </button>
-              </ProjectGroup>
-            );
-          })}
-        </nav>
-
-        <div className={leftFooterClass}>
-          <button
-            type="button"
-            className={settingsNavRowClass({ active: surfaceMode === 'settings' })}
-            data-testid="open-settings-button"
-            data-active={surfaceMode === 'settings' ? 'true' : 'false'}
-            onClick={() => setSurfaceMode('settings')}
-          >
-            <GearSix size={15} weight={surfaceMode === 'settings' ? 'fill' : 'regular'} />
-            <span>Settings</span>
-          </button>
-        </div>
-      </aside>
+      <Sidebar
+        shell={shell}
+        surfaceMode={surfaceMode}
+        selectedProjectId={selectedProjectId}
+        selectedFocusId={selectedFocusId}
+        liveSessionCount={liveSessionCount}
+        busy={busy}
+        canUseAppServices={canUseAppServices}
+        onOpenCommandPalette={() => setPaletteOpen(true)}
+        onGoToDashboard={goToDashboard}
+        onSelectProject={projectId => {
+          setSelectedProjectId(projectId);
+          setSurfaceMode('terminal');
+        }}
+        onOpenFocus={openFocus}
+        onOpenSessionHistory={openSessionHistory}
+        onArchiveFocus={focus => void archiveFocusRecord(focus)}
+        onArchiveProject={project => void archiveProjectRecord(project)}
+        onOpenCreation={openCreation}
+        onOpenSettings={() => setSurfaceMode('settings')}
+      />
 
       <section className={canvasStageClass} aria-label="Focus view" data-testid="focus-stage">
         {surfaceMode === 'dashboard' ? (
@@ -1007,189 +899,6 @@ const windowDragStripClass = css({
   lgDown: { height: '14px' },
   mdDown: { display: 'none' },
 });
-
-// Layout-only; the rim-lit surface treatment is composed in via cx() at the
-// call site (see themes/surfaces.ts rimLitPanelClass).
-const leftPanelClass = css({
-  zIndex: 2,
-  display: 'flex',
-  flexDirection: 'column',
-  minHeight: 0,
-});
-
-const titlebarClass = css({
-  position: 'relative',
-  zIndex: 2,
-  padding: '14px 16px 10px',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '12px',
-});
-
-const searchClass = css({
-  margin: '6px 14px 12px',
-  padding: '8px 10px',
-  background: 'var(--surface-2)',
-  border: '1px solid var(--line)',
-  borderRadius: '10px',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '8px',
-  color: 'var(--text-3)',
-  position: 'relative',
-  zIndex: 2,
-  cursor: 'pointer',
-  width: 'calc(100% - 28px)',
-  textAlign: 'left',
-  transition: 'border-color 120ms ease, color 120ms ease',
-  _hover: { borderColor: 'var(--line-strong)', color: 'var(--text-2)' },
-});
-
-const searchPlaceholderClass = css({
-  flex: 1,
-  minWidth: 0,
-  fontSize: '13px',
-  color: 'var(--text-3)',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-});
-
-const searchShortcutClass = css({
-  fontSize: '10.5px',
-  color: 'var(--text-3)',
-  padding: '1px 5px',
-  border: '1px solid var(--line)',
-  borderRadius: '4px',
-  background: 'var(--surface-1)',
-  flexShrink: 0,
-});
-
-
-const navClass = css({
-  flex: 1,
-  overflowY: 'auto',
-  padding: '4px 8px 12px',
-  position: 'relative',
-  zIndex: 2,
-  '&::-webkit-scrollbar': { width: '8px' },
-  '&::-webkit-scrollbar-thumb': {
-    background: 'var(--line)',
-    borderRadius: '8px',
-    border: '2px solid var(--surface-1)',
-  },
-});
-
-function homeRowClass({ active }: { active: boolean }) {
-  return css({
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    width: '100%',
-    padding: '7px 10px',
-    marginBottom: '8px',
-    borderRadius: '8px',
-    border: '1px solid',
-    borderColor: active ? 'var(--line-strong)' : 'transparent',
-    color: active ? 'var(--text)' : 'var(--text-2)',
-    background: active ? 'var(--surface-3)' : 'transparent',
-    cursor: 'pointer',
-    userSelect: 'none',
-    textAlign: 'left',
-    fontSize: '13px',
-    fontWeight: 500,
-    letterSpacing: '-0.005em',
-    transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
-    _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
-    '& svg': { color: active ? 'var(--text)' : 'var(--text-3)', flexShrink: 0 },
-  });
-}
-
-const homeRowLabelClass = css({
-  flex: 1,
-  minWidth: 0,
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
-});
-
-const homeRowMetaClass = css({
-  fontSize: '10.5px',
-  color: 'var(--text-3)',
-  fontVariantNumeric: 'tabular-nums',
-  padding: '1px 7px',
-  border: '1px solid var(--line)',
-  borderRadius: '999px',
-  background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
-});
-
-
-const addFocusRowClass = css({
-  display: 'flex',
-  alignItems: 'center',
-  gap: '10px',
-  width: '100%',
-  padding: '5px 10px',
-  borderRadius: '8px',
-  color: 'var(--text-3)',
-  cursor: 'pointer',
-  textAlign: 'left',
-  _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
-});
-
-const sectionLabelClass = css({
-  padding: '12px 8px 4px',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  color: 'var(--text-3)',
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.08em',
-  textTransform: 'uppercase',
-  '& button': {
-    color: 'var(--text-3)',
-    width: '18px',
-    height: '18px',
-    display: 'grid',
-    placeItems: 'center',
-    borderRadius: '5px',
-    cursor: 'pointer',
-    _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
-  },
-});
-
-const leftFooterClass = css({
-  borderTop: '1px solid var(--line-faint)',
-  padding: '8px 10px 10px',
-  position: 'relative',
-  zIndex: 2,
-});
-
-function settingsNavRowClass({ active }: { active: boolean }) {
-  return css({
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    width: '100%',
-    padding: '9px 10px',
-    borderRadius: '8px',
-    border: '1px solid',
-    borderColor: active ? 'var(--line-strong)' : 'transparent',
-    color: active ? 'var(--text)' : 'var(--text-2)',
-    background: active ? 'var(--surface-3)' : 'transparent',
-    cursor: 'pointer',
-    userSelect: 'none',
-    textAlign: 'left',
-    fontSize: '13px',
-    fontWeight: 500,
-    letterSpacing: '-0.005em',
-    transition: 'background 120ms ease, color 120ms ease, border-color 120ms ease',
-    _hover: { background: 'var(--surface-2)', color: 'var(--text)' },
-    '& svg': { color: active ? 'var(--text)' : 'var(--text-3)', flexShrink: 0 },
-    '& span': { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  });
-}
 
 const canvasStageClass = css({
   zIndex: 2,
