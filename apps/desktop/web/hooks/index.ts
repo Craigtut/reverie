@@ -5,3 +5,4 @@ export { useAppFocus } from './useAppFocus';
 export { useCommandPalette } from './useCommandPalette';
 export { useSessionActivity } from './useSessionActivity';
 export { useAgentClis } from './useAgentClis';
+export { useTerminalSession } from './useTerminalSession';

@@ -10,10 +10,10 @@ import {
   type UIEvent,
   type WheelEvent,
 } from 'react';
-import { invoke, listen, type UnlistenFn } from './services/runtime';
+import { invoke } from './services/runtime';
+import { terminateSession } from './services/terminalApi';
 import { useActivityStore, useNavigationStore, usePaletteStore, useShellStore, useTerminalStore, useUiStore } from './store';
-import { useAgentClis, useAppFocus, useCommandPalette, useSessionActivity } from './hooks';
-import { BrandMark, DotMatrixWord } from './components/brand';
+import { useAgentClis, useAppFocus, useCommandPalette, useSessionActivity, useTerminalSession } from './hooks';
 import { AgentGlyph, SessionStatusGlyph } from './components/glyphs';
 import { TrafficLights, DotField } from './components/chrome';
 import { ProjectGroup, FocusRow } from './components/nav';
@@ -46,8 +46,6 @@ import { appShellClass } from './themes/appShell';
 import { rimLitPanelClass } from './themes/surfaces';
 import {
   USER_HOME,
-  DEFAULT_TERMINAL_SCROLLBACK_ROWS,
-  average,
   sessionBreadcrumb,
   sessionsForProject,
   shortenCwd,
@@ -57,19 +55,10 @@ import {
   agentTabLabel,
   dangerousLabel,
   activityForSession,
-  terminalInputForKey,
-  terminalWheelDeltaRows,
   errorMessage,
 } from './domain';
 import type {
   CreationMode,
-  RenderMetrics,
-  GhosttyFrameSequencePayload,
-  StartSessionRequest,
-  TerminalStreamStartedPayload,
-  TerminalFramePayload,
-  TerminalExitPayload,
-  TerminalFailedPayload,
   WorkspaceShellSnapshot,
   ShellProject,
   ShellFocus,
@@ -78,50 +67,15 @@ import type {
   ActivityState,
   CreateProjectRequest,
   ProjectFolderSelection,
-  SessionTerminalBinding,
-  SessionTerminalView,
   CreateFocusRequest,
   CreateSessionRecordRequest,
 } from './domain';
-import {
-  TERMINAL_SURFACE,
-  createTerminalCanvasRenderer,
-  percentile,
-} from './terminal-canvas-renderer';
-import {
-  SCROLL_FOLLOW_EPSILON_PX,
-  cloneTerminalRow,
-  frameForSurface,
-  terminalScrollbackContract,
-  terminalSurfaceForBounds,
-  type TerminalSurface,
-} from './terminalScrollback';
-import type { TerminalFrame, TerminalModes, TerminalRenderer, TerminalRow } from './terminalTypes';
+import { terminalScrollbackContract } from './terminalScrollback';
 import { maybeRunHarnessSmokeTest } from './harnessSmoke';
 
 
 
-// Opacity of the terminal's default background. 0 lets the shell background
-// (gradient + dot field) show fully through so the session feels painted onto
-// the surface rather than inside a box; raise toward 1 for a tinted or solid
-// backdrop if legibility ever needs it.
-const TERMINAL_BACKGROUND_OPACITY = 0;
-
-
 export function App() {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const surfaceViewportRef = useRef<HTMLDivElement | null>(null);
-  const terminalScrollSpacerRef = useRef<HTMLDivElement | null>(null);
-  const rendererRef = useRef<TerminalRenderer | null>(null);
-  const activeTerminalIdRef = useRef<string | null>(null);
-  const terminalSurfaceRef = useRef<TerminalSurface>(TERMINAL_SURFACE);
-  const lastTerminalFrameRef = useRef<TerminalFrame | null>(null);
-  const lastCompositeTerminalFrameRef = useRef<TerminalFrame | null>(null);
-  const scrollbackRowsRef = useRef<TerminalRow[]>([]);
-  const rendererNeedsFullPaintRef = useRef(true);
-  const lastTerminalPaintStartRowRef = useRef<number | null>(null);
-  const liveFollowRef = useRef(true);
-  const autoScrollingTerminalRef = useRef(false);
   const shell = useShellStore(s => s.shell);
   const setShell = useShellStore(s => s.setShell);
   const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
@@ -140,10 +94,7 @@ export function App() {
   const [newSessionAgentKind, setNewSessionAgentKind] = useState<CreateSessionRecordRequest['agentKind']>('cortex_code');
   const [newSessionDangerousMode, setNewSessionDangerousMode] = useState(false);
   const agentCliDetections = useShellStore(s => s.agentCliDetections);
-  const activeTerminalId = useTerminalStore(s => s.activeTerminalId);
-  const setActiveTerminalId = useTerminalStore(s => s.setActiveTerminalId);
   const runningSessionId = useTerminalStore(s => s.runningSessionId);
-  const setRunningSessionId = useTerminalStore(s => s.setRunningSessionId);
   // Tracks which session is mid-launch so the terminal surface can show the
   // breathing launch animation. Cleared automatically when the live terminal
   // binding arrives, or on launch failure.
@@ -160,18 +111,12 @@ export function App() {
   // their entry by `nativeSessionRef.sessionId`. Sessions Reverie doesn't own
   // still land in the map but stay invisible until correlation succeeds.
   const cortexActivity = useActivityStore(s => s.cortexActivity);
-  const terminalInputArmed = useTerminalStore(s => s.terminalInputArmed);
-  const setTerminalInputArmed = useTerminalStore(s => s.setTerminalInputArmed);
   const sessionTerminalBindings = useTerminalStore(s => s.sessionTerminalBindings);
   const setSessionTerminalBindings = useTerminalStore(s => s.setSessionTerminalBindings);
   const terminalSurface = useTerminalStore(s => s.terminalSurface);
-  const setTerminalSurface = useTerminalStore(s => s.setTerminalSurface);
   const scrollbackRowCount = useTerminalStore(s => s.scrollbackRowCount);
-  const setScrollbackRowCount = useTerminalStore(s => s.setScrollbackRowCount);
   const terminalLiveFollow = useTerminalStore(s => s.terminalLiveFollow);
-  const setTerminalLiveFollow = useTerminalStore(s => s.setTerminalLiveFollow);
   const [logs, setLogs] = useState<string[]>([]);
-  const [metrics, setMetrics] = useState<RenderMetrics[]>([]);
   const [busy, setBusy] = useState(false);
   const theme = useUiStore(s => s.theme);
   const setTheme = useUiStore(s => s.setTheme);
@@ -185,13 +130,10 @@ export function App() {
   const selectedProject = selectedProjectId ? shell.projects.find(project => project.id === selectedProjectId) ?? null : null;
   const selectedProjectIdRef = useRef<string | null>(selectedProjectId);
   const selectedProjectRef = useRef<ShellProject | null>(selectedProject);
-  const sessionTerminalBindingsRef = useRef<Record<string, SessionTerminalBinding>>({});
-  const sessionTerminalViewsRef = useRef<Record<string, SessionTerminalView>>({});
-  // Latest raw backend frame per session. Background sessions keep only this and
-  // skip the per-row surface mapping (buildSessionTerminalView); the view is
-  // built lazily when the session is brought to front, so output churning in
-  // off-screen sessions costs nothing on the main thread.
-  const sessionLatestFrameRef = useRef<Record<string, TerminalFrame>>({});
+  // The session id we've already auto-launched for the current selection. Opening
+  // a session in the terminal surface starts it once; if that launch fails the
+  // idle overlay's Run/Resume button is the manual fallback, so we don't retry.
+  const autoLaunchedSessionIdRef = useRef<string | null>(null);
   const visibleFocuses = useMemo(() => {
     return shell.focuses
       .filter(focus => !focus.archived)
@@ -240,7 +182,6 @@ export function App() {
     }
   }, [launchingSessionId, sessionTerminalBindings]);
   const runningSession = runningSessionId ? shell.sessions.find(session => session.id === runningSessionId) ?? null : null;
-  const hasActiveTerminal = activeTerminalId !== null;
   const effectiveDangerousMode = dangerousLabel(selectedSession, shell.workspace.defaultDangerousMode) !== 'Off';
   // Plain-language status shown in the terminal meta strip. We deliberately
   // omit terminal-internal details (cols×rows, scrollback row counts) from
@@ -254,293 +195,22 @@ export function App() {
     setLogs(current => [stamped, ...current].slice(0, 80));
   };
 
-  function mountTerminalRenderer(surface = terminalSurfaceRef.current, displayRows = surface.rows) {
-    if (!canvasRef.current) return null;
+  const terminal = useTerminalSession({ selectedSession, writeLog, loadWorkspaceShell, setBusy, isTauriRuntime });
 
-    const renderer = createTerminalCanvasRenderer(canvasRef.current, { ...surface, rows: displayRows, backgroundOpacity: TERMINAL_BACKGROUND_OPACITY });
-    rendererRef.current = renderer;
-    return renderer;
-  }
-
-  function ensureTerminalRenderer(surface: TerminalSurface, displayRows: number) {
-    const renderer = rendererRef.current;
-    if (!renderer || renderer.cols !== surface.cols || renderer.rows !== displayRows) {
-      rendererNeedsFullPaintRef.current = true;
-      lastTerminalPaintStartRowRef.current = null;
-      return mountTerminalRenderer(surface, displayRows);
-    }
-
-    return renderer;
-  }
-
-  function blankTerminalFrame(surface = terminalSurfaceRef.current): TerminalFrame {
-    return {
-      dirty: 'full',
-      rows: Array.from({ length: surface.rows }, (_, index) => ({
-        index,
-        dirty: true,
-        cells: [],
-      })),
-      cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
-    };
-  }
-
-  function emptyTerminalView(surface = terminalSurfaceRef.current): SessionTerminalView {
-    const frame = blankTerminalFrame(surface);
-    return {
-      lastFrame: null,
-      compositeFrame: frame,
-      scrollbackRows: [],
-      rowCount: 0,
-      liveFollow: true,
-    };
-  }
-
-  function buildSessionTerminalView(previousView: SessionTerminalView | undefined, frame: TerminalFrame, surface = terminalSurfaceRef.current): SessionTerminalView {
-    const surfaceFrame = frameForSurface(frame, surface);
-    const renderedScrollbackRows: TerminalRow[] = [];
-    return {
-      lastFrame: surfaceFrame,
-      compositeFrame: surfaceFrame,
-      scrollbackRows: renderedScrollbackRows,
-      rowCount: surfaceFrame.scrollback?.scrollbackRows ?? renderedScrollbackRows.length,
-      liveFollow: surfaceFrame.scrollback?.atBottom ?? previousView?.liveFollow ?? true,
-    };
-  }
-
-  // Resolve the view to paint for a session. Prefers a fresh build from the
-  // latest raw frame (correct even if the surface resized while the session was
-  // backgrounded); falls back to any previously stored view.
-  function ensureSessionTerminalView(sessionId: string, surface = terminalSurfaceRef.current): SessionTerminalView | undefined {
-    const frame = sessionLatestFrameRef.current[sessionId];
-    if (frame) {
-      const view = buildSessionTerminalView(sessionTerminalViewsRef.current[sessionId], frame, surface);
-      sessionTerminalViewsRef.current[sessionId] = view;
-      return view;
-    }
-    return sessionTerminalViewsRef.current[sessionId];
-  }
-
-  function applyTerminalView(view: SessionTerminalView, surface = terminalSurfaceRef.current) {
-    lastTerminalFrameRef.current = view.lastFrame;
-    lastCompositeTerminalFrameRef.current = view.compositeFrame;
-    scrollbackRowsRef.current = view.scrollbackRows;
-    liveFollowRef.current = view.liveFollow;
-    setScrollbackRowCount(view.rowCount);
-    setTerminalLiveFollow(view.liveFollow);
-    updateTerminalScrollSpacer(view.compositeFrame.rows.length, surface);
-    paintVisibleTerminalWindow(view.compositeFrame, surface);
-
-    requestAnimationFrame(() => {
-      if (liveFollowRef.current) {
-        scrollTerminalViewportToTail();
-      } else {
-        paintVisibleTerminalWindow();
-      }
-    });
-  }
-
-  function clearTerminalSurface(surface = terminalSurfaceRef.current) {
-    rendererRef.current = null;
-    rendererNeedsFullPaintRef.current = true;
-    lastTerminalPaintStartRowRef.current = null;
-    const view = emptyTerminalView(surface);
-    lastTerminalFrameRef.current = null;
-    lastCompositeTerminalFrameRef.current = view.compositeFrame;
-    scrollbackRowsRef.current = [];
-    liveFollowRef.current = true;
-    setScrollbackRowCount(0);
-    setTerminalLiveFollow(true);
-    updateTerminalScrollSpacer(surface.rows, surface);
-    paintVisibleTerminalWindow(view.compositeFrame, surface);
-  }
-
-  function resetTerminalScrollback() {
-    scrollbackRowsRef.current = [];
-    lastCompositeTerminalFrameRef.current = null;
-    rendererNeedsFullPaintRef.current = true;
-    lastTerminalPaintStartRowRef.current = null;
-    liveFollowRef.current = true;
-    setScrollbackRowCount(0);
-    setTerminalLiveFollow(true);
-    updateTerminalScrollSpacer(terminalSurfaceRef.current.rows, terminalSurfaceRef.current);
-  }
-
-  function updateTerminalScrollSpacer(totalRows: number, surface: TerminalSurface) {
-    const spacer = terminalScrollSpacerRef.current;
-    if (!spacer) return;
-
-    spacer.style.height = `${Math.max(totalRows, surface.rows) * surface.cellHeight}px`;
-    spacer.style.width = `${surface.cols * surface.cellWidth}px`;
-  }
-
-  function scrollTerminalViewportToTail() {
-    const viewport = surfaceViewportRef.current;
-    if (!viewport) return;
-
-    autoScrollingTerminalRef.current = true;
-    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    paintVisibleTerminalWindow();
-
-    requestAnimationFrame(() => {
-      paintVisibleTerminalWindow();
-      const isStillFollowing = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
-      autoScrollingTerminalRef.current = false;
-      liveFollowRef.current = isStillFollowing;
-      setTerminalLiveFollow(isStillFollowing);
-    });
-  }
-
-  function paintVisibleTerminalWindow(frame = lastCompositeTerminalFrameRef.current, surface = terminalSurfaceRef.current) {
-    if (!frame) return;
-
-    const viewport = surfaceViewportRef.current;
-    const viewportHeight = Math.max(surface.cellHeight, viewport?.clientHeight ?? surface.rows * surface.cellHeight);
-    const overscanRows = 3;
-    const targetDisplayRows = Math.max(surface.rows, Math.ceil(viewportHeight / surface.cellHeight) + overscanRows * 2);
-    const displayRows = Math.max(1, Math.min(frame.rows.length, targetDisplayRows));
-    const scrollTop = viewport?.scrollTop ?? 0;
-    const maxStartRow = Math.max(0, frame.rows.length - displayRows);
-    const startRow = Math.min(maxStartRow, Math.max(0, Math.floor(scrollTop / surface.cellHeight) - overscanRows));
-    const endRow = startRow + displayRows;
-    const renderer = ensureTerminalRenderer(surface, displayRows);
-    const forceFullPaint = rendererNeedsFullPaintRef.current || lastTerminalPaintStartRowRef.current !== startRow || frame.dirty !== 'partial';
-    const rows = frame.rows
-      .filter(row => row.index >= startRow && row.index < endRow && (forceFullPaint || row.dirty))
-      .map(row => ({
-        ...cloneTerminalRow(row),
-        index: row.index - startRow,
-        dirty: forceFullPaint || row.dirty,
-      }));
-    const cursorRow = frame.cursor?.position?.row ?? frame.cursor?.row;
-    const cursorCol = frame.cursor?.position?.col ?? frame.cursor?.col;
-    const cursorVisible = Number.isFinite(cursorRow) && Number.isFinite(cursorCol) && (cursorRow as number) >= startRow && (cursorRow as number) < endRow;
-    const windowFrame: TerminalFrame = {
-      ...frame,
-      dirty: forceFullPaint ? 'full' : frame.dirty,
-      rows,
-      cursor: cursorVisible
-        ? {
-            ...frame.cursor,
-            row: (cursorRow as number) - startRow,
-            col: cursorCol as number,
-            position: {
-              row: (cursorRow as number) - startRow,
-              col: cursorCol as number,
-            },
-          }
-        : { ...frame.cursor, visible: false },
-    };
-    if (canvasRef.current) {
-      canvasRef.current.style.transform = `translateY(${startRow * surface.cellHeight}px)`;
-    }
-    if (forceFullPaint) {
-      renderer?.clear(windowFrame.colors?.background);
-    }
-    renderer?.paintFrame(windowFrame);
-    rendererNeedsFullPaintRef.current = false;
-    lastTerminalPaintStartRowRef.current = startRow;
-  }
-
-  function paintTerminalFrame(frame: TerminalFrame) {
-    const surface = terminalSurfaceRef.current;
-    const surfaceFrame = frameForSurface(frame, surface);
-
-    lastTerminalFrameRef.current = surfaceFrame;
-    const renderedScrollbackRows: TerminalRow[] = [];
-    if (renderedScrollbackRows.length !== scrollbackRowsRef.current.length) {
-      scrollbackRowsRef.current = renderedScrollbackRows;
-    }
-    setScrollbackRowCount(surfaceFrame.scrollback?.scrollbackRows ?? renderedScrollbackRows.length);
-    const compositeFrame = surfaceFrame;
-    lastCompositeTerminalFrameRef.current = compositeFrame;
-    updateTerminalScrollSpacer(compositeFrame.rows.length, surface);
-    paintVisibleTerminalWindow(compositeFrame, surface);
-
-    requestAnimationFrame(() => {
-      if (liveFollowRef.current) {
-        scrollTerminalViewportToTail();
-      } else {
-        paintVisibleTerminalWindow();
-      }
-    });
-  }
-
-  function paintCurrentTerminalFrame(surface = terminalSurfaceRef.current) {
-    if (selectedSessionId) {
-      const sessionView = ensureSessionTerminalView(selectedSessionId, surface);
-      if (sessionView) {
-        applyTerminalView(sessionView, surface);
-        return;
-      }
-    }
-
-    if (lastTerminalFrameRef.current) {
-      paintTerminalFrame(lastTerminalFrameRef.current);
-      return;
-    }
-
-    clearTerminalSurface(surface);
-  }
-
+  // A terminal session you're looking at should be running, not parked behind a
+  // Run button. Opening a focus, clicking a tab, or creating a session already
+  // launches directly; this is the safety net for the remaining ways the
+  // terminal surface can land on an idle session (opening a project or the
+  // General group, falling back to the first visible tab). We auto-launch a
+  // selection once: a restore_failed session waits for an explicit retry, and a
+  // launch that fails falls back to the overlay's manual Run/Resume button.
   useEffect(() => {
-    if (rendererRef.current) return;
-
-    paintCurrentTerminalFrame();
-    writeLog('Ready. Reverie shell is now using the floating-panel UI direction; terminal rendering remains a Canvas island.');
-  }, []);
-
-  useEffect(() => {
-    activeTerminalIdRef.current = activeTerminalId;
-  }, [activeTerminalId]);
-
-  useEffect(() => {
-    if (surfaceMode !== 'terminal') return;
-    rendererRef.current = null;
-    requestAnimationFrame(() => paintCurrentTerminalFrame());
-  }, [surfaceMode]);
-
-  useEffect(() => {
-    if (surfaceMode !== 'terminal' || creationMode || !selectedSession) {
-      rendererRef.current = null;
-      return;
-    }
-
-    rendererRef.current = null;
-    requestAnimationFrame(() => paintCurrentTerminalFrame());
-  }, [creationMode, selectedSession?.id, surfaceMode]);
-
-  useEffect(() => {
-    const viewport = surfaceViewportRef.current;
-    if (!viewport) return;
-
-    function applyViewportSize(width: number, height: number) {
-      const next = terminalSurfaceForBounds(width, height, terminalSurfaceRef.current);
-      const previous = terminalSurfaceRef.current;
-      if (next.cols === previous.cols && next.rows === previous.rows) return;
-
-      terminalSurfaceRef.current = next;
-      setTerminalSurface(next);
-      paintCurrentTerminalFrame(next);
-
-      const terminalId = activeTerminalIdRef.current;
-      if (terminalId && isTauriRuntime) {
-        void invoke('resize_terminal', { terminalId, cols: next.cols, rows: next.rows }).catch(error => {
-          writeLog(`Terminal resize failed: ${errorMessage(error)}`);
-        });
-      }
-    }
-
-    const observer = new ResizeObserver(entries => {
-      const entry = entries[0];
-      if (!entry) return;
-      applyViewportSize(entry.contentRect.width, entry.contentRect.height);
-    });
-
-    observer.observe(viewport);
-    applyViewportSize(viewport.clientWidth, viewport.clientHeight);
-    return () => observer.disconnect();
-  }, [isTauriRuntime, surfaceMode, selectedSession?.id]);
+    if (surfaceMode !== 'terminal' || creationMode || !selectedSession) return;
+    if (selectedTerminalBinding || isLaunchingSelectedSession) return;
+    if (selectedSession.status === 'restore_failed') return;
+    if (autoLaunchedSessionIdRef.current === selectedSession.id) return;
+    terminal.autostartSession(selectedSession);
+  }, [surfaceMode, creationMode, selectedSession?.id, selectedSession?.status, selectedTerminalBinding, isLaunchingSelectedSession]);
 
   // Global ⌘K / Ctrl+K opens the command palette from any surface, and Esc
   // closes it. We swallow the default browser behavior for the shortcut so
@@ -575,10 +245,6 @@ export function App() {
     selectedProjectIdRef.current = selectedProjectId;
     selectedProjectRef.current = selectedProject;
   }, [selectedProject, selectedProjectId]);
-
-  useEffect(() => {
-    sessionTerminalBindingsRef.current = sessionTerminalBindings;
-  }, [sessionTerminalBindings]);
 
   useEffect(() => {
     if (selectedFocus && selectedFocus.id !== selectedFocusId) {
@@ -618,165 +284,6 @@ export function App() {
   }, []);
 
   useAppFocus();
-
-  async function attachRuntimeSessionListeners(terminalId: string, session: ShellSession): Promise<() => void> {
-    requireRenderer();
-    const timings: number[] = [];
-    const interEventTimings: number[] = [];
-    let cellsDrawn = 0;
-    let framesReceived = 0;
-    let droppedFrames = 0;
-    let expectedSeq = 0;
-    let lastEventAt: number | null = null;
-    let receiveStarted: number | null = null;
-    let startedPayload: TerminalStreamStartedPayload | null = null;
-    let pendingTerminalFramePayload: TerminalFramePayload | null = null;
-    let terminalFrameRaf = 0;
-    const unlisteners: UnlistenFn[] = [];
-
-    function cleanup() {
-      if (terminalFrameRaf) {
-        cancelAnimationFrame(terminalFrameRaf);
-        terminalFrameRaf = 0;
-      }
-      for (const unlisten of unlisteners.splice(0)) {
-        unlisten();
-      }
-    }
-
-    function paintPendingTerminalFrame() {
-      terminalFrameRaf = 0;
-      const payload = pendingTerminalFramePayload;
-      pendingTerminalFramePayload = null;
-      if (!payload) return;
-
-      const frameStarted = performance.now();
-      sessionLatestFrameRef.current[session.id] = payload.frame;
-      if (activeTerminalIdRef.current === terminalId) {
-        const previousView = sessionTerminalViewsRef.current[session.id];
-        const nextView = buildSessionTerminalView(previousView, payload.frame);
-        sessionTerminalViewsRef.current[session.id] = nextView;
-        applyTerminalView(nextView);
-      } else {
-        // Backgrounded: drop any stale built view so the next activation rebuilds
-        // from this raw frame instead of paying for the surface mapping now.
-        delete sessionTerminalViewsRef.current[session.id];
-      }
-      const frameEnded = performance.now();
-      timings.push(frameEnded - frameStarted);
-      cellsDrawn += payload.frame.rows.reduce((sum, row) => sum + row.cells.length, 0);
-    }
-
-    function setSessionTerminalInputReady(inputArmed: boolean) {
-      setSessionTerminalBindings(current => ({
-        ...current,
-        [session.id]: { terminalId, inputArmed },
-      }));
-      if (activeTerminalIdRef.current === terminalId) {
-        setTerminalInputArmed(inputArmed);
-      }
-    }
-
-    function clearActiveTerminal() {
-      setSessionTerminalBindings(current => {
-        const next = { ...current };
-        delete next[session.id];
-        return next;
-      });
-      setTerminalInputArmed(false);
-      if (activeTerminalIdRef.current === terminalId) {
-        activeTerminalIdRef.current = null;
-      }
-      setActiveTerminalId(current => current === terminalId ? null : current);
-      setRunningSessionId(current => current === session.id ? null : current);
-    }
-
-    unlisteners.push(await listen<TerminalStreamStartedPayload>('terminal_stream_started', event => {
-      if (event.payload.terminalId !== terminalId) return;
-      startedPayload = event.payload;
-      receiveStarted = performance.now();
-      setSessionTerminalInputReady(true);
-      requestAnimationFrame(() => canvasRef.current?.focus());
-      writeLog(`Runtime session started: terminal=${shortId(terminalId)} session=${shortId(session.id)} cols=${startedPayload.cols} rows=${startedPayload.rows}.`);
-      void loadWorkspaceShell();
-    }));
-
-    unlisteners.push(await listen<TerminalFramePayload>('terminal_frame', event => {
-      const payload = event.payload;
-      if (payload.terminalId !== terminalId) return;
-
-      const now = performance.now();
-      if (receiveStarted === null) receiveStarted = now;
-      if (lastEventAt !== null) interEventTimings.push(now - lastEventAt);
-      lastEventAt = now;
-
-      if (payload.seq !== expectedSeq) {
-        droppedFrames += Math.max(0, payload.seq - expectedSeq);
-      }
-      expectedSeq = payload.seq + 1;
-
-      framesReceived += 1;
-      pendingTerminalFramePayload = payload;
-      if (!terminalFrameRaf) {
-        terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrame);
-      }
-    }));
-
-    unlisteners.push(await listen<TerminalExitPayload>('terminal_exit', event => {
-      const finished = event.payload;
-      if (finished.terminalId !== terminalId) return;
-
-      if (pendingTerminalFramePayload) {
-        if (terminalFrameRaf) {
-          cancelAnimationFrame(terminalFrameRaf);
-          terminalFrameRaf = 0;
-        }
-        paintPendingTerminalFrame();
-      }
-      const receiveElapsed = receiveStarted === null ? 0 : performance.now() - receiveStarted;
-      cleanup();
-      clearActiveTerminal();
-      const result: RenderMetrics = {
-        mode: 'Cortex adapter terminal session',
-        terminalId,
-        frames: finished.framesEmitted,
-        framesReceived,
-        droppedFrames,
-        chunksRead: finished.chunksRead,
-        cellsDrawn,
-        elapsedMs: receiveElapsed,
-        avgFrameMs: average(timings),
-        p95FrameMs: percentile(timings, 0.95),
-        maxFrameMs: Math.max(0, ...timings),
-        cellsPerSecond: cellsDrawn / Math.max(0.001, receiveElapsed / 1000),
-        outputBytes: finished.bytesRead,
-        rustElapsedMs: finished.rustElapsedMs,
-        totalEmitMs: finished.totalEmitMs,
-        avgEmitMs: finished.avgEmitMs,
-        maxEmitMs: finished.maxEmitMs,
-        avgInterEventMs: average(interEventTimings),
-        p95InterEventMs: percentile(interEventTimings, 0.95),
-        maxInterEventMs: Math.max(0, ...interEventTimings),
-        childSuccess: finished.childSuccess,
-        targetFrames: startedPayload?.targetFrames ?? undefined,
-      };
-      writeLog(`Runtime session exited: terminal=${shortId(terminalId)} received=${result.framesReceived}/${result.frames} chunks=${result.chunksRead}.`);
-      setMetrics([result]);
-      void recordMetrics(result);
-      void loadWorkspaceShell();
-    }));
-
-    unlisteners.push(await listen<TerminalFailedPayload>('terminal_failed', event => {
-      const failedTerminalId = event.payload?.terminalId;
-      if (failedTerminalId && failedTerminalId !== terminalId) return;
-      cleanup();
-      clearActiveTerminal();
-      writeLog(`Runtime session failed: ${event.payload?.message || 'terminal session failed'}`);
-      void loadWorkspaceShell();
-    }));
-
-    return cleanup;
-  }
 
   function defaultCwdForFocus(focus: ShellFocus | null, snapshot: WorkspaceShellSnapshot = shell) {
     if (!focus?.projectId) return USER_HOME;
@@ -865,30 +372,6 @@ export function App() {
     }
   }
 
-  function scheduleSessionAutostart(session: ShellSession) {
-    let attempts = 0;
-
-    const tryLaunchAfterTerminalMount = () => {
-      if (!canvasRef.current || !surfaceViewportRef.current) {
-        attempts += 1;
-        if (attempts <= 12) {
-          window.setTimeout(tryLaunchAfterTerminalMount, 25);
-        } else {
-          writeLog(`Autostart session delayed: terminal surface did not mount for ${session.title}.`);
-        }
-        return;
-      }
-
-      rendererRef.current = null;
-      paintCurrentTerminalFrame();
-      void launchRuntimeSession(session).catch(error => {
-        writeLog(`Autostart session failed: ${errorMessage(error)}`);
-      });
-    };
-
-    window.setTimeout(tryLaunchAfterTerminalMount, 0);
-  }
-
   async function createSessionForSelection() {
     if (!canUseAppServices || !selectedFocus) return;
     setBusy(true);
@@ -913,7 +396,7 @@ export function App() {
       setSurfaceMode('terminal');
       writeLog(`Created session: ${created?.title ?? request.title}. Preparing terminal handoff for the selected CLI.`);
       if (created) {
-        scheduleSessionAutostart(created);
+        terminal.autostartSession(created);
       }
     } catch (error) {
       writeLog(`Create session failed: ${errorMessage(error)}`);
@@ -923,221 +406,14 @@ export function App() {
     }
   }
 
-  async function launchRuntimeSession(session: ShellSession, options: { manageBusy?: boolean } = {}) {
-    const existingBinding = sessionTerminalBindingsRef.current[session.id];
-    if (existingBinding) {
-      activateSessionTerminal(session);
-      writeLog(`${session.title} already owns terminal ${shortId(existingBinding.terminalId)}.`);
-      return;
-    }
-
-    setSurfaceMode('terminal');
-    if (options.manageBusy !== false) setBusy(true);
-    setLaunchingSessionId(session.id);
-    resetTerminalScrollback();
-    sessionTerminalViewsRef.current[session.id] = emptyTerminalView();
-    applyTerminalView(sessionTerminalViewsRef.current[session.id]);
-    const terminalId = crypto.randomUUID();
-    let cleanup: (() => void) | null = null;
-    try {
-      cleanup = await attachRuntimeSessionListeners(terminalId, session);
-      const surface = terminalSurfaceRef.current;
-      const request: StartSessionRequest = {
-        sessionId: session.id,
-        terminalId,
-        cols: surface.cols,
-        rows: surface.rows,
-        maxScrollback: DEFAULT_TERMINAL_SCROLLBACK_ROWS,
-      };
-      setSessionTerminalBindings(current => ({
-        ...current,
-        [session.id]: { terminalId, inputArmed: false },
-      }));
-      setTerminalInputArmed(false);
-      activeTerminalIdRef.current = terminalId;
-      setActiveTerminalId(terminalId);
-      setRunningSessionId(session.id);
-      writeLog(`Launching ${session.title} as its own terminal session.`);
-      await invoke<string>('start_session', { request });
-      void loadWorkspaceShell();
-    } catch (error) {
-      cleanup?.();
-      setSessionTerminalBindings(current => {
-        const next = { ...current };
-        delete next[session.id];
-        return next;
-      });
-      setTerminalInputArmed(false);
-      if (activeTerminalIdRef.current === terminalId) {
-        activeTerminalIdRef.current = null;
-      }
-      setActiveTerminalId(current => current === terminalId ? null : current);
-      setRunningSessionId(current => current === session.id ? null : current);
-      setLaunchingSessionId(current => current === session.id ? null : current);
-      writeLog(`Runtime session launch failed: ${errorMessage(error)}`);
-      throw error;
-    } finally {
-      if (options.manageBusy !== false) setBusy(false);
-    }
-  }
-
-  async function sendTerminalInput(input: string) {
-    if (!activeTerminalId || !terminalInputArmed || input.length === 0) return;
-
-    try {
-      await invoke('write_terminal_input', { terminalId: activeTerminalId, input });
-    } catch (error) {
-      writeLog(`Terminal input failed: ${errorMessage(error)}`);
-    }
-  }
-
-  async function sendTerminalViewportScroll(deltaRows: number) {
-    if (!activeTerminalId || deltaRows === 0) return;
-
-    try {
-      await invoke('scroll_terminal_viewport', { terminalId: activeTerminalId, deltaRows });
-    } catch (error) {
-      writeLog(`Terminal scroll failed: ${errorMessage(error)}`);
-    }
-  }
-
-  async function sendTerminalViewportToBottom() {
-    if (!activeTerminalId) return;
-
-    try {
-      await invoke('scroll_terminal_viewport_to_bottom', { terminalId: activeTerminalId });
-    } catch (error) {
-      writeLog(`Follow live failed: ${errorMessage(error)}`);
-    }
-  }
-
-  function terminalInputReady() {
-    return Boolean(activeTerminalId && terminalInputArmed);
-  }
-
-  function handleTerminalKeyDown(event: KeyboardEvent<HTMLCanvasElement>) {
-    const input = terminalInputForKey(event, lastTerminalFrameRef.current?.modes);
-    if (!input || !terminalInputReady()) return;
-
-    event.preventDefault();
-    void sendTerminalInput(input);
-  }
-
-  function handleTerminalPaste(event: ClipboardEvent<HTMLCanvasElement>) {
-    if (!terminalInputReady()) return;
-
-    const text = event.clipboardData.getData('text');
-    if (!text) return;
-
-    event.preventDefault();
-    const input = lastTerminalFrameRef.current?.modes?.bracketedPaste
-      ? `\x1b[200~${text}\x1b[201~`
-      : text;
-    void sendTerminalInput(input);
-  }
-
-  function focusTerminalCanvas(event?: MouseEvent<HTMLElement>) {
-    event?.preventDefault();
-    canvasRef.current?.focus();
-  }
-
-  function handleTerminalScroll(event: UIEvent<HTMLDivElement>) {
-    paintVisibleTerminalWindow();
-
-    if (autoScrollingTerminalRef.current) {
-      liveFollowRef.current = true;
-      setTerminalLiveFollow(true);
-      return;
-    }
-
-    const viewport = event.currentTarget;
-    const following = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
-    liveFollowRef.current = following;
-    setTerminalLiveFollow(following);
-  }
-
-  function handleTerminalWheel(event: WheelEvent<HTMLDivElement>) {
-    if (!activeTerminalId || lastTerminalFrameRef.current?.modes?.mouseTracking) return;
-
-    const deltaRows = terminalWheelDeltaRows(event, terminalSurfaceRef.current);
-    if (deltaRows === 0) return;
-
-    event.preventDefault();
-    if (deltaRows < 0) {
-      liveFollowRef.current = false;
-      setTerminalLiveFollow(false);
-    }
-    void sendTerminalViewportScroll(deltaRows);
-  }
-
-  function followLiveTerminalOutput() {
-    liveFollowRef.current = true;
-    setTerminalLiveFollow(true);
-    void sendTerminalViewportToBottom();
-
-    requestAnimationFrame(() => {
-      scrollTerminalViewportToTail();
-      canvasRef.current?.focus();
-    });
-  }
-
-  async function recordMetrics(result: RenderMetrics) {
-    try {
-      await invoke('record_render_metrics', { metrics: result });
-    } catch (error) {
-      if (isTauriRuntime) {
-        writeLog(`Unable to record metrics through Tauri: ${errorMessage(error)}`);
-      }
-    }
-  }
-
-  function requireRenderer() {
-    const renderer = rendererRef.current ?? mountTerminalRenderer();
-    if (!renderer) {
-      throw new Error('Terminal renderer is not mounted yet');
-    }
-    return renderer;
-  }
-
-  function activateSessionTerminal(session: ShellSession): boolean {
-    const binding = sessionTerminalBindingsRef.current[session.id];
-    setSelectedSessionId(session.id);
-    setCreationMode(null);
-    setSurfaceMode('terminal');
-
-    if (!binding) {
-      const view = ensureSessionTerminalView(session.id);
-      if (view) {
-        applyTerminalView(view);
-      } else {
-        clearTerminalSurface();
-      }
-      setTerminalInputArmed(false);
-      return false;
-    }
-
-    activeTerminalIdRef.current = binding.terminalId;
-    setActiveTerminalId(binding.terminalId);
-    setRunningSessionId(session.id);
-    setTerminalInputArmed(binding.inputArmed);
-    const view = ensureSessionTerminalView(session.id);
-    if (view) {
-      applyTerminalView(view);
-    } else {
-      clearTerminalSurface();
-    }
-    requestAnimationFrame(() => canvasRef.current?.focus());
-    return true;
-  }
-
   function selectSessionTab(session: ShellSession) {
     // Selecting a tab is an "open this session" intent. If it's already bound
     // to a live PTY we just re-focus it; otherwise we launch (or resume, if
     // there's a native session ref). The user shouldn't have to also click a
     // separate Run button just to start a session they meant to open.
-    const attached = activateSessionTerminal(session);
+    const attached = terminal.activateSession(session);
     if (attached) return;
-    void launchRuntimeSession(session).catch(error => {
+    void terminal.launchSession(session).catch(error => {
       const verb = session.nativeSessionRef ? 'Resume' : 'Launch';
       writeLog(`${verb} failed for ${session.title}: ${errorMessage(error)}`);
     });
@@ -1174,7 +450,7 @@ export function App() {
       selectSessionTab(firstSession);
     } else {
       setSelectedSessionId(null);
-      clearTerminalSurface();
+      terminal.clearSurface();
     }
     setCreationMode(null);
     setSurfaceMode('terminal');
@@ -1188,7 +464,7 @@ export function App() {
     setSelectedSessionId(null);
     setCreationMode(null);
     setSurfaceMode('session-history');
-    clearTerminalSurface();
+    terminal.clearSurface();
   }
 
   async function setWorkspaceDefaultDangerousMode(next: boolean) {
@@ -1215,7 +491,7 @@ export function App() {
     if (!selectedSession) return;
     const current = selectedSession.dangerousModeOverride ?? shell.workspace.defaultDangerousMode;
     const next = !current;
-    const binding = sessionTerminalBindingsRef.current[selectedSession.id];
+    const binding = useTerminalStore.getState().sessionTerminalBindings[selectedSession.id];
     if (binding) {
       const confirmed = window.confirm(
         `Restart this session with auto-approve ${next ? 'on' : 'off'}? The current ${agentLabel(selectedSession.agentKind)} process will terminate and resume with the new mode.`,
@@ -1226,7 +502,7 @@ export function App() {
     setBusy(true);
     try {
       if (binding) {
-        await invoke('terminate_session', { terminalId: binding.terminalId }).catch(error => {
+        await terminateSession(binding.terminalId).catch(error => {
           writeLog(`Restart terminate failed: ${errorMessage(error)}`);
         });
       }
@@ -1240,7 +516,7 @@ export function App() {
         // Relaunch through the same path as a tab-click: launchRuntimeSession
         // rebuilds the spawn spec from the persisted session, which now sees
         // the updated override and will include the right dangerous flag.
-        void launchRuntimeSession(updated).catch(error => {
+        void terminal.launchSession(updated).catch(error => {
           writeLog(`Restart with new auto-approve failed: ${errorMessage(error)}`);
         });
       }
@@ -1267,10 +543,10 @@ export function App() {
     // with the captured native session id (Cortex today, Claude/Codex once
     // their capture lands), which restarts the CLI with `--resume <id>` and
     // the session's current dangerous-mode override.
-    const binding = sessionTerminalBindingsRef.current[session.id];
+    const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
     if (binding) {
       try {
-        await invoke('terminate_session', { terminalId: binding.terminalId });
+        await terminateSession(binding.terminalId);
       } catch (error) {
         writeLog(`Close requested terminal stop first; stop failed for ${shortId(binding.terminalId)}: ${errorMessage(error)}`);
       }
@@ -1282,7 +558,7 @@ export function App() {
         selectSessionTab(nextVisibleSession);
       } else {
         setSelectedSessionId(null);
-        clearTerminalSurface();
+        terminal.clearSurface();
         const stillHasHistory = snapshot.sessions.some(candidate => candidate.focusId === session.focusId);
         if (stillHasHistory) setSurfaceMode('session-history');
       }
@@ -1299,9 +575,9 @@ export function App() {
 
   async function removeSessionRecord(session: ShellSession) {
     if (!window.confirm(`Delete session “${session.title}”? This removes it from the focus history.`)) return;
-    const binding = sessionTerminalBindingsRef.current[session.id];
+    const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
     if (binding) {
-      await invoke('terminate_session', { terminalId: binding.terminalId }).catch(error => {
+      await terminateSession(binding.terminalId).catch(error => {
         writeLog(`Delete requested terminal stop first; stop failed for ${shortId(binding.terminalId)}: ${errorMessage(error)}`);
       });
     }
@@ -1312,12 +588,10 @@ export function App() {
       delete next[session.id];
       return next;
     });
-    delete sessionTerminalBindingsRef.current[session.id];
-    delete sessionTerminalViewsRef.current[session.id];
-    delete sessionLatestFrameRef.current[session.id];
+    terminal.dropSession(session.id);
     if (selectedSessionId === session.id) {
       setSelectedSessionId(null);
-      clearTerminalSurface();
+      terminal.clearSurface();
     }
     writeLog(`Deleted session record: ${session.title}.`);
   }
@@ -1330,16 +604,16 @@ export function App() {
     if (selectedFocusId === focus.id) {
       setSelectedFocusId(null);
       setSelectedSessionId(null);
-      clearTerminalSurface();
+      terminal.clearSurface();
     }
     writeLog(`Removed focus from navigation: ${focus.title}.`);
   }
 
   async function terminateBoundSessions(sessions: ShellSession[]) {
     for (const session of sessions) {
-      const binding = sessionTerminalBindingsRef.current[session.id];
+      const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
       if (!binding) continue;
-      await invoke('terminate_session', { terminalId: binding.terminalId }).catch(error => {
+      await terminateSession(binding.terminalId).catch(error => {
         writeLog(`Stop before removal failed for ${session.title}: ${errorMessage(error)}`);
       });
     }
@@ -1355,7 +629,7 @@ export function App() {
       setSelectedProjectId(null);
       setSelectedFocusId(null);
       setSelectedSessionId(null);
-      clearTerminalSurface();
+      terminal.clearSurface();
     }
     writeLog(`Removed project from navigation: ${project.name}.`);
   }
@@ -1381,10 +655,6 @@ export function App() {
       <aside className={cx(rimLitPanelClass, leftPanelClass)} aria-label="Reverie navigation" data-testid="left-panel">
         <div className={titlebarClass} data-tauri-drag-region>
           <TrafficLights />
-          <div className={brandClass} data-tauri-drag-region>
-            <BrandMark />
-            REVERIE
-          </div>
         </div>
 
         <button
@@ -1641,7 +911,7 @@ export function App() {
                   <span data-testid="terminal-status-label" className={metaStripStatusClass}>{runningLabel}</span>
                   <span className={metaStripCwdClass} title={selectedSession.cwd}>{shortenCwd(selectedSession.cwd)}</span>
                   {!terminalLiveFollow ? (
-                    <button type="button" className={followLiveButtonClass} data-testid="follow-live-button" onClick={followLiveTerminalOutput}>Jump to latest</button>
+                    <button type="button" className={followLiveButtonClass} data-testid="follow-live-button" onClick={terminal.followLiveTerminalOutput}>Jump to latest</button>
                   ) : null}
                   <span data-testid="scrollback-row-count" hidden>{scrollbackRowCount.toLocaleString()} / {scrollbackContract.maxRenderedHistoryRows.toLocaleString()}</span>
                   <span data-testid="follow-live-state" hidden>{terminalLiveFollow ? 'live' : 'history'}</span>
@@ -1660,17 +930,17 @@ export function App() {
                     <span className={permissionBannerHintClass}>Respond in the terminal</span>
                   </div>
                 ) : null}
-                <div ref={surfaceViewportRef} className={surfaceViewportClass} data-testid="terminal-viewport" onScroll={handleTerminalScroll} onWheel={handleTerminalWheel} onMouseDown={focusTerminalCanvas}>
-                  <div ref={terminalScrollSpacerRef} className={terminalScrollSpacerClass} data-testid="terminal-scroll-spacer">
+                <div ref={terminal.surfaceViewportRef} className={surfaceViewportClass} data-testid="terminal-viewport" onScroll={terminal.handleTerminalScroll} onWheel={terminal.handleTerminalWheel} onMouseDown={terminal.focusTerminalCanvas}>
+                  <div ref={terminal.terminalScrollSpacerRef} className={terminalScrollSpacerClass} data-testid="terminal-scroll-spacer">
                     <canvas
-                      ref={canvasRef}
+                      ref={terminal.canvasRef}
                       className="terminal-canvas"
                       data-testid="terminal-canvas"
                       aria-label="Terminal runtime surface"
                       tabIndex={0}
-                      onKeyDown={handleTerminalKeyDown}
-                      onPaste={handleTerminalPaste}
-                      onMouseDown={focusTerminalCanvas}
+                      onKeyDown={terminal.handleTerminalKeyDown}
+                      onPaste={terminal.handleTerminalPaste}
+                      onMouseDown={terminal.focusTerminalCanvas}
                     />
                   </div>
                   {!selectedTerminalBinding ? (
@@ -1679,7 +949,7 @@ export function App() {
                       launching={isLaunchingSelectedSession}
                       disabled={busy && !isLaunchingSelectedSession}
                       onLaunch={() => {
-                        void launchRuntimeSession(selectedSession).catch(error => {
+                        void terminal.launchSession(selectedSession).catch(error => {
                           writeLog(`Launch failed: ${errorMessage(error)}`);
                         });
                       }}
@@ -1754,17 +1024,6 @@ const titlebarClass = css({
   display: 'flex',
   alignItems: 'center',
   gap: '12px',
-});
-
-const brandClass = css({
-  marginLeft: 'auto',
-  display: 'flex',
-  alignItems: 'center',
-  gap: '8px',
-  color: 'var(--text-2)',
-  fontSize: '11.5px',
-  fontWeight: 500,
-  letterSpacing: '0.04em',
 });
 
 const searchClass = css({
