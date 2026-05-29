@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::activity::ActivityState;
+
 pub type WorkspaceId = Uuid;
 pub type ProjectId = Uuid;
 pub type FocusId = Uuid;
@@ -27,7 +29,30 @@ impl WorkspaceSettings {
     }
 }
 
+/// Top-level workspace record shown in the dashboard. The persistence layer and
+/// the Tauri wire format both use this shape.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    pub id: WorkspaceId,
+    pub name: String,
+    pub general_label: String,
+    pub default_dangerous_mode: bool,
+}
+
+impl Workspace {
+    pub fn new(name: impl Into<String>, general_label: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            general_label: general_label.into(),
+            default_dangerous_mode: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: ProjectId,
     pub name: String,
@@ -47,6 +72,7 @@ impl Project {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Focus {
     pub id: FocusId,
     pub project_id: Option<ProjectId>,
@@ -138,18 +164,29 @@ impl NativeSessionRef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+// No PartialEq: `latest_activity` holds an ActivityState, which is not PartialEq.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: SessionId,
     pub focus_id: FocusId,
     pub title: String,
     pub agent_kind: AgentKind,
     pub cwd: PathBuf,
+    #[serde(default)]
     pub native_session_ref: Option<NativeSessionRef>,
     pub launch_mode: LaunchMode,
     pub dangerous_mode_override: Option<bool>,
     pub status: SessionStatus,
     pub last_exit_code: Option<i32>,
+    /// Whether this session currently has a visible tab in the workspace.
+    #[serde(default = "default_true")]
+    pub tab_visible: bool,
+    /// Last observed activity-state snapshot from whichever adapter owns this
+    /// session. Persisted as a denormalized cache so the dashboard paints
+    /// immediately on app start, before any live signal arrives.
+    #[serde(default)]
+    pub latest_activity: Option<ActivityState>,
 }
 
 impl Session {
@@ -170,6 +207,8 @@ impl Session {
             dangerous_mode_override: None,
             status: SessionStatus::NotStarted,
             last_exit_code: None,
+            tab_visible: true,
+            latest_activity: None,
         }
     }
 
@@ -182,6 +221,22 @@ impl Session {
         self.launch_mode = LaunchMode::Resume;
         self.status = SessionStatus::Restorable;
     }
+}
+
+/// Default for `Session::tab_visible` when absent from persisted or serialized
+/// data: sessions are visible unless explicitly hidden.
+fn default_true() -> bool {
+    true
+}
+
+/// Full workspace state served to the frontend on every workspace command.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSnapshot {
+    pub workspace: Workspace,
+    pub projects: Vec<Project>,
+    pub focuses: Vec<Focus>,
+    pub sessions: Vec<Session>,
 }
 
 #[cfg(test)]
@@ -260,5 +315,99 @@ mod tests {
             Some(std::path::Path::new("/tmp/reverie/legacy-meta.json"))
         );
         assert_eq!(decoded.adapter_payload["cwd"], "/tmp/reverie");
+    }
+
+    #[test]
+    fn workspace_serializes_with_camel_case_wire_format() {
+        let workspace = Workspace::new("Reverie", "General");
+        let encoded = serde_json::to_value(&workspace).expect("workspace serializes");
+        assert!(encoded.get("generalLabel").is_some());
+        assert!(encoded.get("defaultDangerousMode").is_some());
+        assert!(encoded.get("general_label").is_none());
+        assert!(encoded.get("default_dangerous_mode").is_none());
+    }
+
+    #[test]
+    fn focus_serializes_with_camel_case_wire_format() {
+        let focus = Focus::for_project(Uuid::new_v4(), "Branding", 3);
+        let encoded = serde_json::to_value(&focus).expect("focus serializes");
+        assert!(encoded.get("projectId").is_some());
+        assert!(encoded.get("sortOrder").is_some());
+        assert!(encoded.get("project_id").is_none());
+        assert!(encoded.get("sort_order").is_none());
+    }
+
+    #[test]
+    fn session_serializes_with_camel_case_wire_format() {
+        let session = Session::new(
+            Uuid::new_v4(),
+            "Cortex",
+            AgentKind::CortexCode,
+            PathBuf::from("/tmp/reverie"),
+        );
+        let encoded = serde_json::to_value(&session).expect("session serializes");
+        for key in [
+            "focusId",
+            "agentKind",
+            "nativeSessionRef",
+            "launchMode",
+            "dangerousModeOverride",
+            "lastExitCode",
+            "tabVisible",
+            "latestActivity",
+        ] {
+            assert!(encoded.get(key).is_some(), "missing camelCase key {key}");
+        }
+        for snake in [
+            "focus_id",
+            "agent_kind",
+            "native_session_ref",
+            "launch_mode",
+            "dangerous_mode_override",
+            "last_exit_code",
+            "tab_visible",
+            "latest_activity",
+        ] {
+            assert!(encoded.get(snake).is_none(), "leaked snake_case key {snake}");
+        }
+        // tab_visible defaults true and serializes as a bool, not null.
+        assert_eq!(encoded["tabVisible"], serde_json::json!(true));
+        // The struct rename does not touch enum values: agentKind stays snake_case.
+        assert_eq!(encoded["agentKind"], serde_json::json!("cortex_code"));
+    }
+
+    #[test]
+    fn workspace_snapshot_serializes_with_camel_case_wire_format() {
+        let snapshot = WorkspaceSnapshot {
+            workspace: Workspace::new("Reverie", "General"),
+            projects: Vec::new(),
+            focuses: Vec::new(),
+            sessions: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        for key in ["workspace", "projects", "focuses", "sessions"] {
+            assert!(encoded.get(key).is_some(), "missing key {key}");
+        }
+    }
+
+    #[test]
+    fn session_decodes_with_defaults_for_omitted_fields() {
+        // The persistence and wire layers may omit tabVisible / nativeSessionRef /
+        // latestActivity; serde defaults must fill them in rather than error.
+        let decoded: Session = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4().to_string(),
+            "focusId": Uuid::new_v4().to_string(),
+            "title": "Recovered",
+            "agentKind": "claude_code",
+            "cwd": "/tmp/reverie",
+            "launchMode": "new",
+            "dangerousModeOverride": null,
+            "status": "not_started",
+            "lastExitCode": null
+        }))
+        .expect("session decodes with defaults");
+        assert!(decoded.tab_visible);
+        assert!(decoded.native_session_ref.is_none());
+        assert!(decoded.latest_activity.is_none());
     }
 }

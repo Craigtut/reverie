@@ -36,7 +36,8 @@ pub use agents::{
     CortexSessionMetadata, LaunchContext,
 };
 pub use domain::{
-    AgentKind, Focus, NativeSessionRef, Project, Session, SessionStatus, WorkspaceSettings,
+    AgentKind, Focus, NativeSessionRef, Project, Session, SessionStatus, Workspace,
+    WorkspaceSettings, WorkspaceSnapshot,
 };
 pub use terminal::{
     TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors,
