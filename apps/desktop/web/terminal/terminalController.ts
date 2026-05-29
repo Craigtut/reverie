@@ -383,7 +383,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   // and size the spacer to it, so the frontend scrollbar scrolls the whole
   // session. Lands at the bottom (most recent), continuous with the live tail;
   // the user scrolls up toward row 0.
-  function enterHistory(frame: TerminalFrame) {
+  function enterHistory(frame: TerminalFrame, scrollToBottom = true) {
     historyMode = true;
     clearInteractionState();
     lastComposite = frame;
@@ -392,16 +392,40 @@ export function createTerminalController(options: TerminalControllerOptions) {
     setLiveFollow(false);
     onScrollbackRowCount(Math.max(0, frame.rows.length - surface.rows));
     updateSpacer(frame.rows.length, surface);
-    requestAnimationFrame(() => {
-      const viewport = els.viewport;
-      if (viewport) viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    if (scrollToBottom) {
+      // "Full history": land at the most recent rows, continuous with the live
+      // tail; the user scrolls up toward row 0. Deferred so the grown spacer's
+      // scrollHeight is laid out before we read it.
+      requestAnimationFrame(() => {
+        const viewport = els.viewport;
+        if (viewport)
+          viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+        paintWindow(frame, surface);
+      });
+    } else {
+      // Find drives the scroll itself (to the active match), so paint in place
+      // now and skip the scroll-to-bottom that would otherwise override it.
       paintWindow(frame, surface);
-    });
+    }
   }
 
   function exitHistory() {
     historyMode = false;
     clearInteractionState();
+  }
+
+  // Scroll the (frontend-virtualized) full-history viewport so composite `row`
+  // is visible, aimed about a third down from the top for context, then repaint
+  // that window. Find navigation uses this to land on a match anywhere in the
+  // session, including rows far above the live band.
+  function scrollToHistoryRow(row: number) {
+    const viewport = els.viewport;
+    if (!viewport) return;
+    const target = (row - Math.floor(surface.rows / 3)) * surface.cellHeight;
+    const max = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    viewport.scrollTop = Math.max(0, Math.min(target, max));
+    needsFullPaint = true;
+    paintWindow();
   }
 
   function setLiveFollow(live: boolean) {
@@ -553,13 +577,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
     setSearchActive(active: boolean) {
       searchActive = active;
     },
-    // The screen-row index of the top of the current viewport, for mapping a
-    // backend match's absolute row to a composite (viewport-local) row.
-    getViewportOffset(): number {
-      return lastComposite?.scrollback?.viewportOffset ?? 0;
-    },
     enterHistory,
     exitHistory,
+    scrollToHistoryRow,
     isHistoryMode() {
       return historyMode;
     },

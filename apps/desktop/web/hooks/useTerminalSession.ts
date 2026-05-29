@@ -15,15 +15,12 @@ import {
   resizeTerminal,
   scrollTerminalViewport,
   scrollTerminalViewportToBottom,
-  scrollTerminalViewportToRow,
-  searchTerminal,
   startSession,
   terminalHistoryInfo,
   terminalHistoryWindow,
   writeTerminalInput,
-  type TerminalSearchMatch,
 } from '../services/terminalApi';
-import { cycleIndex } from '../terminal/findModel';
+import { cycleIndex, findMatchesInFrame, type FrameMatch } from '../terminal/findModel';
 import {
   DEFAULT_TERMINAL_SCROLLBACK_ROWS,
   USER_HOME,
@@ -73,7 +70,7 @@ interface FindState {
   open: boolean;
   query: string;
   caseSensitive: boolean;
-  matches: TerminalSearchMatch[];
+  matches: FrameMatch[];
   activeIndex: number; // 0-based into matches, -1 when none
   total: number;
   capped: boolean;
@@ -81,6 +78,10 @@ interface FindState {
 }
 
 const FIND_DEBOUNCE_MS = 120;
+// Find searches the whole session, so a single query can match thousands of
+// times; cap the kept matches (still report the true total) so navigation and
+// the overlay stay cheap.
+const FIND_MAX_MATCHES = 2_000;
 
 // React binding for the terminal island. Owns the imperative TerminalController,
 // wires the canvas/viewport DOM, runs the paint/resize effects, subscribes to the
@@ -154,6 +155,10 @@ export function useTerminalSession(params: {
   const findDebounceRef = useRef<number>(0);
   // Whether the full-history (deep scroll) view is showing.
   const [historyViewing, setHistoryViewing] = useState(false);
+  // True when Find was the thing that opened the full-history view, so closing
+  // Find returns to the live tail (but leaves history alone if the user had
+  // opened it themselves via "Full history").
+  const findEnteredHistoryRef = useRef(false);
   function updateFind(patch: Partial<FindState>) {
     findRef.current = { ...findRef.current, ...patch };
     setFind(findRef.current);
@@ -181,6 +186,9 @@ export function useTerminalSession(params: {
   // coordinates. Keyed on the session id only, so a resize repaint never clears.
   useEffect(() => {
     controller.resetInteraction();
+    // Hard-reset find on session switch: clear the bar without the live-tail
+    // dance (which would target the newly-selected session), then drop history.
+    findEnteredHistoryRef.current = false;
     closeFind();
     if (controller.isHistoryMode()) {
       controller.exitHistory();
@@ -223,11 +231,24 @@ export function useTerminalSession(params: {
   // Resize the surface to the viewport and tell the backend to match.
   useEffect(() => {
     const viewport = surfaceViewportRef.current;
+    console.log(
+      '[RESIZE-DBG] effect run ' +
+        JSON.stringify({
+          surfaceMode,
+          selectedSessionId: selectedSession?.id,
+          hasViewport: !!viewport,
+          ch: viewport?.clientHeight,
+          cw: viewport?.clientWidth,
+        }),
+    );
     if (!viewport) return;
 
     function applyViewportSize(width: number, height: number) {
       const previous = controller.getSurface();
       const next = terminalSurfaceForBounds(width, height, previous);
+      console.log(
+        '[RESIZE-DBG] applyViewportSize ' + JSON.stringify({ width, height, previous, next }),
+      );
       if (next.cols === previous.cols && next.rows === previous.rows) return;
 
       controller.setSurface(next);
@@ -236,7 +257,17 @@ export function useTerminalSession(params: {
       // resize reflows deep history rather than clobbering it back to the live
       // frame (the live repaint path is width-correct only for the live band).
       if (controller.isHistoryMode()) {
-        void loadFullHistory(next);
+        const activeFind = findRef.current;
+        if (activeFind.open && activeFind.query.length > 0) {
+          // A resize while finding: reflow without jumping to the tail, then
+          // re-run the search so matches + the active position are recomputed
+          // for the new width and the viewport stays on the match.
+          void loadFullHistory(next, false).then(loaded => {
+            if (loaded) void runSearch(activeFind.query, activeFind.caseSensitive);
+          });
+        } else {
+          void loadFullHistory(next);
+        }
       } else {
         controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
       }
@@ -552,68 +583,73 @@ export function useTerminalSession(params: {
 
   // --- Find in terminal ---
 
-  // Map the stored matches (screen-row coords) onto the current viewport and
-  // push the spans to the renderer overlay. Re-runs on every painted frame
-  // (via the controller's onComposite) so highlights track scrolling/output.
+  // Push the stored matches (absolute composite-row coords) to the renderer
+  // overlay; the controller clips them to the painted window. Re-runs on every
+  // painted frame (via the controller's onComposite) so highlights track
+  // scrolling. Find operates on the full-history composite, so a match's row is
+  // its absolute row in the whole session.
   function applyFindOverlay() {
     const state = findRef.current;
     if (!state.open || state.matches.length === 0) {
       controller.clearSearch();
       return;
     }
-    const offset = controller.getViewportOffset();
-    const rows = controller.getSurface().rows;
-    const spans = [];
-    for (const match of state.matches) {
-      const row = match.row - offset;
-      if (row >= 0 && row < rows) {
-        spans.push({ row, startCol: match.startCol, endCol: match.endCol });
-      }
-    }
-    controller.setSearchMatches(spans);
+    controller.setSearchMatches(
+      state.matches.map(match => ({
+        row: match.row,
+        startCol: match.startCol,
+        endCol: match.endCol,
+      })),
+    );
     const active = state.activeIndex >= 0 ? state.matches[state.activeIndex] : undefined;
-    if (active) {
-      const activeRow = active.row - offset;
-      controller.setActiveMatch(
-        activeRow >= 0 && activeRow < rows
-          ? { row: activeRow, startCol: active.startCol, endCol: active.endCol }
-          : null,
-      );
-    } else {
-      controller.setActiveMatch(null);
-    }
+    controller.setActiveMatch(
+      active ? { row: active.row, startCol: active.startCol, endCol: active.endCol } : null,
+    );
   }
   applyFindOverlayRef.current = applyFindOverlay;
 
   function scrollToActiveMatch() {
     const state = findRef.current;
     const match = state.activeIndex >= 0 ? state.matches[state.activeIndex] : undefined;
-    const terminalId = useTerminalStore.getState().activeTerminalId;
-    if (!match || !terminalId) return;
-    void scrollTerminalViewportToRow(terminalId, match.row).catch(() => {});
-    // Apply immediately so an already-visible match highlights without waiting
-    // for a frame; the scroll's frame re-applies via onComposite.
+    if (!match) return;
+    // Find lives in the full-history view, so navigation scrolls the frontend
+    // viewport to the match's absolute row; the repaint re-applies the overlay.
+    controller.scrollToHistoryRow(match.row);
     applyFindOverlay();
   }
 
+  // Find searches the entire persisted session, not just the visible area. It
+  // loads the full replayed transcript into the history view (once) and matches
+  // against that composite in-memory, so every keystroke after the first is a
+  // cheap re-scan with no backend replay.
   async function runSearch(query: string, caseSensitive: boolean) {
-    const terminalId = useTerminalStore.getState().activeTerminalId;
-    if (!terminalId || query.length === 0) {
+    const sessionId = useNavigationStore.getState().selectedSessionId;
+    if (!sessionId || query.length === 0) {
       updateFind({ matches: [], total: 0, capped: false, activeIndex: -1, busy: false });
       controller.clearSearch();
       return;
     }
     updateFind({ busy: true });
     try {
-      const result = await searchTerminal(terminalId, query, caseSensitive);
-      const activeIndex = result.matches.length > 0 ? 0 : -1;
-      updateFind({
-        matches: result.matches,
-        total: result.total,
-        capped: result.capped,
-        activeIndex,
-        busy: false,
-      });
+      if (!controller.isHistoryMode()) {
+        // Enter history without landing at the bottom; scrollToActiveMatch
+        // positions the viewport on the first match instead.
+        const loaded = await loadFullHistory(controller.getSurface(), false);
+        if (!loaded) {
+          updateFind({ busy: false });
+          return;
+        }
+        findEnteredHistoryRef.current = true;
+        setHistoryViewing(true);
+      }
+      const composite = controller.getComposite();
+      const all = composite
+        ? findMatchesInFrame(composite, query, caseSensitive, controller.getSurface().cols)
+        : [];
+      const capped = all.length > FIND_MAX_MATCHES;
+      const matches = capped ? all.slice(0, FIND_MAX_MATCHES) : all;
+      const activeIndex = matches.length > 0 ? 0 : -1;
+      updateFind({ matches, total: all.length, capped, activeIndex, busy: false });
       if (activeIndex >= 0) {
         controller.setSearchActive(true);
         scrollToActiveMatch();
@@ -642,6 +678,13 @@ export function useTerminalSession(params: {
 
   function closeFind() {
     window.clearTimeout(findDebounceRef.current);
+    // If Find opened the full-history view, closing it returns to the live tail
+    // (which also clears the find bar). Otherwise just dismiss the bar and stay
+    // wherever the user is (e.g. a history view they opened themselves).
+    if (findEnteredHistoryRef.current) {
+      followLiveTerminalOutput();
+      return;
+    }
     controller.clearSearch();
     controller.setSearchActive(false);
     updateFind({ open: false, query: '', matches: [], total: 0, capped: false, activeIndex: -1 });
@@ -871,6 +914,15 @@ export function useTerminalSession(params: {
   }
 
   function followLiveTerminalOutput() {
+    // Returning to the live tail also ends any full-history find session (its
+    // match coordinates belong to the frozen history composite).
+    if (findRef.current.open) {
+      window.clearTimeout(findDebounceRef.current);
+      controller.clearSearch();
+      controller.setSearchActive(false);
+      findEnteredHistoryRef.current = false;
+      updateFind({ open: false, query: '', matches: [], total: 0, capped: false, activeIndex: -1 });
+    }
     // "Jump to latest" also leaves the full-history view.
     if (controller.isHistoryMode()) {
       controller.exitHistory();
@@ -889,14 +941,14 @@ export function useTerminalSession(params: {
   // to the controller's history view. Returns whether the load succeeded. Shared
   // by the initial "Full history" entry and the resize reflow (deep history is
   // width-dependent, so a resize must re-replay at the new width).
-  async function loadFullHistory(surface: TerminalSurface) {
+  async function loadFullHistory(surface: TerminalSurface, scrollToBottom = true) {
     const sessionId = useNavigationStore.getState().selectedSessionId;
     if (!sessionId) return false;
     try {
       const info = await terminalHistoryInfo(sessionId, surface.cols, surface.rows);
       const totalRows = Math.max(info.totalRows, surface.rows);
       const windowResult = await terminalHistoryWindow(sessionId, 0, surface.cols, totalRows);
-      controller.enterHistory(windowResult.frame);
+      controller.enterHistory(windowResult.frame, scrollToBottom);
       return true;
     } catch (error) {
       writeLog(`View full history failed: ${errorMessage(error)}`);

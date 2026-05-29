@@ -50,6 +50,20 @@ describe('findMatchesInFrame', () => {
   it('empty query yields nothing', () => {
     expect(findMatchesInFrame(frame, '', false, 20)).toEqual([]);
   });
+
+  it("reports each match's absolute row index, not its array position", () => {
+    // Full-history find searches a composite whose rows are absolute (a window
+    // deep in the session starts well above 0), and navigation scrolls to that
+    // absolute row, so the match must carry row.index, not the loop position.
+    const deep: TerminalFrame = {
+      dirty: 'full',
+      rows: [row(900, 'no match'), row(901, 'find me'), row(902, 'me too')],
+    };
+    expect(findMatchesInFrame(deep, 'me', false, 20)).toEqual([
+      { row: 901, startCol: 5, endCol: 7, lineText: 'find me' },
+      { row: 902, startCol: 0, endCol: 2, lineText: 'me too' },
+    ]);
+  });
 });
 
 describe('formatMatchCount', () => {
