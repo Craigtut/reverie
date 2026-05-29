@@ -7,11 +7,16 @@ import { buildPaletteEntries, filterPalette } from '../../domain';
 import type { ShellSession } from '../../domain';
 import { useActivityStore, usePaletteStore, useShellStore } from '../../store';
 import { AgentGlyph } from '../glyphs';
+import { Typography } from '../primitives/Typography';
 
 // Cmd/Ctrl+K command palette: fuzzy-jump to any focus or session in the
 // workspace. Reads its query + the shell snapshot + activity from the stores;
 // callers supply only what to do on close / pick.
-export function CommandPalette({ onClose, onPickSession, onPickFocus }: {
+export function CommandPalette({
+  onClose,
+  onPickSession,
+  onPickFocus,
+}: {
   onClose: () => void;
   onPickSession: (session: ShellSession) => void;
   onPickFocus: (projectId: string | null, focusId: string) => void;
@@ -22,7 +27,10 @@ export function CommandPalette({ onClose, onPickSession, onPickFocus }: {
   const cortexActivity = useActivityStore(s => s.cortexActivity);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const entries = useMemo(() => buildPaletteEntries(shell, cortexActivity), [shell, cortexActivity]);
+  const entries = useMemo(
+    () => buildPaletteEntries(shell, cortexActivity),
+    [shell, cortexActivity],
+  );
   const filtered = useMemo(() => filterPalette(entries, query), [entries, query]);
   const [highlight, setHighlight] = useState(0);
 
@@ -79,11 +87,21 @@ export function CommandPalette({ onClose, onPickSession, onPickFocus }: {
             onChange={event => setQuery(event.currentTarget.value)}
             onKeyDown={handleKeyDown}
           />
-          <span className={paletteHintClass}>Esc</span>
+          <Typography as="span" variant="tiny" tone="faint" className={paletteHintClass}>
+            Esc
+          </Typography>
         </div>
         <ul className={paletteListClass} data-testid="command-palette-results">
           {filtered.length === 0 ? (
-            <li className={paletteEmptyClass}>No matches</li>
+            <Typography
+              as="li"
+              variant="caption"
+              tone="faint"
+              align="center"
+              className={paletteEmptyClass}
+            >
+              No matches
+            </Typography>
           ) : (
             filtered.map((entry, index) => (
               <li
@@ -99,21 +117,38 @@ export function CommandPalette({ onClose, onPickSession, onPickFocus }: {
                   <>
                     <CircleDashed size={13} />
                     <span className={paletteItemLabelClass}>
-                      <strong>{entry.title}</strong>
-                      <small>{entry.projectName ? `${entry.projectName} · ` : ''}Focus · {entry.sessionCount} session{entry.sessionCount === 1 ? '' : 's'}</small>
+                      <Typography as="strong" variant="smallBody" tone="inherit" truncate>
+                        {entry.title}
+                      </Typography>
+                      <Typography as="small" variant="caption" tone="faint" truncate>
+                        {entry.projectName ? `${entry.projectName} · ` : ''}Focus ·{' '}
+                        {entry.sessionCount} session{entry.sessionCount === 1 ? '' : 's'}
+                      </Typography>
                     </span>
                   </>
                 ) : (
                   <>
                     <AgentGlyph kind={entry.session.agentKind} />
                     <span className={paletteItemLabelClass}>
-                      <strong>{entry.session.title}</strong>
-                      <small>{entry.breadcrumb} · {entry.session.cwd}</small>
+                      <Typography as="strong" variant="smallBody" tone="inherit" truncate>
+                        {entry.session.title}
+                      </Typography>
+                      <Typography as="small" variant="caption" tone="faint" truncate>
+                        {entry.breadcrumb} · {entry.session.cwd}
+                      </Typography>
                     </span>
                     {entry.activity ? (
-                      <span className={paletteItemStatusClass} data-status={entry.activity.status}>
+                      <Typography
+                        as="span"
+                        variant="tiny"
+                        tone="inherit"
+                        uppercase
+                        className={paletteItemStatusClass}
+                        data-status={entry.activity.status}
+                        style={{ letterSpacing: '0.06em' }}
+                      >
                         {entry.activity.status.replace(/_/g, ' ')}
-                      </span>
+                      </Typography>
                     ) : null}
                   </>
                 )}
@@ -170,8 +205,6 @@ const paletteInputRowClass = css({
 });
 
 const paletteHintClass = css({
-  fontSize: '10.5px',
-  color: 'var(--text-3)',
   padding: '2px 7px',
   border: '1px solid var(--line)',
   borderRadius: '4px',
@@ -208,27 +241,9 @@ const paletteItemLabelClass = css({
   gap: '1px',
   minWidth: 0,
   flex: 1,
-  '& strong': {
-    fontWeight: 500,
-    color: 'inherit',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-  '& small': {
-    fontSize: '11px',
-    color: 'var(--text-3)',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
 });
 
 const paletteItemStatusClass = css({
-  fontSize: '10.5px',
-  fontWeight: 500,
-  letterSpacing: '0.06em',
-  textTransform: 'uppercase',
   color: 'var(--text-3)',
   '&[data-status="working"]': { color: 'var(--good)' },
   '&[data-status="awaiting_permission"]': { color: 'var(--warn)' },
@@ -237,7 +252,4 @@ const paletteItemStatusClass = css({
 
 const paletteEmptyClass = css({
   padding: '14px 10px',
-  textAlign: 'center',
-  color: 'var(--text-3)',
-  fontSize: '12px',
 });
