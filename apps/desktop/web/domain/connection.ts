@@ -109,3 +109,10 @@ export const CLI_LABELS: Record<BridgeCliKind, { title: string; configPath: stri
   codex: { title: 'Codex CLI', configPath: '~/.codex/config.toml' },
   claude: { title: 'Claude Code', configPath: '~/.claude.json' },
 };
+
+/** AgentKind (workspace domain) ↔ BridgeCliKind (installer domain). */
+export const AGENT_KIND_TO_BRIDGE_CLI: Record<AgentKind, BridgeCliKind> = {
+  cortex_code: 'cortex',
+  codex_cli: 'codex',
+  claude_code: 'claude',
+};

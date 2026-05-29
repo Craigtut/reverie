@@ -1,12 +1,12 @@
 import { CaretRight, Moon, Sun } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
+import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
 import type { CreateSessionRecordRequest } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
 import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
 import { useShellStore, useUiStore } from '../../store';
 import { AgentsSection } from './AgentsSection';
-import { BridgeInstallationSection } from './BridgeInstallationSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
 
 // The settings surface: appearance (theme) + default new-session preferences.
@@ -142,17 +142,21 @@ export function SettingsSurface({
           detections={detections}
           pending={enablement.pending}
           error={enablement.error}
+          bridgeStatus={bridge.status}
+          bridgeBusy={
+            bridge.busyCli
+              ? (detections.find(
+                  detection => AGENT_KIND_TO_BRIDGE_CLI[detection.kind] === bridge.busyCli,
+                )?.kind ?? null)
+              : null
+          }
           onToggle={(kind, enabled) => void enablement.toggle(kind, enabled)}
+          onRetryInstall={kind => {
+            const cli = AGENT_KIND_TO_BRIDGE_CLI[kind];
+            if (cli) void bridge.install(cli);
+          }}
         />
-        <BridgeInstallationSection
-          detections={detections}
-          status={bridge.status}
-          loading={bridge.loading}
-          error={bridge.error}
-          install={cli => void bridge.install(cli)}
-          uninstall={cli => void bridge.uninstall(cli)}
-        />
-        <ConnectionPolicySection />
+        {anyReverieToolsInstalled(detections, bridge.status) ? <ConnectionPolicySection /> : null}
       </div>
     </div>
   );
@@ -340,3 +344,20 @@ const settingsSwitchKnobClass = css({
     background: '#FFFFFF',
   },
 });
+
+// True when at least one detected+enabled CLI has the full Reverie tools
+// installed. The connection-policy section is hidden until this is true:
+// without any installed CLI there is nothing for a policy to affect.
+function anyReverieToolsInstalled(
+  detections: ReturnType<typeof useShellStore.getState>['agentCliDetections'],
+  status: ReturnType<typeof useBridgeInstallationStatus>['status'],
+): boolean {
+  if (!status) return false;
+  return detections.some(detection => {
+    if (!detection.available || !detection.enabled) return false;
+    const cli = AGENT_KIND_TO_BRIDGE_CLI[detection.kind];
+    if (!cli) return false;
+    const entry = status[cli];
+    return entry.mcpInstalled && entry.hookInstalled && !entry.mismatchedPaths;
+  });
+}

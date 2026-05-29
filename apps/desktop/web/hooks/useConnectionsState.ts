@@ -38,6 +38,9 @@ import type {
 export function useBridgeInstallationStatus() {
   const [status, setStatus] = useState<BridgeStatusReport | null>(null);
   const [loading, setLoading] = useState(false);
+  // Which CLI's install/uninstall is currently in flight, if any. The UI
+  // uses this to render a per-row pending state instead of a global spinner.
+  const [busyCli, setBusyCli] = useState<BridgeCliKind | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -58,7 +61,7 @@ export function useBridgeInstallationStatus() {
   }, [refresh]);
 
   const install = useCallback(async (cli: BridgeCliKind) => {
-    setLoading(true);
+    setBusyCli(cli);
     setError(null);
     try {
       const next = await (cli === 'cortex'
@@ -70,12 +73,12 @@ export function useBridgeInstallationStatus() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      setBusyCli(null);
     }
   }, []);
 
   const uninstall = useCallback(async (cli: BridgeCliKind) => {
-    setLoading(true);
+    setBusyCli(cli);
     setError(null);
     try {
       const next = await (cli === 'cortex'
@@ -87,11 +90,11 @@ export function useBridgeInstallationStatus() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      setBusyCli(null);
     }
   }, []);
 
-  return { status, loading, error, refresh, install, uninstall };
+  return { status, loading, busyCli, error, refresh, install, uninstall };
 }
 
 export function useConnectionPolicy() {

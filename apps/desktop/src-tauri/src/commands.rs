@@ -186,9 +186,10 @@ fn detect_agent_clis(disabled: &[AgentKind]) -> Vec<AgentCliDetection> {
 }
 
 /// Switch a single agent CLI on or off. Returns the refreshed detection list
-/// (so the shell store updates in one round-trip). Disabling a CLI also
-/// removes any inter-agent bridge entries it has, so an off CLI never has
-/// Reverie-managed config left in its files.
+/// (so the shell store updates in one round-trip). Reverie tools (currently
+/// the inter-agent bridge MCP entry and pre-turn hook) are managed in
+/// lockstep with this toggle: enabling auto-installs them; disabling tears
+/// them down. Both directions are best-effort and never block the toggle.
 #[tauri::command]
 pub(crate) fn set_agent_cli_enabled(
     app: AppHandle,
@@ -199,16 +200,50 @@ pub(crate) fn set_agent_cli_enabled(
         .set_agent_cli_enabled(request.kind, request.enabled)
         .map_err(|err| err.to_string())?;
 
-    if !request.enabled {
-        // Best-effort: tear down the bridge so a disabled CLI keeps nothing
-        // Reverie-managed in its config. A failure here must not block the
-        // toggle, so we log and carry on.
+    if request.enabled {
+        // Auto-install so a freshly-enabled CLI gets its Reverie integration
+        // without a separate user action. Failure (read-only file, malformed
+        // existing config, etc.) is logged and surfaced via the bridge
+        // status, which the UI consults to render a retry affordance.
+        if let Err(err) = install_bridge_for(&app, request.kind) {
+            eprintln!("[reverie] could not install bridge for enabled CLI: {err:#}");
+        }
+    } else {
+        // Tear down so a disabled CLI keeps nothing Reverie-managed in its
+        // config. Best-effort: a failure here must not block the toggle.
         if let Err(err) = remove_bridge_for(&app, request.kind) {
             eprintln!("[reverie] could not remove bridge for disabled CLI: {err:#}");
         }
     }
 
     Ok(detect_agent_clis(&snapshot.workspace.disabled_agent_kinds))
+}
+
+/// Install the inter-agent bridge entries for one CLI. Unix-only.
+#[cfg(unix)]
+fn install_bridge_for(app: &AppHandle, kind: AgentKind) -> Result<()> {
+    use crate::bridge_installer::{
+        install_claude_bridge, install_codex_bridge, install_cortex_bridge,
+    };
+    use crate::connection_commands::resolve_bridge_binaries;
+    let binaries = resolve_bridge_binaries(app)?;
+    match kind {
+        AgentKind::CortexCode => {
+            install_cortex_bridge(&binaries)?;
+        }
+        AgentKind::CodexCli => {
+            install_codex_bridge(&binaries)?;
+        }
+        AgentKind::ClaudeCode => {
+            install_claude_bridge(&binaries)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_bridge_for(_app: &AppHandle, _kind: AgentKind) -> Result<()> {
+    Ok(())
 }
 
 /// Remove the inter-agent bridge entries for one CLI. Unix-only (the installer

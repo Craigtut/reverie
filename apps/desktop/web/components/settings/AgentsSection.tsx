@@ -1,22 +1,35 @@
 import { css } from '../../styled-system/css';
-import type { AgentCliDetection, AgentKind } from '../../domain';
+import type {
+  AgentCliDetection,
+  AgentKind,
+  BridgeInstallationStatus,
+  BridgeStatusReport,
+} from '../../domain';
+import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
 
-// The "Agents" settings block: one row per supported CLI showing whether it is
-// detected on this machine and, when it is, a switch to turn it on or off. A
-// switched-off CLI is never offered as a session agent elsewhere in the app and
-// never has its config files written (the inter-agent bridge below is removed
-// when a CLI is disabled). Not-detected CLIs show what we looked for and carry
-// no switch, since there is nothing to enable.
+// The "Agents" settings block: one row per supported CLI showing whether it
+// is detected on this machine and, when it is, a switch to turn it on or
+// off. A switched-off CLI is never offered as a session agent elsewhere in
+// the app and never has its config files written. When a CLI is enabled
+// Reverie auto-installs its integration (currently the inter-agent
+// connection bridge) into that CLI's user-global config; the row shows a
+// small confirmation, or a retry affordance if the auto-install failed.
 export function AgentsSection({
   detections,
   pending,
   error,
+  bridgeStatus,
+  bridgeBusy,
   onToggle,
+  onRetryInstall,
 }: {
   detections: AgentCliDetection[];
   pending: AgentKind | null;
   error: string | null;
+  bridgeStatus: BridgeStatusReport | null;
+  bridgeBusy: AgentKind | null;
   onToggle: (kind: AgentKind, enabled: boolean) => void;
+  onRetryInstall: (kind: AgentKind) => void;
 }) {
   return (
     <section className={sectionClass} aria-labelledby="settings-agents-label">
@@ -38,7 +51,10 @@ export function AgentsSection({
             key={detection.kind}
             detection={detection}
             busy={pending === detection.kind}
+            bridgeEntry={bridgeEntryFor(detection.kind, bridgeStatus)}
+            bridgeBusy={bridgeBusy === detection.kind}
             onToggle={onToggle}
+            onRetryInstall={onRetryInstall}
           />
         ))}
       </ul>
@@ -46,14 +62,30 @@ export function AgentsSection({
   );
 }
 
+function bridgeEntryFor(
+  kind: AgentKind,
+  report: BridgeStatusReport | null,
+): BridgeInstallationStatus | null {
+  if (!report) return null;
+  const cli = AGENT_KIND_TO_BRIDGE_CLI[kind];
+  if (!cli) return null;
+  return report[cli];
+}
+
 function AgentRow({
   detection,
   busy,
+  bridgeEntry,
+  bridgeBusy,
   onToggle,
+  onRetryInstall,
 }: {
   detection: AgentCliDetection;
   busy: boolean;
+  bridgeEntry: BridgeInstallationStatus | null;
+  bridgeBusy: boolean;
   onToggle: (kind: AgentKind, enabled: boolean) => void;
+  onRetryInstall: (kind: AgentKind) => void;
 }) {
   const { kind, displayName, available, enabled, executable, candidates } = detection;
   // The title + status pill already say everything most people need; the
@@ -64,6 +96,13 @@ function AgentRow({
     ? (executable ?? candidates[0] ?? 'Detected on PATH')
     : `Looked for: ${candidates.join(', ') || 'no known locations'}`;
 
+  const showReverieTools = available && enabled;
+  const toolsInstalled =
+    bridgeEntry !== null &&
+    bridgeEntry.mcpInstalled &&
+    bridgeEntry.hookInstalled &&
+    !bridgeEntry.mismatchedPaths;
+
   return (
     <li
       className={rowClass}
@@ -71,35 +110,76 @@ function AgentRow({
       data-available={available ? 'on' : 'off'}
       title={detail}
     >
-      <span className={rowTitleClass}>{displayName}</span>
+      <div className={rowMainClass}>
+        <span className={rowTitleClass}>{displayName}</span>
 
-      <span
-        className={statusClass}
-        data-tone={available ? 'on' : 'off'}
-        data-testid={`agent-cli-status-${kind}`}
-      >
-        {available ? 'Detected' : 'Not detected'}
-      </span>
-
-      {available ? (
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          aria-label={`Enable ${displayName}`}
-          data-state={enabled ? 'on' : 'off'}
-          data-testid={`agent-cli-toggle-${kind}`}
-          className={switchClass}
-          disabled={busy}
-          onClick={() => onToggle(kind, !enabled)}
+        <span
+          className={statusClass}
+          data-tone={available ? 'on' : 'off'}
+          data-testid={`agent-cli-status-${kind}`}
         >
-          <span className={switchKnobClass} />
-        </button>
-      ) : (
-        // Nothing to enable until it is installed; hold the column so detected
-        // and not-detected rows stay aligned.
-        <span className={switchPlaceholderClass} aria-hidden />
-      )}
+          {available ? 'Detected' : 'Not detected'}
+        </span>
+
+        {available ? (
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enabled}
+            aria-label={`Enable ${displayName}`}
+            data-state={enabled ? 'on' : 'off'}
+            data-testid={`agent-cli-toggle-${kind}`}
+            className={switchClass}
+            disabled={busy}
+            onClick={() => onToggle(kind, !enabled)}
+          >
+            <span className={switchKnobClass} />
+          </button>
+        ) : (
+          // Nothing to enable until it is installed; hold the column so
+          // detected and not-detected rows stay aligned.
+          <span className={switchPlaceholderClass} aria-hidden />
+        )}
+      </div>
+
+      {showReverieTools ? (
+        bridgeEntry === null ? (
+          // Status hasn't loaded yet; muted hint keeps the row from jumping.
+          <span
+            className={toolsHintClass}
+            data-tone="muted"
+            data-testid={`agent-cli-tools-${kind}`}
+          >
+            Checking Reverie tools…
+          </span>
+        ) : toolsInstalled ? (
+          <span
+            className={toolsHintClass}
+            data-tone="ok"
+            data-testid={`agent-cli-tools-${kind}`}
+            title={bridgeEntry.mismatchedPaths ? 'Different bridge path detected' : undefined}
+          >
+            ✓ Reverie tools installed
+          </span>
+        ) : (
+          <span
+            className={toolsHintClass}
+            data-tone="missing"
+            data-testid={`agent-cli-tools-${kind}`}
+          >
+            Reverie tools not installed.
+            <button
+              type="button"
+              className={installRetryClass}
+              disabled={bridgeBusy}
+              onClick={() => onRetryInstall(kind)}
+              data-testid={`agent-cli-tools-retry-${kind}`}
+            >
+              {bridgeBusy ? 'Installing…' : 'Install Reverie tools'}
+            </button>
+          </span>
+        )
+      ) : null}
     </li>
   );
 }
@@ -137,13 +217,39 @@ const listClass = css({
 });
 const rowClass = css({
   display: 'grid',
-  gridTemplateColumns: '1fr auto auto',
-  alignItems: 'center',
-  gap: '16px',
+  gap: '6px',
   padding: '16px 4px',
   borderTop: '1px solid var(--line-faint)',
   _first: { borderTop: 'none' },
   '&[data-available="off"]': { opacity: 0.62 },
+});
+const rowMainClass = css({
+  display: 'grid',
+  gridTemplateColumns: '1fr auto auto',
+  alignItems: 'center',
+  gap: '16px',
+});
+const toolsHintClass = css({
+  fontSize: '11.5px',
+  letterSpacing: '0.02em',
+  color: 'var(--text-3)',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '8px',
+  '&[data-tone="ok"]': { color: 'var(--status-ok, #2f7a3f)' },
+  '&[data-tone="missing"]': { color: 'var(--status-warning, #b03f1f)' },
+});
+const installRetryClass = css({
+  appearance: 'none',
+  border: 'none',
+  background: 'transparent',
+  padding: 0,
+  color: 'inherit',
+  textDecoration: 'underline',
+  textUnderlineOffset: '2px',
+  cursor: 'pointer',
+  fontSize: 'inherit',
+  '&:disabled': { opacity: 0.6, cursor: 'wait' },
 });
 const rowTitleClass = css({
   minWidth: 0,

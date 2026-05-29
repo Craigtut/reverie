@@ -326,7 +326,7 @@ fn emit_request_change(app: &AppHandle) {
 
 use tauri::Emitter;
 
-fn resolve_bridge_binaries(app: &AppHandle) -> Result<BridgeBinaries> {
+pub(crate) fn resolve_bridge_binaries(app: &AppHandle) -> Result<BridgeBinaries> {
     // Resource path lookup for production builds. In dev (tauri:dev), the
     // sidecar layout colocates the binaries next to the desktop exe.
     let exe = std::env::current_exe().map_err(|err| anyhow!("locating current exe: {err}"))?;
