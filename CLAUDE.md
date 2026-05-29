@@ -63,6 +63,7 @@ These are load-bearing product and architecture rules. Breaking them undermines 
 - **Don't turn Reverie into an IDE.** Favor session continuity and a calm, organized map over feature sprawl. Developer-only features (worktrees, etc.) are opt-in, progressive-disclosure only.
 - **Keep the product/domain layer independent of the terminal renderer.** The UI consumes Reverie's `TerminalFrame` event model, not Ghostty-specific APIs.
 - **Never render terminal cells as React DOM.** The terminal is an imperative Canvas island.
+- **All frontend text renders through the `<Typography>` primitive** (`apps/desktop/web/components/primitives/Typography.tsx`). Pick a `variant` from the scale (`themes/typography.ts`) and a `tone` for color; never set `fontSize`, `fontWeight`, `lineHeight`, or text `color` ad-hoc in a `css()` block. Residual needs (monospace, opacity, eyebrow letter-spacing) go through the component's `className`/`style`, not a parallel text style.
 - **Don't animate inside the terminal paint loop.** Motion is shell-level only.
 - **Local-first only.** No accounts, cloud sync, or sync seams in v1.
 - **Dangerous / YOLO mode stays explicit.** Off by default, opt-in, overridable per session. Never hidden behind defaults.
