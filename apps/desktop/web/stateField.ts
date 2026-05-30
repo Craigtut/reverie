@@ -11,17 +11,23 @@
 //   attention - rhythmic rings pinging outward from a lit core (amber/red)
 //   finished  - one bloom that settles into an even, still lattice (neutral)
 //
+// On top of those resting states, specific state *changes* can play a one-shot
+// transition overlay (see TRANSITIONS): e.g. active -> idle blooms the working
+// energy outward and settles it, so finishing a turn reads as a small moment.
+//
 // Performance is non-negotiable (this can appear on dozens of cards at once), so:
 //   - There is exactly ONE WebGL context, an offscreen canvas reused per cell.
 //     Each cell owns a cheap 2D <canvas> in the DOM (clipped + scrolled for free
 //     by its container); we render a cell in GL then drawImage it onto that 2D
 //     canvas. No N contexts, no overlay-positioning math.
-//   - Only animating states (active/attention/error, and finished during its
-//     ~1.4s settle) drive the rAF loop. Static states stamp exactly once.
+//   - Only animating cells drive the rAF loop: the continuously-animated states
+//     (active/attention/error), and any cell mid-transition or in the finished
+//     settle. Static states stamp exactly once.
 //   - The loop stops when no cell is animating and when the tab is hidden.
-//   - prefers-reduced-motion renders a single representative still per state.
+//   - prefers-reduced-motion renders a single representative still per state and
+//     skips transitions entirely.
 
-export type CellState = 'fresh' | 'active' | 'attention' | 'error' | 'finished';
+export type CellState = 'fresh' | 'active' | 'idle' | 'attention' | 'error' | 'finished';
 
 const STATE_CODE: Record<CellState, number> = {
   fresh: 0,
@@ -29,6 +35,37 @@ const STATE_CODE: Record<CellState, number> = {
   attention: 2,
   error: 3,
   finished: 4,
+  idle: 5,
+};
+
+// --- Transition moments -------------------------------------------------------
+// Most state changes are an instant swap. A few are worth a one-shot motion
+// played *on the change itself*, keyed on the state we came FROM. A transition is
+// deliberately decoupled from state: the base render is always the target state's
+// resting look, and the transition is a time-boxed *overlay* faded out by its
+// progress. That keeps moments composable and cheap to add.
+//
+// To author a new moment:
+//   1. add a `TransitionKind` + a code in `TRANSITION_CODE`,
+//   2. add a branch to `transitionOverlay()` in the vertex shader,
+//   3. map the `from>to` pair(s) to it in `TRANSITIONS`.
+export type TransitionKind = 'settle';
+
+interface TransitionDef {
+  kind: TransitionKind;
+  durationMs: number;
+}
+
+// Shader codes for each kind. 0 is reserved for "no transition".
+const TRANSITION_CODE: Record<TransitionKind, number> = {
+  settle: 1,
+};
+
+// Keyed `${from}>${to}`. Pairs not listed here swap instantly with no overlay.
+const TRANSITIONS: Partial<Record<`${CellState}>${CellState}`, TransitionDef>> = {
+  // The agent just finished a turn: the working energy releases outward and the
+  // cell comes to rest. A green-tinted bloom dissolving into the neutral idle dot.
+  'active>idle': { kind: 'settle', durationMs: 1400 },
 };
 
 // How long the finished bloom plays before the cell goes static.
@@ -41,6 +78,15 @@ export interface StateCellHandle {
   destroy(): void;
 }
 
+// An in-flight transition overlay on a cell. `from` is the state we left, used
+// to tint the overlay toward where it came from (e.g. green "working" energy
+// dissolving into the neutral resting cell).
+interface ActiveTransition {
+  def: TransitionDef;
+  from: CellState;
+  startedAt: number;
+}
+
 interface Cell {
   ctx: CanvasRenderingContext2D;
   cssSize: number;
@@ -48,6 +94,7 @@ interface Cell {
   state: CellState;
   seed: number;
   stateChangedAt: number;
+  transition: ActiveTransition | null;
 }
 
 interface GlProgram {
@@ -59,6 +106,9 @@ interface GlProgram {
   uAge: WebGLUniformLocation | null;
   uSeed: WebGLUniformLocation | null;
   uColor: WebGLUniformLocation | null;
+  uColorFrom: WebGLUniformLocation | null;
+  uTransition: WebGLUniformLocation | null;
+  uTransProgress: WebGLUniformLocation | null;
 }
 
 const VERT = `#version 300 es
@@ -69,8 +119,11 @@ uniform int uState;
 uniform float uTime;
 uniform float uAge;
 uniform float uSeed;
+uniform int uTransition;      // active transition kind (0 = none)
+uniform float uTransProgress; // 0..1 across the transition (1 = done)
 out vec2 vUv;
 out float vBright;
+out float vTrans;             // overlay weight, also tints the dot toward FROM color
 
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p){
@@ -83,16 +136,19 @@ float vnoise(vec2 p){
 void field(vec2 g, out float s, out float b){
   float r = length(g);
   float core = smoothstep(1.1, 0.0, r);
-  if (uState == 0) {            // fresh: still, dim seed
-    s = 0.34 + 0.34 * core;
-    b = 0.24 + 0.32 * core;
+  if (uState == 0) {            // fresh: still, dim seed (corners fade out)
+    s = 0.18 + 0.48 * core;
+    b = 0.13 + 0.40 * core;
   } else if (uState == 1) {     // active: drifting gaussian presence
     vec2 c = 0.52 * vec2(sin(uTime*0.55 + uSeed), sin(uTime*0.43 + uSeed*1.7 + 1.0));
     float d = length(g - c);
     float blob = exp(-d*d / 0.30);
     float n = 0.07 * (vnoise(g*1.6 + uTime*0.35 + uSeed) - 0.5);
-    s = clamp(0.30 + 0.80*blob + n, 0.0, 1.0);
-    b = clamp(0.42 + 0.58*blob, 0.0, 1.0);
+    // Low base so dots far from the moving presence shrink toward transparent
+    // (the far corner nearly vanishes when the blob sits in the opposite one),
+    // so the lattice never reads as a hard square.
+    s = clamp(0.10 + 0.90*blob + n, 0.0, 1.0);
+    b = clamp(0.14 + 0.86*blob, 0.0, 1.0);
   } else if (uState == 2 || uState == 3) { // attention / error: pinging rings
     float speed = uState == 3 ? 4.6 : 3.2;
     float sharp = uState == 3 ? 5.0 : 4.0;
@@ -101,22 +157,51 @@ void field(vec2 g, out float s, out float b){
     float wave = 0.5 + 0.5 * sin(r*6.3 - uTime*speed);
     float ring = pow(wave, sharp) * smoothstep(1.25, 0.1, r);
     float m = max(coreLit, ring);
-    s = clamp(0.36 + 0.64*m, 0.0, 1.0);
-    b = clamp((0.55 + 0.45*m) * pulse, 0.22, 1.0);
-  } else {                      // finished: bloom once, settle to even lattice
+    s = clamp(0.30 + 0.70*m, 0.0, 1.0);
+    b = clamp((0.50 + 0.50*m) * pulse, 0.20, 1.0);
+  } else if (uState == 4) {     // finished: bloom once, settle to even lattice
     float settle = smoothstep(0.0, 1.1, uAge);
     float bloomR = uAge * 1.35;
     float bloom = pow(0.5 + 0.5*sin((r - bloomR)*6.0), 6.0) * (1.0 - settle);
-    float even = 0.42 + 0.30 * smoothstep(1.2, 0.0, r);
-    s = clamp(mix(0.26, even, settle) + bloom*0.5, 0.0, 1.0);
-    b = clamp(mix(0.28, 0.48 + 0.26*smoothstep(1.2,0.0,r), settle) + bloom*0.5, 0.0, 1.0);
+    // Flat, settled, with the four corners dimmed so it reads as a dot cluster
+    // rather than a perfect square.
+    float even = 0.24 + 0.44 * smoothstep(1.45, 0.0, r);
+    s = clamp(mix(0.22, even, settle) + bloom*0.5, 0.0, 1.0);
+    b = clamp(mix(0.24, even * 0.96, settle) + bloom*0.5, 0.0, 1.0);
+  } else {                      // idle (5): alive, resting, waiting on you
+    // A still, center-weighted presence: brighter than fresh/finished and
+    // clearly concentrated at the core (not the green drift of "working").
+    float glow = smoothstep(1.0, 0.0, r);
+    s = 0.16 + 0.56 * glow;
+    b = 0.20 + 0.52 * glow;
   }
+}
+
+// One-shot transition overlays, layered over the target state's resting field and
+// faded out by progress p in [0,1]. Returns the overlay weight, which the
+// fragment stage uses to tint the dot toward the FROM color.
+float transitionOverlay(vec2 g, float p, inout float s, inout float b){
+  float r = length(g);
+  float t = 0.0;
+  if (uTransition == 1) {            // settle: working energy releases, then rests
+    float ringR = (1.0 - pow(1.0 - p, 2.0)) * 1.5;   // ease-out expansion
+    float fade  = pow(1.0 - p, 1.4);                 // soft, lingering tail
+    float ring  = pow(0.5 + 0.5 * sin((r - ringR) * 5.5), 6.0);
+    float flash = smoothstep(0.6, 0.0, r) * pow(1.0 - p, 3.0) * 0.45; // release instant
+    t = max(ring * fade, flash);
+    s = clamp(s + t * 0.5, 0.0, 1.0);
+    b = clamp(b + t * 0.7, 0.0, 1.0);
+  }
+  return t;
 }
 
 void main(){
   float s; float b;
   field(aGrid, s, b);
+  // No-ops (returns 0, leaves s/b) when uTransition == 0.
+  float t = transitionOverlay(aGrid, uTransProgress, s, b);
   vBright = b;
+  vTrans = t;
   vUv = aQuad;
   float spread = 0.66;            // how far the lattice fills the tile
   float dotRadius = 0.188 * s;    // half-size of a dot in tile space
@@ -129,13 +214,18 @@ const FRAG = `#version 300 es
 precision highp float;
 in vec2 vUv;
 in float vBright;
+in float vTrans;
 uniform vec3 uColor;
+uniform vec3 uColorFrom;
 out vec4 outColor;
 void main(){
   float d = length(vUv);
   float a = smoothstep(1.0, 0.34, d) * vBright;  // crisp dot with a soft halo
+  // During a transition the overlay reads in the FROM color (e.g. green work
+  // energy) and dissolves toward the target color as the moment settles.
+  vec3 col = mix(uColor, uColorFrom, clamp(vTrans, 0.0, 1.0));
   // Premultiplied alpha so overlapping soft dots bloom gently over any card bg.
-  outColor = vec4(uColor * a, a);
+  outColor = vec4(col * a, a);
 }`;
 
 let gl: WebGL2RenderingContext | null = null;
@@ -154,6 +244,7 @@ const reduceMotion =
 let colors: Record<CellState, [number, number, number]> = {
   fresh: [0.5, 0.5, 0.5],
   active: [0.43, 0.72, 0.48],
+  idle: [0.62, 0.66, 0.72],
   attention: [0.85, 0.65, 0.3],
   error: [0.85, 0.4, 0.4],
   finished: [0.55, 0.55, 0.58],
@@ -212,6 +303,9 @@ function ensureGl(): GlProgram | null {
       uAge: gl.getUniformLocation(program, 'uAge'),
       uSeed: gl.getUniformLocation(program, 'uSeed'),
       uColor: gl.getUniformLocation(program, 'uColor'),
+      uColorFrom: gl.getUniformLocation(program, 'uColorFrom'),
+      uTransition: gl.getUniformLocation(program, 'uTransition'),
+      uTransProgress: gl.getUniformLocation(program, 'uTransProgress'),
     };
     return prog;
   } catch {
@@ -250,11 +344,21 @@ function cellAge(cell: Cell, now: number): number {
   return Math.max(0, (now - cell.stateChangedAt) / 1000);
 }
 
+// Progress of an in-flight transition overlay in [0,1], or null when there is
+// none or it has elapsed. Pure: expiry is cleaned up by the frame loop so the
+// final settled frame gets stamped exactly once.
+function transitionFrac(cell: Cell, now: number): number | null {
+  const t = cell.transition;
+  if (!t) return null;
+  const frac = (now - t.startedAt) / t.def.durationMs;
+  return frac >= 1 ? null : Math.max(0, frac);
+}
+
 function isAnimating(cell: Cell, now: number): boolean {
   if (reduceMotion) return false;
   if (cell.state === 'active' || cell.state === 'attention' || cell.state === 'error') return true;
   if (cell.state === 'finished') return now - cell.stateChangedAt < FINISHED_SETTLE_MS;
-  return false;
+  return transitionFrac(cell, now) !== null;
 }
 
 // Render one cell into the shared GL canvas, then stamp it onto the cell's 2D
@@ -284,6 +388,13 @@ function renderCell(cell: Cell, now: number) {
   g.uniform1f(p.uSeed, cell.seed);
   const c = colors[cell.state];
   g.uniform3f(p.uColor, c[0], c[1], c[2]);
+  // Transition overlay: tinted toward the FROM state's color while it plays.
+  const frac = transitionFrac(cell, now);
+  const overlay = frac !== null ? cell.transition : null;
+  const from = overlay ? colors[overlay.from] : c;
+  g.uniform3f(p.uColorFrom, from[0], from[1], from[2]);
+  g.uniform1i(p.uTransition, overlay ? TRANSITION_CODE[overlay.def.kind] : 0);
+  g.uniform1f(p.uTransProgress, frac ?? 1.0);
   g.drawArraysInstanced(g.TRIANGLE_STRIP, 0, 4, GRID * GRID);
   g.bindVertexArray(null);
   ctx2d.drawImage(glCanvas, 0, 0, TILE, TILE, 0, 0, cell.dprSize, cell.dprSize);
@@ -320,6 +431,12 @@ function frame() {
     if (isAnimating(cell, now)) {
       renderCell(cell, now);
       stillAnimating = true;
+    } else if (cell.transition) {
+      // A transition overlay just elapsed: clear it and stamp the settled target
+      // state once. (A transition whose target is itself a continuously-animated
+      // state never reaches here; it is cleared lazily on the next change.)
+      cell.transition = null;
+      renderCell(cell, now);
     } else if (cell.state === 'finished') {
       // Stamp the settled frame once as the bloom window closes.
       renderCell(cell, now);
@@ -382,6 +499,7 @@ export function registerStateCell(
     state,
     seed,
     stateChangedAt: performance.now(),
+    transition: null,
   };
   cells.set(key, cell);
   renderCell(cell, performance.now()); // immediate first paint
@@ -390,10 +508,15 @@ export function registerStateCell(
   return {
     update(next: CellState) {
       if (next === cell.state) return;
+      const now = performance.now();
+      // Look up a transition moment for this exact change before we leave the
+      // FROM state. Skipped under reduced motion (we just swap to the still).
+      const def = reduceMotion ? undefined : TRANSITIONS[`${cell.state}>${next}`];
+      cell.transition = def ? { def, from: cell.state, startedAt: now } : null;
       cell.state = next;
-      cell.stateChangedAt = performance.now();
-      renderCell(cell, performance.now());
-      if (isAnimating(cell, performance.now())) startLoop();
+      cell.stateChangedAt = now;
+      renderCell(cell, now);
+      if (isAnimating(cell, now)) startLoop();
     },
     destroy() {
       cells.delete(key);
@@ -419,9 +542,10 @@ export function refreshStateFieldColors() {
   colors = {
     fresh: read('--text-3', colors.fresh),
     active: read('--good', colors.active),
+    idle: read('--text-2', colors.idle),
     attention: read('--warn', colors.attention),
     error: read('--bad', colors.error),
-    finished: read('--text-2', colors.finished),
+    finished: read('--text-3', colors.finished),
   };
   const now = performance.now();
   for (const cell of cells.values()) renderCell(cell, now);

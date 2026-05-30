@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 import { css } from '../../styled-system/css';
 import { refreshStateFieldColors, type CellState } from '../../stateField';
@@ -9,12 +9,49 @@ import { StateCell } from './StateCell';
 // Shows every state large (for motion tuning) plus at the card / row / tab sizes
 // they ship at. Not wired into the app shell.
 const STATES: { state: CellState; label: string; note: string }[] = [
-  { state: 'fresh', label: 'Fresh', note: 'ready, dormant — near-still seed' },
-  { state: 'active', label: 'Active', note: 'working — gaussian presence drifts' },
-  { state: 'attention', label: 'Attention', note: 'awaiting you — rings ping outward' },
-  { state: 'error', label: 'Error', note: 'hard error — faster red rings' },
-  { state: 'finished', label: 'Finished', note: 'done — blooms once, then settles' },
+  { state: 'fresh', label: 'Fresh', note: 'created, never launched (near-still seed)' },
+  { state: 'idle', label: 'Idle', note: 'alive, waiting for your next prompt' },
+  { state: 'active', label: 'Working', note: 'mid-turn, the presence drifts' },
+  { state: 'attention', label: 'Attention', note: 'awaiting you, rings ping outward' },
+  { state: 'error', label: 'Error', note: 'hard error, faster red rings' },
+  {
+    state: 'finished',
+    label: 'Finished',
+    note: 'bloom-and-settle primitive (not a session state)',
+  },
 ];
+
+// A cell that loops active -> idle so the "settle" transition (the moment an
+// agent finishes a turn) can be tuned. The toggle every few seconds replays it.
+function TransitionShowcase() {
+  const [state, setState] = useState<CellState>('active');
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setState(prev => (prev === 'active' ? 'idle' : 'active'));
+    }, 2600);
+    return () => window.clearInterval(id);
+  }, []);
+  const replay = () => {
+    setState('active');
+    window.setTimeout(() => setState('idle'), 80);
+  };
+  return (
+    <div className={cardClass}>
+      <StateCell state={state} size={120} />
+      <div className={metaClass}>
+        <Typography as="strong" variant="smallBodyAlt" tone="inherit">
+          active → idle · “settle”
+        </Typography>
+        <Typography as="span" variant="caption" tone="inherit" style={{ opacity: 0.55 }}>
+          the working energy releases outward and comes to rest (auto-loops)
+        </Typography>
+        <button type="button" className={replayButtonClass} onClick={replay}>
+          Replay
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export function StateCellDemo() {
   useEffect(() => {
@@ -34,6 +71,9 @@ export function StateCellDemo() {
           WebGL dot-field motion per state. Large for tuning; card (22) / row (14) / tab (10) sizes
           on the right.
         </Typography>
+      </div>
+      <div className={gridClass}>
+        <TransitionShowcase />
       </div>
       <div className={gridClass}>
         {STATES.map(({ state, label, note }) => (
@@ -94,4 +134,17 @@ const scalesClass = css({
   alignItems: 'center',
   gap: '12px',
   marginTop: '8px',
+});
+
+const replayButtonClass = css({
+  marginTop: '8px',
+  alignSelf: 'start',
+  padding: '4px 12px',
+  borderRadius: '8px',
+  border: '1px solid rgba(255,255,255,0.16)',
+  background: 'rgba(255,255,255,0.04)',
+  color: 'inherit',
+  cursor: 'pointer',
+  fontSize: '12px',
+  _hover: { background: 'rgba(255,255,255,0.09)' },
 });
