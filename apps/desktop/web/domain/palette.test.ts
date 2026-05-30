@@ -67,6 +67,9 @@ function makeShell(overrides: Partial<WorkspaceShellSnapshot> = {}): WorkspaceSh
       name: 'Local',
       generalLabel: 'General',
       defaultDangerousMode: false,
+      defaultNewSessionDangerous: false,
+      theme: 'dark',
+      defaultAgentKind: 'cortex_code',
     },
     projects: [],
     focuses: [],
@@ -131,7 +134,9 @@ describe('buildPaletteEntries', () => {
     const focusEntry = entries.find(e => e.kind === 'focus');
     expect(focusEntry).toMatchObject({ projectId: null, projectName: null });
     const sessionEntry = entries.find(e => e.kind === 'session');
-    expect(sessionEntry && sessionEntry.kind === 'session' ? sessionEntry.breadcrumb : null).toBe('Terminal work');
+    expect(sessionEntry && sessionEntry.kind === 'session' ? sessionEntry.breadcrumb : null).toBe(
+      'Terminal work',
+    );
   });
 
   it('excludes hidden sessions (tabVisible === false) from session entries', () => {
@@ -177,7 +182,9 @@ describe('buildPaletteEntries', () => {
     const activity = makeActivity({ sessionId: 'native-1' });
     const entries = buildPaletteEntries(shell, { 'native-1': activity });
     const sessionEntry = entries.find(e => e.kind === 'session');
-    expect(sessionEntry && sessionEntry.kind === 'session' ? sessionEntry.activity : null).toBe(activity);
+    expect(sessionEntry && sessionEntry.kind === 'session' ? sessionEntry.activity : null).toBe(
+      activity,
+    );
   });
 
   it('leaves activity null when there is no matching native session id', () => {
@@ -188,7 +195,9 @@ describe('buildPaletteEntries', () => {
     });
     const entries = buildPaletteEntries(shell, { 'native-1': makeActivity() });
     const sessionEntry = entries.find(e => e.kind === 'session');
-    expect(sessionEntry && sessionEntry.kind === 'session' ? sessionEntry.activity : 'sentinel').toBeNull();
+    expect(
+      sessionEntry && sessionEntry.kind === 'session' ? sessionEntry.activity : 'sentinel',
+    ).toBeNull();
   });
 });
 
@@ -245,14 +254,28 @@ describe('filterPalette', () => {
 
   it('treats a whitespace-only query as empty', () => {
     const entries: PaletteEntry[] = [
-      { kind: 'focus', id: 'f', title: 'Alpha', projectId: null, projectName: null, sessionCount: 0 },
+      {
+        kind: 'focus',
+        id: 'f',
+        title: 'Alpha',
+        projectId: null,
+        projectName: null,
+        sessionCount: 0,
+      },
     ];
     expect(filterPalette(entries, '   ')).toHaveLength(1);
   });
 
   it('matches substrings case-insensitively across all haystack fields', () => {
     const entries: PaletteEntry[] = [
-      { kind: 'focus', id: 'f1', title: 'Terminal work', projectId: null, projectName: null, sessionCount: 0 },
+      {
+        kind: 'focus',
+        id: 'f1',
+        title: 'Terminal work',
+        projectId: null,
+        projectName: null,
+        sessionCount: 0,
+      },
       {
         kind: 'session',
         session: makeSession({ title: 'Codex run', agentKind: 'codex_cli', cwd: '/srv/api' }),

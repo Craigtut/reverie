@@ -1,15 +1,11 @@
 import { makeSyntheticFrame } from '../terminal-canvas-renderer';
-import { findMatchesInFrame } from '../terminal/findModel';
 import type { TerminalFrame } from '../terminalTypes';
 import type { AgentCliDetection, AgentKind, WorkspaceShellSnapshot } from '../domain';
 import type { EventHandler, UnlistenFn } from './types';
 
-// Fixture frames are authored at the default surface width; search reuses it.
-const FIXTURE_COLS = 120;
-const FIXTURE_SEARCH_MAX = 2_000;
-// The most recent frame per terminal, so the fixture `search_terminal` can scan
-// the same content the harness injected/streamed (the real backend searches the
-// live Ghostty buffer).
+// The most recent frame per terminal. The history fixtures serve it as the whole
+// replayed transcript, so the harness can exercise full-history scroll + find
+// without a real replay engine.
 const lastFixtureFrames = new Map<string, TerminalFrame>();
 
 // Browser fixture backend: an in-memory, localStorage-persisted stand-in for
@@ -52,12 +48,16 @@ export async function invokeBrowserFixture<T>(
       return createFixtureSession(args) as T;
     case 'update_session_tab_visibility':
       return updateFixtureSessionTabVisibility(args) as T;
+    case 'set_session_archived':
+      return updateFixtureSessionArchived(args) as T;
     case 'remove_session':
       return removeFixtureSession(args) as T;
     case 'archive_focus':
       return archiveFixtureFocus(args) as T;
     case 'archive_project':
       return archiveFixtureProject(args) as T;
+    case 'reorder_focuses':
+      return reorderFixtureFocuses(args) as T;
     case 'list_agent_clis':
       return listFixtureAgentClis() as T;
     case 'set_agent_cli_enabled':
@@ -82,10 +82,10 @@ export async function invokeBrowserFixture<T>(
       return undefined as T;
     case 'scroll_terminal_viewport_to_bottom':
       return undefined as T;
-    case 'scroll_terminal_viewport_to_row':
+    case 'set_terminal_theme':
+      // No backend terminal in the browser harness; the Canvas renderer applies
+      // theme colors directly via the controller, so this is a no-op here.
       return undefined as T;
-    case 'search_terminal':
-      return searchFixtureTerminal(args) as T;
     case 'terminal_history_info':
       return historyInfoFixture(args) as T;
     case 'terminal_history_window':
@@ -177,6 +177,7 @@ function createFixtureSession(args?: Record<string, unknown>) {
     status: 'not_started' as const,
     lastExitCode: null,
     tabVisible: true,
+    archived: false,
   };
 
   fixtureShell = {
@@ -193,6 +194,16 @@ function updateFixtureSessionTabVisibility(args?: Record<string, unknown>) {
   const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
   if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
   session.tabVisible = request.tabVisible;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function updateFixtureSessionArchived(args?: Record<string, unknown>) {
+  const request = readRequest<{ shellSessionId: string; archived: boolean }>(args);
+  const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
+  if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
+  session.archived = request.archived;
+  session.tabVisible = !request.archived;
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
@@ -218,6 +229,16 @@ function archiveFixtureFocus(args?: Record<string, unknown>) {
   for (const session of fixtureShell.sessions.filter(item => item.focusId === focusId)) {
     session.tabVisible = false;
   }
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function reorderFixtureFocuses(args?: Record<string, unknown>) {
+  const orderedIds = readDirectArg<string[]>(args, 'orderedFocusIds');
+  orderedIds.forEach((id, index) => {
+    const focus = fixtureShell.focuses.find(item => item.id === id);
+    if (focus) focus.sortOrder = index * 10;
+  });
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
@@ -370,22 +391,6 @@ function historyWindowFixture(args?: Record<string, unknown>) {
   const startRow = Number(args?.startRow ?? 0);
   const frame = fixtureSessionFrame() ?? { dirty: 'full', rows: [] };
   return { startRow, frame };
-}
-
-function searchFixtureTerminal(args?: Record<string, unknown>) {
-  const terminalId = readDirectArg<string>(args, 'terminalId');
-  const query = (args?.query as string) ?? '';
-  const caseSensitive = Boolean(args?.caseSensitive);
-  const frame = lastFixtureFrames.get(terminalId);
-  if (!frame || query.length === 0) {
-    return { matches: [], total: 0, capped: false };
-  }
-  const all = findMatchesInFrame(frame, query, caseSensitive, FIXTURE_COLS);
-  return {
-    matches: all.slice(0, FIXTURE_SEARCH_MAX),
-    total: all.length,
-    capped: all.length > FIXTURE_SEARCH_MAX,
-  };
 }
 
 function emitFixtureFrames(terminalId: string, cols: number, rows: number) {
@@ -575,6 +580,19 @@ function persistFixtureShellSnapshot(snapshot = fixtureShell) {
 function normalizeFixtureShellSnapshot(snapshot: WorkspaceShellSnapshot) {
   for (const session of snapshot.sessions) {
     session.tabVisible ??= true;
+    session.archived ??= false;
+  }
+  // Mirror the backend `ensure_seeded`: a workspace always has a General focus so
+  // sessions can be spun up without a project.
+  if (!snapshot.focuses.some(focus => !focus.projectId && !focus.archived)) {
+    snapshot.focuses.unshift({
+      id: 'focus-general',
+      projectId: null,
+      title: snapshot.workspace.generalLabel,
+      description: null,
+      sortOrder: 0,
+      archived: false,
+    });
   }
 }
 
@@ -583,20 +601,152 @@ function makeId(prefix: string) {
 }
 
 function makeFixtureShellSnapshot(): WorkspaceShellSnapshot {
-  const workspace = {
+  const workspace: WorkspaceShellSnapshot['workspace'] = {
     id: 'fixture-workspace',
     name: 'Browser fixture workspace',
     generalLabel: 'General',
     defaultDangerousMode: false,
+    defaultNewSessionDangerous: false,
+    theme: 'dark',
+    defaultAgentKind: 'cortex_code',
   };
 
-  // The harness defaults to an empty workspace, matching the Tauri build's first-launch state.
-  // The `?fixture=empty` URL param is still honored for callers that pass it explicitly; the
-  // default branch returns the same shape.
+  const generalFocus = {
+    id: 'focus-general',
+    projectId: null,
+    title: 'General',
+    description: null,
+    sortOrder: 0,
+    archived: false,
+  };
+
+  // `?fixture=populated` returns a rich workspace (projects, focuses, sessions
+  // across every state, plus archived ones) for exercising the dashboard,
+  // sidebar accordions, and focus view. Every other value (including `empty`)
+  // returns the seeded-but-empty first-launch shape.
+  if (new URLSearchParams(window.location.search).get('fixture') === 'populated') {
+    return makePopulatedFixtureSnapshot(workspace, generalFocus);
+  }
+
   return {
     workspace,
     projects: [],
-    focuses: [],
+    focuses: [generalFocus],
     sessions: [],
+  };
+}
+
+function makePopulatedFixtureSnapshot(
+  workspace: WorkspaceShellSnapshot['workspace'],
+  generalFocus: WorkspaceShellSnapshot['focuses'][number],
+): WorkspaceShellSnapshot {
+  const project = {
+    id: 'project-cortex-mono',
+    name: 'cortex-mono',
+    path: '/Users/user/Code/cortex-mono',
+    archived: false,
+  };
+  const authFocus = {
+    id: 'focus-auth',
+    projectId: project.id,
+    title: 'Auth',
+    description: null,
+    sortOrder: 0,
+    archived: false,
+  };
+  const brandingFocus = {
+    id: 'focus-branding',
+    projectId: project.id,
+    title: 'Branding',
+    description: null,
+    sortOrder: 10,
+    archived: false,
+  };
+
+  const session = (
+    overrides: Partial<WorkspaceShellSnapshot['sessions'][number]> & {
+      id: string;
+      focusId: string;
+      title: string;
+    },
+  ): WorkspaceShellSnapshot['sessions'][number] => ({
+    agentKind: 'cortex_code',
+    cwd: project.path,
+    nativeSessionRef: null,
+    launchMode: 'new',
+    dangerousModeOverride: false,
+    status: 'not_started',
+    lastExitCode: null,
+    tabVisible: true,
+    archived: false,
+    ...overrides,
+  });
+
+  return {
+    workspace,
+    projects: [project],
+    focuses: [generalFocus, authFocus, brandingFocus],
+    sessions: [
+      session({
+        id: 'session-auth-running',
+        focusId: authFocus.id,
+        title: 'OAuth refactor',
+        agentKind: 'claude_code',
+        status: 'running',
+      }),
+      session({
+        id: 'session-auth-failed',
+        focusId: authFocus.id,
+        title: 'Token rotation',
+        agentKind: 'cortex_code',
+        status: 'restore_failed',
+      }),
+      session({
+        id: 'session-auth-fresh',
+        focusId: authFocus.id,
+        title: 'Session store spike',
+        agentKind: 'codex_cli',
+        status: 'not_started',
+      }),
+      session({
+        id: 'session-auth-done',
+        focusId: authFocus.id,
+        title: 'Login form polish',
+        agentKind: 'claude_code',
+        status: 'restorable',
+      }),
+      session({
+        id: 'session-auth-archived',
+        focusId: authFocus.id,
+        title: 'Old password reset',
+        agentKind: 'cortex_code',
+        status: 'exited',
+        tabVisible: false,
+        archived: true,
+      }),
+      session({
+        id: 'session-branding-running',
+        focusId: brandingFocus.id,
+        title: 'Logo explorations',
+        agentKind: 'codex_cli',
+        status: 'running',
+      }),
+      session({
+        id: 'session-general-fresh',
+        focusId: generalFocus.id,
+        title: 'Scratch notes',
+        agentKind: 'cortex_code',
+        cwd: '/Users/user',
+        status: 'not_started',
+      }),
+      session({
+        id: 'session-general-done',
+        focusId: generalFocus.id,
+        title: 'Weekly summary',
+        agentKind: 'claude_code',
+        cwd: '/Users/user',
+        status: 'restorable',
+      }),
+    ],
   };
 }

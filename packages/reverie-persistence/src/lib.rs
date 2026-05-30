@@ -22,7 +22,7 @@ use reverie_core::connection::{
 use reverie_core::connection_repository::ConnectionRepository;
 use reverie_core::domain::{
     AgentKind, Focus, LaunchMode, NativeSessionRef, Project, ProjectId, Session, SessionId,
-    SessionStatus, Workspace, WorkspaceId, WorkspaceSnapshot,
+    SessionStatus, ThemeMode, Workspace, WorkspaceId, WorkspaceSnapshot,
 };
 use reverie_core::repository::{PersistenceError, RepoResult, WorkspaceRepository};
 use reverie_core::transcript::TranscriptStore;
@@ -122,6 +122,22 @@ const MIGRATIONS: &[&str] = &[
      );
      CREATE INDEX IF NOT EXISTS idx_session_transcript_chunk_offset
         ON session_transcript_chunk(session_id, byte_offset);",
+    // v4 -> v5: per-session archive flag. Closing a session archives it: it
+    // leaves the Home dashboard and the sidebar focus lists for the focus's
+    // archived list, restorable anytime. Defaults to 0 so existing sessions
+    // surface as active (non-archived) after upgrade.
+    "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;",
+    // v5 -> v6: persisted default YOLO state for new sessions. This only seeds
+    // the new-session composer's starting value; it is independent of
+    // default_dangerous_mode (the per-session fallback) and never changes an
+    // existing session. Defaults to 0 so existing workspaces upgrade unchanged.
+    "ALTER TABLE workspace ADD COLUMN default_new_session_dangerous INTEGER NOT NULL DEFAULT 0;",
+    // v6 -> v7: persisted workspace appearance and default new-session agent.
+    // `theme` stores the light/dark wire string the renderer seeds on load;
+    // `default_agent_kind` seeds the new-session composer's agent picker. Both
+    // get safe defaults so existing workspaces upgrade unchanged.
+    "ALTER TABLE workspace ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark';
+     ALTER TABLE workspace ADD COLUMN default_agent_kind TEXT NOT NULL DEFAULT 'cortex_code';",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -132,7 +148,8 @@ const CONNECTION_MESSAGE_COLUMNS: &str =
     "id, connection_id, from_session, to_session, body, sent_at, delivered_at, sequence";
 
 const SESSION_COLUMNS: &str = "id, focus_id, title, agent_kind, cwd, native_session_ref_json, \
-     launch_mode, dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json";
+     launch_mode, dangerous_mode_override, status, last_exit_code, tab_visible, \
+     latest_activity_json, archived";
 
 pub struct SqliteWorkspaceRepository {
     conn: Mutex<Connection>,
@@ -206,14 +223,19 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         if count == 0 {
             conn.execute(
                 "INSERT INTO workspace
-                    (id, name, general_label, default_dangerous_mode, disabled_agent_kinds)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (id, name, general_label, default_dangerous_mode,
+                     default_new_session_dangerous, disabled_agent_kinds,
+                     theme, default_agent_kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     seed.id.to_string(),
                     seed.name,
                     seed.general_label,
                     bool_to_int(seed.default_dangerous_mode),
+                    bool_to_int(seed.default_new_session_dangerous),
                     disabled_kinds_to_db(&seed.disabled_agent_kinds)?,
+                    theme_mode_to_db(seed.theme)?,
+                    agent_kind_to_db(seed.default_agent_kind)?,
                 ],
             )
             .map_err(backend)?;
@@ -225,19 +247,27 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO workspace
-                (id, name, general_label, default_dangerous_mode, disabled_agent_kinds)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+                (id, name, general_label, default_dangerous_mode,
+                 default_new_session_dangerous, disabled_agent_kinds,
+                 theme, default_agent_kind)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
                 default_dangerous_mode = excluded.default_dangerous_mode,
-                disabled_agent_kinds = excluded.disabled_agent_kinds",
+                default_new_session_dangerous = excluded.default_new_session_dangerous,
+                disabled_agent_kinds = excluded.disabled_agent_kinds,
+                theme = excluded.theme,
+                default_agent_kind = excluded.default_agent_kind",
             params![
                 workspace.id.to_string(),
                 workspace.name,
                 workspace.general_label,
                 bool_to_int(workspace.default_dangerous_mode),
+                bool_to_int(workspace.default_new_session_dangerous),
                 disabled_kinds_to_db(&workspace.disabled_agent_kinds)?,
+                theme_mode_to_db(workspace.theme)?,
+                agent_kind_to_db(workspace.default_agent_kind)?,
             ],
         )
         .map_err(backend)?;
@@ -296,8 +326,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         conn.execute(
             "INSERT INTO sessions (
                 id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
-                dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json,
+                archived
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 focus_id = excluded.focus_id, title = excluded.title,
                 agent_kind = excluded.agent_kind, cwd = excluded.cwd,
@@ -306,7 +337,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 dangerous_mode_override = excluded.dangerous_mode_override,
                 status = excluded.status, last_exit_code = excluded.last_exit_code,
                 tab_visible = excluded.tab_visible,
-                latest_activity_json = excluded.latest_activity_json",
+                latest_activity_json = excluded.latest_activity_json,
+                archived = excluded.archived",
             params![
                 session.id.to_string(),
                 session.focus_id.to_string(),
@@ -320,6 +352,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 session.last_exit_code,
                 bool_to_int(session.tab_visible),
                 latest_activity_json,
+                bool_to_int(session.archived),
             ],
         )
         .map_err(backend)?;
@@ -748,7 +781,9 @@ fn read_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionMessa
 
 fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
     conn.query_row(
-        "SELECT id, name, general_label, default_dangerous_mode, disabled_agent_kinds
+        "SELECT id, name, general_label, default_dangerous_mode,
+                default_new_session_dangerous, disabled_agent_kinds,
+                theme, default_agent_kind
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -757,7 +792,10 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 name: row.get(1)?,
                 general_label: row.get(2)?,
                 default_dangerous_mode: int_to_bool(row.get::<_, i64>(3)?),
-                disabled_agent_kinds: disabled_kinds_from_db(&row.get::<_, String>(4)?),
+                default_new_session_dangerous: int_to_bool(row.get::<_, i64>(4)?),
+                disabled_agent_kinds: disabled_kinds_from_db(&row.get::<_, String>(5)?),
+                theme: theme_mode_from_db(&row.get::<_, String>(6)?)?,
+                default_agent_kind: agent_kind_from_db(&row.get::<_, String>(7)?)?,
             })
         },
     )
@@ -834,6 +872,7 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         last_exit_code: row.get(9)?,
         tab_visible: int_to_bool(row.get::<_, i64>(10)?),
         latest_activity: activity_state_from_db(row.get::<_, Option<String>>(11)?)?,
+        archived: int_to_bool(row.get::<_, i64>(12)?),
     })
 }
 
@@ -868,6 +907,14 @@ fn disabled_kinds_from_db(value: &str) -> Vec<AgentKind> {
 }
 
 fn agent_kind_from_db(value: &str) -> rusqlite::Result<AgentKind> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(conversion_failure)
+}
+
+fn theme_mode_to_db(value: ThemeMode) -> RepoResult<String> {
+    string_enum(serde_json::to_value(value), "theme mode")
+}
+
+fn theme_mode_from_db(value: &str) -> rusqlite::Result<ThemeMode> {
     serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(conversion_failure)
 }
 
@@ -1115,6 +1162,49 @@ mod tests {
                 .workspace
                 .default_dangerous_mode
         );
+    }
+
+    #[test]
+    fn save_workspace_round_trips_new_session_dangerous_default() {
+        let repo = seeded();
+        // Fresh workspaces default off, independent of default_dangerous_mode.
+        let workspace = repo.load_snapshot().unwrap().workspace;
+        assert!(!workspace.default_new_session_dangerous);
+        assert!(!workspace.default_dangerous_mode);
+
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.default_new_session_dangerous = true;
+        repo.save_workspace(&workspace).unwrap();
+
+        let loaded = repo.load_snapshot().unwrap().workspace;
+        assert!(loaded.default_new_session_dangerous);
+        // Persisting the new-session default must not flip the fallback.
+        assert!(!loaded.default_dangerous_mode);
+    }
+
+    #[test]
+    fn save_workspace_round_trips_theme_and_default_agent_kind() {
+        let repo = seeded();
+        // Fresh workspaces default to the dark theme and the Cortex agent.
+        let workspace = repo.load_snapshot().unwrap().workspace;
+        assert_eq!(workspace.theme, ThemeMode::Dark);
+        assert_eq!(workspace.default_agent_kind, AgentKind::CortexCode);
+
+        // Flipping the theme persists and round-trips without touching the agent.
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.theme = ThemeMode::Light;
+        repo.save_workspace(&workspace).unwrap();
+        let loaded = repo.load_snapshot().unwrap().workspace;
+        assert_eq!(loaded.theme, ThemeMode::Light);
+        assert_eq!(loaded.default_agent_kind, AgentKind::CortexCode);
+
+        // Changing the default agent persists and is independent of the theme.
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.default_agent_kind = AgentKind::ClaudeCode;
+        repo.save_workspace(&workspace).unwrap();
+        let loaded = repo.load_snapshot().unwrap().workspace;
+        assert_eq!(loaded.default_agent_kind, AgentKind::ClaudeCode);
+        assert_eq!(loaded.theme, ThemeMode::Light);
     }
 
     #[test]

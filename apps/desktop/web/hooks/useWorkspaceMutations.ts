@@ -1,8 +1,28 @@
-import { agentLabel, errorMessage, shortId } from '../domain';
-import type { ShellFocus, ShellProject, ShellSession, WorkspaceShellSnapshot } from '../domain';
+import {
+  activityForSession,
+  agentLabel,
+  deriveSessionState,
+  errorMessage,
+  rollupSessionStates,
+  shortId,
+} from '../domain';
+import type {
+  ShellFocus,
+  ShellProject,
+  ShellSession,
+  ShellWorkspace,
+  WorkspaceShellSnapshot,
+} from '../domain';
 import { invoke } from '../services/runtime';
 import { terminateSession } from '../services/terminalApi';
-import { useNavigationStore, useShellStore, useTerminalStore, useUiStore } from '../store';
+import {
+  useActivityStore,
+  useNavigationStore,
+  useOverlayStore,
+  useShellStore,
+  useTerminalStore,
+  useUiStore,
+} from '../store';
 import type { TerminalSession } from './useTerminalSession';
 import type { WorkspaceModel } from './useWorkspaceModel';
 
@@ -17,7 +37,11 @@ interface WorkspaceMutationsOptions {
 // (terminate + relaunch), tab show/hide, session deletion, and focus/project
 // archival (terminating any bound CLIs first). Each reads the live terminal
 // bindings via getState so it sees processes started after this render.
-export function useWorkspaceMutations({ model, terminal, selectSessionTab }: WorkspaceMutationsOptions) {
+export function useWorkspaceMutations({
+  model,
+  terminal,
+  selectSessionTab,
+}: WorkspaceMutationsOptions) {
   const { shell, selectedSession, visibleSessions } = model;
   const setShell = useShellStore(s => s.setShell);
   const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
@@ -34,13 +58,68 @@ export function useWorkspaceMutations({ model, terminal, selectSessionTab }: Wor
   async function setWorkspaceDefaultDangerousMode(next: boolean) {
     if (shell.workspace.defaultDangerousMode === next) return;
     try {
-      const snapshot = await invoke<WorkspaceShellSnapshot>('set_workspace_default_dangerous_mode', {
-        request: { defaultDangerousMode: next },
-      });
+      const snapshot = await invoke<WorkspaceShellSnapshot>(
+        'set_workspace_default_dangerous_mode',
+        {
+          request: { defaultDangerousMode: next },
+        },
+      );
       setShell(snapshot);
       appendLog(`Default auto-approve set to ${next ? 'on' : 'off'} for this workspace.`);
     } catch (error) {
       appendLog(`Update workspace default auto-approve failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Persist the default YOLO state seeded into the new-session composer. This
+  // only changes the starting value of future new-session forms; it does not
+  // touch any existing session and is independent of the workspace
+  // auto-approve default (setWorkspaceDefaultDangerousMode).
+  async function setWorkspaceDefaultNewSessionDangerous(next: boolean) {
+    if (shell.workspace.defaultNewSessionDangerous === next) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>(
+        'set_workspace_default_new_session_dangerous',
+        {
+          request: { defaultNewSessionDangerous: next },
+        },
+      );
+      setShell(snapshot);
+      appendLog(`Default YOLO for new sessions set to ${next ? 'on' : 'off'}.`);
+    } catch (error) {
+      appendLog(`Update default YOLO for new sessions failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Persist the workspace appearance (light/dark). The caller also flips the
+  // live uiStore theme so the UI changes immediately; this write makes the
+  // choice survive restarts by seeding it back on the next shell load.
+  async function setWorkspaceTheme(next: ShellWorkspace['theme']) {
+    if (shell.workspace.theme === next) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_workspace_theme', {
+        request: { theme: next },
+      });
+      setShell(snapshot);
+      appendLog(`Theme set to ${next} for this workspace.`);
+    } catch (error) {
+      appendLog(`Update workspace theme failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Persist the default agent kind seeded into the new-session composer. Only a
+  // starting value for future new-session forms; it does not touch any existing
+  // session. The caller also seeds the live composer state.
+  async function setWorkspaceDefaultAgentKind(next: ShellWorkspace['defaultAgentKind']) {
+    if (shell.workspace.defaultAgentKind === next) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_workspace_default_agent_kind', {
+        request: { defaultAgentKind: next },
+      });
+      setShell(snapshot);
+      appendLog(`Default agent for new sessions set to ${agentLabel(next)}.`);
+    } catch (error) {
+      appendLog(`Update default agent for new sessions failed: ${errorMessage(error)}`);
     }
   }
 
@@ -91,60 +170,110 @@ export function useWorkspaceMutations({ model, terminal, selectSessionTab }: Wor
     }
   }
 
-  async function setSessionTabVisibility(session: ShellSession, tabVisible: boolean) {
-    const snapshot = await invoke<WorkspaceShellSnapshot>('update_session_tab_visibility', {
-      request: { shellSessionId: session.id, tabVisible },
+  async function setSessionArchived(session: ShellSession, archived: boolean) {
+    const snapshot = await invoke<WorkspaceShellSnapshot>('set_session_archived', {
+      request: { shellSessionId: session.id, archived },
     });
     setShell(snapshot);
     return snapshot;
   }
 
-  async function hideSessionTab(event: { stopPropagation: () => void }, session: ShellSession) {
-    event.stopPropagation();
-    // Closing a tab terminates the underlying CLI process. The session record
-    // (title, focus, cwd, native session ref) stays in the store so the user
-    // can resume it later; reopening will call the adapter's resume path
-    // with the captured native session id, which restarts the CLI with
-    // `--resume <id>` and the session's current dangerous-mode override.
+  // Closing a session archives it: the CLI process is terminated, its tab is
+  // dropped, and it leaves Home and the sidebar for the focus's archived list.
+  // The record (title, focus, cwd, native session ref) stays, so restore can
+  // resume it later with `--resume <id>` and the current dangerous-mode
+  // override. Invoked from the tab bar X and the sidebar session row X.
+  // Closing a session archives it. When the session is idle this is quiet and
+  // instant with an Undo; when it is still running or waiting on the user we ask
+  // first, since closing stops a live process.
+  async function archiveSession(session: ShellSession) {
+    const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
+    const activity = activityForSession(session, useActivityStore.getState().cortexActivity);
+    const state = deriveSessionState(session, Boolean(binding), activity);
+    if (binding || state === 'active' || state === 'attention') {
+      useOverlayStore.getState().requestConfirm({
+        title: `Close “${session.title}”?`,
+        body:
+          state === 'attention'
+            ? 'This session is waiting on you. Closing archives it; you can resume it later from the focus history.'
+            : 'This session is still running. Closing stops the process and archives it; you can resume it later.',
+        confirmLabel: 'Close session',
+        onConfirm: () => void performArchiveSession(session),
+      });
+      return;
+    }
+    await performArchiveSession(session);
+  }
+
+  async function performArchiveSession(session: ShellSession) {
     const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
     if (binding) {
       try {
         await terminateSession(binding.terminalId);
       } catch (error) {
-        appendLog(`Close requested terminal stop first; stop failed for ${shortId(binding.terminalId)}: ${errorMessage(error)}`);
+        appendLog(
+          `Close requested terminal stop first; stop failed for ${shortId(binding.terminalId)}: ${errorMessage(error)}`,
+        );
       }
     }
-    const nextVisibleSession = visibleSessions.find(candidate => candidate.id !== session.id) ?? null;
-    const snapshot = await setSessionTabVisibility(session, false);
+    const nextVisibleSession =
+      visibleSessions.find(candidate => candidate.id !== session.id) ?? null;
+    const snapshot = await setSessionArchived(session, true);
     if (selectedSessionId === session.id) {
       if (nextVisibleSession) {
         selectSessionTab(nextVisibleSession);
       } else {
         setSelectedSessionId(null);
         terminal.clearSurface();
-        const stillHasHistory = snapshot.sessions.some(candidate => candidate.focusId === session.focusId);
-        if (stillHasHistory) setSurfaceMode('session-history');
+        const stillHasActive = snapshot.sessions.some(
+          candidate => candidate.focusId === session.focusId && !candidate.archived,
+        );
+        setSurfaceMode(stillHasActive ? 'dashboard' : 'session-history');
       }
     }
-    appendLog(`Closed ${session.title}; CLI process terminated. Reopen to resume.`);
+    appendLog(`Closed ${session.title}; archived to the focus history.`);
+    useOverlayStore.getState().pushToast({
+      message: `Closed “${session.title}”`,
+      actionLabel: 'Undo',
+      onAction: () => {
+        void setSessionArchived(session, false).then(() =>
+          appendLog(`Restored ${session.title} from history.`),
+        );
+      },
+    });
   }
 
   async function restoreSessionTab(session: ShellSession) {
-    await setSessionTabVisibility(session, true);
+    await setSessionArchived(session, false);
     setSurfaceMode('terminal');
-    selectSessionTab({ ...session, tabVisible: true });
+    selectSessionTab({ ...session, tabVisible: true, archived: false });
     appendLog(`Restored ${session.title} to active tabs.`);
   }
 
+  // Permanently delete a session from the focus history (not reversible), so
+  // this always asks first via the confirm sheet.
   async function removeSessionRecord(session: ShellSession) {
-    if (!window.confirm(`Delete session “${session.title}”? This removes it from the focus history.`)) return;
+    useOverlayStore.getState().requestConfirm({
+      title: `Delete “${session.title}”?`,
+      body: 'This permanently removes the session from the focus history and cannot be undone.',
+      confirmLabel: 'Delete session',
+      danger: true,
+      onConfirm: () => void performRemoveSession(session),
+    });
+  }
+
+  async function performRemoveSession(session: ShellSession) {
     const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
     if (binding) {
       await terminateSession(binding.terminalId).catch(error => {
-        appendLog(`Delete requested terminal stop first; stop failed for ${shortId(binding.terminalId)}: ${errorMessage(error)}`);
+        appendLog(
+          `Delete requested terminal stop first; stop failed for ${shortId(binding.terminalId)}: ${errorMessage(error)}`,
+        );
       });
     }
-    const snapshot = await invoke<WorkspaceShellSnapshot>('remove_session', { sessionId: session.id });
+    const snapshot = await invoke<WorkspaceShellSnapshot>('remove_session', {
+      sessionId: session.id,
+    });
     setShell(snapshot);
     setSessionTerminalBindings(bindings => {
       const next = { ...bindings };
@@ -169,8 +298,27 @@ export function useWorkspaceMutations({ model, terminal, selectSessionTab }: Wor
     }
   }
 
+  // Removing a focus or project hides several sessions at once (a cascade), so
+  // these always confirm first and describe what is at stake.
   async function archiveFocusRecord(focus: ShellFocus) {
-    if (!window.confirm(`Remove focus “${focus.title}” from navigation? Sessions under it will no longer be shown in this workspace view.`)) return;
+    const focusSessions = shell.sessions.filter(
+      session => session.focusId === focus.id && !session.archived,
+    );
+    const rollup = rollupSessionStates(
+      focusSessions,
+      useTerminalStore.getState().sessionTerminalBindings,
+      useActivityStore.getState().cortexActivity,
+    );
+    useOverlayStore.getState().requestConfirm({
+      title: `Remove focus “${focus.title}”?`,
+      body: describeRemoval('focus', focusSessions.length, rollup.attention),
+      confirmLabel: 'Remove focus',
+      danger: true,
+      onConfirm: () => void performArchiveFocus(focus),
+    });
+  }
+
+  async function performArchiveFocus(focus: ShellFocus) {
     await terminateBoundSessions(shell.sessions.filter(session => session.focusId === focus.id));
     const snapshot = await invoke<WorkspaceShellSnapshot>('archive_focus', { focusId: focus.id });
     setShell(snapshot);
@@ -183,10 +331,36 @@ export function useWorkspaceMutations({ model, terminal, selectSessionTab }: Wor
   }
 
   async function archiveProjectRecord(project: ShellProject) {
-    if (!window.confirm(`Remove project “${project.name}” from navigation? Its focuses and session tabs will be hidden.`)) return;
-    const projectFocusIds = new Set(shell.focuses.filter(focus => focus.projectId === project.id).map(focus => focus.id));
-    await terminateBoundSessions(shell.sessions.filter(session => projectFocusIds.has(session.focusId)));
-    const snapshot = await invoke<WorkspaceShellSnapshot>('archive_project', { projectId: project.id });
+    const projectFocusIds = new Set(
+      shell.focuses.filter(focus => focus.projectId === project.id).map(focus => focus.id),
+    );
+    const projectSessions = shell.sessions.filter(
+      session => projectFocusIds.has(session.focusId) && !session.archived,
+    );
+    const rollup = rollupSessionStates(
+      projectSessions,
+      useTerminalStore.getState().sessionTerminalBindings,
+      useActivityStore.getState().cortexActivity,
+    );
+    useOverlayStore.getState().requestConfirm({
+      title: `Remove project “${project.name}”?`,
+      body: describeRemoval('project', projectSessions.length, rollup.attention),
+      confirmLabel: 'Remove project',
+      danger: true,
+      onConfirm: () => void performArchiveProject(project),
+    });
+  }
+
+  async function performArchiveProject(project: ShellProject) {
+    const projectFocusIds = new Set(
+      shell.focuses.filter(focus => focus.projectId === project.id).map(focus => focus.id),
+    );
+    await terminateBoundSessions(
+      shell.sessions.filter(session => projectFocusIds.has(session.focusId)),
+    );
+    const snapshot = await invoke<WorkspaceShellSnapshot>('archive_project', {
+      projectId: project.id,
+    });
     setShell(snapshot);
     if (selectedProjectId === project.id) {
       setSelectedProjectId(null);
@@ -199,13 +373,31 @@ export function useWorkspaceMutations({ model, terminal, selectSessionTab }: Wor
 
   return {
     setWorkspaceDefaultDangerousMode,
+    setWorkspaceDefaultNewSessionDangerous,
+    setWorkspaceTheme,
+    setWorkspaceDefaultAgentKind,
     toggleSelectedSessionYolo,
-    hideSessionTab,
+    archiveSession,
     restoreSessionTab,
     removeSessionRecord,
     archiveFocusRecord,
     archiveProjectRecord,
   };
+}
+
+// Plain-language summary of what removing a focus or project takes off the
+// board, used in the confirm sheet so the user knows the stakes before acting.
+function describeRemoval(
+  kind: 'focus' | 'project',
+  sessionCount: number,
+  attention: number,
+): string {
+  if (sessionCount === 0) {
+    return `This ${kind} is empty. Removing it hides it from the workspace; nothing is deleted.`;
+  }
+  const sessions = `${sessionCount} session${sessionCount === 1 ? '' : 's'}`;
+  const needs = attention > 0 ? ` (${attention} waiting on you)` : '';
+  return `${sessions}${needs} live under this ${kind}. Removing it hides them from the workspace; they stay resumable.`;
 }
 
 export type WorkspaceMutations = ReturnType<typeof useWorkspaceMutations>;

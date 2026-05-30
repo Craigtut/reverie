@@ -58,6 +58,9 @@ function makeShell(overrides: Partial<WorkspaceShellSnapshot> = {}): WorkspaceSh
       name: 'Local',
       generalLabel: 'General',
       defaultDangerousMode: false,
+      defaultNewSessionDangerous: false,
+      theme: 'dark',
+      defaultAgentKind: 'cortex_code',
     },
     projects: [],
     focuses: [],
@@ -183,7 +186,9 @@ describe('agentTabLabel', () => {
   });
 
   it('falls back per agent kind when the title is blank', () => {
-    expect(agentTabLabel(makeSession({ title: '   ', agentKind: 'claude_code' }))).toBe('Claude Code');
+    expect(agentTabLabel(makeSession({ title: '   ', agentKind: 'claude_code' }))).toBe(
+      'Claude Code',
+    );
     expect(agentTabLabel(makeSession({ title: '', agentKind: 'codex_cli' }))).toBe('Codex');
     expect(agentTabLabel(makeSession({ title: '', agentKind: 'cortex_code' }))).toBe('Cortex');
   });
@@ -200,11 +205,17 @@ describe('nativeSessionSummary', () => {
 
   it('returns null when there is no native session id', () => {
     expect(nativeSessionSummary(makeSession({ nativeSessionRef: null }))).toBeNull();
-    expect(nativeSessionSummary(makeSession({ nativeSessionRef: { kind: 'claude_code', sessionId: null } }))).toBeNull();
+    expect(
+      nativeSessionSummary(
+        makeSession({ nativeSessionRef: { kind: 'claude_code', sessionId: null } }),
+      ),
+    ).toBeNull();
   });
 
   it('summarizes the native kind and short id', () => {
-    const session = makeSession({ nativeSessionRef: { kind: 'claude_code', sessionId: '0123456789abcdef' } });
+    const session = makeSession({
+      nativeSessionRef: { kind: 'claude_code', sessionId: '0123456789abcdef' },
+    });
     expect(nativeSessionSummary(session)).toBe('Claude Code 01234567');
   });
 });
@@ -219,23 +230,32 @@ describe('launchButtonLabel', () => {
   });
 
   it('returns "Resume" when there is a native session ref', () => {
-    const session = makeSession({ launchMode: 'new', nativeSessionRef: { kind: 'claude_code', sessionId: 'n1' } });
+    const session = makeSession({
+      launchMode: 'new',
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'n1' },
+    });
     expect(launchButtonLabel(session)).toBe('Resume');
   });
 
   it('returns "Run" for a fresh new session', () => {
-    expect(launchButtonLabel(makeSession({ launchMode: 'new', nativeSessionRef: null }))).toBe('Run');
+    expect(launchButtonLabel(makeSession({ launchMode: 'new', nativeSessionRef: null }))).toBe(
+      'Run',
+    );
   });
 });
 
 describe('dangerousLabel', () => {
   it('uses the session override when set', () => {
-    expect(dangerousLabel(makeSession({ dangerousModeOverride: true }), false)).toBe('Explicitly enabled');
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: true }), false)).toBe(
+      'Explicitly enabled',
+    );
     expect(dangerousLabel(makeSession({ dangerousModeOverride: false }), true)).toBe('Off');
   });
 
   it('falls back to the workspace default when there is no override', () => {
-    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), true)).toBe('Explicitly enabled');
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), true)).toBe(
+      'Explicitly enabled',
+    );
     expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), false)).toBe('Off');
   });
 

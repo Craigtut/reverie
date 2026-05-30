@@ -18,7 +18,7 @@ use crate::agents::{
 };
 use crate::domain::{
     AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, Session,
-    SessionId, SessionStatus, Workspace, WorkspaceId, WorkspaceSnapshot,
+    SessionId, SessionStatus, ThemeMode, Workspace, WorkspaceId, WorkspaceSnapshot,
 };
 use crate::repository::WorkspaceRepository;
 use crate::terminal::TerminalSpawnSpec;
@@ -44,10 +44,31 @@ impl WorkspaceService {
             name: "Local workspace".to_owned(),
             general_label: "General".to_owned(),
             default_dangerous_mode: false,
+            default_new_session_dangerous: false,
             disabled_agent_kinds: Vec::new(),
+            theme: ThemeMode::Dark,
+            default_agent_kind: AgentKind::CortexCode,
         };
         self.repo.ensure_seeded(&seed)?;
+        self.ensure_general_focus(&seed.general_label)?;
         self.normalize_sessions()?;
+        Ok(())
+    }
+
+    /// The General project (`project_id == None`) is a place to spin up sessions
+    /// that are not tied to a folder. It always has exactly one focus, created
+    /// here on first run; the UI keeps that focus implicit and lists General's
+    /// sessions directly. Idempotent: a no-op once a non-archived general focus
+    /// exists.
+    fn ensure_general_focus(&self, general_label: &str) -> Result<()> {
+        let snapshot = self.repo.load_snapshot()?;
+        let has_general = snapshot
+            .focuses
+            .iter()
+            .any(|focus| focus.project_id.is_none() && !focus.archived);
+        if !has_general {
+            self.repo.upsert_focus(&Focus::general(general_label, 0))?;
+        }
         Ok(())
     }
 
@@ -144,6 +165,21 @@ impl WorkspaceService {
         self.update_session(session_id, |session| session.tab_visible = tab_visible)
     }
 
+    /// Archive or restore a session. Archiving also drops its tab; restoring
+    /// brings the tab back so reopening lands the user on the live surface.
+    /// Closing a session (tab bar or sidebar) archives it; the focus's archived
+    /// list is the only place it shows afterward, and restore reverses this.
+    pub fn set_session_archived(
+        &self,
+        session_id: SessionId,
+        archived: bool,
+    ) -> Result<WorkspaceSnapshot> {
+        self.update_session(session_id, |session| {
+            session.archived = archived;
+            session.tab_visible = !archived;
+        })
+    }
+
     pub fn set_session_dangerous_mode(
         &self,
         session_id: SessionId,
@@ -160,6 +196,39 @@ impl WorkspaceService {
     ) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.default_dangerous_mode = default_dangerous_mode;
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Persist the default YOLO state seeded into the new-session composer. This
+    /// only affects the starting value of future new-session forms; it does not
+    /// touch any existing session and is independent of the workspace
+    /// `default_dangerous_mode` fallback.
+    pub fn set_workspace_default_new_session_dangerous(
+        &self,
+        default_new_session_dangerous: bool,
+    ) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.default_new_session_dangerous = default_new_session_dangerous;
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Persist the workspace appearance (light/dark). The renderer seeds its
+    /// live theme from this value on load, so it survives restarts.
+    pub fn set_workspace_theme(&self, theme: ThemeMode) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.theme = theme;
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Persist the default agent kind seeded into the new-session composer. This
+    /// only affects the starting value of future new-session forms; it does not
+    /// touch any existing session.
+    pub fn set_workspace_default_agent_kind(&self, kind: AgentKind) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.default_agent_kind = kind;
         self.repo.save_workspace(&workspace)?;
         Ok(self.repo.load_snapshot()?)
     }
@@ -209,6 +278,23 @@ impl WorkspaceService {
 
     pub fn archive_project(&self, project_id: ProjectId) -> Result<WorkspaceSnapshot> {
         self.repo.archive_project_cascade(project_id)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Reorder focuses to match the given id order, used by drag-and-drop in the
+    /// left nav. The frontend sends the full ordered id list for a single
+    /// project (or General); unknown ids are skipped. Spacing the persisted
+    /// `sort_order` by 10 leaves room between neighbors for future inserts
+    /// without renumbering the whole list.
+    pub fn reorder_focuses(&self, ordered_ids: Vec<FocusId>) -> Result<WorkspaceSnapshot> {
+        let snapshot = self.repo.load_snapshot()?;
+        for (index, id) in ordered_ids.iter().enumerate() {
+            if let Some(focus) = snapshot.focuses.iter().find(|focus| focus.id == *id) {
+                let mut updated = focus.clone();
+                updated.sort_order = (index as i64) * 10;
+                self.repo.upsert_focus(&updated)?;
+            }
+        }
         Ok(self.repo.load_snapshot()?)
     }
 
@@ -635,6 +721,103 @@ mod tests {
     }
 
     #[test]
+    fn set_workspace_default_new_session_dangerous_persists_and_is_independent() {
+        let (_repo, service) = service();
+        // Defaults to off and starts independent of the dangerous-mode fallback.
+        let workspace = service.snapshot().unwrap().workspace;
+        assert!(!workspace.default_new_session_dangerous);
+        assert!(!workspace.default_dangerous_mode);
+
+        // Turning it on persists and round-trips.
+        let snapshot = service
+            .set_workspace_default_new_session_dangerous(true)
+            .unwrap();
+        assert!(snapshot.workspace.default_new_session_dangerous);
+        // It must not flip the dangerous-mode fallback.
+        assert!(!snapshot.workspace.default_dangerous_mode);
+        // A fresh load sees the persisted value.
+        assert!(
+            service
+                .snapshot()
+                .unwrap()
+                .workspace
+                .default_new_session_dangerous
+        );
+
+        // Setting the dangerous-mode fallback does not touch the new-session
+        // default, and vice versa.
+        let snapshot = service.set_workspace_default_dangerous_mode(true).unwrap();
+        assert!(snapshot.workspace.default_dangerous_mode);
+        assert!(snapshot.workspace.default_new_session_dangerous);
+
+        let snapshot = service
+            .set_workspace_default_new_session_dangerous(false)
+            .unwrap();
+        assert!(!snapshot.workspace.default_new_session_dangerous);
+        assert!(snapshot.workspace.default_dangerous_mode);
+    }
+
+    #[test]
+    fn set_workspace_theme_and_default_agent_kind_persist_independently() {
+        let (_repo, service) = service();
+        // Fresh workspaces default to dark + Cortex.
+        let workspace = service.snapshot().unwrap().workspace;
+        assert_eq!(workspace.theme, ThemeMode::Dark);
+        assert_eq!(workspace.default_agent_kind, AgentKind::CortexCode);
+
+        // Theme persists and round-trips without touching the default agent.
+        let snapshot = service.set_workspace_theme(ThemeMode::Light).unwrap();
+        assert_eq!(snapshot.workspace.theme, ThemeMode::Light);
+        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::CortexCode);
+        assert_eq!(
+            service.snapshot().unwrap().workspace.theme,
+            ThemeMode::Light
+        );
+
+        // Default agent persists and is independent of the theme.
+        let snapshot = service
+            .set_workspace_default_agent_kind(AgentKind::ClaudeCode)
+            .unwrap();
+        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::ClaudeCode);
+        assert_eq!(snapshot.workspace.theme, ThemeMode::Light);
+
+        // Setting one does not flip the other.
+        let snapshot = service.set_workspace_theme(ThemeMode::Dark).unwrap();
+        assert_eq!(snapshot.workspace.theme, ThemeMode::Dark);
+        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::ClaudeCode);
+    }
+
+    #[test]
+    fn new_session_default_does_not_change_session_overrides() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        // A session created with an explicit override keeps it.
+        let id = service
+            .create_session(
+                focus,
+                "S".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp".into(),
+                Some(true),
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+
+        service
+            .set_workspace_default_new_session_dangerous(true)
+            .unwrap();
+        let session = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap();
+        assert_eq!(session.dangerous_mode_override, Some(true));
+    }
+
+    #[test]
     fn create_project_validates_name_and_unique_path() {
         let (_repo, service) = service();
         assert!(
@@ -667,7 +850,45 @@ mod tests {
             .filter(|f| f.project_id.is_none())
             .map(|f| f.sort_order)
             .collect();
-        assert_eq!(general, vec![0, 10]);
+        // Index 0 is the General focus seeded by `ensure_seeded`; the two created
+        // here pick up the next sort slots.
+        assert_eq!(general, vec![0, 10, 20]);
+    }
+
+    #[test]
+    fn reorder_focuses_rewrites_sort_order_by_position() {
+        let (_repo, service) = service();
+        let after_first = service
+            .create_focus(None, "First".to_owned(), None)
+            .unwrap();
+        let first_id = after_first
+            .focuses
+            .iter()
+            .find(|f| f.title == "First")
+            .unwrap()
+            .id;
+        let after_second = service
+            .create_focus(None, "Second".to_owned(), None)
+            .unwrap();
+        let second_id = after_second
+            .focuses
+            .iter()
+            .find(|f| f.title == "Second")
+            .unwrap()
+            .id;
+
+        // Drop "Second" above "First": the new positions drive the sort order.
+        let snapshot = service.reorder_focuses(vec![second_id, first_id]).unwrap();
+        let order_of = |id| {
+            snapshot
+                .focuses
+                .iter()
+                .find(|f| f.id == id)
+                .unwrap()
+                .sort_order
+        };
+        assert_eq!(order_of(second_id), 0);
+        assert_eq!(order_of(first_id), 10);
     }
 
     #[test]

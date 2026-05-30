@@ -12,6 +12,9 @@ export function fallbackShellSnapshot(): WorkspaceShellSnapshot {
       name: 'Local workspace',
       generalLabel: 'General',
       defaultDangerousMode: false,
+      defaultNewSessionDangerous: false,
+      theme: 'dark',
+      defaultAgentKind: 'cortex_code',
     },
     projects: [],
     focuses: [],
@@ -24,6 +27,30 @@ export function sessionsForProject(projectId: string | null, shell: WorkspaceShe
     shell.focuses.filter(focus => focus.projectId === projectId).map(focus => focus.id),
   );
   return shell.sessions.filter(session => focusIds.has(session.focusId));
+}
+
+// Non-archived sessions for a single focus, the set the left-nav accordion and
+// the focus dashboard show. Archived sessions live only in the focus's archived
+// list.
+export function activeSessionsInFocus(shell: WorkspaceShellSnapshot, focusId: string) {
+  return shell.sessions.filter(session => session.focusId === focusId && !session.archived);
+}
+
+// The General project (`projectId == null`) keeps its focus implicit: the UI
+// lists General's sessions directly. `ensure_seeded` creates exactly one general
+// focus, but pre-existing data may have several, so callers treat them as one
+// flat bucket and target the primary one for new sessions.
+export function primaryGeneralFocus(shell: WorkspaceShellSnapshot): ShellFocus | null {
+  return shell.focuses.find(focus => !focus.projectId && !focus.archived) ?? null;
+}
+
+export function activeGeneralSessions(shell: WorkspaceShellSnapshot) {
+  const generalFocusIds = new Set(
+    shell.focuses.filter(focus => !focus.projectId && !focus.archived).map(focus => focus.id),
+  );
+  return shell.sessions.filter(
+    session => generalFocusIds.has(session.focusId) && !session.archived,
+  );
 }
 
 // The cwd a new session should default to: the focus's project folder when the

@@ -9,7 +9,7 @@ import type {
   WorkspaceModel,
   WorkspaceMutations,
 } from '../../hooks';
-import { useTerminalFileDrop } from '../../hooks';
+import { TERMINAL_DROP_ZONE, TERMINAL_TAB_DROP_ZONE, useTerminalFileDrop } from '../../hooks';
 import {
   useActivityStore,
   useNavigationStore,
@@ -54,6 +54,7 @@ export interface AppLayoutProps {
 // All it does is render; logic lives in the hooks WorkspaceShell composes.
 export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayoutProps) {
   const theme = useUiStore(s => s.theme);
+  const setTheme = useUiStore(s => s.setTheme);
   const appFocused = useUiStore(s => s.appFocused);
   const busy = useUiStore(s => s.busy);
   const writeLog = useUiStore(s => s.appendLog);
@@ -118,6 +119,8 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const {
     setWorkspaceDefaultDangerousMode,
     setWorkspaceDefaultNewSessionDangerous,
+    setWorkspaceTheme,
+    setWorkspaceDefaultAgentKind,
     toggleSelectedSessionYolo,
     archiveSession,
     restoreSessionTab,
@@ -126,15 +129,29 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     archiveProjectRecord,
   } = mutations;
 
+  // Theme: flip the live uiStore value for an instant UI change, then persist it
+  // to the workspace so it survives restarts (the model re-seeds uiStore from the
+  // saved snapshot when it returns).
+  const onSetTheme = (next: typeof theme) => {
+    setTheme(next);
+    void setWorkspaceTheme(next);
+  };
+  // Default agent: persist the workspace default and seed the live composer pick
+  // so the next new session starts on the chosen CLI right away.
+  const onSetDefaultAgentKind = (next: typeof newSessionAgentKind) => {
+    void setWorkspaceDefaultAgentKind(next);
+    setNewSessionAgentKind(next);
+  };
+
   // Native file drag-drop: resolves the session under the cursor (terminal body
   // or a session tab) and inserts dropped paths into it. Drives the drop overlay.
   const dropModel = useTerminalFileDrop({
     insertTextIntoSession: terminal.insertTextIntoSession,
   });
   const tabDropTargetId =
-    dropModel.target?.kind === 'tab' &&
+    dropModel.target?.kind === TERMINAL_TAB_DROP_ZONE &&
     (dropModel.phase === 'over' || dropModel.phase === 'confirm')
-      ? dropModel.target.sessionId
+      ? dropModel.target.id
       : null;
 
   // Starting a session in General targets its (implicit) focus; if a workspace
@@ -212,8 +229,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
           />
         ) : surfaceMode === 'settings' ? (
           <SettingsSurface
-            newSessionAgentKind={newSessionAgentKind}
-            setNewSessionAgentKind={setNewSessionAgentKind}
+            theme={theme}
+            onSetTheme={onSetTheme}
+            defaultAgentKind={shell.workspace.defaultAgentKind}
+            onSetDefaultAgentKind={onSetDefaultAgentKind}
             defaultNewSessionDangerous={shell.workspace.defaultNewSessionDangerous}
             onSetDefaultNewSessionDangerous={next => {
               // Persist the workspace default and reflect it in the live composer
@@ -303,13 +322,13 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             ) : null}
 
             {selectedSession && !creationMode ? (
-              // The drop host marks the terminal body as a file-drop target and
-              // anchors the drop overlay over it. data-session-id lets the drop
+              // The drop host marks the terminal body as a file-drop zone and
+              // anchors the drop overlay over it. data-drop-id lets the drop
               // controller route a release into this session.
               <div
                 className={terminalDropHostClass}
-                data-drop-target="body"
-                data-session-id={selectedSession.id}
+                data-drop-zone={TERMINAL_DROP_ZONE}
+                data-drop-id={selectedSession.id}
               >
                 <TerminalSurface
                   session={selectedSession}

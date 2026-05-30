@@ -5,27 +5,35 @@ import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
 import type { CreateSessionRecordRequest } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
 import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
-import { useShellStore, useUiStore } from '../../store';
+import { useShellStore } from '../../store';
 import { Typography } from '../primitives/Typography';
 import { AgentsSection } from './AgentsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
 
 // The settings surface: appearance (theme) + default new-session preferences.
-// Theme is read straight from the UI store; the new-session prefs are shared
-// App state (also used by the creation composer) and arrive as props.
+// Theme and the new-session defaults are all persisted workspace settings now:
+// the active theme highlight reads the live UI store, but every change is
+// routed through the props so it both flips the UI and persists.
 export function SettingsSurface({
-  newSessionAgentKind,
-  setNewSessionAgentKind,
-  newSessionDangerousMode,
-  setNewSessionDangerousMode,
+  theme,
+  onSetTheme,
+  defaultAgentKind,
+  onSetDefaultAgentKind,
+  defaultNewSessionDangerous,
+  onSetDefaultNewSessionDangerous,
 }: {
-  newSessionAgentKind: CreateSessionRecordRequest['agentKind'];
-  setNewSessionAgentKind: (value: CreateSessionRecordRequest['agentKind']) => void;
-  newSessionDangerousMode: boolean;
-  setNewSessionDangerousMode: (value: boolean) => void;
+  // The persisted workspace theme; the handler flips the live UI and persists.
+  theme: 'light' | 'dark';
+  onSetTheme: (value: 'light' | 'dark') => void;
+  // The persisted workspace default agent that seeds new sessions. The select
+  // reflects and writes this, then seeds the live composer.
+  defaultAgentKind: CreateSessionRecordRequest['agentKind'];
+  onSetDefaultAgentKind: (value: CreateSessionRecordRequest['agentKind']) => void;
+  // The persisted workspace default that seeds new sessions. The toggle reflects
+  // and writes this, not the ephemeral composer state.
+  defaultNewSessionDangerous: boolean;
+  onSetDefaultNewSessionDangerous: (value: boolean) => void;
 }) {
-  const theme = useUiStore(s => s.theme);
-  const setTheme = useUiStore(s => s.setTheme);
   const detections = useShellStore(s => s.agentCliDetections);
 
   // The bridge status lives here, not inside the bridge section, so disabling a
@@ -85,7 +93,7 @@ export function SettingsSurface({
                   aria-label="Light theme"
                   data-active={theme === 'light'}
                   data-testid="settings-theme-light"
-                  onClick={() => setTheme('light')}
+                  onClick={() => onSetTheme('light')}
                 >
                   <Sun size={15} />
                 </button>
@@ -96,7 +104,7 @@ export function SettingsSurface({
                   aria-label="Dark theme"
                   data-active={theme === 'dark'}
                   data-testid="settings-theme-dark"
-                  onClick={() => setTheme('dark')}
+                  onClick={() => onSetTheme('dark')}
                 >
                   <Moon size={15} />
                 </button>
@@ -134,10 +142,10 @@ export function SettingsSurface({
               <div className={settingsSelectWrapClass}>
                 <select
                   className={settingsSelectClass}
-                  value={newSessionAgentKind}
+                  value={defaultAgentKind}
                   data-testid="settings-default-agent"
                   onChange={event =>
-                    setNewSessionAgentKind(
+                    onSetDefaultAgentKind(
                       event.currentTarget.value as CreateSessionRecordRequest['agentKind'],
                     )
                   }
@@ -173,12 +181,12 @@ export function SettingsSurface({
               <button
                 type="button"
                 role="switch"
-                aria-checked={newSessionDangerousMode}
+                aria-checked={defaultNewSessionDangerous}
                 aria-label="Enable YOLO for new sessions"
-                data-state={newSessionDangerousMode ? 'on' : 'off'}
+                data-state={defaultNewSessionDangerous ? 'on' : 'off'}
                 data-testid="settings-yolo-toggle"
                 className={settingsSwitchClass}
-                onClick={() => setNewSessionDangerousMode(!newSessionDangerousMode)}
+                onClick={() => onSetDefaultNewSessionDangerous(!defaultNewSessionDangerous)}
               >
                 <span className={settingsSwitchKnobClass} />
               </button>

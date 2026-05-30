@@ -94,8 +94,18 @@ export interface ShellWorkspace {
   name: string;
   generalLabel: string;
   defaultDangerousMode: boolean;
+  // Persisted default YOLO state seeded into the new-session composer. Only a
+  // starting value for the form; it does not affect existing sessions and is
+  // independent of defaultDangerousMode (the per-session fallback).
+  defaultNewSessionDangerous: boolean;
   // Agent CLIs the user has switched off. Absent/empty means all enabled.
   disabledAgentKinds?: AgentKind[];
+  // Persisted light/dark appearance. The renderer seeds the live uiStore theme
+  // from this on load, so the chosen mode survives restarts.
+  theme: 'light' | 'dark';
+  // Persisted default agent kind seeded into the new-session composer. Only a
+  // starting value for the form; it does not affect existing sessions.
+  defaultAgentKind: AgentKind;
 }
 
 export interface ShellProject {
@@ -133,6 +143,10 @@ export interface ShellSession {
   status: 'not_started' | 'running' | 'exited' | 'restorable' | 'restore_failed';
   lastExitCode?: number | null;
   tabVisible?: boolean;
+  // Whether the user archived this session. Archived sessions leave Home and the
+  // sidebar focus lists and live only in the focus's archived list (restorable
+  // anytime). Closing a session archives it. Absent/false means not archived.
+  archived?: boolean;
   // Persisted last-observed activity for this session (from the Cortex
   // filesystem watcher, eventually also Claude/Codex hooks). Seeds the
   // dashboard cortexActivity map on app start so state is visible immediately.
@@ -266,5 +280,11 @@ export type PaletteEntry =
   | { kind: 'session'; session: ShellSession; breadcrumb: string; activity: ActivityState | null };
 
 export type DashboardStatus = 'attention' | 'live' | 'recent';
+
+// The user-facing lifecycle state a session is grouped under on Home and in the
+// focus view. Derived from the live activity feed when present, the persisted
+// record status otherwise. `archived` is handled separately (a filter, not a
+// group), so it is not part of this set.
+export type SessionState = 'attention' | 'active' | 'fresh' | 'finished';
 
 export type GlyphState = 'working' | 'attention' | 'error' | 'idle';

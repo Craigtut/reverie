@@ -38,8 +38,12 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
   const [newFocusTitle, setNewFocusTitle] = useState('');
   const [newSessionTitle, setNewSessionTitle] = useState('');
   const [newSessionCwd, setNewSessionCwd] = useState(USER_HOME);
-  const [newSessionAgentKind, setNewSessionAgentKind] = useState<CreateSessionRecordRequest['agentKind']>('cortex_code');
-  const [newSessionDangerousMode, setNewSessionDangerousMode] = useState(false);
+  const [newSessionAgentKind, setNewSessionAgentKind] = useState<
+    CreateSessionRecordRequest['agentKind']
+  >(model.shell.workspace.defaultAgentKind);
+  const [newSessionDangerousMode, setNewSessionDangerousMode] = useState(
+    model.shell.workspace.defaultNewSessionDangerous,
+  );
 
   const setShell = useShellStore(s => s.setShell);
   const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
@@ -59,6 +63,26 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     setNewSessionCwd(selectedFocusDefaultCwd);
   }, [selectedFocusDefaultCwd]);
 
+  // Re-seed the composer's YOLO toggle from the persisted workspace default
+  // whenever that default changes (a Settings change or an app reload). The
+  // composer checkbox stays a per-session tweak after this seed: toggling it
+  // there does not persist, so it is only overwritten when the persisted
+  // default itself moves.
+  const persistedNewSessionDangerous = shell.workspace.defaultNewSessionDangerous;
+  useEffect(() => {
+    setNewSessionDangerousMode(persistedNewSessionDangerous);
+  }, [persistedNewSessionDangerous]);
+
+  // Re-seed the composer's agent picker from the persisted workspace default
+  // whenever that default changes (a Settings change or an app reload). This is
+  // only a starting value: useAgentClis may still narrow it to an available
+  // CLI, and a per-session pick via setNewSessionAgentKind sticks until the
+  // persisted default itself moves.
+  const persistedDefaultAgentKind = shell.workspace.defaultAgentKind;
+  useEffect(() => {
+    setNewSessionAgentKind(persistedDefaultAgentKind);
+  }, [persistedDefaultAgentKind]);
+
   function openCreation(mode: NonNullable<CreationMode>, projectId = selectedProjectId) {
     setCreationMode(mode);
     setSurfaceMode('terminal');
@@ -68,6 +92,19 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     if (mode === 'session') {
       setNewSessionCwd(defaultCwdForFocus(selectedFocus, shell));
     }
+  }
+
+  // Open the new-session composer pointed at a specific focus (the sidebar's
+  // per-focus and General "New session" buttons, and the empty-state action).
+  // Selects the focus first so the composer's submit targets it.
+  function createSessionInFocus(projectId: string | null, focusId: string) {
+    setSelectedProjectId(projectId);
+    setSelectedFocusId(focusId);
+    setSelectedSessionId(null);
+    setCreationMode('session');
+    setSurfaceMode('terminal');
+    const focus = shell.focuses.find(item => item.id === focusId) ?? null;
+    setNewSessionCwd(defaultCwdForFocus(focus, shell));
   }
 
   async function chooseProjectFolder() {
@@ -124,7 +161,8 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     try {
       const targetProjectId = selectedProjectId;
       const targetProject = selectedProject;
-      const title = newFocusTitle.trim() || (targetProject ? `${targetProject.name} focus` : 'New focus');
+      const title =
+        newFocusTitle.trim() || (targetProject ? `${targetProject.name} focus` : 'New focus');
       const request: CreateFocusRequest = {
         projectId: targetProjectId,
         title,
@@ -172,7 +210,9 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
       setNewSessionTitle('');
       setCreationMode(null);
       setSurfaceMode('terminal');
-      appendLog(`Created session: ${created?.title ?? request.title}. Preparing terminal handoff for the selected CLI.`);
+      appendLog(
+        `Created session: ${created?.title ?? request.title}. Preparing terminal handoff for the selected CLI.`,
+      );
       if (created) {
         terminal.autostartSession(created);
       }
@@ -200,6 +240,7 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     newSessionDangerousMode,
     setNewSessionDangerousMode,
     openCreation,
+    createSessionInFocus,
     chooseProjectFolder,
     createProjectFromComposer,
     createFocusForSelection,

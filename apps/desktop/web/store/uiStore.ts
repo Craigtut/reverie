@@ -22,15 +22,16 @@ interface UiState {
   appendLog: (line: string) => void;
 }
 
-export const useUiStore = create<UiState>((set) => ({
+export const useUiStore = create<UiState>(set => ({
   theme: 'dark',
   appFocused: typeof document !== 'undefined' ? document.hasFocus() : true,
   busy: false,
   logs: [],
-  setTheme: (action) => set((s) => ({ theme: resolveSetStateAction(action, s.theme) })),
-  setAppFocused: (action) => set((s) => ({ appFocused: resolveSetStateAction(action, s.appFocused) })),
-  setBusy: (action) => set((s) => ({ busy: resolveSetStateAction(action, s.busy) })),
-  appendLog: (line) => set((s) => ({
-    logs: [`[${new Date().toLocaleTimeString()}] ${line}`, ...s.logs].slice(0, MAX_LOG_LINES),
-  })),
+  setTheme: action => set(s => ({ theme: resolveSetStateAction(action, s.theme) })),
+  setAppFocused: action => set(s => ({ appFocused: resolveSetStateAction(action, s.appFocused) })),
+  setBusy: action => set(s => ({ busy: resolveSetStateAction(action, s.busy) })),
+  appendLog: line =>
+    set(s => ({
+      logs: [`[${new Date().toLocaleTimeString()}] ${line}`, ...s.logs].slice(0, MAX_LOG_LINES),
+    })),
 }));

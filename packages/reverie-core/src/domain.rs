@@ -19,12 +19,27 @@ pub struct Workspace {
     pub name: String,
     pub general_label: String,
     pub default_dangerous_mode: bool,
+    /// Default YOLO (dangerous-mode) state seeded into the new-session composer.
+    /// This is only a starting value for the form; it does not change existing
+    /// sessions and is independent of `default_dangerous_mode` (the fallback for
+    /// sessions whose `dangerous_mode_override` is unset).
+    #[serde(default)]
+    pub default_new_session_dangerous: bool,
     /// Agent CLIs the user has explicitly switched off in settings. Absence
     /// means enabled, so a fresh workspace has every detected CLI available.
     /// A disabled CLI is never offered as a session agent and never has its
     /// config files written (the inter-agent bridge).
     #[serde(default)]
     pub disabled_agent_kinds: Vec<AgentKind>,
+    /// Persisted light/dark appearance for the workspace. The renderer reads
+    /// this on load to seed the live theme; it survives restarts.
+    #[serde(default)]
+    pub theme: ThemeMode,
+    /// Default agent kind seeded into the new-session composer. Like
+    /// `default_new_session_dangerous`, this is only a starting value for the
+    /// form and does not change any existing session.
+    #[serde(default = "default_agent_kind")]
+    pub default_agent_kind: AgentKind,
 }
 
 impl Workspace {
@@ -34,9 +49,28 @@ impl Workspace {
             name: name.into(),
             general_label: general_label.into(),
             default_dangerous_mode: false,
+            default_new_session_dangerous: false,
             disabled_agent_kinds: Vec::new(),
+            theme: ThemeMode::Dark,
+            default_agent_kind: AgentKind::CortexCode,
         }
     }
+}
+
+/// Default agent kind for `Workspace::default_agent_kind` when absent from
+/// persisted or serialized data: Cortex Code, matching the composer default.
+fn default_agent_kind() -> AgentKind {
+    AgentKind::CortexCode
+}
+
+/// Persisted light/dark appearance. Serializes as "light"/"dark" to match the
+/// frontend `ThemeMode` union.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeMode {
+    Light,
+    #[default]
+    Dark,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -170,6 +204,13 @@ pub struct Session {
     /// Whether this session currently has a visible tab in the workspace.
     #[serde(default = "default_true")]
     pub tab_visible: bool,
+    /// Whether the user has archived this session. Archived sessions leave the
+    /// Home dashboard and the left-nav focus lists; they live only in the
+    /// focus's archived list and can be restored at any time. Closing a session
+    /// (from the tab bar or the sidebar) archives it. Defaults to false so
+    /// pre-archive persisted sessions surface on the dashboard after upgrade.
+    #[serde(default)]
+    pub archived: bool,
     /// Last observed activity-state snapshot from whichever adapter owns this
     /// session. Persisted as a denormalized cache so the dashboard paints
     /// immediately on app start, before any live signal arrives.
@@ -196,6 +237,7 @@ impl Session {
             status: SessionStatus::NotStarted,
             last_exit_code: None,
             tab_visible: true,
+            archived: false,
             latest_activity: None,
         }
     }
@@ -311,10 +353,21 @@ mod tests {
         let encoded = serde_json::to_value(&workspace).expect("workspace serializes");
         assert!(encoded.get("generalLabel").is_some());
         assert!(encoded.get("defaultDangerousMode").is_some());
+        assert!(encoded.get("defaultNewSessionDangerous").is_some());
         assert!(encoded.get("disabledAgentKinds").is_some());
+        assert!(encoded.get("defaultAgentKind").is_some());
         assert!(encoded.get("general_label").is_none());
         assert!(encoded.get("default_dangerous_mode").is_none());
+        assert!(encoded.get("default_new_session_dangerous").is_none());
         assert!(encoded.get("disabled_agent_kinds").is_none());
+        assert!(encoded.get("default_agent_kind").is_none());
+        // The theme enum serializes to its lowercase wire value.
+        assert_eq!(encoded["theme"], serde_json::json!("dark"));
+        // default_agent_kind keeps the snake_case enum value, like agentKind.
+        assert_eq!(
+            encoded["defaultAgentKind"],
+            serde_json::json!("cortex_code")
+        );
     }
 
     #[test]
@@ -344,6 +397,7 @@ mod tests {
             "dangerousModeOverride",
             "lastExitCode",
             "tabVisible",
+            "archived",
             "latestActivity",
         ] {
             assert!(encoded.get(key).is_some(), "missing camelCase key {key}");

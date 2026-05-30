@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use reverie_core::agents::built_in_adapters;
-use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId};
+use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId, ThemeMode};
 use reverie_core::hook_server::HookServerControl;
 use reverie_core::terminal::{TerminalFrame, TerminalId};
 use reverie_core::{
@@ -107,6 +107,13 @@ pub(crate) struct UpdateSessionTabVisibilityRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetSessionArchivedRequest {
+    shell_session_id: SessionId,
+    archived: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CaptureCortexSessionRequest {
     shell_session_id: SessionId,
     cortex_session_id: String,
@@ -124,6 +131,24 @@ pub(crate) struct SetSessionDangerousModeRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceDefaultDangerousModeRequest {
     default_dangerous_mode: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetWorkspaceDefaultNewSessionDangerousRequest {
+    default_new_session_dangerous: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetWorkspaceThemeRequest {
+    theme: ThemeMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetWorkspaceDefaultAgentKindRequest {
+    default_agent_kind: AgentKind,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,6 +359,16 @@ pub(crate) fn update_session_tab_visibility(
 }
 
 #[tauri::command]
+pub(crate) fn set_session_archived(
+    service: State<'_, WorkspaceService>,
+    request: SetSessionArchivedRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_session_archived(request.shell_session_id, request.archived)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn remove_session(
     app: AppHandle,
     service: State<'_, WorkspaceService>,
@@ -376,6 +411,36 @@ pub(crate) fn set_workspace_default_dangerous_mode(
 }
 
 #[tauri::command]
+pub(crate) fn set_workspace_default_new_session_dangerous(
+    service: State<'_, WorkspaceService>,
+    request: SetWorkspaceDefaultNewSessionDangerousRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_workspace_default_new_session_dangerous(request.default_new_session_dangerous)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_workspace_theme(
+    service: State<'_, WorkspaceService>,
+    request: SetWorkspaceThemeRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_workspace_theme(request.theme)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_workspace_default_agent_kind(
+    service: State<'_, WorkspaceService>,
+    request: SetWorkspaceDefaultAgentKindRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_workspace_default_agent_kind(request.default_agent_kind)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn archive_focus(
     service: State<'_, WorkspaceService>,
     focus_id: FocusId,
@@ -392,6 +457,16 @@ pub(crate) fn archive_project(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .archive_project(project_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn reorder_focuses(
+    service: State<'_, WorkspaceService>,
+    ordered_focus_ids: Vec<FocusId>,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .reorder_focuses(ordered_focus_ids)
         .map_err(|err| err.to_string())
 }
 

@@ -1,8 +1,9 @@
-import { Plus, ShieldWarning, X } from '@phosphor-icons/react';
+import { Plus, ShieldWarning } from '@phosphor-icons/react';
 import { css } from '../../styled-system/css';
 import { agentTabLabel, cellStateFor } from '../../domain';
 import type { ShellSession } from '../../domain';
-import { AgentGlyph, StateCell } from '../glyphs';
+import { TERMINAL_TAB_DROP_ZONE } from '../../hooks';
+import { AgentGlyph, CloseGlyph, StateCell } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 
 export interface SessionTabsBarProps {
@@ -62,7 +63,8 @@ export function SessionTabsBar({
             className={tabClass({ active: session.id === selectedSessionId })}
             type="button"
             data-testid="session-tab"
-            data-drop-target="tab"
+            data-drop-zone={TERMINAL_TAB_DROP_ZONE}
+            data-drop-id={session.id}
             data-session-id={session.id}
             data-active={session.id === selectedSessionId ? 'true' : 'false'}
             data-drop-armed={session.id === dropTargetSessionId ? 'true' : 'false'}
@@ -72,27 +74,35 @@ export function SessionTabsBar({
             <Typography as="span" variant="caption" tone="inherit">
               {agentTabLabel(session)}
             </Typography>
-            <StateCell
-              state={cellStateFor(
-                session,
-                session.status === 'running' || session.id === runningSessionId,
-                null,
-              )}
-              size={12}
-              className={tabCellClass}
-            />
-            <span
-              className={tabCloseClass}
-              role="button"
-              tabIndex={0}
-              data-testid="close-session-tab-button"
-              aria-label={`Close ${session.title} tab`}
-              onClick={event => void onCloseSession(event, session)}
-              onKeyDown={event => {
-                if (event.key === 'Enter' || event.key === ' ') void onCloseSession(event, session);
-              }}
-            >
-              <X size={12} />
+            {/* Trailing slot: the live state dot at rest crossfades to a large
+                square close target on hover (mirrors the left-nav row pattern),
+                so the tab never shows both a status and a persistent X. */}
+            <span className={tabTrailingClass}>
+              <span className={tabCellWrapClass} data-tab-meta="true" aria-hidden="true">
+                <StateCell
+                  state={cellStateFor(
+                    session,
+                    session.status === 'running' || session.id === runningSessionId,
+                    null,
+                  )}
+                  size={12}
+                />
+              </span>
+              <span
+                className={tabCloseClass}
+                role="button"
+                tabIndex={0}
+                data-testid="close-session-tab-button"
+                data-tab-action="true"
+                aria-label={`Close ${session.title} tab`}
+                onClick={event => void onCloseSession(event, session)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ')
+                    void onCloseSession(event, session);
+                }}
+              >
+                <CloseGlyph size={12} />
+              </span>
             </span>
           </button>
         ))}
@@ -202,7 +212,25 @@ function tabClass({ active }: { active: boolean }) {
     cursor: 'pointer',
     whiteSpace: 'nowrap',
     transition: 'background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
-    _hover: { color: 'var(--text)' },
+    // Hover (or keyboard focus within) crossfades the trailing slot: the state
+    // dot fades out, the square close target fades in, in place.
+    _hover: {
+      color: 'var(--text)',
+      '& [data-tab-action]': { opacity: 1, pointerEvents: 'auto' },
+      '& [data-tab-meta]': { opacity: 0 },
+      // As the close X is revealed, its two strokes swing into the cross: the
+      // lead diagonal lands first, the trail follows a beat later (see main.css).
+      '& [data-x-line="lead"]': {
+        animation: 'reverieCloseLead 200ms cubic-bezier(0.34, 1.45, 0.5, 1) backwards',
+      },
+      '& [data-x-line="trail"]': {
+        animation: 'reverieCloseTrail 200ms cubic-bezier(0.34, 1.45, 0.5, 1) 170ms backwards',
+      },
+    },
+    '&:has(:focus-visible)': {
+      '& [data-tab-action]': { opacity: 1, pointerEvents: 'auto' },
+      '& [data-tab-meta]': { opacity: 0 },
+    },
     // File-drop target: a dragged file hovering this tab lights it as a "file
     // this into that session" target, lifting it with a --good-tinted ring.
     '&[data-drop-armed="true"]': {
@@ -215,22 +243,39 @@ function tabClass({ active }: { active: boolean }) {
   });
 }
 
-const tabCellClass = css({
+// The trailing slot: a fixed square that holds the resting state dot and the
+// hover close target stacked on the same center, so they crossfade without
+// shifting layout. Square + ~most of the tab height (28px) for a generous,
+// easy-to-hit close target.
+const tabTrailingClass = css({
+  position: 'relative',
   flexShrink: 0,
+  width: '24px',
+  height: '24px',
   marginLeft: '1px',
+  display: 'grid',
+  placeItems: 'center',
+});
+
+const tabCellWrapClass = css({
+  display: 'grid',
+  placeItems: 'center',
+  transition: 'opacity 120ms ease',
 });
 
 const tabCloseClass = css({
-  opacity: 0.45,
-  flexShrink: 0,
-  width: '14px',
-  height: '14px',
-  padding: '1px',
-  borderRadius: '3px',
+  position: 'absolute',
+  inset: 0,
   display: 'grid',
   placeItems: 'center',
+  borderRadius: '6px',
+  color: 'var(--text-2)',
+  background: 'transparent',
   cursor: 'pointer',
-  _hover: { opacity: 1, background: 'var(--surface-hi)' },
+  opacity: 0,
+  pointerEvents: 'none',
+  transition: 'opacity 120ms ease, color 120ms ease, background 120ms ease',
+  _hover: { color: 'var(--text)', background: 'var(--surface-hi)' },
 });
 
 const emptyTabsHintClass = css({
