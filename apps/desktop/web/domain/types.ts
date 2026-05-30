@@ -113,6 +113,9 @@ export interface ShellProject {
   name: string;
   path: string;
   archived: boolean;
+  // Position in the left-nav project list, for drag-to-reorder. The backend
+  // always sends it; absent only in hand-built fixtures/tests (treated as 0).
+  sortOrder?: number;
 }
 
 export interface ShellFocus {
@@ -122,6 +125,10 @@ export interface ShellFocus {
   description?: string | null;
   sortOrder: number;
   archived: boolean;
+  // Topic-wide default dangerous (auto-approve) mode. Sessions in this focus
+  // inherit it unless they carry their own override; null/undefined falls
+  // through to the workspace default.
+  defaultDangerousMode?: boolean | null;
 }
 
 export interface NativeSessionRef {
@@ -137,6 +144,9 @@ export interface ShellSession {
   title: string;
   agentKind: string;
   cwd: string;
+  // Position within its focus (topic), for drag-to-reorder. The backend always
+  // sends it; absent only in hand-built fixtures/tests (treated as 0).
+  sortOrder?: number;
   nativeSessionRef?: NativeSessionRef | null;
   launchMode: 'new' | 'resume';
   dangerousModeOverride?: boolean | null;
@@ -245,6 +255,7 @@ export interface CreateFocusRequest {
   projectId: string | null;
   title: string;
   description?: string | null;
+  defaultDangerousMode?: boolean | null;
 }
 
 export interface CreateSessionRecordRequest {

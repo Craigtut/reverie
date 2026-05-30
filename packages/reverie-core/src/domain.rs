@@ -80,6 +80,11 @@ pub struct Project {
     pub name: String,
     pub path: PathBuf,
     pub archived: bool,
+    /// Position in the left-nav project list, for drag-to-reorder. Spaced by 10
+    /// on create so neighbors leave room; defaults to 0 for pre-reorder projects
+    /// (which then fall back to name order as a stable tiebreak).
+    #[serde(default)]
+    pub sort_order: i64,
 }
 
 impl Project {
@@ -89,6 +94,7 @@ impl Project {
             name: name.into(),
             path,
             archived: false,
+            sort_order: 0,
         }
     }
 }
@@ -102,6 +108,11 @@ pub struct Focus {
     pub description: Option<String>,
     pub sort_order: i64,
     pub archived: bool,
+    /// Topic-wide default dangerous (auto-approve) mode. Sessions in this
+    /// focus inherit it unless they carry their own override. None falls
+    /// through to the workspace default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_dangerous_mode: Option<bool>,
 }
 
 impl Focus {
@@ -113,6 +124,7 @@ impl Focus {
             description: None,
             sort_order,
             archived: false,
+            default_dangerous_mode: None,
         }
     }
 
@@ -124,6 +136,7 @@ impl Focus {
             description: None,
             sort_order,
             archived: false,
+            default_dangerous_mode: None,
         }
     }
 }
@@ -216,6 +229,10 @@ pub struct Session {
     /// immediately on app start, before any live signal arrives.
     #[serde(default)]
     pub latest_activity: Option<ActivityState>,
+    /// Position within its focus (topic), for drag-to-reorder. Spaced by 10 on
+    /// create so neighbors leave room; defaults to 0 for pre-reorder sessions.
+    #[serde(default)]
+    pub sort_order: i64,
 }
 
 impl Session {
@@ -239,11 +256,20 @@ impl Session {
             tab_visible: true,
             archived: false,
             latest_activity: None,
+            sort_order: 0,
         }
     }
 
-    pub fn effective_dangerous_mode(&self, workspace_default: bool) -> bool {
-        self.dangerous_mode_override.unwrap_or(workspace_default)
+    /// Resolve the effective dangerous mode: the session's own override
+    /// wins, then the focus (topic) default, then the workspace default.
+    pub fn effective_dangerous_mode(
+        &self,
+        focus_default: Option<bool>,
+        workspace_default: bool,
+    ) -> bool {
+        self.dangerous_mode_override
+            .or(focus_default)
+            .unwrap_or(workspace_default)
     }
 
     pub fn mark_restorable(&mut self, native_session_ref: NativeSessionRef) {
@@ -283,14 +309,22 @@ mod tests {
             PathBuf::from("/tmp/reverie"),
         );
 
-        assert!(session.effective_dangerous_mode(true));
-        assert!(!session.effective_dangerous_mode(false));
+        assert!(session.effective_dangerous_mode(None, true));
+        assert!(!session.effective_dangerous_mode(None, false));
+
+        // A focus default beats the workspace default when set.
+        assert!(session.effective_dangerous_mode(Some(true), false));
+        assert!(!session.effective_dangerous_mode(Some(false), true));
 
         session.dangerous_mode_override = Some(false);
-        assert!(!session.effective_dangerous_mode(true));
+        assert!(!session.effective_dangerous_mode(None, true));
+
+        // The session override beats both.
+        assert!(!session.effective_dangerous_mode(Some(true), true));
 
         session.dangerous_mode_override = Some(true);
-        assert!(session.effective_dangerous_mode(false));
+        assert!(session.effective_dangerous_mode(None, false));
+        assert!(session.effective_dangerous_mode(Some(false), false));
     }
 
     #[test]

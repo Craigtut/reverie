@@ -86,6 +86,7 @@ pub(crate) struct CreateFocusRequest {
     project_id: Option<ProjectId>,
     title: String,
     description: Option<String>,
+    default_dangerous_mode: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,7 +329,12 @@ pub(crate) fn create_focus(
     request: CreateFocusRequest,
 ) -> Result<WorkspaceSnapshot, String> {
     service
-        .create_focus(request.project_id, request.title, request.description)
+        .create_focus(
+            request.project_id,
+            request.title,
+            request.description,
+            request.default_dangerous_mode,
+        )
         .map_err(|err| err.to_string())
 }
 
@@ -467,6 +473,38 @@ pub(crate) fn reorder_focuses(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .reorder_focuses(ordered_focus_ids)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn reorder_projects(
+    service: State<'_, WorkspaceService>,
+    ordered_project_ids: Vec<ProjectId>,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .reorder_projects(ordered_project_ids)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn reorder_sessions(
+    service: State<'_, WorkspaceService>,
+    ordered_session_ids: Vec<SessionId>,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .reorder_sessions(ordered_session_ids)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn move_session(
+    service: State<'_, WorkspaceService>,
+    session_id: SessionId,
+    target_focus_id: FocusId,
+    target_index: usize,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .move_session(session_id, target_focus_id, target_index)
         .map_err(|err| err.to_string())
 }
 

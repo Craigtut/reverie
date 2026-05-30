@@ -58,6 +58,12 @@ export async function invokeBrowserFixture<T>(
       return archiveFixtureProject(args) as T;
     case 'reorder_focuses':
       return reorderFixtureFocuses(args) as T;
+    case 'reorder_projects':
+      return reorderFixtureProjects(args) as T;
+    case 'reorder_sessions':
+      return reorderFixtureSessions(args) as T;
+    case 'move_session':
+      return moveFixtureSession(args) as T;
     case 'list_agent_clis':
       return listFixtureAgentClis() as T;
     case 'set_agent_cli_enabled':
@@ -135,6 +141,7 @@ function createFixtureFocus(args?: Record<string, unknown>) {
     projectId: string | null;
     title: string;
     description?: string | null;
+    defaultDangerousMode?: boolean | null;
   }>(args);
   const projectFocuses = fixtureShell.focuses.filter(
     focus => focus.projectId === request.projectId,
@@ -146,6 +153,7 @@ function createFixtureFocus(args?: Record<string, unknown>) {
     description: request.description ?? null,
     sortOrder: projectFocuses.length * 10,
     archived: false,
+    defaultDangerousMode: request.defaultDangerousMode ?? null,
   };
 
   fixtureShell = {
@@ -173,7 +181,9 @@ function createFixtureSession(args?: Record<string, unknown>) {
     cwd: request.cwd,
     nativeSessionRef: null,
     launchMode: 'new' as const,
-    dangerousModeOverride: request.dangerousModeOverride ?? false,
+    // Null means "inherit" (topic default, then workspace default); only an
+    // explicit boolean is a per-session override.
+    dangerousModeOverride: request.dangerousModeOverride ?? null,
     status: 'not_started' as const,
     lastExitCode: null,
     tabVisible: true,
@@ -238,6 +248,47 @@ function reorderFixtureFocuses(args?: Record<string, unknown>) {
   orderedIds.forEach((id, index) => {
     const focus = fixtureShell.focuses.find(item => item.id === id);
     if (focus) focus.sortOrder = index * 10;
+  });
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function reorderFixtureProjects(args?: Record<string, unknown>) {
+  const orderedIds = readDirectArg<string[]>(args, 'orderedProjectIds');
+  orderedIds.forEach((id, index) => {
+    const project = fixtureShell.projects.find(item => item.id === id);
+    if (project) project.sortOrder = index * 10;
+  });
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function reorderFixtureSessions(args?: Record<string, unknown>) {
+  const orderedIds = readDirectArg<string[]>(args, 'orderedSessionIds');
+  orderedIds.forEach((id, index) => {
+    const session = fixtureShell.sessions.find(item => item.id === id);
+    if (session) session.sortOrder = index * 10;
+  });
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function moveFixtureSession(args?: Record<string, unknown>) {
+  const sessionId = readDirectArg<string>(args, 'sessionId');
+  const targetFocusId = readDirectArg<string>(args, 'targetFocusId');
+  const targetIndex = readDirectArg<number>(args, 'targetIndex');
+  const moved = fixtureShell.sessions.find(item => item.id === sessionId);
+  if (!moved) throw new Error(`Unknown fixture session: ${sessionId}`);
+  moved.focusId = targetFocusId;
+  // Rebuild the destination order with the moved session spliced in.
+  const order = fixtureShell.sessions
+    .filter(item => item.focusId === targetFocusId && !item.archived && item.id !== sessionId)
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0))
+    .map(item => item.id);
+  order.splice(Math.min(targetIndex, order.length), 0, sessionId);
+  order.forEach((id, position) => {
+    const session = fixtureShell.sessions.find(item => item.id === id);
+    if (session) session.sortOrder = position * 10;
   });
   persistFixtureShellSnapshot();
   return clone(fixtureShell);

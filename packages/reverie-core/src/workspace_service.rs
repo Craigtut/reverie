@@ -89,7 +89,16 @@ impl WorkspaceService {
         {
             bail!("project path is already in Reverie: {}", path.display());
         }
-        self.repo.upsert_project(&Project::new(name, path))?;
+        let sort_order = snapshot
+            .projects
+            .iter()
+            .filter(|project| !project.archived)
+            .map(|project| project.sort_order)
+            .max()
+            .map_or(0, |current| current + 10);
+        let mut project = Project::new(name, path);
+        project.sort_order = sort_order;
+        self.repo.upsert_project(&project)?;
         Ok(self.repo.load_snapshot()?)
     }
 
@@ -98,6 +107,7 @@ impl WorkspaceService {
         project_id: Option<ProjectId>,
         title: String,
         description: Option<String>,
+        default_dangerous_mode: Option<bool>,
     ) -> Result<WorkspaceSnapshot> {
         let title = required_text(title, "focus title")?;
         let snapshot = self.repo.load_snapshot()?;
@@ -125,6 +135,7 @@ impl WorkspaceService {
             description: description.and_then(optional_text),
             sort_order,
             archived: false,
+            default_dangerous_mode,
         };
         self.repo.upsert_focus(&focus)?;
         Ok(self.repo.load_snapshot()?)
@@ -151,8 +162,16 @@ impl WorkspaceService {
             bail!("cannot create session for unknown or archived focus {focus_id}");
         }
 
+        let sort_order = snapshot
+            .sessions
+            .iter()
+            .filter(|session| session.focus_id == focus_id && !session.archived)
+            .map(|session| session.sort_order)
+            .max()
+            .map_or(0, |current| current + 10);
         let mut session = Session::new(focus_id, title, agent_kind, cwd);
         session.dangerous_mode_override = dangerous_mode_override;
+        session.sort_order = sort_order;
         self.repo.upsert_session(&session)?;
         Ok(self.repo.load_snapshot()?)
     }
@@ -293,6 +312,89 @@ impl WorkspaceService {
                 let mut updated = focus.clone();
                 updated.sort_order = (index as i64) * 10;
                 self.repo.upsert_focus(&updated)?;
+            }
+        }
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Reorder top-level projects to match the given id order (drag-and-drop in
+    /// the left nav). Unknown ids are skipped; `sort_order` is spaced by 10.
+    pub fn reorder_projects(&self, ordered_ids: Vec<ProjectId>) -> Result<WorkspaceSnapshot> {
+        let snapshot = self.repo.load_snapshot()?;
+        for (index, id) in ordered_ids.iter().enumerate() {
+            if let Some(project) = snapshot.projects.iter().find(|project| project.id == *id) {
+                let mut updated = project.clone();
+                updated.sort_order = (index as i64) * 10;
+                self.repo.upsert_project(&updated)?;
+            }
+        }
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Reorder sessions within a focus (topic) to match the given id order.
+    pub fn reorder_sessions(&self, ordered_ids: Vec<SessionId>) -> Result<WorkspaceSnapshot> {
+        let snapshot = self.repo.load_snapshot()?;
+        for (index, id) in ordered_ids.iter().enumerate() {
+            if let Some(session) = snapshot.sessions.iter().find(|session| session.id == *id) {
+                let mut updated = session.clone();
+                updated.sort_order = (index as i64) * 10;
+                self.repo.upsert_session(&updated)?;
+            }
+        }
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Move a session to a different focus (topic) and drop it at `target_index`
+    /// among that focus's non-archived sessions. The session keeps its cwd,
+    /// resume ref, and live process: only its parent and order change. The
+    /// destination order is renumbered so the moved session and its new
+    /// neighbors keep room between them.
+    pub fn move_session(
+        &self,
+        session_id: SessionId,
+        target_focus_id: FocusId,
+        target_index: usize,
+    ) -> Result<WorkspaceSnapshot> {
+        let snapshot = self.repo.load_snapshot()?;
+        let focus_ok = snapshot
+            .focuses
+            .iter()
+            .any(|focus| focus.id == target_focus_id && !focus.archived);
+        if !focus_ok {
+            bail!("cannot move session to unknown or archived focus {target_focus_id}");
+        }
+        if !snapshot
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id)
+        {
+            bail!("cannot move unknown session {session_id}");
+        }
+
+        // The destination's current order (already sort_order-ordered by
+        // load_snapshot), minus the moved session, with it spliced back in.
+        let mut order: Vec<SessionId> = snapshot
+            .sessions
+            .iter()
+            .filter(|session| {
+                session.focus_id == target_focus_id && !session.archived && session.id != session_id
+            })
+            .map(|session| session.id)
+            .collect();
+        let index = target_index.min(order.len());
+        order.insert(index, session_id);
+
+        if let Some(session) = snapshot.sessions.iter().find(|s| s.id == session_id) {
+            let mut updated = session.clone();
+            updated.focus_id = target_focus_id;
+            self.repo.upsert_session(&updated)?;
+        }
+        let refreshed = self.repo.load_snapshot()?;
+        for (position, id) in order.iter().enumerate() {
+            if let Some(session) = refreshed.sessions.iter().find(|s| s.id == *id) {
+                let mut updated = session.clone();
+                updated.sort_order = (position as i64) * 10;
+                self.repo.upsert_session(&updated)?;
             }
         }
         Ok(self.repo.load_snapshot()?)
@@ -553,9 +655,17 @@ impl WorkspaceService {
                 )
             })?;
         let executable_path = require_detected(adapter.as_ref())?;
+        // Focus (topic) default falls back to the workspace default; the
+        // session override (applied inside build_spawn_spec) still wins.
+        let focus_or_workspace_default = snapshot
+            .focuses
+            .iter()
+            .find(|f| f.id == session.focus_id)
+            .and_then(|f| f.default_dangerous_mode)
+            .unwrap_or(snapshot.workspace.default_dangerous_mode);
         build_spawn_spec(
             session,
-            snapshot.workspace.default_dangerous_mode,
+            focus_or_workspace_default,
             cols,
             rows,
             executable_path,
@@ -670,7 +780,7 @@ mod tests {
 
     fn make_focus(service: &WorkspaceService) -> FocusId {
         let snapshot = service
-            .create_focus(None, "General".to_owned(), None)
+            .create_focus(None, "General".to_owned(), None, None)
             .unwrap();
         snapshot.focuses[0].id
     }
@@ -835,14 +945,14 @@ mod tests {
     #[test]
     fn create_focus_assigns_increasing_sort_order_and_checks_project() {
         let (_repo, service) = service();
-        let unknown = service.create_focus(Some(ProjectId::new_v4()), "X".to_owned(), None);
+        let unknown = service.create_focus(Some(ProjectId::new_v4()), "X".to_owned(), None, None);
         assert!(unknown.is_err());
 
         service
-            .create_focus(None, "First".to_owned(), None)
+            .create_focus(None, "First".to_owned(), None, None)
             .unwrap();
         let snapshot = service
-            .create_focus(None, "Second".to_owned(), None)
+            .create_focus(None, "Second".to_owned(), None, None)
             .unwrap();
         let general: Vec<i64> = snapshot
             .focuses
@@ -859,7 +969,7 @@ mod tests {
     fn reorder_focuses_rewrites_sort_order_by_position() {
         let (_repo, service) = service();
         let after_first = service
-            .create_focus(None, "First".to_owned(), None)
+            .create_focus(None, "First".to_owned(), None, None)
             .unwrap();
         let first_id = after_first
             .focuses
@@ -868,7 +978,7 @@ mod tests {
             .unwrap()
             .id;
         let after_second = service
-            .create_focus(None, "Second".to_owned(), None)
+            .create_focus(None, "Second".to_owned(), None, None)
             .unwrap();
         let second_id = after_second
             .focuses
@@ -889,6 +999,52 @@ mod tests {
         };
         assert_eq!(order_of(second_id), 0);
         assert_eq!(order_of(first_id), 10);
+    }
+
+    #[test]
+    fn move_session_reparents_and_reorders_keeping_cwd() {
+        let (_repo, service) = service();
+        let focus_a = service.snapshot().unwrap().focuses[0].id;
+        let after_topic = service
+            .create_focus(None, "Topic B".to_owned(), None, None)
+            .unwrap();
+        let focus_b = after_topic
+            .focuses
+            .iter()
+            .find(|f| f.title == "Topic B")
+            .unwrap()
+            .id;
+
+        service
+            .create_session(
+                focus_a,
+                "S1".to_owned(),
+                AgentKind::CortexCode,
+                "/work/a".into(),
+                None,
+            )
+            .unwrap();
+        let after = service
+            .create_session(
+                focus_a,
+                "S2".to_owned(),
+                AgentKind::CortexCode,
+                "/work/a".into(),
+                None,
+            )
+            .unwrap();
+        let s2 = after.sessions.iter().find(|s| s.title == "S2").unwrap();
+        let s2_id = s2.id;
+        let s2_cwd = s2.cwd.clone();
+
+        let snapshot = service.move_session(s2_id, focus_b, 0).unwrap();
+        let moved = snapshot.sessions.iter().find(|s| s.id == s2_id).unwrap();
+        assert_eq!(
+            moved.focus_id, focus_b,
+            "session reparents to the target topic"
+        );
+        assert_eq!(moved.cwd, s2_cwd, "cwd is preserved across the move");
+        assert_eq!(moved.sort_order, 0, "placed at the requested index");
     }
 
     #[test]
@@ -1100,7 +1256,7 @@ mod tests {
             .unwrap();
         let project_id = snapshot.projects[0].id;
         let focus_snapshot = service
-            .create_focus(Some(project_id), "Terminal".to_owned(), None)
+            .create_focus(Some(project_id), "Terminal".to_owned(), None, None)
             .unwrap();
         let focus_id = focus_snapshot
             .focuses

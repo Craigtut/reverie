@@ -106,7 +106,11 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
             .ok_or_else(|| PersistenceError::Backend("workspace has not been seeded".to_owned()))?;
 
         let mut projects = state.projects.clone();
-        projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        projects.sort_by(|a, b| {
+            a.sort_order
+                .cmp(&b.sort_order)
+                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
 
         let mut focuses = state.focuses.clone();
         focuses.sort_by(|a, b| {
@@ -118,12 +122,17 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
                 .then(a.title.to_lowercase().cmp(&b.title.to_lowercase()))
         });
 
+        // Stable sort by sort_order keeps insertion order (the old SQLite
+        // `ORDER BY rowid` behavior) for the many sessions that share the
+        // default 0, while reordered sessions take their assigned slots.
+        let mut sessions = state.sessions.clone();
+        sessions.sort_by(|a, b| a.sort_order.cmp(&b.sort_order));
+
         Ok(WorkspaceSnapshot {
             workspace,
             projects,
             focuses,
-            // Sessions keep insertion order, matching the SQLite `ORDER BY rowid`.
-            sessions: state.sessions.clone(),
+            sessions,
         })
     }
 
