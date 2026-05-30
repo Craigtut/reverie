@@ -812,13 +812,17 @@ fn normalize_session(session: &mut Session) -> bool {
     }
 
     if session.status == SessionStatus::Running {
-        session.status = if session.native_session_ref.is_some() {
-            SessionStatus::Restorable
+        // A session left in Running on boot means its process is gone (the app
+        // crashed, or quit without persisting the finish). That is not a
+        // failure, so we never stamp a fake exit code. With a captured native
+        // ref the conversation is resumable; without one the session never got
+        // far enough to resume, so we reset it to fresh rather than strand it as
+        // a dead Exited record the user can neither resume nor cleanly restart.
+        if session.native_session_ref.is_some() {
+            session.status = SessionStatus::Restorable;
         } else {
-            SessionStatus::Exited
-        };
-        if session.last_exit_code.is_none() {
-            session.last_exit_code = Some(1);
+            session.status = SessionStatus::NotStarted;
+            session.last_exit_code = None;
         }
         changed = true;
     }
@@ -1203,10 +1207,22 @@ mod tests {
         let focus = Focus::general("General", 0);
         repo.upsert_focus(&focus).unwrap();
 
+        // Stale Running with no native ref: died too young to resume, so it
+        // resets to fresh (NotStarted) rather than a dead Exited record, and is
+        // never stamped with a failure exit code (the app just quit).
         let mut stale_running =
             Session::new(focus.id, "Running", AgentKind::CortexCode, "/a".into());
         stale_running.status = SessionStatus::Running;
+        stale_running.last_exit_code = None;
         repo.upsert_session(&stale_running).unwrap();
+
+        // Stale Running WITH a native ref: the conversation is resumable.
+        let mut stale_running_resumable =
+            Session::new(focus.id, "Running2", AgentKind::CortexCode, "/c".into());
+        stale_running_resumable.status = SessionStatus::Running;
+        stale_running_resumable.native_session_ref =
+            Some(NativeSessionRef::cortex("native-7", None));
+        repo.upsert_session(&stale_running_resumable).unwrap();
 
         let mut resume_without_ref =
             Session::new(focus.id, "Resume", AgentKind::CortexCode, "/b".into());
@@ -1222,7 +1238,16 @@ mod tests {
             .iter()
             .find(|s| s.id == stale_running.id)
             .unwrap();
-        assert_eq!(running.status, SessionStatus::Exited);
+        assert_eq!(running.status, SessionStatus::NotStarted);
+        assert_eq!(running.last_exit_code, None);
+
+        let resumable = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == stale_running_resumable.id)
+            .unwrap();
+        assert_eq!(resumable.status, SessionStatus::Restorable);
+        assert_eq!(resumable.last_exit_code, None);
 
         let resume = snapshot
             .sessions
