@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
 import type { CreationMode, ProjectFilter, SurfaceMode } from '../domain';
+import { preserveStoreAcrossHmr } from './hmr';
 import { resolveSetStateAction, type SetStateAction } from './setter';
 
 // Navigation is app state, not a URL: which surface is showing and what the
@@ -105,4 +106,20 @@ export const useNavigationStore = create<NavigationState>(set => ({
       return { expandedFocusIds, collapsedProjectIds, generalCollapsed };
     }),
   hydrate: restored => set(() => ({ ...restored, hydrated: true })),
+}));
+
+// Preserve the current view (selection + accordion + hydrated flag) across HMR.
+// On a partial Fast Refresh update the mount-once nav hydrate effect does not
+// re-run, so without this an edit would drop the user back to the default
+// dashboard with nothing selected. See store/hmr.ts.
+preserveStoreAcrossHmr(useNavigationStore, import.meta.hot, s => ({
+  selectedProjectId: s.selectedProjectId,
+  selectedFocusId: s.selectedFocusId,
+  selectedSessionId: s.selectedSessionId,
+  surfaceMode: s.surfaceMode,
+  creationMode: s.creationMode,
+  collapsedProjectIds: s.collapsedProjectIds,
+  expandedFocusIds: s.expandedFocusIds,
+  generalCollapsed: s.generalCollapsed,
+  hydrated: s.hydrated,
 }));

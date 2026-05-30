@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { TERMINAL_SURFACE } from '../terminal-canvas-renderer';
 import type { TerminalScrollMetrics, TerminalSurface } from '../terminalScrollback';
 import type { SessionTerminalBinding } from '../domain';
+import { preserveStoreAcrossHmr } from './hmr';
 import { resolveSetStateAction, type SetStateAction } from './setter';
 
 // Terminal-island reactive state: which session→terminal bindings are live,
@@ -64,4 +65,19 @@ export const useTerminalStore = create<TerminalStoreState>(set => ({
     set(s => ({ terminalLiveFollow: resolveSetStateAction(action, s.terminalLiveFollow) })),
   setTerminalScroll: action =>
     set(s => ({ terminalScroll: resolveSetStateAction(action, s.terminalScroll) })),
+}));
+
+// Keep live terminal bindings and surface state across HMR. The backend PTYs
+// survive a partial Fast Refresh untouched, so dropping the bindings would make
+// running terminals vanish from the UI until a full reload. See store/hmr.ts.
+preserveStoreAcrossHmr(useTerminalStore, import.meta.hot, s => ({
+  sessionTerminalBindings: s.sessionTerminalBindings,
+  activeTerminalId: s.activeTerminalId,
+  runningSessionId: s.runningSessionId,
+  launchingSessionId: s.launchingSessionId,
+  terminalInputArmed: s.terminalInputArmed,
+  terminalSurface: s.terminalSurface,
+  scrollbackRowCount: s.scrollbackRowCount,
+  terminalLiveFollow: s.terminalLiveFollow,
+  terminalScroll: s.terminalScroll,
 }));
