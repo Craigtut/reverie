@@ -8,20 +8,23 @@ mod bridge_installer;
 mod commands;
 #[cfg(unix)]
 mod connection_commands;
+mod correlator;
 mod state;
 mod terminal;
 
 use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
 
+use reverie_core::CodexLogSource;
 use reverie_core::TranscriptStore;
 use reverie_core::WorkspaceService;
 use reverie_core::activity_watcher::watch_cortex_activity;
 use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
+use reverie_core::session_log::start_session_log_watcher;
 use reverie_persistence::SqliteWorkspaceRepository;
-use tauri::Manager;
+use tauri::{Emitter, Manager, Url};
 
-use crate::activity_bridge::{drain_cortex_activity, drain_hook_activity};
-use crate::state::{HookServerInfo, HookTokenRegistry, WorkspaceBoot};
+use crate::activity_bridge::{drain_codex_activity, drain_cortex_activity, drain_hook_activity};
+use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
 use crate::terminal::runtime::TerminalSessionRuntime;
 
 const WINDOW_CORNER_RADIUS: f64 = 44.0;
@@ -101,6 +104,19 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            // Closing the window (red traffic-light button) is a quit for this
+            // single-window app. Defer it the first time so the frontend can
+            // confirm any in-flight agent work, then it calls `confirm_quit`,
+            // which stops every session and re-issues the exit.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                if !app.state::<ShutdownState>().is_started() {
+                    api.prevent_close();
+                    let _ = app.emit("app_quit_requested", ());
+                }
+            }
+        })
         .setup(|app| {
             let store_path = app
                 .path()
@@ -134,6 +150,18 @@ fn main() {
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
                 apply_macos_window_corners(&window, WINDOW_CORNER_RADIUS);
+                if std::env::var_os("REVERIE_TERMINAL_STRESS").is_some() {
+                    let target = window
+                        .url()
+                        .map(|mut url| {
+                            url.set_query(Some("tauriTerminalStress=1"));
+                            url
+                        })
+                        .or_else(|_| Url::parse("http://127.0.0.1:1420/?tauriTerminalStress=1"));
+                    if let Ok(url) = target {
+                        let _ = window.navigate(url);
+                    }
+                }
             }
 
             // Start the Cortex activity-state watcher. Best-effort: if
@@ -155,6 +183,26 @@ fn main() {
                 }
             } else {
                 eprintln!("[reverie] Cortex home not located; activity watcher disabled");
+            }
+
+            // Codex session-log watcher: the active-file, incremental-tail engine
+            // for Codex live state. Unlike Cortex's snapshot file, the Codex
+            // rollout is an append-only log, so the engine watches only the
+            // rollout files the launch path registers (via the managed
+            // `SessionLogControl`) and tails only newly appended bytes. Cost
+            // scales with active sessions and new output, not with history.
+            match start_session_log_watcher(std::sync::Arc::new(CodexLogSource)) {
+                Ok(watcher) => {
+                    app.manage(watcher.control.clone());
+                    let app_handle = app.handle().clone();
+                    std::thread::Builder::new()
+                        .name("reverie-codex-activity-bridge".to_owned())
+                        .spawn(move || drain_codex_activity(watcher, app_handle))
+                        .ok();
+                }
+                Err(error) => {
+                    eprintln!("[reverie] Codex session-log watcher disabled: {error:#}");
+                }
             }
 
             // Start the inter-agent connection bridge FIRST so we can hand
@@ -217,10 +265,20 @@ fn main() {
                 }
             }
 
+            // Start the idle-session reaper. It keeps every session alive until
+            // macOS itself reports memory pressure, then sheds only the coldest
+            // off-screen, non-working, long-idle sessions. Best-effort: if it
+            // cannot start, sessions simply stay alive.
+            crate::terminal::reaper::spawn_reaper(
+                app.state::<TerminalSessionRuntime>().inner().clone(),
+                app.state::<WorkspaceService>().inner().clone(),
+            );
+
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
         .manage(WorkspaceBoot::default())
+        .manage(ShutdownState::default())
         .invoke_handler(tauri::generate_handler![
             commands::app_status,
             commands::ghostty_frame_sequence,
@@ -257,6 +315,7 @@ fn main() {
             commands::scroll_terminal_viewport_to_top,
             commands::scroll_terminal_viewport_to_bottom,
             commands::scroll_terminal_viewport_to_row,
+            commands::set_terminal_frontend_active,
             commands::search_terminal,
             commands::terminal_history_info,
             commands::terminal_history_search,
@@ -264,6 +323,7 @@ fn main() {
             commands::terminal_history_window,
             commands::set_terminal_theme,
             commands::terminate_session,
+            commands::confirm_quit,
             commands::record_render_metrics,
             commands::open_url,
             #[cfg(unix)]
@@ -309,6 +369,24 @@ fn main() {
             #[cfg(unix)]
             connection_commands::clear_session_pair_block,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Reverie desktop shell");
+        .build(tauri::generate_context!())
+        .expect("failed to build Reverie desktop shell")
+        .run(|app_handle, event| match event {
+            // Cmd-Q / Quit menu. Defer the first time and route through the
+            // frontend confirm + `confirm_quit`, which sets the shutdown flag
+            // and re-exits so this pass falls through.
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                if !app_handle.state::<ShutdownState>().is_started() {
+                    api.prevent_exit();
+                    let _ = app_handle.emit("app_quit_requested", ());
+                }
+            }
+            // Final backstop: once the app is actually terminating, make sure no
+            // agent process tree outlives it, even if the graceful path never
+            // ran (e.g. a wedged or closed webview).
+            tauri::RunEvent::Exit => {
+                app_handle.state::<TerminalSessionRuntime>().kill_all_now();
+            }
+            _ => {}
+        });
 }

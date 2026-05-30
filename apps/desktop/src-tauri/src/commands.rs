@@ -22,7 +22,7 @@ use tauri_plugin_opener::OpenerExt;
 
 #[cfg(unix)]
 use crate::bridge::{BridgeInfo, mint_session_secret};
-use crate::state::{HookServerInfo, HookTokenRegistry, WorkspaceBoot};
+use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
 use crate::terminal::ghostty::GhosttyTerminalState;
 use crate::terminal::runtime::{
     TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest,
@@ -772,19 +772,34 @@ pub(crate) fn scroll_terminal_viewport_to_row(
         .map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+pub(crate) fn set_terminal_frontend_active(
+    runtime: State<'_, TerminalSessionRuntime>,
+    terminal_id: TerminalId,
+    active: bool,
+) -> Result<(), String> {
+    runtime
+        .set_frontend_active(terminal_id, active)
+        .map_err(|err| err.to_string())
+}
+
 const SEARCH_MAX_MATCHES: usize = 2_000;
 
 /// Substring search over the live terminal buffer (viewport + scrollback).
 #[tauri::command]
-pub(crate) fn search_terminal(
+pub(crate) async fn search_terminal(
     runtime: State<'_, TerminalSessionRuntime>,
     terminal_id: TerminalId,
     query: String,
     case_sensitive: bool,
 ) -> Result<crate::terminal::ghostty::TerminalSearchResult, String> {
-    runtime
-        .search_terminal(terminal_id, query, case_sensitive, SEARCH_MAX_MATCHES)
-        .map_err(|err| err.to_string())
+    let runtime = runtime.inner().clone();
+    run_terminal_blocking_command(move || {
+        runtime
+            .search_terminal(terminal_id, query, case_sensitive, SEARCH_MAX_MATCHES)
+            .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -797,18 +812,21 @@ pub(crate) struct TerminalHistoryInfo {
 /// Works for live, exited, and restored sessions (history is replayed from the
 /// persisted bytes, not the live PTY).
 #[tauri::command]
-pub(crate) fn terminal_history_info(
+pub(crate) async fn terminal_history_info(
     runtime: State<'_, TerminalSessionRuntime>,
     session_id: SessionId,
     cols: u16,
     rows: u16,
 ) -> Result<TerminalHistoryInfo, String> {
-    let transcript = runtime
-        .read_full_transcript(session_id)
-        .map_err(|err| err.to_string())?;
-    let total_rows = crate::terminal::history::history_total_rows(&transcript, cols, rows)
-        .map_err(|err| err.to_string())?;
-    Ok(TerminalHistoryInfo { total_rows })
+    let runtime = runtime.inner().clone();
+    run_terminal_blocking_command(move || {
+        let transcripts = read_history_transcript_segments(&runtime, session_id)?;
+        let total_rows =
+            crate::terminal::history::history_total_rows_segments(&transcripts, cols, rows)
+                .map_err(|err| err.to_string())?;
+        Ok(TerminalHistoryInfo { total_rows })
+    })
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -821,34 +839,62 @@ pub(crate) struct TerminalHistoryWindow {
 /// Render a window of the session's transcript at `start_row` (absolute row,
 /// from the top of the whole history) by replaying the persisted bytes.
 #[tauri::command]
-pub(crate) fn terminal_history_window(
+pub(crate) async fn terminal_history_window(
     runtime: State<'_, TerminalSessionRuntime>,
     session_id: SessionId,
     start_row: usize,
     cols: u16,
-    rows: u16,
+    surface_rows: u16,
+    row_count: u16,
 ) -> Result<TerminalHistoryWindow, String> {
-    let transcript = runtime
-        .read_full_transcript(session_id)
+    let runtime = runtime.inner().clone();
+    run_terminal_blocking_command(move || {
+        let transcripts = read_history_transcript_segments(&runtime, session_id)?;
+        let colors = runtime.default_colors();
+        if let Some(frame) = runtime.cached_history_window(
+            session_id,
+            &transcripts,
+            cols,
+            surface_rows,
+            start_row,
+            row_count,
+            colors,
+        ) {
+            return Ok(TerminalHistoryWindow {
+                start_row: frame.scrollback.viewport_offset,
+                frame,
+            });
+        }
+        let frame = crate::terminal::history::history_window_segments_prefetched(
+            &transcripts,
+            cols,
+            surface_rows,
+            start_row,
+            row_count,
+            runtime.history_prefetch_row_count(surface_rows, row_count),
+            colors,
+        )
         .map_err(|err| err.to_string())?;
-    let frame = crate::terminal::history::history_window(
-        &transcript,
-        cols,
-        rows,
-        start_row,
-        runtime.default_colors(),
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(TerminalHistoryWindow {
-        start_row: frame.scrollback.viewport_offset,
-        frame,
+        runtime.remember_history_window(
+            session_id,
+            &transcripts,
+            cols,
+            surface_rows,
+            colors,
+            frame.clone(),
+        );
+        Ok(TerminalHistoryWindow {
+            start_row: frame.scrollback.viewport_offset,
+            frame,
+        })
     })
+    .await
 }
 
 /// Search the session's durable transcript by replaying it through Ghostty
 /// without returning the full rendered history to the WebView.
 #[tauri::command]
-pub(crate) fn terminal_history_search(
+pub(crate) async fn terminal_history_search(
     runtime: State<'_, TerminalSessionRuntime>,
     session_id: SessionId,
     query: String,
@@ -856,19 +902,21 @@ pub(crate) fn terminal_history_search(
     cols: u16,
     rows: u16,
 ) -> Result<crate::terminal::ghostty::TerminalSearchResult, String> {
-    let transcript = runtime
-        .read_full_transcript(session_id)
-        .map_err(|err| err.to_string())?;
-    crate::terminal::history::history_search(
-        &transcript,
-        cols,
-        rows,
-        &query,
-        case_sensitive,
-        SEARCH_MAX_MATCHES,
-        runtime.default_colors(),
-    )
-    .map_err(|err| err.to_string())
+    let runtime = runtime.inner().clone();
+    run_terminal_blocking_command(move || {
+        let transcripts = read_history_transcript_segments(&runtime, session_id)?;
+        crate::terminal::history::history_search_segments(
+            &transcripts,
+            cols,
+            rows,
+            &query,
+            case_sensitive,
+            SEARCH_MAX_MATCHES,
+            runtime.default_colors(),
+        )
+        .map_err(|err| err.to_string())
+    })
+    .await
 }
 
 #[derive(Debug, Serialize)]
@@ -882,7 +930,7 @@ pub(crate) struct TerminalHistorySearchWindow {
 /// Search the durable transcript and return the first paintable history window
 /// from the same Ghostty replay.
 #[tauri::command]
-pub(crate) fn terminal_history_search_window(
+pub(crate) async fn terminal_history_search_window(
     runtime: State<'_, TerminalSessionRuntime>,
     session_id: SessionId,
     query: String,
@@ -890,24 +938,46 @@ pub(crate) fn terminal_history_search_window(
     cols: u16,
     rows: u16,
 ) -> Result<TerminalHistorySearchWindow, String> {
-    let transcript = runtime
-        .read_full_transcript(session_id)
+    let runtime = runtime.inner().clone();
+    run_terminal_blocking_command(move || {
+        let transcripts = read_history_transcript_segments(&runtime, session_id)?;
+        let (search, frame) = crate::terminal::history::history_search_window_segments(
+            &transcripts,
+            cols,
+            rows,
+            &query,
+            case_sensitive,
+            SEARCH_MAX_MATCHES,
+            runtime.default_colors(),
+        )
         .map_err(|err| err.to_string())?;
-    let (search, frame) = crate::terminal::history::history_search_window(
-        &transcript,
-        cols,
-        rows,
-        &query,
-        case_sensitive,
-        SEARCH_MAX_MATCHES,
-        runtime.default_colors(),
-    )
-    .map_err(|err| err.to_string())?;
-    Ok(TerminalHistorySearchWindow {
-        search,
-        start_row: frame.scrollback.viewport_offset,
-        frame,
+        Ok(TerminalHistorySearchWindow {
+            search,
+            start_row: frame.scrollback.viewport_offset,
+            frame,
+        })
     })
+    .await
+}
+
+async fn run_terminal_blocking_command<T>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|err| format!("terminal blocking task failed: {err}"))?
+}
+
+fn read_history_transcript_segments(
+    runtime: &TerminalSessionRuntime,
+    session_id: SessionId,
+) -> Result<Vec<Vec<u8>>, String> {
+    runtime
+        .read_transcript_segments(session_id)
+        .map_err(|err| err.to_string())
 }
 
 /// Push the active shell theme's default terminal colors into the runtime.
@@ -951,6 +1021,30 @@ pub(crate) fn terminate_session(
     runtime
         .terminate_session(terminal_id)
         .map_err(|err| err.to_string())
+}
+
+/// Finalize a deliberate quit. The window-close / app-exit handlers defer the
+/// quit and let the frontend confirm any in-flight agent work; once the user
+/// confirms (or there is nothing to confirm), the frontend calls this. We mark
+/// shutdown as begun (so the re-issued exit is not deferred again), gracefully
+/// stop every live session's whole process tree, persist each session as
+/// finished/restorable, then exit the app.
+#[tauri::command]
+pub(crate) fn confirm_quit(
+    app: AppHandle,
+    service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
+    shutdown: State<'_, ShutdownState>,
+) -> Result<(), String> {
+    shutdown.begin();
+    let live_sessions = runtime.shutdown_all();
+    for session_id in live_sessions {
+        // child_success = true: a deliberate quit is not a failure. The status
+        // becomes Restorable when a native ref exists, else Exited.
+        let _ = service.mark_session_finished(session_id, true);
+    }
+    app.exit(0);
+    Ok(())
 }
 
 // Benchmark-only commands the React perf harness still calls. They should move
@@ -1041,32 +1135,29 @@ fn attach_claude_hooks(
         }
     };
 
+    // Write the settings file BEFORE touching the registry. If the write fails
+    // we return having mutated nothing: a relaunch then keeps its prior token
+    // (and a still-running prior CLI's hook coverage) instead of being left with
+    // no hook integration at all.
     let token = uuid::Uuid::new_v4().to_string();
-    // Revoke any token left from a previous launch of this session before
-    // registering the new one, so a stale CLI process can't keep pushing state.
-    if let Some((prev_source, prev_token)) =
-        registry.replace(shell_session_id, HookSource::ClaudeCode, token.clone())
-    {
-        control.revoke_session(prev_source, &prev_token);
-    }
-    control.register_session(
-        HookSource::ClaudeCode,
-        token.clone(),
-        shell_session_id.to_string(),
-    );
-
     let url = hook_url(HookSource::ClaudeCode, control.port, &token);
     let written = match write_claude_settings(&config_dir, &url) {
         Ok(written) => written,
         Err(err) => {
             eprintln!("[reverie-hooks] failed writing Claude settings.json: {err}");
-            // Undo the registration so we never leave an authorized token with
-            // no config pointing the CLI at it.
-            registry.take(shell_session_id);
-            control.revoke_session(HookSource::ClaudeCode, &token);
             return;
         }
     };
+
+    // The write succeeded, so commit the token: revoke any token left from a
+    // previous launch of this session (so a stale CLI can't keep pushing state),
+    // then authorize the new one.
+    if let Some((prev_source, prev_token)) =
+        registry.replace(shell_session_id, HookSource::ClaudeCode, token.clone())
+    {
+        control.revoke_session(prev_source, &prev_token);
+    }
+    control.register_session(HookSource::ClaudeCode, token, shell_session_id);
 
     // The adapter owns the `--settings` flag; the shell owns the file + token.
     spawn_spec
@@ -1227,7 +1318,7 @@ fn build_ghostty_frame_sequence() -> Result<GhosttyFrameSequence> {
         let underline = if frame_index % 11 == 0 { "\x1b[4m" } else { "" };
         let reset_underline = if frame_index % 11 == 0 { "\x1b[0m" } else { "" };
         let line = format!(
-            "\x1b[38;2;{red};{green};{blue}mghostty-tauri-frame-{frame_index:03}\x1b[0m {underline}payload: agent output stream, unicode café 🚀 —, dirty-row patch candidate {reset_underline}\r\n"
+            "\x1b[38;2;{red};{green};{blue}mghostty-tauri-frame-{frame_index:03}\x1b[0m {underline}payload: agent output stream, unicode café 🚀, dirty-row patch candidate {reset_underline}\r\n"
         );
 
         terminal.write(line.as_bytes());
