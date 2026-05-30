@@ -27,8 +27,18 @@ import { ProjectGroup } from './ProjectGroup';
 import { FocusRow } from './FocusRow';
 import { SessionRow } from './SessionRow';
 import { rowAddClass } from './navStyles';
-import { FocusReorderGroup } from './FocusReorderGroup';
-import { useReorderFocuses } from '../../hooks/useReorderFocuses';
+import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { NavDndProvider } from './NavDndProvider';
+import { SortableRow } from './SortableRow';
+import { SessionDropZone } from './SessionDropZone';
+import {
+  PROJECTS_CONTAINER,
+  projectSortId,
+  sessionSortId,
+  sessionsContainer,
+  topicSortId,
+  topicsContainer,
+} from './navDnd';
 
 export interface SidebarProps {
   shell: WorkspaceShellSnapshot;
@@ -82,27 +92,57 @@ export function Sidebar({
   const toggleProjectCollapsed = useNavigationStore(s => s.toggleProjectCollapsed);
   const toggleFocusExpanded = useNavigationStore(s => s.toggleFocusExpanded);
   const toggleGeneralCollapsed = useNavigationStore(s => s.toggleGeneralCollapsed);
-  const reorderFocuses = useReorderFocuses();
 
-  function renderSessions(sessions: ShellSession[]) {
-    return sessions.map(session => {
-      const isBound = Boolean(sessionTerminalBindings[session.id]);
-      const activity = activityForSession(session, cortexActivity);
-      const cellState = cellStateFor(session, isBound, activity);
-      return (
-        <SessionRow
-          key={session.id}
-          session={session}
-          active={surfaceMode === 'terminal' && selectedSessionId === session.id}
-          cellState={cellState}
-          onOpen={() => onOpenSession(session)}
-          onClose={(event: MouseEvent<HTMLElement>) => {
-            event.stopPropagation();
-            onCloseSession(session);
-          }}
-        />
-      );
-    });
+  // One topic's (or General's) sessions, each a sortable row, wrapped in the
+  // topic's drop zone, with the "New session" button inside so an empty topic
+  // still has real drop height. `projectId` is null for General.
+  function renderSessionList(focusId: string, projectId: string | null, sessions: ShellSession[]) {
+    const sorted = sessions.slice().sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+    return (
+      <SessionDropZone focusId={focusId} sessionIds={sorted.map(session => session.id)}>
+        {sorted.map(session => {
+          const isBound = Boolean(sessionTerminalBindings[session.id]);
+          const activity = activityForSession(session, cortexActivity);
+          const cellState = cellStateFor(session, isBound, activity);
+          return (
+            <SortableRow
+              key={session.id}
+              id={sessionSortId(session.id)}
+              data={{
+                kind: 'session',
+                entityId: session.id,
+                containerId: sessionsContainer(focusId),
+              }}
+            >
+              <SessionRow
+                session={session}
+                active={surfaceMode === 'terminal' && selectedSessionId === session.id}
+                cellState={cellState}
+                onOpen={() => onOpenSession(session)}
+                onClose={(event: MouseEvent<HTMLElement>) => {
+                  event.stopPropagation();
+                  onCloseSession(session);
+                }}
+              />
+            </SortableRow>
+          );
+        })}
+        <button
+          className={rowAddClass}
+          type="button"
+          data-testid={
+            projectId === null ? 'create-general-session-button' : 'create-focus-session-button'
+          }
+          disabled={busy || !canUseAppServices}
+          onClick={() => onCreateSession(projectId, focusId)}
+        >
+          <Plus size={projectId === null ? 13 : 12} />
+          <Typography as="span" variant="smallBody" tone="inherit">
+            New session
+          </Typography>
+        </button>
+      </SessionDropZone>
+    );
   }
 
   const generalFocus = primaryGeneralFocus(shell);
@@ -112,6 +152,10 @@ export function Sidebar({
     sessionTerminalBindings,
     cortexActivity,
   );
+  const sortedProjects = shell.projects
+    .filter(project => !project.archived)
+    .slice()
+    .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
 
   return (
     <aside
@@ -133,7 +177,7 @@ export function Sidebar({
       >
         <MagnifyingGlass size={14} />
         <Typography as="span" variant="smallBody" tone="faint" className={searchPlaceholderClass}>
-          Search focuses, sessions…
+          Search topics, sessions…
         </Typography>
         <Typography as="span" variant="tiny" tone="faint" className={searchShortcutClass}>
           ⌘K
@@ -141,160 +185,157 @@ export function Sidebar({
       </button>
 
       <nav className={navClass} data-testid="workspace-nav">
-        <button
-          type="button"
-          className={homeRowClass({ active: surfaceMode === 'dashboard' })}
-          data-testid="home-nav-button"
-          data-active={surfaceMode === 'dashboard' ? 'true' : 'false'}
-          onClick={onGoToDashboard}
-        >
-          <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
-          <Typography as="span" variant="smallBody" tone="inherit" className={homeRowLabelClass}>
-            Home
-          </Typography>
-          {liveSessionCount > 0 ? (
+        <NavDndProvider shell={shell}>
+          <button
+            type="button"
+            className={homeRowClass({ active: surfaceMode === 'dashboard' })}
+            data-testid="home-nav-button"
+            data-active={surfaceMode === 'dashboard' ? 'true' : 'false'}
+            onClick={onGoToDashboard}
+          >
+            <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
+            <Typography as="span" variant="smallBody" tone="inherit" className={homeRowLabelClass}>
+              Home
+            </Typography>
+            {liveSessionCount > 0 ? (
+              <Typography
+                as="span"
+                variant="tiny"
+                tone="faint"
+                className={homeRowMetaClass}
+                data-testid="home-nav-live-count"
+              >
+                {liveSessionCount} live
+              </Typography>
+            ) : null}
+          </button>
+
+          <ProjectGroup
+            title={shell.workspace.generalLabel}
+            count={generalRollup.total}
+            attention={generalRollup.attention}
+            expanded={!generalCollapsed}
+            onToggle={toggleGeneralCollapsed}
+            testId="general-group-toggle"
+          >
+            {generalFocus ? renderSessionList(generalFocus.id, null, generalSessions) : null}
+          </ProjectGroup>
+
+          <div className={sectionLabelClass}>
             <Typography
               as="span"
               variant="tiny"
               tone="faint"
-              className={homeRowMetaClass}
-              data-testid="home-nav-live-count"
+              uppercase
+              style={{ letterSpacing: '0.08em' }}
             >
-              {liveSessionCount} live
+              Projects
             </Typography>
-          ) : null}
-        </button>
+            <button
+              type="button"
+              title="Add project"
+              data-testid="add-project-button"
+              disabled={busy || !canUseAppServices}
+              onClick={() => onOpenCreation('project')}
+            >
+              <Plus size={13} />
+            </button>
+          </div>
 
-        <ProjectGroup
-          title={shell.workspace.generalLabel}
-          count={generalRollup.total}
-          attention={generalRollup.attention}
-          expanded={!generalCollapsed}
-          onToggle={toggleGeneralCollapsed}
-          testId="general-group-toggle"
-        >
-          {renderSessions(generalSessions)}
-          <button
-            className={rowAddClass}
-            type="button"
-            data-testid="create-general-session-button"
-            disabled={busy || !canUseAppServices || !generalFocus}
-            onClick={() => generalFocus && onCreateSession(null, generalFocus.id)}
+          <SortableContext
+            items={sortedProjects.map(project => projectSortId(project.id))}
+            strategy={verticalListSortingStrategy}
           >
-            <Plus size={13} />
-            <Typography as="span" variant="smallBody" tone="inherit">
-              New session
-            </Typography>
-          </button>
-        </ProjectGroup>
-
-        <div className={sectionLabelClass}>
-          <Typography
-            as="span"
-            variant="tiny"
-            tone="faint"
-            uppercase
-            style={{ letterSpacing: '0.08em' }}
-          >
-            Projects
-          </Typography>
-          <button
-            type="button"
-            title="Add project"
-            data-testid="add-project-button"
-            disabled={busy || !canUseAppServices}
-            onClick={() => onOpenCreation('project')}
-          >
-            <Plus size={13} />
-          </button>
-        </div>
-
-        {shell.projects
-          .filter(project => !project.archived)
-          .map(project => {
-            const projectFocuses = shell.focuses
-              .filter(focus => !focus.archived && focus.projectId === project.id)
-              .sort((a, b) => a.sortOrder - b.sortOrder);
-            const projectFocusIds = new Set(projectFocuses.map(focus => focus.id));
-            const projectSessions = shell.sessions.filter(
-              session => projectFocusIds.has(session.focusId) && !session.archived,
-            );
-            const projectRollup = rollupSessionStates(
-              projectSessions,
-              sessionTerminalBindings,
-              cortexActivity,
-            );
-            const expanded = !collapsedProjectIds.has(project.id);
-            return (
-              <ProjectGroup
-                key={project.id}
-                icon={expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
-                title={project.name}
-                count={projectRollup.total}
-                attention={projectRollup.attention}
-                expanded={expanded}
-                onToggle={() => toggleProjectCollapsed(project.id)}
-                onRemove={(event: MouseEvent<HTMLElement>) => {
-                  event.stopPropagation();
-                  onArchiveProject(project);
-                }}
-                removeTitle={`Remove project ${project.name}`}
-              >
-                <FocusReorderGroup
-                  focuses={projectFocuses}
-                  onReorder={orderedIds => void reorderFocuses(orderedIds)}
-                  renderFocus={focus => {
-                    const focusSessions = activeSessionsInFocus(shell, focus.id);
-                    const focusRollup = rollupSessionStates(
-                      focusSessions,
-                      sessionTerminalBindings,
-                      cortexActivity,
-                    );
-                    return (
-                      <FocusRow
-                        focus={focus}
-                        rollup={focusRollup}
-                        active={focus.id === selectedFocusId && surfaceMode !== 'dashboard'}
-                        expanded={expandedFocusIds.has(focus.id)}
-                        onToggle={() => toggleFocusExpanded(focus.id)}
-                        onOpen={() => onOpenFocus(project.id, focus.id)}
-                        onRemoveFocus={(event: MouseEvent<HTMLElement>) => {
-                          event.stopPropagation();
-                          onArchiveFocus(focus);
-                        }}
-                      >
-                        {renderSessions(focusSessions)}
-                        <button
-                          className={rowAddClass}
-                          type="button"
-                          data-testid="create-focus-session-button"
-                          disabled={busy || !canUseAppServices}
-                          onClick={() => onCreateSession(project.id, focus.id)}
-                        >
-                          <Plus size={12} />
-                          <Typography as="span" variant="smallBody" tone="inherit">
-                            New session
-                          </Typography>
-                        </button>
-                      </FocusRow>
-                    );
-                  }}
-                />
-                <button
-                  className={rowAddClass}
-                  type="button"
-                  data-testid="create-project-focus-button"
-                  disabled={busy || !canUseAppServices}
-                  onClick={() => onOpenCreation('focus', project.id)}
+            {sortedProjects.map(project => {
+              const projectFocuses = shell.focuses
+                .filter(focus => !focus.archived && focus.projectId === project.id)
+                .sort((a, b) => a.sortOrder - b.sortOrder);
+              const projectFocusIds = new Set(projectFocuses.map(focus => focus.id));
+              const projectSessions = shell.sessions.filter(
+                session => projectFocusIds.has(session.focusId) && !session.archived,
+              );
+              const projectRollup = rollupSessionStates(
+                projectSessions,
+                sessionTerminalBindings,
+                cortexActivity,
+              );
+              const expanded = !collapsedProjectIds.has(project.id);
+              return (
+                <SortableRow
+                  key={project.id}
+                  id={projectSortId(project.id)}
+                  data={{ kind: 'project', entityId: project.id, containerId: PROJECTS_CONTAINER }}
                 >
-                  <Plus size={13} />
-                  <Typography as="span" variant="smallBody" tone="inherit">
-                    New focus
-                  </Typography>
-                </button>
-              </ProjectGroup>
-            );
-          })}
+                  <ProjectGroup
+                    icon={expanded ? <FolderOpen size={15} /> : <Folder size={15} />}
+                    title={project.name}
+                    count={projectRollup.total}
+                    attention={projectRollup.attention}
+                    expanded={expanded}
+                    onToggle={() => toggleProjectCollapsed(project.id)}
+                    onRemove={(event: MouseEvent<HTMLElement>) => {
+                      event.stopPropagation();
+                      onArchiveProject(project);
+                    }}
+                    removeTitle={`Remove project ${project.name}`}
+                  >
+                    <SortableContext
+                      items={projectFocuses.map(focus => topicSortId(focus.id))}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      {projectFocuses.map(focus => {
+                        const focusSessions = activeSessionsInFocus(shell, focus.id);
+                        const focusRollup = rollupSessionStates(
+                          focusSessions,
+                          sessionTerminalBindings,
+                          cortexActivity,
+                        );
+                        return (
+                          <SortableRow
+                            key={focus.id}
+                            id={topicSortId(focus.id)}
+                            data={{
+                              kind: 'topic',
+                              entityId: focus.id,
+                              containerId: topicsContainer(project.id),
+                            }}
+                          >
+                            <FocusRow
+                              focus={focus}
+                              rollup={focusRollup}
+                              active={focus.id === selectedFocusId && surfaceMode !== 'dashboard'}
+                              expanded={expandedFocusIds.has(focus.id)}
+                              onToggle={() => toggleFocusExpanded(focus.id)}
+                              onOpen={() => onOpenFocus(project.id, focus.id)}
+                              onRemoveFocus={(event: MouseEvent<HTMLElement>) => {
+                                event.stopPropagation();
+                                onArchiveFocus(focus);
+                              }}
+                            >
+                              {renderSessionList(focus.id, project.id, focusSessions)}
+                            </FocusRow>
+                          </SortableRow>
+                        );
+                      })}
+                    </SortableContext>
+                    <button
+                      className={rowAddClass}
+                      type="button"
+                      data-testid="create-project-focus-button"
+                      disabled={busy || !canUseAppServices}
+                      onClick={() => onOpenCreation('focus', project.id)}
+                    >
+                      <Plus size={13} />
+                      <Typography as="span" variant="smallBody" tone="inherit">
+                        New topic
+                      </Typography>
+                    </button>
+                  </ProjectGroup>
+                </SortableRow>
+              );
+            })}
+          </SortableContext>
+        </NavDndProvider>
       </nav>
 
       <div className={leftFooterClass}>

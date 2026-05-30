@@ -15,11 +15,24 @@ interface ShellStoreState {
   agentCliDetections: AgentCliDetection[];
   setShell: (action: SetStateAction<WorkspaceShellSnapshot>) => void;
   setAgentCliDetections: (action: SetStateAction<AgentCliDetection[]>) => void;
+  // Patch a single session's title in place (driven by live OSC title events)
+  // so every display site re-renders without refetching the whole snapshot.
+  patchSessionTitle: (sessionId: string, title: string) => void;
 }
 
-export const useShellStore = create<ShellStoreState>((set) => ({
+export const useShellStore = create<ShellStoreState>(set => ({
   shell: fallbackShellSnapshot(),
   agentCliDetections: fallbackAgentCliDetections(),
-  setShell: (action) => set((s) => ({ shell: resolveSetStateAction(action, s.shell) })),
-  setAgentCliDetections: (action) => set((s) => ({ agentCliDetections: resolveSetStateAction(action, s.agentCliDetections) })),
+  setShell: action => set(s => ({ shell: resolveSetStateAction(action, s.shell) })),
+  setAgentCliDetections: action =>
+    set(s => ({ agentCliDetections: resolveSetStateAction(action, s.agentCliDetections) })),
+  patchSessionTitle: (sessionId, title) =>
+    set(s => ({
+      shell: {
+        ...s.shell,
+        sessions: s.shell.sessions.map(session =>
+          session.id === sessionId ? { ...session, title } : session,
+        ),
+      },
+    })),
 }));
