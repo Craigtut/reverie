@@ -8,4 +8,6 @@ export { useActivityStore } from './activityStore';
 export { useShellStore } from './shellStore';
 export { useTerminalStore } from './terminalStore';
 export { useConnectionPanelStore } from './connectionPanelStore';
+export { useOverlayStore } from './overlayStore';
+export type { ConfirmRequest, Toast } from './overlayStore';
 export type { SetStateAction } from './setter';
