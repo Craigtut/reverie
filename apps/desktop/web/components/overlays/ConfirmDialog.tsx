@@ -158,6 +158,10 @@ const buttonBase = {
   borderRadius: '9px',
   border: '1px solid',
   cursor: 'pointer',
+  // Drop the browser's default focus ring; the dialog focuses the confirm
+  // button on open, so a mouse-opened sheet would otherwise show a stray blue
+  // outline. Keyboard users still get a monochrome ring via _focusVisible.
+  outline: 'none',
   transition: 'background 130ms ease, color 130ms ease, border-color 130ms ease',
 } as const;
 
@@ -171,6 +175,10 @@ const cancelButtonClass = css({
     color: 'var(--text)',
     borderColor: 'var(--line-strong)',
   },
+  _focusVisible: {
+    borderColor: 'var(--line-strong)',
+    boxShadow: '0 0 0 3px color-mix(in srgb, var(--text) 8%, transparent)',
+  },
 });
 
 const primaryButtonClass = css({
@@ -179,6 +187,10 @@ const primaryButtonClass = css({
   color: 'var(--text)',
   background: 'var(--surface-3)',
   _hover: { background: 'var(--surface-hi)' },
+  _focusVisible: {
+    borderColor: 'var(--line-strong)',
+    boxShadow: '0 0 0 3px color-mix(in srgb, var(--text) 8%, transparent)',
+  },
 });
 
 const dangerButtonClass = css({
@@ -187,4 +199,8 @@ const dangerButtonClass = css({
   color: 'var(--bad)',
   background: 'color-mix(in srgb, var(--bad) 12%, transparent)',
   _hover: { background: 'color-mix(in srgb, var(--bad) 20%, transparent)' },
+  _focusVisible: {
+    borderColor: 'color-mix(in srgb, var(--bad) 60%, var(--line))',
+    boxShadow: '0 0 0 3px color-mix(in srgb, var(--bad) 22%, transparent)',
+  },
 });
