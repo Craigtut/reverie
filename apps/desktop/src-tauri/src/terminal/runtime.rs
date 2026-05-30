@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::path::PathBuf;
 use std::sync::{
@@ -20,10 +20,17 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::terminal::ghostty::{GhosttyTerminalState, TerminalSearchResult};
 use crate::terminal::transcript::TranscriptWriter;
 use reverie_core::WorkspaceService;
+use reverie_core::session_log::SessionLogControl;
 use reverie_core::transcript::TranscriptStore;
 
 const READ_BUFFER_BYTES: usize = 4096;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+const BACKGROUND_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+const HISTORY_WINDOW_CACHE_ENTRIES: usize = 6;
+const HISTORY_WINDOW_PREFETCH_ROWS: usize = 2_048;
+/// Shared grace period for batch shutdown: SIGTERM every session, wait this
+/// long once, then SIGKILL any stragglers.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
 /// The terminal's default foreground/background. libghostty-vt has no color
 /// config, so Reverie sources these from the active shell theme and feeds them
@@ -66,6 +73,38 @@ pub struct TerminalSessionRuntime {
     // The active shell theme's default terminal colors, pushed from the
     // frontend. Applied to each terminal at spawn and re-broadcast on change.
     default_colors: Arc<Mutex<TerminalThemeColors>>,
+    // The single terminal the user is currently viewing, mirrored from the
+    // frontend's `set_frontend_active`. The idle-session reaper reads this so it
+    // never reaps the session on screen, even when that session is idle.
+    foreground_terminal: Arc<Mutex<Option<TerminalId>>>,
+    // Rendered deep-history windows, keyed by transcript shape and terminal
+    // dimensions. This does not replace the durable transcript as source of
+    // truth; it only avoids repeated Ghostty replays while the user scrolls
+    // around the same history neighborhood.
+    history_cache: Arc<Mutex<HistoryReplayCache>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HistoryCacheKey {
+    session_id: SessionId,
+    cols: u16,
+    surface_rows: u16,
+    foreground: (u8, u8, u8),
+    background: (u8, u8, u8),
+    segment_lengths: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct HistoryWindowCacheEntry {
+    key: HistoryCacheKey,
+    start_row: usize,
+    row_count: usize,
+    frame: TerminalFrame,
+}
+
+#[derive(Default, Debug)]
+struct HistoryReplayCache {
+    windows: VecDeque<HistoryWindowCacheEntry>,
 }
 
 enum TerminalRuntimeCommand {
@@ -90,6 +129,7 @@ enum TerminalRuntimeCommand {
         max_matches: usize,
         reply: Sender<TerminalSearchResult>,
     },
+    SetFrontendActive(bool),
 }
 
 #[derive(Debug)]
@@ -102,6 +142,7 @@ enum PtyReadEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalViewportState {
     follow_tail: bool,
+    frontend_active: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +172,16 @@ pub struct TerminalSessionRecord {
     pub frames_emitted: usize,
     pub bytes_read: usize,
     pub last_exit_success: Option<bool>,
+    // Reaper bookkeeping (not serialized to the frontend; `Instant` is not a
+    // wall clock anyway). `last_output_at` is when the PTY last produced bytes;
+    // `last_active_at` is when the user last sent input. The idle-session reaper
+    // uses these to avoid reaping a session that is producing output or that the
+    // user just interacted with, and as an idle-time fallback for CLIs with no
+    // activity-hook integration.
+    #[serde(skip)]
+    pub last_output_at: Instant,
+    #[serde(skip)]
+    pub last_active_at: Instant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -163,6 +214,77 @@ struct TerminalFrameEvent {
     chunk_bytes: usize,
     rust_elapsed_ms: f64,
     frame: TerminalFrame,
+}
+
+impl HistoryReplayCache {
+    fn get_window(
+        &mut self,
+        key: &HistoryCacheKey,
+        start_row: usize,
+        row_count: u16,
+    ) -> Option<TerminalFrame> {
+        let index = self.windows.iter().position(|entry| {
+            entry.key == *key && entry_contains_request(entry, start_row, row_count)
+        })?;
+        let entry = self.windows.remove(index)?;
+        let frame = entry.frame.clone();
+        self.windows.push_back(entry);
+        Some(frame)
+    }
+
+    fn put_window(&mut self, key: HistoryCacheKey, frame: TerminalFrame) {
+        let start_row = frame.scrollback.viewport_offset;
+        let row_count = frame.rows.len();
+        if row_count == 0 {
+            return;
+        }
+        self.windows.retain(|entry| {
+            !(entry.key == key && entry.start_row == start_row && entry.row_count == row_count)
+        });
+        self.windows.push_back(HistoryWindowCacheEntry {
+            key,
+            start_row,
+            row_count,
+            frame,
+        });
+        while self.windows.len() > HISTORY_WINDOW_CACHE_ENTRIES {
+            self.windows.pop_front();
+        }
+    }
+}
+
+fn entry_contains_request(
+    entry: &HistoryWindowCacheEntry,
+    start_row: usize,
+    row_count: u16,
+) -> bool {
+    let total_rows = entry.frame.scrollback.total_rows.max(1);
+    let requested_count = usize::from(row_count.max(1)).min(total_rows);
+    let requested_start = start_row.min(total_rows.saturating_sub(requested_count));
+    let requested_end = requested_start.saturating_add(requested_count);
+    let entry_end = entry.start_row.saturating_add(entry.row_count);
+    entry.start_row <= requested_start && entry_end >= requested_end
+}
+
+fn history_cache_key(
+    session_id: SessionId,
+    transcripts: &[Vec<u8>],
+    cols: u16,
+    surface_rows: u16,
+    colors: TerminalThemeColors,
+) -> HistoryCacheKey {
+    HistoryCacheKey {
+        session_id,
+        cols,
+        surface_rows,
+        foreground: color_tuple(colors.foreground),
+        background: color_tuple(colors.background),
+        segment_lengths: transcripts.iter().map(Vec::len).collect(),
+    }
+}
+
+fn color_tuple(color: TerminalColor) -> (u8, u8, u8) {
+    (color.r, color.g, color.b)
 }
 
 /// Emitted when a session's normalized OSC title changes, so the frontend can
@@ -209,6 +331,48 @@ impl TerminalSessionRuntime {
             .unwrap_or_default()
     }
 
+    pub fn history_prefetch_row_count(&self, surface_rows: u16, row_count: u16) -> u16 {
+        let requested = usize::from(row_count.max(1));
+        let surface_prefetch = usize::from(surface_rows.max(1)).saturating_mul(24);
+        let rows = requested
+            .max(surface_prefetch)
+            .min(HISTORY_WINDOW_PREFETCH_ROWS)
+            .min(usize::from(u16::MAX));
+        u16::try_from(rows).unwrap_or(u16::MAX).max(1)
+    }
+
+    pub fn cached_history_window(
+        &self,
+        session_id: SessionId,
+        transcripts: &[Vec<u8>],
+        cols: u16,
+        surface_rows: u16,
+        start_row: usize,
+        row_count: u16,
+        colors: TerminalThemeColors,
+    ) -> Option<TerminalFrame> {
+        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
+        self.history_cache
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get_window(&key, start_row, row_count))
+    }
+
+    pub fn remember_history_window(
+        &self,
+        session_id: SessionId,
+        transcripts: &[Vec<u8>],
+        cols: u16,
+        surface_rows: u16,
+        colors: TerminalThemeColors,
+        frame: TerminalFrame,
+    ) {
+        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
+        if let Ok(mut cache) = self.history_cache.lock() {
+            cache.put_window(key, frame);
+        }
+    }
+
     /// Set the default terminal colors for the active theme. Stored for
     /// future spawns + history replay, and broadcast to every live terminal so
     /// a theme switch repaints without respawning sessions.
@@ -251,6 +415,10 @@ impl TerminalSessionRuntime {
             runtime.remove_controller(request.terminal_id);
             runtime.register_failed(request.terminal_id);
             persist_shell_session_failed(&app, request.session_id);
+            eprintln!(
+                "[reverie-terminal] stream failed for {}: {}",
+                request.terminal_id, failure_message
+            );
             let failure = TerminalFailedEvent {
                 session_id: request.session_id,
                 terminal_id: Some(request.terminal_id),
@@ -277,20 +445,14 @@ impl TerminalSessionRuntime {
             .and_then(|guard| guard.clone())
     }
 
-    /// Read a session's entire durable transcript (empty when none is stored).
-    /// Used by the deep-history replay engine.
-    pub fn read_full_transcript(&self, session_id: SessionId) -> Result<Vec<u8>> {
+    /// Read a session's durable transcript grouped by fresh PTY launch. Used by
+    /// replay so a resumed CLI starts from a clean terminal model.
+    pub fn read_transcript_segments(&self, session_id: SessionId) -> Result<Vec<Vec<u8>>> {
         let Some(store) = self.transcript_store() else {
             return Ok(Vec::new());
         };
-        let len = store
-            .transcript_len(session_id)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-        if len == 0 {
-            return Ok(Vec::new());
-        }
         store
-            .read_transcript_range(session_id, 0, len)
+            .read_transcript_segments(session_id)
             .map_err(|err| anyhow::anyhow!(err.to_string()))
     }
 
@@ -311,7 +473,13 @@ impl TerminalSessionRuntime {
             return Ok(());
         }
 
-        self.controller_for(terminal_id)?.write_input(input)
+        self.controller_for(terminal_id)?.write_input(input)?;
+        // Record the interaction so the reaper never reaps a session the user
+        // just typed into, even on a CLI with no activity-hook integration.
+        let _ = self.update_record(terminal_id, |record| {
+            record.last_active_at = Instant::now();
+        });
+        Ok(())
     }
 
     pub fn resize_terminal(&self, terminal_id: TerminalId, cols: u16, rows: u16) -> Result<()> {
@@ -357,6 +525,32 @@ impl TerminalSessionRuntime {
             .context("failed to queue terminal scroll-to-row command")
     }
 
+    pub fn set_frontend_active(&self, terminal_id: TerminalId, active: bool) -> Result<()> {
+        // Mirror the on-screen terminal into shared state so the reaper can read
+        // it. Setting active marks this terminal foreground; clearing only
+        // clears if this terminal is still the recorded foreground, so a stale
+        // deactivate cannot wipe a newer activation.
+        if let Ok(mut foreground) = self.foreground_terminal.lock() {
+            if active {
+                *foreground = Some(terminal_id);
+            } else if *foreground == Some(terminal_id) {
+                *foreground = None;
+            }
+        }
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::SetFrontendActive(active))
+            .context("failed to queue terminal frontend-priority command")
+    }
+
+    /// The terminal the user is currently viewing, if any. Read by the reaper to
+    /// protect the on-screen session from being reaped.
+    pub fn foreground_terminal(&self) -> Option<TerminalId> {
+        self.foreground_terminal
+            .lock()
+            .ok()
+            .and_then(|guard| *guard)
+    }
+
     /// Search the terminal's buffer. Dispatched to the worker thread (which owns
     /// the Ghostty state) and waits for the reply.
     pub fn search_terminal(
@@ -382,6 +576,50 @@ impl TerminalSessionRuntime {
 
     pub fn terminate_session(&self, terminal_id: TerminalId) -> Result<()> {
         self.controller_for(terminal_id)?.terminate()
+    }
+
+    /// Gracefully terminate every live session's process tree on app shutdown.
+    /// SIGTERMs all groups first, waits once for a shared grace period, then
+    /// SIGKILLs any stragglers, so quitting does not orphan the agents or
+    /// anything they spawned. Returns the product session ids that were live so
+    /// the caller can persist them as finished/restorable.
+    pub fn shutdown_all(&self) -> Vec<SessionId> {
+        let live: Vec<(TerminalId, PtyController)> = match self.controllers.lock() {
+            Ok(map) => map.iter().map(|(id, c)| (*id, c.clone())).collect(),
+            Err(_) => return Vec::new(),
+        };
+        if live.is_empty() {
+            return Vec::new();
+        }
+        // Resolve product session ids before killing anything.
+        let session_ids: Vec<SessionId> = match self.sessions.lock() {
+            Ok(sessions) => live
+                .iter()
+                .filter_map(|(id, _)| sessions.get(id).and_then(|record| record.session_id))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        for (_, controller) in &live {
+            controller.request_terminate();
+        }
+        std::thread::sleep(SHUTDOWN_GRACE);
+        for (_, controller) in &live {
+            let _ = controller.terminate_now();
+        }
+        session_ids
+    }
+
+    /// Immediately SIGKILL every live session's process tree with no grace.
+    /// Final app-exit backstop for a wedged/closed webview that never drove the
+    /// graceful path.
+    pub fn kill_all_now(&self) {
+        let controllers: Vec<PtyController> = match self.controllers.lock() {
+            Ok(map) => map.values().cloned().collect(),
+            Err(_) => return,
+        };
+        for controller in controllers {
+            let _ = controller.terminate_now();
+        }
     }
 
     fn run_stream_worker(&self, app: AppHandle, request: TerminalStreamRequest) -> Result<()> {
@@ -422,6 +660,18 @@ impl TerminalSessionRuntime {
 
         self.mark_running(request.terminal_id)?;
         persist_shell_session_running(&app, request.session_id);
+        // Launch-time native-session capture: poll the adapter's on-disk state
+        // for a few seconds so the session binds its native ref (and its live
+        // activity) as soon as the CLI has written its session file, instead of
+        // only at exit. This brings file-watched adapters (Cortex, Codex) to
+        // parity with the Claude hook path, which binds live immediately. Runs
+        // off-thread and is best-effort; exit-time capture stays the backstop.
+        spawn_launch_capture_poll(
+            app.clone(),
+            request.session_id,
+            request.agent_kind,
+            launch_started_ms,
+        );
         let started_payload = TerminalStreamStarted {
             label: "PTY -> Ghostty -> Tauri terminal stream",
             session_id: request.session_id,
@@ -434,6 +684,9 @@ impl TerminalSessionRuntime {
         app.emit("terminal_stream_started", started_payload)?;
 
         let started = Instant::now();
+        // When the PTY last produced bytes. Pushed to the session record on each
+        // frame emit so the reaper can tell a busy session from an idle one.
+        let mut last_output_at = Instant::now();
         let mut bytes_read = 0_usize;
         let mut bytes_rendered = 0_usize;
         let mut bytes_since_last_frame = 0_usize;
@@ -445,7 +698,10 @@ impl TerminalSessionRuntime {
         let mut last_frame_emit = Instant::now()
             .checked_sub(TERMINAL_FRAME_INTERVAL)
             .unwrap_or_else(Instant::now);
-        let mut viewport_state = TerminalViewportState { follow_tail: true };
+        let mut viewport_state = TerminalViewportState {
+            follow_tail: true,
+            frontend_active: true,
+        };
         // Live session title: apply this CLI's OSC-title rule and push label
         // changes up to the frontend. Only for real product sessions with a
         // known CLI (the bench/proof path has neither, so it skips this).
@@ -465,7 +721,12 @@ impl TerminalSessionRuntime {
                 pending_frame = true;
             }
 
-            if pending_frame && last_frame_emit.elapsed() >= TERMINAL_FRAME_INTERVAL {
+            if terminal_frame_due(
+                pending_frame,
+                last_frame_emit,
+                &viewport_state,
+                Instant::now(),
+            ) {
                 let emit_ms = emit_terminal_frame_event(
                     &app,
                     request.session_id,
@@ -479,7 +740,12 @@ impl TerminalSessionRuntime {
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
                 frames_emitted += 1;
-                self.update_progress(request.terminal_id, frames_emitted, bytes_rendered)?;
+                self.update_progress(
+                    request.terminal_id,
+                    frames_emitted,
+                    bytes_rendered,
+                    last_output_at,
+                )?;
                 bytes_since_last_frame = 0;
                 pending_frame = false;
                 last_frame_emit = Instant::now();
@@ -491,6 +757,7 @@ impl TerminalSessionRuntime {
                     bytes_read += chunk.len();
                     bytes_rendered += chunk.len();
                     bytes_since_last_frame += chunk.len();
+                    last_output_at = Instant::now();
 
                     terminal.write(&chunk);
                     // A title only changes as a side effect of program output,
@@ -525,7 +792,12 @@ impl TerminalSessionRuntime {
             // Gate on `pending_frame` so an idle terminal (no new PTY output and
             // no applied commands) never emits. Without this guard the loop ships
             // a full grid frame every TERMINAL_FRAME_INTERVAL forever, per session.
-            if pending_frame && last_frame_emit.elapsed() >= TERMINAL_FRAME_INTERVAL {
+            if terminal_frame_due(
+                pending_frame,
+                last_frame_emit,
+                &viewport_state,
+                Instant::now(),
+            ) {
                 let emit_ms = emit_terminal_frame_event(
                     &app,
                     request.session_id,
@@ -539,7 +811,12 @@ impl TerminalSessionRuntime {
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
                 frames_emitted += 1;
-                self.update_progress(request.terminal_id, frames_emitted, bytes_rendered)?;
+                self.update_progress(
+                    request.terminal_id,
+                    frames_emitted,
+                    bytes_rendered,
+                    last_output_at,
+                )?;
                 bytes_since_last_frame = 0;
                 pending_frame = false;
                 last_frame_emit = Instant::now();
@@ -560,7 +837,12 @@ impl TerminalSessionRuntime {
             total_emit_ms += emit_ms;
             max_emit_ms = max_emit_ms.max(emit_ms);
             frames_emitted += 1;
-            self.update_progress(request.terminal_id, frames_emitted, bytes_rendered)?;
+            self.update_progress(
+                request.terminal_id,
+                frames_emitted,
+                bytes_rendered,
+                last_output_at,
+            )?;
         }
 
         let avg_emit_ms = if frames_emitted == 0 {
@@ -589,7 +871,12 @@ impl TerminalSessionRuntime {
             bytes_read,
             child_success,
         )?;
-        persist_native_session_after_launch(&app, request.session_id, launch_started_ms);
+        persist_native_session_after_launch(
+            &app,
+            request.session_id,
+            request.agent_kind,
+            launch_started_ms,
+        );
         persist_shell_session_finished(&app, request.session_id, child_success);
         app.emit("terminal_exit", finished.clone())?;
         app.emit("session_status_changed", finished)?;
@@ -614,6 +901,8 @@ impl TerminalSessionRuntime {
                 frames_emitted: 0,
                 bytes_read: 0,
                 last_exit_success: None,
+                last_output_at: Instant::now(),
+                last_active_at: Instant::now(),
             },
         );
         Ok(())
@@ -649,6 +938,11 @@ impl TerminalSessionRuntime {
         }
         if let Ok(mut command_senders) = self.command_senders.lock() {
             command_senders.remove(&terminal_id);
+        }
+        if let Ok(mut foreground) = self.foreground_terminal.lock() {
+            if *foreground == Some(terminal_id) {
+                *foreground = None;
+            }
         }
     }
 
@@ -686,10 +980,12 @@ impl TerminalSessionRuntime {
         terminal_id: TerminalId,
         frames_emitted: usize,
         bytes_read: usize,
+        last_output_at: Instant,
     ) -> Result<()> {
         self.update_record(terminal_id, |record| {
             record.frames_emitted = frames_emitted;
             record.bytes_read = bytes_read;
+            record.last_output_at = last_output_at;
         })
     }
 
@@ -852,13 +1148,35 @@ fn apply_terminal_commands(
                         matches: Vec::new(),
                         total: 0,
                         capped: false,
+                        total_rows: 0,
                     });
                 let _ = reply.send(result);
+            }
+            TerminalRuntimeCommand::SetFrontendActive(active) => {
+                viewport_state.frontend_active = active;
             }
         }
     }
 
     Ok(needs_frame)
+}
+
+fn terminal_frame_interval(state: &TerminalViewportState) -> Duration {
+    if state.frontend_active {
+        TERMINAL_FRAME_INTERVAL
+    } else {
+        BACKGROUND_TERMINAL_FRAME_INTERVAL
+    }
+}
+
+fn terminal_frame_due(
+    pending_frame: bool,
+    last_frame_emit: Instant,
+    state: &TerminalViewportState,
+    now: Instant,
+) -> bool {
+    pending_frame
+        && now.saturating_duration_since(last_frame_emit) >= terminal_frame_interval(state)
 }
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -874,17 +1192,166 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 fn persist_native_session_after_launch(
     app: &AppHandle,
     session_id: Option<SessionId>,
+    agent_kind: Option<AgentKind>,
     launch_started_ms: i64,
 ) {
     if let Some((service, session_id)) = workspace_service(app, session_id) {
         // Adapter-driven discovery: the service resolves the session's adapter
-        // and attaches a native ref if one is found. `cortex_home_dir` supplies
-        // the Cortex home; non-Cortex adapters ignore it (no discovery yet).
+        // and attaches a native ref if one is found. We pass the CLI home that
+        // matches this session's adapter so each scanner looks in the right
+        // place (Cortex `~/.cortex`, Claude `~/.claude`, Codex `~/.codex`). This
+        // is the exit-time backstop; the launch-time poll usually wins first.
         let _ = service.discover_and_attach_native_session(
             session_id,
             Some(launch_started_ms),
-            cortex_home_dir(),
+            agent_home_dir(agent_kind),
         );
+        // The Codex rollout file stops changing once the process exits, so stop
+        // tailing it (the launch poll re-registers it on resume). Claude (hooks)
+        // and Cortex (its own watcher) are not in the session-log engine.
+        if agent_kind == Some(AgentKind::CodexCli) {
+            unregister_active_file_watch(app, &service, session_id);
+        }
+    }
+}
+
+/// Register a Codex session's rollout file with the session-log watcher so its
+/// appends are tailed for live state. No-op for non-Codex adapters (Claude uses
+/// hooks, Cortex its own watcher) and when the watcher control or the rollout
+/// path is not available yet.
+fn register_active_file_watch(
+    app: &AppHandle,
+    service: &WorkspaceService,
+    session_id: SessionId,
+    agent_kind: AgentKind,
+) {
+    if agent_kind != AgentKind::CodexCli {
+        return;
+    }
+    let Some(control) = app.try_state::<SessionLogControl>() else {
+        return;
+    };
+    if let Some(path) = session_native_metadata_path(service, session_id) {
+        control.register(path);
+    }
+}
+
+/// Stop tailing a Codex session's rollout file.
+fn unregister_active_file_watch(
+    app: &AppHandle,
+    service: &WorkspaceService,
+    session_id: SessionId,
+) {
+    let Some(control) = app.try_state::<SessionLogControl>() else {
+        return;
+    };
+    if let Some(path) = session_native_metadata_path(service, session_id) {
+        control.unregister(path);
+    }
+}
+
+/// The on-disk session-file path captured into a session's native ref (Codex's
+/// rollout file), if any.
+fn session_native_metadata_path(
+    service: &WorkspaceService,
+    session_id: SessionId,
+) -> Option<PathBuf> {
+    service
+        .snapshot()
+        .ok()?
+        .sessions
+        .into_iter()
+        .find(|session| session.id == session_id)?
+        .native_session_ref
+        .and_then(|reference| reference.metadata_path)
+}
+
+/// How long to poll for the CLI's session file after launch, and how often.
+/// ~10s is long enough for any of the CLIs to write their first session record,
+/// short enough that the thread does not linger; we stop early once captured.
+const LAUNCH_CAPTURE_ATTEMPTS: usize = 20;
+const LAUNCH_CAPTURE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Poll adapter-driven native-session discovery for a short window after launch
+/// so a session binds its native ref (and the dashboard binds its live activity)
+/// as soon as the CLI has written its session file, rather than only at exit.
+///
+/// No-op for the bench/proof path (no session) and for adapters without
+/// filesystem discovery. Best-effort and off the worker thread. The capture is
+/// idempotent: whoever wins first (this poll, the Claude hook, or exit-time
+/// discovery) attaches the ref, and the rest become no-ops.
+fn spawn_launch_capture_poll(
+    app: AppHandle,
+    session_id: Option<SessionId>,
+    agent_kind: Option<AgentKind>,
+    launch_started_ms: i64,
+) {
+    let (Some(session_id), Some(agent_kind)) = (session_id, agent_kind) else {
+        return;
+    };
+    let Some(agent_home) = agent_home_dir(Some(agent_kind)) else {
+        return;
+    };
+
+    thread::spawn(move || {
+        for _ in 0..LAUNCH_CAPTURE_ATTEMPTS {
+            thread::sleep(LAUNCH_CAPTURE_INTERVAL);
+            let Some((service, session_id)) = workspace_service(&app, Some(session_id)) else {
+                return;
+            };
+            match service.discover_and_attach_native_session(
+                session_id,
+                Some(launch_started_ms),
+                Some(agent_home.clone()),
+            ) {
+                // Captured this iteration: tell the frontend to refetch so it
+                // binds the now-live session, register the live-state watch, then
+                // stop polling.
+                Ok(true) => {
+                    let _ = app.emit("session_record_changed", ());
+                    register_active_file_watch(&app, &service, session_id, agent_kind);
+                    return;
+                }
+                // The ref already exists (a resume, or a prior poll iteration
+                // won). Still ensure the live-state watch is attached, then stop.
+                // Otherwise the CLI has not written its file yet -> keep waiting.
+                Ok(false) => {
+                    if session_native_ref_present(&service, session_id) {
+                        register_active_file_watch(&app, &service, session_id, agent_kind);
+                        return;
+                    }
+                }
+                Err(_) => return,
+            }
+        }
+    });
+}
+
+/// Whether the session already carries a native ref (so launch-capture polling
+/// should stop). A missing session also stops the poll.
+fn session_native_ref_present(service: &WorkspaceService, session_id: SessionId) -> bool {
+    service
+        .snapshot()
+        .ok()
+        .and_then(|snapshot| {
+            snapshot
+                .sessions
+                .into_iter()
+                .find(|session| session.id == session_id)
+        })
+        .map(|session| session.native_session_ref.is_some())
+        .unwrap_or(true)
+}
+
+/// Resolve the CLI home directory whose on-disk session records the adapter for
+/// `agent_kind` knows how to scan. Returns `None` when the kind has no
+/// filesystem discovery wired (Codex capture lands with the rollout watcher).
+fn agent_home_dir(agent_kind: Option<AgentKind>) -> Option<PathBuf> {
+    match agent_kind {
+        Some(AgentKind::CortexCode) => cortex_home_dir(),
+        Some(AgentKind::ClaudeCode) => claude_home_dir(),
+        Some(AgentKind::CodexCli) => codex_home_dir(),
+        None => None,
     }
 }
 
@@ -985,6 +1452,25 @@ fn cortex_home_dir() -> Option<PathBuf> {
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cortex")))
 }
 
+// Locate where Claude actually stores its transcripts, mirroring `cortex_home_dir`.
+// We honor `CLAUDE_CONFIG_DIR` on purpose: the PTY spawn inherits this process's
+// env (no `env_clear`), so when the user has it set, the spawned `claude` writes
+// its `projects/` transcripts there, and the scanner must look in the same place.
+// This is discovery only; Reverie still never *sets* `CLAUDE_CONFIG_DIR` on a
+// spawn (that would redirect the credential home), which `assert_safe_cli_env`
+// enforces. When the var is unset, both sides fall back to `~/.claude`.
+fn claude_home_dir() -> Option<PathBuf> {
+    env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+}
+
+fn codex_home_dir() -> Option<PathBuf> {
+    env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+}
+
 fn unix_time_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1024,6 +1510,30 @@ fn terminal_frame_segments(chunk: &[u8], max_segment_bytes: usize) -> Vec<&[u8]>
 mod tests {
     use super::*;
     use reverie_core::CommandSpec;
+    use reverie_core::terminal::{
+        TerminalColors, TerminalCursor, TerminalCursorStyle, TerminalDirtyState, TerminalPosition,
+        TerminalRow, TerminalScrollback,
+    };
+
+    fn blank_test_frame() -> TerminalFrame {
+        TerminalFrame {
+            dirty: TerminalDirtyState::Full,
+            colors: TerminalColors {
+                foreground: TerminalColor { r: 0, g: 0, b: 0 },
+                background: TerminalColor { r: 0, g: 0, b: 0 },
+                cursor: None,
+            },
+            cursor: TerminalCursor {
+                visible: false,
+                blinking: false,
+                style: TerminalCursorStyle::Block,
+                position: Some(TerminalPosition { col: 0, row: 0 }),
+            },
+            modes: Default::default(),
+            scrollback: TerminalScrollback::default(),
+            rows: Vec::new(),
+        }
+    }
 
     #[test]
     fn runtime_registers_session_metadata_before_stream_starts() {
@@ -1101,7 +1611,10 @@ mod tests {
     fn terminal_commands_scroll_ghostty_viewport() {
         let (sender, receiver) = mpsc::channel();
         let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
-        let mut viewport_state = TerminalViewportState { follow_tail: true };
+        let mut viewport_state = TerminalViewportState {
+            follow_tail: true,
+            frontend_active: true,
+        };
 
         for index in 1..=10 {
             terminal.write(format!("L{index:02}\r\n").as_bytes());
@@ -1120,6 +1633,135 @@ mod tests {
         let bottom = terminal.frame().unwrap();
         assert!(viewport_state.follow_tail);
         assert!(bottom.scrollback.at_bottom);
+    }
+
+    #[test]
+    fn terminal_commands_lower_frame_cadence_when_frontend_backgrounds_terminal() {
+        let (sender, receiver) = mpsc::channel();
+        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let mut viewport_state = TerminalViewportState {
+            follow_tail: true,
+            frontend_active: true,
+        };
+
+        assert_eq!(
+            terminal_frame_interval(&viewport_state),
+            TERMINAL_FRAME_INTERVAL
+        );
+
+        sender
+            .send(TerminalRuntimeCommand::SetFrontendActive(false))
+            .unwrap();
+        assert!(!apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        assert!(!viewport_state.frontend_active);
+        assert_eq!(
+            terminal_frame_interval(&viewport_state),
+            BACKGROUND_TERMINAL_FRAME_INTERVAL
+        );
+
+        sender
+            .send(TerminalRuntimeCommand::SetFrontendActive(true))
+            .unwrap();
+        assert!(!apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        assert!(viewport_state.frontend_active);
+        assert_eq!(
+            terminal_frame_interval(&viewport_state),
+            TERMINAL_FRAME_INTERVAL
+        );
+    }
+
+    #[test]
+    fn history_window_cache_reuses_containing_prefetch_window() {
+        let session_id = SessionId::new_v4();
+        let key = HistoryCacheKey {
+            session_id,
+            cols: 80,
+            surface_rows: 24,
+            foreground: (1, 2, 3),
+            background: (4, 5, 6),
+            segment_lengths: vec![100],
+        };
+        let mut frame = blank_test_frame();
+        frame.scrollback.total_rows = 100;
+        frame.scrollback.viewport_offset = 20;
+        frame.rows = (0..50)
+            .map(|index| TerminalRow {
+                index,
+                dirty: true,
+                cells: Vec::new(),
+            })
+            .collect();
+
+        let mut cache = HistoryReplayCache::default();
+        cache.put_window(key.clone(), frame);
+
+        assert!(cache.get_window(&key, 30, 10).is_some());
+        assert!(cache.get_window(&key, 10, 10).is_none());
+    }
+
+    #[test]
+    fn terminal_frame_due_throttles_background_sessions_under_output_pressure() {
+        let active_frames = simulated_pending_frame_emits(true, 500, 4);
+        let background_frames = simulated_pending_frame_emits(false, 500, 4);
+
+        assert!(active_frames >= 30, "active frames: {active_frames}");
+        assert!(
+            background_frames <= 5,
+            "background frames: {background_frames}"
+        );
+        assert!(
+            active_frames >= background_frames * 5,
+            "active={active_frames} background={background_frames}"
+        );
+    }
+
+    #[test]
+    fn terminal_frame_due_flushes_pending_background_frame_when_reactivated() {
+        let start = Instant::now();
+        let last_frame_emit = start;
+        let mut viewport_state = TerminalViewportState {
+            follow_tail: true,
+            frontend_active: false,
+        };
+        let pending_frame = true;
+        let next_tick = start + Duration::from_millis(80);
+
+        assert!(!terminal_frame_due(
+            pending_frame,
+            last_frame_emit,
+            &viewport_state,
+            next_tick
+        ));
+
+        viewport_state.frontend_active = true;
+
+        assert!(terminal_frame_due(
+            pending_frame,
+            last_frame_emit,
+            &viewport_state,
+            next_tick
+        ));
+    }
+
+    fn simulated_pending_frame_emits(active: bool, duration_ms: u64, tick_ms: u64) -> usize {
+        let start = Instant::now();
+        let mut last_frame_emit = start.checked_sub(TERMINAL_FRAME_INTERVAL).unwrap_or(start);
+        let viewport_state = TerminalViewportState {
+            follow_tail: true,
+            frontend_active: active,
+        };
+        let mut frames = 0_usize;
+        let ticks = duration_ms / tick_ms;
+
+        for tick in 0..=ticks {
+            let now = start + Duration::from_millis(tick * tick_ms);
+            if terminal_frame_due(true, last_frame_emit, &viewport_state, now) {
+                frames += 1;
+                last_frame_emit = now;
+            }
+        }
+
+        frames
     }
 
     #[test]
