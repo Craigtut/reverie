@@ -48,6 +48,7 @@ impl WorkspaceService {
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
             default_agent_kind: AgentKind::CortexCode,
+            nav_state: None,
         };
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
@@ -248,6 +249,17 @@ impl WorkspaceService {
     pub fn set_workspace_default_agent_kind(&self, kind: AgentKind) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.default_agent_kind = kind;
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Persist the opaque, frontend-owned UI view state (last selected
+    /// focus/session, active surface, sidebar accordion). The renderer reads it
+    /// back on load so the workspace reopens where the user left it. The domain
+    /// stores it verbatim and never interprets it; `None` clears it.
+    pub fn set_workspace_nav_state(&self, nav_state: Option<String>) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.nav_state = nav_state;
         self.repo.save_workspace(&workspace)?;
         Ok(self.repo.load_snapshot()?)
     }

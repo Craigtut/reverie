@@ -40,6 +40,14 @@ pub struct Workspace {
     /// form and does not change any existing session.
     #[serde(default = "default_agent_kind")]
     pub default_agent_kind: AgentKind,
+    /// Opaque, frontend-owned UI view state (the last selected focus/session,
+    /// active surface, and sidebar accordion), persisted so the workspace
+    /// reopens where the user left it instead of resetting to the dashboard on
+    /// every reload or relaunch. The domain never reads or interprets this; it
+    /// is a JSON string the renderer round-trips. `None` means "never saved"
+    /// (a fresh workspace), which the renderer treats as "seed a default view".
+    #[serde(default)]
+    pub nav_state: Option<String>,
 }
 
 impl Workspace {
@@ -53,6 +61,7 @@ impl Workspace {
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
             default_agent_kind: AgentKind::CortexCode,
+            nav_state: None,
         }
     }
 }

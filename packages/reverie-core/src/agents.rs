@@ -116,6 +116,82 @@ pub trait AgentAdapter: Send + Sync {
         let _ = ctx;
         Ok(None)
     }
+
+    /// Extra CLI arguments that attach Reverie's externally-written per-session
+    /// hook config file to this launch, given the path it was written to.
+    ///
+    /// Defaults to none: a CLI is either observed through its own on-disk state
+    /// (Cortex) or attaches hooks by a different mechanism. Claude Code overrides
+    /// this to pass `--settings <path>`, which merges the file on top of the
+    /// user's settings for this run only, without redirecting the config or
+    /// credential home. Pure: the shell owns writing the file and minting the
+    /// token; the adapter only knows the flag.
+    fn hook_config_args(&self, config_file: &Path) -> Vec<String> {
+        let _ = config_file;
+        Vec::new()
+    }
+
+    /// Turn a raw OSC terminal title this CLI emitted into a displayable session
+    /// label, or `None` when it is just the CLI's default (its own name or the
+    /// working folder) or pure status decoration not worth showing.
+    ///
+    /// The default handles every CLI we ship: it strips the leading animated
+    /// status/spinner glyphs CLIs prefix their title with while working (see
+    /// [`is_status_decoration`]) and suppresses the product/folder defaults.
+    /// `folder_name` is the session's working-directory basename. This is the
+    /// per-CLI plug-in point: a future CLI with a non-standard title scheme can
+    /// override it. Pure: no IO, no terminal knowledge.
+    fn normalize_title(&self, raw: &str, folder_name: &str) -> Option<String> {
+        meaningful_title(clean_title(raw), folder_name, self.display_name())
+    }
+}
+
+/// Status/spinner glyphs CLIs animate at the start of their terminal title while
+/// they work. None of these ever begin a human-meaningful label, so we strip a
+/// leading run of them. The braille block is the big one: both Claude (`⠂ ⠐ ...`)
+/// and Codex (`⠙ ⠹ ...`) drive spinners from it. `✳` is Claude's idle/ready mark.
+/// Add generic decoration here so every adapter (and future CLIs) benefits; keep
+/// only truly CLI-specific title quirks in a per-adapter `normalize_title`.
+fn is_status_decoration(c: char) -> bool {
+    matches!(
+        c,
+        '\u{2800}'
+            ..='\u{28FF}' // Braille Patterns: spinner frames (Claude, Codex)
+        | '\u{2733}' // ✳ eight-spoked asterisk (Claude idle/ready)
+    )
+}
+
+/// Strip a leading run of status decoration and whitespace from `raw`, then trim
+/// the remainder. Only the leading run is stripped, so interior punctuation in a
+/// real title (a `·`, a path slash) is preserved.
+fn clean_title(raw: &str) -> &str {
+    raw.trim_start_matches(|c: char| c.is_whitespace() || is_status_decoration(c))
+        .trim()
+}
+
+/// A cleaned title is worth displaying only when it is non-empty and not just the
+/// CLI's own name or the working folder (the values CLIs emit by default). Folder
+/// comparison is case-insensitive; the product name match is exact.
+fn meaningful_title(cleaned: &str, folder_name: &str, display_name: &str) -> Option<String> {
+    if cleaned.is_empty()
+        || cleaned == display_name
+        || cleaned.eq_ignore_ascii_case(folder_name.trim())
+    {
+        None
+    } else {
+        Some(cleaned.to_owned())
+    }
+}
+
+/// Resolve the per-CLI title rule for `kind` and normalize a raw OSC title into a
+/// displayable session label, or `None` when the CLI is showing its default or
+/// decoration. The terminal runtime calls this so normalization stays in the
+/// domain layer (the worker never special-cases a CLI itself).
+pub fn derive_session_title(kind: AgentKind, raw: &str, folder_name: &str) -> Option<String> {
+    built_in_adapters()
+        .into_iter()
+        .find(|adapter| adapter.kind() == kind)
+        .and_then(|adapter| adapter.normalize_title(raw, folder_name))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -407,6 +483,15 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn dangerous_mode_arg(&self) -> Option<&'static str> {
         Some("--dangerously-skip-permissions")
     }
+
+    /// Attach Reverie's per-session hook settings with `--settings <file>`.
+    /// Claude merges this file additively over `~/.claude/settings.json` for
+    /// this run, so the user's own hooks and credentials are untouched.
+    fn hook_config_args(&self, config_file: &Path) -> Vec<String> {
+        vec!["--settings".to_owned(), config_file.display().to_string()]
+    }
+    // Title normalization uses the default: Claude's `✳` idle mark and `⠂ ⠐ ...`
+    // working spinner are both handled by `is_status_decoration`.
 }
 
 /// Codex CLI adapter command semantics verified against `codex-cli 0.133.0`.
@@ -487,6 +572,9 @@ impl AgentAdapter for CodexCliAdapter {
     fn dangerous_mode_arg(&self) -> Option<&'static str> {
         Some("--dangerously-bypass-approvals-and-sandbox")
     }
+    // Title normalization uses the default: Codex's `⠙ ⠹ ...` working spinner is
+    // handled by `is_status_decoration`, and its folder-name-when-idle default is
+    // suppressed by the folder_name check in `meaningful_title`.
 }
 
 pub fn built_in_adapters() -> Vec<Box<dyn AgentAdapter>> {
@@ -827,5 +915,63 @@ mod tests {
         assert!(none.is_none());
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_title_strips_glyph_and_suppresses_default() {
+        let adapter = ClaudeCodeAdapter;
+        // Idle title is the product name behind the `✳` status glyph: suppressed.
+        assert_eq!(adapter.normalize_title("✳ Claude Code", "reverie"), None);
+        // While working, Claude animates a braille spinner (U+2800..) in front of
+        // both its idle name and its task title. Both must be handled.
+        assert_eq!(adapter.normalize_title("⠂ Claude Code", "reverie"), None);
+        assert_eq!(adapter.normalize_title("⠐ Claude Code", "reverie"), None);
+        assert_eq!(
+            adapter.normalize_title("⠐ Write ocean haiku", "reverie"),
+            Some("Write ocean haiku".to_owned())
+        );
+        // A real task title surfaces, with the `✳` glyph and spacing stripped.
+        assert_eq!(
+            adapter.normalize_title("✳ Fixing the parser", "reverie"),
+            Some("Fixing the parser".to_owned())
+        );
+        // No glyph still works, and whitespace-only is suppressed.
+        assert_eq!(
+            adapter.normalize_title("Running tests", "reverie"),
+            Some("Running tests".to_owned())
+        );
+        assert_eq!(adapter.normalize_title("   ", "reverie"), None);
+    }
+
+    #[test]
+    fn codex_title_strips_spinner_and_suppresses_folder() {
+        let adapter = CodexCliAdapter;
+        // Default title is the working folder, with or without a spinner frame.
+        assert_eq!(adapter.normalize_title("pixa", "pixa"), None);
+        assert_eq!(adapter.normalize_title("⠙ pixa", "pixa"), None);
+        assert_eq!(adapter.normalize_title("⠹ Pixa", "pixa"), None);
+        // A task-specific title surfaces with the braille spinner stripped.
+        assert_eq!(
+            adapter.normalize_title("⠼ refactor adapters", "pixa"),
+            Some("refactor adapters".to_owned())
+        );
+    }
+
+    #[test]
+    fn derive_session_title_routes_to_adapter_and_tolerates_silent_clis() {
+        // Routes through the registry to the matching adapter.
+        assert_eq!(
+            derive_session_title(AgentKind::ClaudeCode, "✳ Writing docs", "reverie"),
+            Some("Writing docs".to_owned())
+        );
+        assert_eq!(
+            derive_session_title(AgentKind::CodexCli, "⠙ reverie", "reverie"),
+            None
+        );
+        // Cortex emits no title yet: an empty raw never fights the seeded label.
+        assert_eq!(
+            derive_session_title(AgentKind::CortexCode, "", "reverie"),
+            None
+        );
     }
 }

@@ -154,6 +154,14 @@ pub(crate) struct SetWorkspaceDefaultAgentKindRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetWorkspaceNavStateRequest {
+    /// Opaque, frontend-owned JSON describing the last view (selection, surface,
+    /// sidebar accordion). `None` clears it. The backend stores it verbatim.
+    nav_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetAgentCliEnabledRequest {
     kind: AgentKind,
     enabled: bool,
@@ -443,6 +451,16 @@ pub(crate) fn set_workspace_default_agent_kind(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .set_workspace_default_agent_kind(request.default_agent_kind)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_workspace_nav_state(
+    service: State<'_, WorkspaceService>,
+    request: SetWorkspaceNavStateRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_workspace_nav_state(request.nav_state)
         .map_err(|err| err.to_string())
 }
 

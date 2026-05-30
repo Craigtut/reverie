@@ -138,6 +138,21 @@ const MIGRATIONS: &[&str] = &[
     // get safe defaults so existing workspaces upgrade unchanged.
     "ALTER TABLE workspace ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark';
      ALTER TABLE workspace ADD COLUMN default_agent_kind TEXT NOT NULL DEFAULT 'cortex_code';",
+    // v7 -> v8: per-focus default dangerous (auto-approve) mode.
+    "ALTER TABLE focuses ADD COLUMN default_dangerous_mode INTEGER;",
+    // v8 -> v9: drag-to-reorder positions for projects (left-nav list) and
+    // sessions (within a focus). Spaced by 10 on create so neighbors leave room.
+    // Defaults to 0 so existing rows upgrade unchanged and fall back to their
+    // prior order (name for projects, insertion order for sessions) as a tiebreak.
+    "ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE sessions ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;",
+    // v9 -> v10: persisted UI view state so the workspace reopens where the user
+    // left it (last focus/session, active surface, sidebar accordion) instead of
+    // resetting to the dashboard on every reload or relaunch. An opaque, nullable
+    // JSON blob the frontend owns; the backend stores it verbatim. Nullable with
+    // no default so existing workspaces upgrade to "never saved" (NULL) and the
+    // renderer seeds its usual first-focus default.
+    "ALTER TABLE workspace ADD COLUMN nav_state TEXT;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -225,8 +240,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 "INSERT INTO workspace
                     (id, name, general_label, default_dangerous_mode,
                      default_new_session_dangerous, disabled_agent_kinds,
-                     theme, default_agent_kind)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     theme, default_agent_kind, nav_state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -236,6 +251,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     disabled_kinds_to_db(&seed.disabled_agent_kinds)?,
                     theme_mode_to_db(seed.theme)?,
                     agent_kind_to_db(seed.default_agent_kind)?,
+                    seed.nav_state,
                 ],
             )
             .map_err(backend)?;
@@ -249,8 +265,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
             "INSERT INTO workspace
                 (id, name, general_label, default_dangerous_mode,
                  default_new_session_dangerous, disabled_agent_kinds,
-                 theme, default_agent_kind)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 theme, default_agent_kind, nav_state)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -258,7 +274,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 default_new_session_dangerous = excluded.default_new_session_dangerous,
                 disabled_agent_kinds = excluded.disabled_agent_kinds,
                 theme = excluded.theme,
-                default_agent_kind = excluded.default_agent_kind",
+                default_agent_kind = excluded.default_agent_kind,
+                nav_state = excluded.nav_state",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -268,6 +285,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 disabled_kinds_to_db(&workspace.disabled_agent_kinds)?,
                 theme_mode_to_db(workspace.theme)?,
                 agent_kind_to_db(workspace.default_agent_kind)?,
+                workspace.nav_state,
             ],
         )
         .map_err(backend)?;
@@ -783,7 +801,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
     conn.query_row(
         "SELECT id, name, general_label, default_dangerous_mode,
                 default_new_session_dangerous, disabled_agent_kinds,
-                theme, default_agent_kind
+                theme, default_agent_kind, nav_state
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -796,6 +814,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 disabled_agent_kinds: disabled_kinds_from_db(&row.get::<_, String>(5)?),
                 theme: theme_mode_from_db(&row.get::<_, String>(6)?)?,
                 default_agent_kind: agent_kind_from_db(&row.get::<_, String>(7)?)?,
+                nav_state: row.get::<_, Option<String>>(8)?,
             })
         },
     )
@@ -1205,6 +1224,29 @@ mod tests {
         let loaded = repo.load_snapshot().unwrap().workspace;
         assert_eq!(loaded.default_agent_kind, AgentKind::ClaudeCode);
         assert_eq!(loaded.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn save_workspace_round_trips_nav_state() {
+        let repo = seeded();
+        // A fresh workspace has never saved a view, so the renderer seeds its
+        // default rather than restoring one.
+        assert_eq!(repo.load_snapshot().unwrap().workspace.nav_state, None);
+
+        // An opaque JSON blob round-trips verbatim, independent of the theme.
+        let blob = r#"{"surfaceMode":"terminal","selectedSessionId":"abc"}"#.to_owned();
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.nav_state = Some(blob.clone());
+        repo.save_workspace(&workspace).unwrap();
+        let loaded = repo.load_snapshot().unwrap().workspace;
+        assert_eq!(loaded.nav_state, Some(blob));
+        assert_eq!(loaded.theme, ThemeMode::Dark);
+
+        // Clearing it returns to the unsaved state.
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.nav_state = None;
+        repo.save_workspace(&workspace).unwrap();
+        assert_eq!(repo.load_snapshot().unwrap().workspace.nav_state, None);
     }
 
     #[test]
