@@ -106,6 +106,26 @@ export interface ShellWorkspace {
   // Persisted default agent kind seeded into the new-session composer. Only a
   // starting value for the form; it does not affect existing sessions.
   defaultAgentKind: AgentKind;
+  // Opaque, frontend-owned UI view state (last selection, surface, sidebar
+  // accordion) serialized as JSON, so the workspace reopens where the user left
+  // it. Absent/null means "never saved" (seed the default view). See
+  // PersistedNavState and useNavPersistence.
+  navState?: string | null;
+}
+
+// The navigation we persist so a reload or relaunch reopens the last view
+// instead of resetting to the dashboard. Serialized into ShellWorkspace.navState
+// (a backend column the domain stores verbatim). Sets are stored as arrays since
+// JSON has no Set; creationMode is deliberately excluded (we never restore a
+// half-finished creation flow).
+export interface PersistedNavState {
+  selectedProjectId: ProjectFilter;
+  selectedFocusId: string | null;
+  selectedSessionId: string | null;
+  surfaceMode: SurfaceMode;
+  collapsedProjectIds: string[];
+  expandedFocusIds: string[];
+  generalCollapsed: boolean;
 }
 
 export interface ShellProject {
@@ -296,6 +316,10 @@ export type DashboardStatus = 'attention' | 'live' | 'recent';
 // focus view. Derived from the live activity feed when present, the persisted
 // record status otherwise. `archived` is handled separately (a filter, not a
 // group), so it is not part of this set.
-export type SessionState = 'attention' | 'active' | 'fresh' | 'finished';
+//   active   = the agent is mid-turn, actively working
+//   idle     = the process is alive but waiting for your next prompt (the
+//              common resting state of an interactive CLI; turn done, nothing
+//              pending). Distinct from `finished`, where the process has exited.
+export type SessionState = 'attention' | 'active' | 'idle' | 'fresh' | 'finished';
 
 export type GlyphState = 'working' | 'attention' | 'error' | 'idle';

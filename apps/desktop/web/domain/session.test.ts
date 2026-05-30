@@ -245,22 +245,29 @@ describe('launchButtonLabel', () => {
 });
 
 describe('dangerousLabel', () => {
-  it('uses the session override when set', () => {
-    expect(dangerousLabel(makeSession({ dangerousModeOverride: true }), false)).toBe(
+  it('uses the session override above everything else', () => {
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: true }), false, false)).toBe(
       'Explicitly enabled',
     );
-    expect(dangerousLabel(makeSession({ dangerousModeOverride: false }), true)).toBe('Off');
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: false }), true, true)).toBe('Off');
   });
 
-  it('falls back to the workspace default when there is no override', () => {
-    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), true)).toBe(
+  it('falls back to the topic (focus) default when there is no session override', () => {
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), true, false)).toBe(
       'Explicitly enabled',
     );
-    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), false)).toBe('Off');
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), false, true)).toBe('Off');
+  });
+
+  it('falls back to the workspace default when neither override nor topic default is set', () => {
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), null, true)).toBe(
+      'Explicitly enabled',
+    );
+    expect(dangerousLabel(makeSession({ dangerousModeOverride: null }), null, false)).toBe('Off');
   });
 
   it('falls back to the workspace default for a null session', () => {
-    expect(dangerousLabel(null, true)).toBe('Explicitly enabled');
-    expect(dangerousLabel(null, false)).toBe('Off');
+    expect(dangerousLabel(null, null, true)).toBe('Explicitly enabled');
+    expect(dangerousLabel(null, null, false)).toBe('Off');
   });
 });

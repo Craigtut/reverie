@@ -19,6 +19,30 @@ import {
 
 const canUseAppServices = true;
 
+// Sentinel the backend returns from `workspace_shell` while it is still opening
+// and seeding the database. Mirrors `WORKSPACE_STARTING_UP` in the Tauri command
+// layer; the frontend treats it (like any transient failure) as retryable.
+const WORKSPACE_STARTING_UP = 'reverie:workspace-starting-up';
+
+// Backoff schedule for the initial load, after an immediate first attempt:
+// ~150ms, 300, 600, 1200, 2400. Long enough in aggregate to outlast a cold
+// database open + seed, short enough that the common case (first attempt
+// succeeds) feels instant.
+const WORKSPACE_LOAD_RETRY_DELAYS_MS = [150, 300, 600, 1200, 2400];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Whether a rejected `workspace_shell` invoke is the expected cold-start
+// "still starting" signal rather than a real failure. The error reaches the
+// frontend as a string or Error depending on the runtime, so we normalize.
+function isStartingUpError(error: unknown): boolean {
+  const message =
+    typeof error === 'string' ? error : error instanceof Error ? error.message : String(error);
+  return message.includes(WORKSPACE_STARTING_UP);
+}
+
 // The workspace view-model: every value the shell and its children derive from
 // store state (the selected focus/session, the visible session set, live
 // counts, the meta-strip status), plus the effects that keep the navigation
@@ -35,6 +59,7 @@ export function useWorkspaceModel() {
   const setSelectedSessionId = useNavigationStore(s => s.setSelectedSessionId);
   const creationMode = useNavigationStore(s => s.creationMode);
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
+  const navHydrated = useNavigationStore(s => s.hydrated);
   const sessionTerminalBindings = useTerminalStore(s => s.sessionTerminalBindings);
   const terminalSurface = useTerminalStore(s => s.terminalSurface);
   const launchingSessionId = useTerminalStore(s => s.launchingSessionId);
@@ -43,6 +68,7 @@ export function useWorkspaceModel() {
   const busy = useUiStore(s => s.busy);
   const appendLog = useUiStore(s => s.appendLog);
   const setTheme = useUiStore(s => s.setTheme);
+  const setWorkspaceLoadFailed = useUiStore(s => s.setWorkspaceLoadFailed);
 
   const scrollbackContract = useMemo(
     () => terminalScrollbackContract(terminalSurface),
@@ -114,8 +140,14 @@ export function useWorkspaceModel() {
       }).length,
     [shell.sessions, sessionTerminalBindings, cortexActivity],
   );
+  // The selected session inherits its topic's (focus's) default when it has no
+  // override of its own, then the workspace default.
   const effectiveDangerousMode =
-    dangerousLabel(selectedSession, shell.workspace.defaultDangerousMode) !== 'Off';
+    dangerousLabel(
+      selectedSession,
+      selectedFocus?.defaultDangerousMode ?? null,
+      shell.workspace.defaultDangerousMode,
+    ) !== 'Off';
   // Gates the auto-approve (YOLO) toggle: flipping it terminates + resumes the
   // session, which would interrupt an agent mid-thought. Locked only while the
   // selected session is actively working; awaiting permission, awaiting input,
@@ -134,33 +166,60 @@ export function useWorkspaceModel() {
         ? 'Ready to launch'
         : 'Ready';
 
+  // A single load attempt. On success it installs the snapshot and clears any
+  // prior load-failure state; on failure it returns null so the caller (the
+  // retry loop, or a post-command reload) can decide what to do. It never
+  // mutates the shell on failure, so a transient error can't wipe good data.
   async function loadWorkspaceShell() {
     if (!canUseAppServices) return null;
     try {
       const snapshot = await invoke<WorkspaceShellSnapshot>('workspace_shell');
       setShell(snapshot);
+      setWorkspaceLoadFailed(false);
       appendLog(
         `Loaded persisted workspace shell: ${snapshot.projects.length} project, ${snapshot.focuses.length} focuses, ${snapshot.sessions.length} sessions.`,
       );
       return snapshot;
     } catch (error) {
-      // A load failure here leaves the shell at its empty initial state, which
-      // looks exactly like total data loss even though the database is intact.
-      // Surface it loudly (console + in-app log) so a transient backend error
-      // is never silently mistaken for vanished projects and sessions.
-      console.error('[reverie] workspace_shell load failed; keeping prior shell state.', error);
-      appendLog(
-        `Workspace shell command failed; using browser fallback data: ${errorMessage(error)}`,
-      );
+      // The backend reports a retryable "still starting" signal while it opens
+      // and seeds the database; that is expected on a cold start, so we keep
+      // quiet about it and let the retry loop handle it. Any other error is a
+      // real failure worth surfacing (console + in-app log) so it is never
+      // silently mistaken for vanished projects and sessions.
+      if (!isStartingUpError(error)) {
+        console.error('[reverie] workspace_shell load failed; keeping prior shell state.', error);
+        appendLog(`Workspace shell command failed: ${errorMessage(error)}`);
+      }
       return null;
     }
+  }
+
+  // Load with bounded backoff. The first invoke on a cold start can lose the
+  // race against the backend finishing its database open + seed, and a single
+  // silent failure used to strand the user on the empty fallback shell (looks
+  // like total data loss) until a manual reload. We retry a handful of times
+  // with increasing delays, and only after exhausting them do we flip the
+  // visible error/retry state. Any success along the way clears it.
+  async function loadWorkspaceShellWithRetry() {
+    if (!canUseAppServices) return null;
+    setWorkspaceLoadFailed(false);
+    for (let attempt = 0; attempt <= WORKSPACE_LOAD_RETRY_DELAYS_MS.length; attempt += 1) {
+      const snapshot = await loadWorkspaceShell();
+      if (snapshot) return snapshot;
+      const delay = WORKSPACE_LOAD_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) break;
+      await sleep(delay);
+    }
+    setWorkspaceLoadFailed(true);
+    appendLog('Workspace shell failed to load after several attempts; showing retry.');
+    return null;
   }
 
   // Load the persisted workspace shell once on mount (isTauriRuntime never
   // changes after first render, so the original [isTauriRuntime] dep was a
   // mount-once effect).
   useEffect(() => {
-    loadWorkspaceShell().catch(error => {
+    loadWorkspaceShellWithRetry().catch(error => {
       appendLog(`Workspace shell load failed: ${errorMessage(error)}`);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-once load.
@@ -207,6 +266,9 @@ export function useWorkspaceModel() {
   // the project and focus steps, and re-seeding here (now that a General focus
   // always exists) would clobber the just-set project and misfile the new focus.
   useEffect(() => {
+    // Wait until navigation has hydrated from persisted state, so we never seed
+    // the first focus over a saved selection we are about to restore.
+    if (!navHydrated) return;
     if (creationMode) return;
     if (shell.focuses.length === 0) return;
     if (
@@ -224,7 +286,7 @@ export function useWorkspaceModel() {
     setSelectedProjectId(firstFocus.projectId ?? null);
     setSelectedFocusId(firstFocus.id);
     setSelectedSessionId(firstSession?.id ?? null);
-  }, [creationMode, selectedFocusId, shell.focuses, shell.sessions]);
+  }, [navHydrated, creationMode, selectedFocusId, shell.focuses, shell.sessions]);
 
   return {
     shell,
@@ -245,6 +307,7 @@ export function useWorkspaceModel() {
     runningLabel,
     scrollbackContract,
     loadWorkspaceShell,
+    retryWorkspaceLoad: loadWorkspaceShellWithRetry,
   };
 }
 

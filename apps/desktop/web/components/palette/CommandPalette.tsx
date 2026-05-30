@@ -7,6 +7,7 @@ import { buildPaletteEntries, filterPalette } from '../../domain';
 import type { ShellSession } from '../../domain';
 import { useActivityStore, usePaletteStore, useShellStore } from '../../store';
 import { AgentGlyph } from '../glyphs';
+import { Kbd } from '../primitives/Kbd';
 import { Typography } from '../primitives/Typography';
 
 // Cmd/Ctrl+K command palette: fuzzy-jump to any focus or session in the
@@ -81,15 +82,13 @@ export function CommandPalette({
             ref={inputRef}
             type="text"
             value={query}
-            placeholder="Jump to a focus or session…"
+            placeholder="Jump to a topic or session…"
             aria-label="Command palette query"
             data-testid="command-palette-input"
             onChange={event => setQuery(event.currentTarget.value)}
             onKeyDown={handleKeyDown}
           />
-          <Typography as="span" variant="tiny" tone="faint" className={paletteHintClass}>
-            Esc
-          </Typography>
+          <Kbd keys={['⌘', 'K']} />
         </div>
         <ul className={paletteListClass} data-testid="command-palette-results">
           {filtered.length === 0 ? (
@@ -156,6 +155,27 @@ export function CommandPalette({
             ))
           )}
         </ul>
+        <div className={paletteFooterClass}>
+          <span className={paletteFooterHintClass}>
+            <Kbd keys={['↑']} />
+            <Kbd keys={['↓']} />
+            <Typography as="span" variant="tiny" tone="faint">
+              Move
+            </Typography>
+          </span>
+          <span className={paletteFooterHintClass}>
+            <Kbd keys={['⏎']} />
+            <Typography as="span" variant="tiny" tone="faint">
+              Open
+            </Typography>
+          </span>
+          <span className={paletteFooterHintClass}>
+            <Kbd keys={['Esc']} />
+            <Typography as="span" variant="tiny" tone="faint">
+              Close
+            </Typography>
+          </span>
+        </div>
       </motion.div>
     </div>
   );
@@ -204,11 +224,19 @@ const paletteInputRowClass = css({
   },
 });
 
-const paletteHintClass = css({
-  padding: '2px 7px',
-  border: '1px solid var(--line)',
-  borderRadius: '4px',
-  background: 'var(--surface-2)',
+const paletteFooterClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '16px',
+  padding: '8px 14px',
+  borderTop: '1px solid var(--line)',
+  color: 'var(--text-3)',
+});
+
+const paletteFooterHintClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '6px',
 });
 
 const paletteListClass = css({

@@ -9,7 +9,12 @@ import type {
   WorkspaceModel,
   WorkspaceMutations,
 } from '../../hooks';
-import { TERMINAL_DROP_ZONE, TERMINAL_TAB_DROP_ZONE, useTerminalFileDrop } from '../../hooks';
+import {
+  TERMINAL_DROP_ZONE,
+  TERMINAL_TAB_DROP_ZONE,
+  useSessionTabShortcuts,
+  useTerminalFileDrop,
+} from '../../hooks';
 import {
   useActivityStore,
   useNavigationStore,
@@ -99,12 +104,14 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const {
     newProjectName,
     newProjectPath,
+    projectDropError,
     newFocusTitle,
     setNewFocusTitle,
-    newSessionTitle,
-    setNewSessionTitle,
+    newFocusDangerousMode,
+    setNewFocusDangerousMode,
     newSessionCwd,
     setNewSessionCwd,
+    // Kept for the Settings default-agent picker; the composer no longer uses it.
     newSessionAgentKind,
     setNewSessionAgentKind,
     newSessionDangerousMode,
@@ -112,9 +119,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     openCreation,
     createSessionInFocus,
     chooseProjectFolder,
+    selectDroppedProjectFolder,
     createProjectFromComposer,
-    createFocusForSelection,
-    createSessionForSelection,
+    createTopicAndStartSession,
+    createSessionWithAgent,
   } = creation;
   const {
     setWorkspaceDefaultDangerousMode,
@@ -153,6 +161,16 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     (dropModel.phase === 'over' || dropModel.phase === 'confirm')
       ? dropModel.target.id
       : null;
+
+  // Keyboard tab switching (Cmd+1..9, Ctrl+Tab) across the focus's sessions, so a
+  // crowded strip is fully navigable without the pointer. Only on the terminal
+  // stage, and not while the composer or palette owns the keyboard.
+  useSessionTabShortcuts({
+    enabled: surfaceMode === 'terminal' && !creationMode && !paletteOpen,
+    sessions: visibleSessions,
+    selectedSessionId: selectedSession?.id ?? null,
+    onSelect: selectSessionTab,
+  });
 
   // Starting a session in General targets its (implicit) focus; if a workspace
   // somehow has no general focus, fall back to creating one.
@@ -303,20 +321,20 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 newProjectPath={newProjectPath}
                 newFocusTitle={newFocusTitle}
                 setNewFocusTitle={setNewFocusTitle}
-                newSessionTitle={newSessionTitle}
-                setNewSessionTitle={setNewSessionTitle}
+                newFocusDangerousMode={newFocusDangerousMode}
+                setNewFocusDangerousMode={setNewFocusDangerousMode}
                 newSessionCwd={newSessionCwd}
                 setNewSessionCwd={setNewSessionCwd}
-                newSessionAgentKind={newSessionAgentKind}
-                setNewSessionAgentKind={setNewSessionAgentKind}
                 newSessionDangerousMode={newSessionDangerousMode}
                 setNewSessionDangerousMode={setNewSessionDangerousMode}
                 cliDetections={agentCliDetections}
                 busy={busy}
+                projectDropError={projectDropError}
                 onChooseProjectFolder={() => chooseProjectFolder().catch(() => {})}
+                onDropProjectFolder={selectDroppedProjectFolder}
                 onCreateProject={() => createProjectFromComposer().catch(() => {})}
-                onCreateFocus={() => createFocusForSelection().catch(() => {})}
-                onCreateSession={() => createSessionForSelection().catch(() => {})}
+                onCreateTopicWithAgent={kind => createTopicAndStartSession(kind).catch(() => {})}
+                onCreateSessionWithAgent={kind => createSessionWithAgent(kind).catch(() => {})}
                 onCancel={() => setCreationMode(null)}
               />
             ) : null}
@@ -347,7 +365,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                     });
                   }}
                 />
-                <TerminalDropOverlay model={dropModel} session={selectedSession} />
               </div>
             ) : creationMode ? null : (
               <EmptyState
@@ -367,6 +384,15 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             the tabs, which are lifted); position:fixed anchors it to the whole
             window corner and keeps it from being clipped to the terminal panel. */}
         {terminalView ? <div className={terminalGlowClass} aria-hidden="true" /> : null}
+
+        {/* The file-drop visualization. Mounted inside the canvas stage like the
+            glow, so it sits at z-index 1: full-window (the dot field/dome span the
+            whole app) yet rendered ABOVE the terminal and BELOW the lifted tabs
+            and the sidebar. The carried-file chip portals out to ride on top. The
+            drop target is still resolved by hit-testing the marked zones. */}
+        {selectedSession ? (
+          <TerminalDropOverlay model={dropModel} session={selectedSession} />
+        ) : null}
       </section>
 
       {paletteOpen ? (

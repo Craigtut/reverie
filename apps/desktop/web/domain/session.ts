@@ -131,7 +131,23 @@ export function launchButtonLabel(session: ShellSession) {
   return 'Run';
 }
 
-export function dangerousLabel(session: ShellSession | null, workspaceDefault: boolean) {
-  const effective = session?.dangerousModeOverride ?? workspaceDefault;
-  return effective ? 'Explicitly enabled' : 'Off';
+// Resolve a session's effective dangerous (auto-approve) mode. Precedence:
+// the session's own override, then its topic (focus) default, then the
+// workspace default. Mirrors Session::effective_dangerous_mode in the Rust core.
+export function effectiveSessionDangerousMode(
+  session: ShellSession | null,
+  focusDefault: boolean | null | undefined,
+  workspaceDefault: boolean,
+): boolean {
+  return session?.dangerousModeOverride ?? focusDefault ?? workspaceDefault;
+}
+
+export function dangerousLabel(
+  session: ShellSession | null,
+  focusDefault: boolean | null | undefined,
+  workspaceDefault: boolean,
+) {
+  return effectiveSessionDangerousMode(session, focusDefault, workspaceDefault)
+    ? 'Explicitly enabled'
+    : 'Off';
 }

@@ -40,6 +40,8 @@ export async function invokeBrowserFixture<T>(
       return clone(fixtureShell) as T;
     case 'choose_project_folder':
       return { name: 'reverie', path: '/Users/user/Code/reverie' } as T;
+    case 'resolve_project_folder':
+      return resolveFixtureProjectFolder(args) as T;
     case 'create_project':
       return createFixtureProject(args) as T;
     case 'create_focus':
@@ -98,6 +100,12 @@ export async function invokeBrowserFixture<T>(
       return historyWindowFixture(args) as T;
     case 'record_render_metrics':
       return undefined as T;
+    case 'set_workspace_nav_state':
+      // The desktop backend persists the last view so a reload/relaunch reopens
+      // it. The browser harness deliberately does not, so a harness reload always
+      // lands on the seeded default view (which the smoke test asserts). Nav
+      // restore is verified in the real app, not here.
+      return undefined as T;
     case 'open_url': {
       // In the browser harness there is no system opener; open a new tab so a
       // human can see the link resolve. The desktop build routes this to the
@@ -116,6 +124,20 @@ export function subscribeFixtureEvent<T>(eventName: string, handler: EventHandle
   handlers.add(handler as EventHandler<unknown>);
   browserListeners.set(eventName, handlers);
   return () => handlers.delete(handler as EventHandler<unknown>);
+}
+
+// The harness has no filesystem to stat, so it treats any dropped path as a
+// valid folder and derives the name from the last path segment, mirroring the
+// real `resolve_project_folder` command's happy path.
+function resolveFixtureProjectFolder(args?: Record<string, unknown>) {
+  const path = readDirectArg<string>(args, 'path').trim();
+  const name =
+    path
+      .replace(/[\\/]+$/, '')
+      .split(/[\\/]/)
+      .filter(Boolean)
+      .pop() ?? 'New project';
+  return { name, path };
 }
 
 function createFixtureProject(args?: Record<string, unknown>) {

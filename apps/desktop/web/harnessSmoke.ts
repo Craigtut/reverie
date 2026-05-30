@@ -69,13 +69,7 @@ async function runEmptyOnboardingScenario() {
   await clickTestId('empty-create-project-button');
   await expectComposerMode('project');
   expectAbsentTestId('session-tabs', 'project creation hides session tabs');
-  expectAbsentTestId('terminal-controls', 'project creation hides terminal controls');
   expectAbsentTestId('terminal-body', 'project creation hides the terminal body');
-  expectDisabled(
-    'submit-project-button',
-    true,
-    'project submit starts disabled until a folder is selected',
-  );
   await clickTestId('choose-project-folder-button');
   await waitFor(
     () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
@@ -84,85 +78,48 @@ async function runEmptyOnboardingScenario() {
   assertions.push('project folder picker records a selected folder');
   await waitFor(
     () => !isDisabled(requireTestId('submit-project-button')),
-    'project submit enables after folder selection',
+    'Add project enables after a folder is selected',
   );
   await clickTestId('submit-project-button');
 
+  // A fresh project drops straight into the topic composer. Agent tiles are the
+  // commit: they stay disabled until the topic is named, then picking one creates
+  // the topic and its first session in a single step.
   await expectComposerMode('focus');
-  expectAbsentTestId('session-tabs', 'focus creation hides session tabs');
-  expectAbsentTestId('terminal-controls', 'focus creation hides terminal controls');
-  expectAbsentTestId('terminal-body', 'focus creation hides the terminal body');
+  expectAbsentTestId('session-tabs', 'topic creation hides session tabs');
+  expectAbsentTestId('terminal-body', 'topic creation hides the terminal body');
   expectDisabled(
-    'submit-focus-button',
+    selectorForCli('codex_cli'),
     true,
-    'focus submit starts disabled until a focus title is filled',
+    'agent tiles are disabled until the topic is named',
   );
-  fillInput('focus-title-input', 'Harness Smoke Focus');
+  fillInput('focus-title-input', 'Harness Smoke Topic');
   await waitFor(
-    () => !isDisabled(requireTestId('submit-focus-button')),
-    'focus submit enables after title entry',
-  );
-  await clickTestId('submit-focus-button');
-
-  await expectComposerMode('session');
-  expectAbsentTestId('session-tabs', 'session creation hides session tabs');
-  expectAbsentTestId('terminal-controls', 'session creation hides terminal controls');
-  expectAbsentTestId('terminal-body', 'session creation hides the previous terminal body');
-  assertTextIncludes(
-    'cli-availability-summary',
-    '3 of 3 ready',
-    'session composer reports all CLIs ready',
-  );
-  assertInputValue(
-    'session-cwd-input',
-    '/Users/user/Code/reverie',
-    'project-backed session inherits the selected project folder cwd',
+    () => !isDisabled(requireSelector(selectorForCli('codex_cli'))),
+    'agent tiles enable after the topic is named',
   );
   await clickCliChoice('codex_cli');
-  expectCliSelected('codex_cli', 'Codex can be selected for a new session');
-  assertTextIncludes(
-    'selected-cli-summary',
-    'Codex CLI is ready',
-    'selected CLI summary reassures that Codex is ready',
-  );
-  fillInput('session-title-input', 'Harness Codex Session');
-  await waitFor(
-    () => !isDisabled(requireTestId('submit-session-button')),
-    'session submit enables after valid CLI and inherited cwd',
-  );
-  await clickTestId('submit-session-button');
 
-  await waitFor(() => !queryByTestId('creation-composer'), 'session creation closes the composer');
-  await expectTestId('terminal-body', 'created session opens the terminal body');
+  await waitFor(() => !queryByTestId('creation-composer'), 'picking an agent closes the composer');
+  await expectTestId('terminal-body', 'the first session opens the terminal body');
   await waitForTextIncludes(
     'terminal-status-label',
     'Running',
-    'created Codex session starts its own terminal runtime',
+    'the first Codex session starts its own terminal runtime',
   );
-  assertDocumentIncludes('Harness Smoke Focus', 'created focus is visible in the shell');
-  assertTextIncludes(
-    'session-tabs',
-    'Harness Codex Session',
-    'created session title is visible in the session tab',
-  );
+  assertDocumentIncludes('Harness Smoke Topic', 'created topic is visible in the shell');
+  assertTextIncludes('session-tabs', 'Codex', 'the first session shows the agent name in its tab');
   const codexTerminalId = await waitForTerminalId(
     'created Codex session receives its own terminal id',
   );
 
+  // A second session in the same topic, started from the tab bar, again commits
+  // by picking an agent.
   await clickTestId('create-session-button');
   await expectComposerMode('session');
   await clickCliChoice('claude_code');
-  fillInput('session-title-input', 'Harness Claude Parallel Session');
-  await waitFor(
-    () => !isDisabled(requireTestId('submit-session-button')),
-    'second session submit enables with a different CLI',
-  );
-  await clickTestId('submit-session-button');
-  await waitForTextIncludes(
-    'session-tabs',
-    'Harness Claude Parallel Session',
-    'second session becomes the active terminal',
-  );
+  await waitFor(() => !queryByTestId('creation-composer'), 'second agent pick closes the composer');
+  await waitForTextIncludes('session-tabs', 'Claude', 'second session becomes the active terminal');
   const claudeTerminalId = await waitForTerminalId(
     'created Claude session receives its own terminal id',
   );
@@ -179,7 +136,7 @@ async function runEmptyOnboardingScenario() {
     'clicking Codex tab reattaches its original terminal id',
   );
   assertions.push('clicking Codex tab reattaches its original terminal id');
-  await clickSessionTabWithText('Claude Parallel');
+  await clickSessionTabWithText('Claude');
   await waitFor(
     () => requireTestId('terminal-body').getAttribute('data-terminal-id') === claudeTerminalId,
     'clicking Claude tab reattaches its original terminal id',
@@ -190,23 +147,23 @@ async function runEmptyOnboardingScenario() {
   await waitFor(
     () =>
       ![...document.querySelectorAll('[data-testid="session-tab"]')].some(tab =>
-        tab.textContent?.includes('Claude Parallel'),
+        tab.textContent?.includes('Claude'),
       ),
     'closing a top tab hides it from active tabs',
   );
   assertions.push('closing a top tab hides it from active tabs');
   await clickTestId('nav-focus-open');
-  await expectTestId('session-history-surface', 'opening the focus shows its dashboard');
+  await expectTestId('session-history-surface', 'opening the topic shows its dashboard');
   await waitFor(
     () =>
       Boolean(
         document.querySelector('[data-testid="session-history-row"][data-tab-visible="false"]'),
       ),
-    'closed (archived) session shows in the focus archived list',
+    'closed (archived) session shows in the topic archived list',
   );
-  assertions.push('closed (archived) session shows in the focus archived list');
+  assertions.push('closed (archived) session shows in the topic archived list');
   await clickTestId('restore-session-tab-button');
-  await clickSessionTabWithText('Claude Parallel');
+  await clickSessionTabWithText('Claude');
   await waitFor(() => {
     const restoredTerminalId =
       requireTestId('terminal-body').getAttribute('data-terminal-id') ?? '';
@@ -225,32 +182,16 @@ async function runPartialCliScenario() {
   await clickTestId('empty-create-session-button');
 
   await expectComposerMode('session');
+  // The cwd lives behind the Options disclosure now.
+  await clickTestId('session-options-toggle');
   assertInputValue(
     'session-cwd-input',
     '/Users/user',
     'general workspace session defaults to the home cwd',
   );
-  assertTextIncludes(
-    'cli-availability-summary',
-    '2 of 3 ready',
-    'partial CLI fixture reports only available CLIs',
-  );
   expectCliAvailability('codex_cli', false, 'Codex is shown unavailable in the partial fixture');
-  expectDisabled(selectorForCli('codex_cli'), true, 'unavailable Codex choice is disabled');
+  expectDisabled(selectorForCli('codex_cli'), true, 'unavailable Codex tile is disabled');
   await clickCliChoice('claude_code');
-  expectCliSelected('claude_code', 'Claude can be selected when Codex is unavailable');
-  assertTextIncludes(
-    'selected-cli-summary',
-    'Claude Code is ready',
-    'selected CLI summary updates to Claude',
-  );
-  fillInput('session-title-input', 'Harness Claude Session');
-  fillInput('session-cwd-input', '/Users/user');
-  await waitFor(
-    () => !isDisabled(requireTestId('submit-session-button')),
-    'partial fixture can create a session with an available CLI',
-  );
-  await clickTestId('submit-session-button');
 
   await waitFor(
     () => !queryByTestId('creation-composer'),
@@ -261,11 +202,7 @@ async function runPartialCliScenario() {
     'Running',
     'created Claude session starts its own terminal runtime',
   );
-  assertTextIncludes(
-    'session-tabs',
-    'Harness Claude Session',
-    'Claude session title is visible in the session tab',
-  );
+  assertTextIncludes('session-tabs', 'Claude', 'Claude session shows the agent name in its tab');
 }
 
 async function runNoCliScenario() {
@@ -273,24 +210,14 @@ async function runNoCliScenario() {
   await clickTestId('empty-create-session-button');
 
   await expectComposerMode('session');
-  assertTextIncludes(
-    'cli-availability-summary',
-    'No supported CLIs enabled',
-    'no-CLI fixture reports no supported CLIs',
-  );
   await expectTestId(
     'cli-empty-help',
-    'no-CLI fixture explains that organization can continue without session creation',
+    'no-CLI fixture explains that organization can continue without an agent',
   );
   for (const kind of ['cortex_code', 'claude_code', 'codex_cli']) {
     expectCliAvailability(kind, false, `${kind} is unavailable in the no-CLI fixture`);
-    expectDisabled(selectorForCli(kind), true, `${kind} choice is disabled in the no-CLI fixture`);
+    expectDisabled(selectorForCli(kind), true, `${kind} tile is disabled in the no-CLI fixture`);
   }
-  expectDisabled(
-    'submit-session-button',
-    true,
-    'session creation stays disabled when no supported CLI is detected',
-  );
 }
 
 async function runAssertPersistedScenario() {
@@ -302,7 +229,7 @@ async function runAssertPersistedScenario() {
     'reverie',
     'folder-selected project persists across a browser reload',
   );
-  await waitForDocumentIncludes('Harness Smoke Focus', 'focus persists across a browser reload');
+  await waitForDocumentIncludes('Harness Smoke Topic', 'topic persists across a browser reload');
   await expectTestId(
     'dashboard-surface',
     'persisted workspace opens to the dashboard after reload',
@@ -310,7 +237,7 @@ async function runAssertPersistedScenario() {
   await waitFor(() => {
     const card = [
       ...document.querySelectorAll<HTMLElement>('[data-testid="dashboard-session-card"]'),
-    ].find(candidate => candidate.textContent?.includes('Harness Codex Session'));
+    ].find(candidate => candidate.textContent?.includes('Codex'));
     if (!card) return false;
     card.click();
     return true;
@@ -320,11 +247,7 @@ async function runAssertPersistedScenario() {
     'terminal-body',
     'persisted created session opens terminal body from dashboard after reload',
   );
-  await waitForTextIncludes(
-    'session-tabs',
-    'Harness Codex Session',
-    'session persists across a browser reload',
-  );
+  await waitForTextIncludes('session-tabs', 'Codex', 'session persists across a browser reload');
   await waitFor(() => {
     const activeTab = document.querySelector('[data-testid="session-tab"][data-active="true"]');
     return Boolean(activeTab?.textContent?.includes('Codex'));
@@ -361,16 +284,13 @@ async function runTerminalInteractionScenario() {
     'project submit enables',
   );
   await clickTestId('submit-project-button');
-  fillInput('focus-title-input', 'Interaction Focus');
-  await waitFor(() => !isDisabled(requireTestId('submit-focus-button')), 'focus submit enables');
-  await clickTestId('submit-focus-button');
-  await clickCliChoice('codex_cli');
-  fillInput('session-title-input', 'Interaction Session');
+  fillInput('focus-title-input', 'Interaction Topic');
   await waitFor(
-    () => !isDisabled(requireTestId('submit-session-button')),
-    'session submit enables',
+    () => !isDisabled(requireSelector(selectorForCli('codex_cli'))),
+    'agent tiles enable after the topic is named',
   );
-  await clickTestId('submit-session-button');
+  // Picking the agent creates the topic and its first session and opens it.
+  await clickCliChoice('codex_cli');
   await expectTestId('terminal-body', 'created session opens the terminal body');
   await waitForTextIncludes('terminal-status-label', 'Running', 'created session is running');
   const terminalId = await waitForTerminalId('interaction session has a terminal id');
@@ -515,14 +435,6 @@ function expectCliAvailability(kind: string, available: boolean, label: string) 
   const choice = requireSelector(selectorForCli(kind));
   if (choice.getAttribute('data-available') !== String(available)) {
     throw new Error(`${label}: expected data-available=${available}`);
-  }
-  assertions.push(label);
-}
-
-function expectCliSelected(kind: string, label: string) {
-  const choice = requireSelector(selectorForCli(kind));
-  if (choice.getAttribute('data-selected') !== 'true') {
-    throw new Error(`${label}: expected ${kind} to be selected`);
   }
   assertions.push(label);
 }
