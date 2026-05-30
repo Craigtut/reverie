@@ -21,7 +21,7 @@ use reverie_persistence::SqliteWorkspaceRepository;
 use tauri::Manager;
 
 use crate::activity_bridge::{drain_cortex_activity, drain_hook_activity};
-use crate::state::{HookServerInfo, HookTokenRegistry};
+use crate::state::{HookServerInfo, HookTokenRegistry, WorkspaceBoot};
 use crate::terminal::runtime::TerminalSessionRuntime;
 
 const WINDOW_CORNER_RADIUS: f64 = 44.0;
@@ -112,6 +112,13 @@ fn main() {
             );
             let service = WorkspaceService::new(repository.clone());
             service.ensure_seeded()?;
+            // Publish the service only after the database is opened, migrated,
+            // and seeded. `WorkspaceBoot` is managed on the builder below, so it
+            // is available the instant the webview fires its first
+            // `workspace_shell` invoke; until this `set` runs, that command
+            // returns a retryable "still starting" signal instead of failing
+            // hard, and once it returns a service the read is guaranteed seeded.
+            app.state::<WorkspaceBoot>().set(service.clone());
             app.manage(service);
             // Stash the repository for the bridge to share. We keep it as
             // managed state so background threads can still hold an Arc to
@@ -213,6 +220,7 @@ fn main() {
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
+        .manage(WorkspaceBoot::default())
         .invoke_handler(tauri::generate_handler![
             commands::app_status,
             commands::ghostty_frame_sequence,
@@ -220,6 +228,7 @@ fn main() {
             commands::list_agent_clis,
             commands::set_agent_cli_enabled,
             commands::choose_project_folder,
+            commands::resolve_project_folder,
             commands::create_project,
             commands::create_focus,
             commands::create_session,
