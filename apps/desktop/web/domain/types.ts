@@ -34,6 +34,32 @@ export interface RenderMetrics {
   childSuccess?: boolean;
   targetFrames?: number;
   terminalId?: string;
+  rendererBackend?: string;
+  paintSamples?: number;
+  scrollPaintSamples?: number;
+  avgPaintMs?: number;
+  p95PaintMs?: number;
+  maxPaintMs?: number;
+  avgScrollPaintMs?: number;
+  p95ScrollPaintMs?: number;
+  maxScrollPaintMs?: number;
+  rendererPaints?: number;
+  rendererClears?: number;
+  rendererRowsPainted?: number;
+  rendererCellsPainted?: number;
+  rendererGlyphsPainted?: number;
+  rendererBlockGlyphsPainted?: number;
+  rendererDrawCalls?: number;
+  rendererRectDrawCalls?: number;
+  rendererGlyphDrawCalls?: number;
+  rendererBufferUploads?: number;
+  rendererBufferUploadBytes?: number;
+  glyphAtlasHits?: number;
+  glyphAtlasMisses?: number;
+  glyphAtlasUploads?: number;
+  glyphAtlasResets?: number;
+  maxRowsPerPaint?: number;
+  maxCellsPerPaint?: number;
 }
 
 export interface GhosttyFrameSequencePayload {

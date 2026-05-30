@@ -206,6 +206,18 @@ impl NativeSessionRef {
             adapter_payload: serde_json::Value::Null,
         }
     }
+
+    /// A Claude Code resume ref. `transcript_path` is the discovered
+    /// `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, kept for
+    /// diagnostics; resume only needs `session_id` (`claude --resume <id>`).
+    pub fn claude(session_id: impl Into<String>, transcript_path: Option<PathBuf>) -> Self {
+        Self {
+            kind: AgentKind::ClaudeCode,
+            session_id: Some(session_id.into()),
+            metadata_path: transcript_path,
+            adapter_payload: serde_json::Value::Null,
+        }
+    }
 }
 
 // No PartialEq: `latest_activity` holds an ActivityState, which is not PartialEq.

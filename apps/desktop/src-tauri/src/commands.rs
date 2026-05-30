@@ -839,7 +839,75 @@ pub(crate) fn terminal_history_window(
         runtime.default_colors(),
     )
     .map_err(|err| err.to_string())?;
-    Ok(TerminalHistoryWindow { start_row, frame })
+    Ok(TerminalHistoryWindow {
+        start_row: frame.scrollback.viewport_offset,
+        frame,
+    })
+}
+
+/// Search the session's durable transcript by replaying it through Ghostty
+/// without returning the full rendered history to the WebView.
+#[tauri::command]
+pub(crate) fn terminal_history_search(
+    runtime: State<'_, TerminalSessionRuntime>,
+    session_id: SessionId,
+    query: String,
+    case_sensitive: bool,
+    cols: u16,
+    rows: u16,
+) -> Result<crate::terminal::ghostty::TerminalSearchResult, String> {
+    let transcript = runtime
+        .read_full_transcript(session_id)
+        .map_err(|err| err.to_string())?;
+    crate::terminal::history::history_search(
+        &transcript,
+        cols,
+        rows,
+        &query,
+        case_sensitive,
+        SEARCH_MAX_MATCHES,
+        runtime.default_colors(),
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TerminalHistorySearchWindow {
+    search: crate::terminal::ghostty::TerminalSearchResult,
+    start_row: usize,
+    frame: TerminalFrame,
+}
+
+/// Search the durable transcript and return the first paintable history window
+/// from the same Ghostty replay.
+#[tauri::command]
+pub(crate) fn terminal_history_search_window(
+    runtime: State<'_, TerminalSessionRuntime>,
+    session_id: SessionId,
+    query: String,
+    case_sensitive: bool,
+    cols: u16,
+    rows: u16,
+) -> Result<TerminalHistorySearchWindow, String> {
+    let transcript = runtime
+        .read_full_transcript(session_id)
+        .map_err(|err| err.to_string())?;
+    let (search, frame) = crate::terminal::history::history_search_window(
+        &transcript,
+        cols,
+        rows,
+        &query,
+        case_sensitive,
+        SEARCH_MAX_MATCHES,
+        runtime.default_colors(),
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(TerminalHistorySearchWindow {
+        search,
+        start_row: frame.scrollback.viewport_offset,
+        frame,
+    })
 }
 
 /// Push the active shell theme's default terminal colors into the runtime.
