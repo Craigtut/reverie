@@ -115,8 +115,9 @@ export const rowPrimaryClass = css({
 });
 
 // The trailing slot. Holds the resting meta cluster (a count, a warn attention
-// badge, a state cell) right-aligned, with the hover action overlaid at the
-// right edge so the two crossfade in place without shifting layout.
+// badge, a state cell) right-aligned. The rightmost indicator and the hover
+// action share a fixed cap (rowTrailingCapClass) so they crossfade concentric,
+// in place, without shifting layout.
 export const rowTrailingClass = css({
   position: 'relative',
   flexShrink: 0,
@@ -146,13 +147,24 @@ export const rowAttentionBadgeClass = css({
   },
 });
 
-export const rowActionClass = css({
-  position: 'absolute',
-  right: 0,
-  top: '50%',
-  transform: 'translateY(-50%)',
+// A fixed square at the right end of the trailing slot. The rightmost status
+// indicator (a session's state cell, or a group's count) sits centered inside it,
+// and the hover close/remove action overlays it edge-to-edge, so the revealed X
+// is concentric with the indicator it replaces instead of offset to one side.
+export const rowTrailingCapClass = css({
+  position: 'relative',
+  flexShrink: 0,
+  display: 'grid',
+  placeItems: 'center',
   width: '26px',
   height: '26px',
+});
+
+export const rowActionClass = css({
+  // Fills its trailing cap so the close X lands concentric with the status
+  // indicator it crossfades from, not anchored a few px to its side.
+  position: 'absolute',
+  inset: 0,
   border: 0,
   borderRadius: '7px',
   display: 'grid',

@@ -11,6 +11,7 @@ import {
   rowLabelClass,
   rowPrimaryClass,
   rowShellClass,
+  rowTrailingCapClass,
   rowTrailingClass,
 } from './navStyles';
 
@@ -49,19 +50,21 @@ export function SessionRow({
         </Typography>
       </button>
       <div className={rowTrailingClass}>
-        <span className={cellWrapClass} data-row-meta="true">
-          <StateCell state={cellState} size={16} />
+        <span className={rowTrailingCapClass}>
+          <span className={cellWrapClass} data-row-meta="true">
+            <StateCell state={cellState} size={16} />
+          </span>
+          <button
+            className={rowActionClass}
+            type="button"
+            onClick={onClose}
+            title={`Close ${label}`}
+            data-testid="nav-session-close-button"
+            data-row-action="true"
+          >
+            <CloseGlyph size={11} />
+          </button>
         </span>
-        <button
-          className={rowActionClass}
-          type="button"
-          onClick={onClose}
-          title={`Close ${label}`}
-          data-testid="nav-session-close-button"
-          data-row-action="true"
-        >
-          <CloseGlyph size={11} />
-        </button>
       </div>
     </div>
   );

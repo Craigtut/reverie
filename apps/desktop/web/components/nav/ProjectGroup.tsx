@@ -13,6 +13,7 @@ import {
   rowMetaClass,
   rowPrimaryClass,
   rowShellClass,
+  rowTrailingCapClass,
   rowTrailingClass,
 } from './navStyles';
 
@@ -86,29 +87,31 @@ export function ProjectGroup({
               {attention}
             </Typography>
           ) : null}
-          {count ? (
-            <Typography
-              as="span"
-              variant="caption"
-              tone="ghost"
-              className={rowMetaClass}
-              data-row-meta={onRemove ? 'true' : undefined}
-            >
-              {count}
-            </Typography>
-          ) : null}
-          {onRemove ? (
-            <button
-              className={rowActionClass}
-              type="button"
-              onClick={onRemove}
-              title={removeTitle ?? `Remove ${title}`}
-              data-testid={removeTestId}
-              data-row-action="true"
-            >
-              <CloseGlyph size={11} />
-            </button>
-          ) : null}
+          <span className={rowTrailingCapClass}>
+            {count ? (
+              <Typography
+                as="span"
+                variant="caption"
+                tone="ghost"
+                className={rowMetaClass}
+                data-row-meta={onRemove ? 'true' : undefined}
+              >
+                {count}
+              </Typography>
+            ) : null}
+            {onRemove ? (
+              <button
+                className={rowActionClass}
+                type="button"
+                onClick={onRemove}
+                title={removeTitle ?? `Remove ${title}`}
+                data-testid={removeTestId}
+                data-row-action="true"
+              >
+                <CloseGlyph size={11} />
+              </button>
+            ) : null}
+          </span>
         </div>
       </div>
       {expanded ? <div className={childrenClass}>{children}</div> : null}

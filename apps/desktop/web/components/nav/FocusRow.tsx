@@ -15,6 +15,7 @@ import {
   rowMetaClass,
   rowPrimaryClass,
   rowShellClass,
+  rowTrailingCapClass,
   rowTrailingClass,
 } from './navStyles';
 
@@ -89,27 +90,29 @@ export function FocusRow({
               {rollup.attention}
             </Typography>
           ) : null}
-          {rollup.total ? (
-            <Typography
-              as="span"
-              variant="caption"
-              tone="ghost"
-              className={rowMetaClass}
-              data-row-meta="true"
+          <span className={rowTrailingCapClass}>
+            {rollup.total ? (
+              <Typography
+                as="span"
+                variant="caption"
+                tone="ghost"
+                className={rowMetaClass}
+                data-row-meta="true"
+              >
+                {rollup.total}
+              </Typography>
+            ) : null}
+            <button
+              className={rowActionClass}
+              type="button"
+              onClick={onRemoveFocus}
+              title={`Remove focus ${focus.title}`}
+              data-testid="remove-focus-button"
+              data-row-action="true"
             >
-              {rollup.total}
-            </Typography>
-          ) : null}
-          <button
-            className={rowActionClass}
-            type="button"
-            onClick={onRemoveFocus}
-            title={`Remove focus ${focus.title}`}
-            data-testid="remove-focus-button"
-            data-row-action="true"
-          >
-            <CloseGlyph size={11} />
-          </button>
+              <CloseGlyph size={11} />
+            </button>
+          </span>
         </div>
       </div>
       {expanded ? <div className={focusChildrenClass}>{children}</div> : null}
