@@ -1,4 +1,4 @@
-import type { KeyboardEvent, WheelEvent } from 'react';
+import type { KeyboardEvent } from 'react';
 
 import type { TerminalSurface } from '../terminalScrollback';
 import type { TerminalModes } from '../terminalTypes';
@@ -7,7 +7,10 @@ import type { TerminalModes } from '../terminalTypes';
 // scroll deltas. No DOM mutation, no React state; the event objects are read
 // only for their data.
 
-export function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>, modes?: TerminalModes) {
+export function terminalInputForKey(
+  event: KeyboardEvent<HTMLCanvasElement>,
+  modes?: TerminalModes,
+) {
   if (event.metaKey) return null;
 
   if (event.ctrlKey) {
@@ -25,9 +28,8 @@ export function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>, mod
   }
 
   const cursorApplication = Boolean(modes?.cursorKeyApplication);
-  const cursorSequence = (normal: string, application: string) => (
-    cursorApplication ? application : normal
-  );
+  const cursorSequence = (normal: string, application: string) =>
+    cursorApplication ? application : normal;
 
   switch (event.key) {
     case 'Enter':
@@ -61,7 +63,13 @@ export function terminalInputForKey(event: KeyboardEvent<HTMLCanvasElement>, mod
   }
 }
 
-export function terminalWheelDeltaRows(event: WheelEvent<HTMLElement>, surface: TerminalSurface) {
+// Accepts any wheel-like delta (a React WheelEvent or a plain {deltaY, deltaMode})
+// so the same conversion serves the viewport handler and the shell-level
+// edge-to-edge wheel forwarder.
+export function terminalWheelDeltaRows(
+  event: { deltaY: number; deltaMode: number },
+  surface: TerminalSurface,
+) {
   if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return 0;
 
   const sign = event.deltaY > 0 ? 1 : -1;

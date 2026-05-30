@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 import { TERMINAL_SURFACE } from '../terminal-canvas-renderer';
-import type { TerminalSurface } from '../terminalScrollback';
+import type { TerminalScrollMetrics, TerminalSurface } from '../terminalScrollback';
 import type { SessionTerminalBinding } from '../domain';
 import { resolveSetStateAction, type SetStateAction } from './setter';
 
@@ -20,7 +20,10 @@ interface TerminalStoreState {
   terminalSurface: TerminalSurface;
   scrollbackRowCount: number;
   terminalLiveFollow: boolean;
-  setSessionTerminalBindings: (action: SetStateAction<Record<string, SessionTerminalBinding>>) => void;
+  terminalScroll: TerminalScrollMetrics | null;
+  setSessionTerminalBindings: (
+    action: SetStateAction<Record<string, SessionTerminalBinding>>,
+  ) => void;
   setActiveTerminalId: (action: SetStateAction<string | null>) => void;
   setRunningSessionId: (action: SetStateAction<string | null>) => void;
   setLaunchingSessionId: (action: SetStateAction<string | null>) => void;
@@ -28,9 +31,10 @@ interface TerminalStoreState {
   setTerminalSurface: (action: SetStateAction<TerminalSurface>) => void;
   setScrollbackRowCount: (action: SetStateAction<number>) => void;
   setTerminalLiveFollow: (action: SetStateAction<boolean>) => void;
+  setTerminalScroll: (action: SetStateAction<TerminalScrollMetrics | null>) => void;
 }
 
-export const useTerminalStore = create<TerminalStoreState>((set) => ({
+export const useTerminalStore = create<TerminalStoreState>(set => ({
   sessionTerminalBindings: {},
   activeTerminalId: null,
   runningSessionId: null,
@@ -39,12 +43,25 @@ export const useTerminalStore = create<TerminalStoreState>((set) => ({
   terminalSurface: TERMINAL_SURFACE,
   scrollbackRowCount: 0,
   terminalLiveFollow: true,
-  setSessionTerminalBindings: (action) => set((s) => ({ sessionTerminalBindings: resolveSetStateAction(action, s.sessionTerminalBindings) })),
-  setActiveTerminalId: (action) => set((s) => ({ activeTerminalId: resolveSetStateAction(action, s.activeTerminalId) })),
-  setRunningSessionId: (action) => set((s) => ({ runningSessionId: resolveSetStateAction(action, s.runningSessionId) })),
-  setLaunchingSessionId: (action) => set((s) => ({ launchingSessionId: resolveSetStateAction(action, s.launchingSessionId) })),
-  setTerminalInputArmed: (action) => set((s) => ({ terminalInputArmed: resolveSetStateAction(action, s.terminalInputArmed) })),
-  setTerminalSurface: (action) => set((s) => ({ terminalSurface: resolveSetStateAction(action, s.terminalSurface) })),
-  setScrollbackRowCount: (action) => set((s) => ({ scrollbackRowCount: resolveSetStateAction(action, s.scrollbackRowCount) })),
-  setTerminalLiveFollow: (action) => set((s) => ({ terminalLiveFollow: resolveSetStateAction(action, s.terminalLiveFollow) })),
+  terminalScroll: null,
+  setSessionTerminalBindings: action =>
+    set(s => ({
+      sessionTerminalBindings: resolveSetStateAction(action, s.sessionTerminalBindings),
+    })),
+  setActiveTerminalId: action =>
+    set(s => ({ activeTerminalId: resolveSetStateAction(action, s.activeTerminalId) })),
+  setRunningSessionId: action =>
+    set(s => ({ runningSessionId: resolveSetStateAction(action, s.runningSessionId) })),
+  setLaunchingSessionId: action =>
+    set(s => ({ launchingSessionId: resolveSetStateAction(action, s.launchingSessionId) })),
+  setTerminalInputArmed: action =>
+    set(s => ({ terminalInputArmed: resolveSetStateAction(action, s.terminalInputArmed) })),
+  setTerminalSurface: action =>
+    set(s => ({ terminalSurface: resolveSetStateAction(action, s.terminalSurface) })),
+  setScrollbackRowCount: action =>
+    set(s => ({ scrollbackRowCount: resolveSetStateAction(action, s.scrollbackRowCount) })),
+  setTerminalLiveFollow: action =>
+    set(s => ({ terminalLiveFollow: resolveSetStateAction(action, s.terminalLiveFollow) })),
+  setTerminalScroll: action =>
+    set(s => ({ terminalScroll: resolveSetStateAction(action, s.terminalScroll) })),
 }));

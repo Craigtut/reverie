@@ -2,6 +2,8 @@ import { createTerminalCanvasRenderer } from '../terminal-canvas-renderer';
 import {
   SCROLL_FOLLOW_EPSILON_PX,
   frameForSurface,
+  terminalInsetPx,
+  type TerminalScrollMetrics,
   type TerminalSurface,
 } from '../terminalScrollback';
 import type { SessionTerminalView } from '../domain';
@@ -16,10 +18,14 @@ import { rowPlainText, selectionText } from './interaction/selectionModel';
 import { rowSpanInWindow, selectionWindowSpans } from './interaction/overlayPaint';
 import { detectLinks } from './interaction/linkProvider';
 import type { BufferCell, BufferLinkSpan, RowSpan, SelectionRange } from './interaction/types';
+import { TERMINAL_THEME, type TerminalThemeColors } from '../themes/terminalTheme';
 
-// Opacity of the terminal's default background. 0 lets the shell gradient + dot
-// field show through so the session feels painted onto the surface.
-const TERMINAL_BACKGROUND_OPACITY = 0;
+// The terminal's default background is painted as a solid, opaque panel in the
+// active theme's surface color (set via setThemeColors). Opacity 1 keeps the
+// fast non-alpha canvas; the surface is theme-matched rather than transparent so
+// it reads as a calm solid panel and the default foreground stays legible in
+// both light and dark.
+const TERMINAL_BACKGROUND_OPACITY = 1;
 
 export interface TerminalDomRefs {
   canvas: HTMLCanvasElement | null;
@@ -35,6 +41,9 @@ export interface TerminalControllerOptions {
   // Fired after a new composite frame is applied + painted. The find feature
   // uses it to re-map match spans to the (possibly scrolled) viewport.
   onComposite?: () => void;
+  // Fired (deduped) when the scroll position/extent changes, so the custom
+  // overlay scrollbar can reflect it in both the live and full-history views.
+  onScrollMetrics?: (metrics: TerminalScrollMetrics) => void;
   // Injectable for tests; defaults to the real Canvas renderer.
   createRenderer?: (
     canvas: HTMLCanvasElement,
@@ -49,7 +58,10 @@ export interface TerminalControllerOptions {
 // paints. The hook (useTerminalSession) wires it to React + the stores and
 // drives the session lifecycle.
 export function createTerminalController(options: TerminalControllerOptions) {
-  const { onScrollbackRowCount, onLiveFollow, onComposite } = options;
+  const { onScrollbackRowCount, onLiveFollow, onComposite, onScrollMetrics } = options;
+  // The active theme's terminal colors. Seeded to dark (the app boots dark); the
+  // hook pushes the live theme via setThemeColors on mount and on every switch.
+  let themeColors: TerminalThemeColors = TERMINAL_THEME.dark;
   const createRenderer =
     options.createRenderer ??
     ((canvas, surface, displayRows) =>
@@ -57,6 +69,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
         ...surface,
         rows: displayRows,
         backgroundOpacity: TERMINAL_BACKGROUND_OPACITY,
+        background: themeColors.background,
+        foreground: themeColors.foreground,
       }));
 
   let els: TerminalDomRefs = { canvas: null, viewport: null, spacer: null };
@@ -108,7 +122,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
   function updateSpacer(totalRows: number, forSurface: TerminalSurface) {
     const spacer = els.spacer;
     if (!spacer) return;
-    spacer.style.height = `${Math.max(totalRows, forSurface.rows) * forSurface.cellHeight}px`;
+    const inset = terminalInsetPx(forSurface);
+    const contentHeight = Math.max(totalRows, forSurface.rows) * forSurface.cellHeight;
+    spacer.style.height = `${contentHeight + inset.top + inset.bottom}px`;
     spacer.style.width = `${forSurface.cols * forSurface.cellWidth}px`;
   }
 
@@ -123,6 +139,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       viewport?.clientHeight ?? forSurface.rows * forSurface.cellHeight,
     );
     const scrollTop = viewport?.scrollTop ?? 0;
+    const inset = terminalInsetPx(forSurface);
 
     const { startRow, displayRows, forceFullPaint, windowFrame } = computePaintWindow({
       frame,
@@ -131,18 +148,71 @@ export function createTerminalController(options: TerminalControllerOptions) {
       viewportHeight,
       needsFullPaint,
       lastStartRow,
+      topInsetPx: inset.top,
     });
     const activeRenderer = ensureRenderer(forSurface, displayRows);
 
     if (els.canvas) {
-      els.canvas.style.transform = `translateY(${startRow * forSurface.cellHeight}px)`;
+      // The canvas sits below the top inset (the injected blank scroll space), so
+      // the first content row never butts against the top edge.
+      els.canvas.style.transform = `translateY(${startRow * forSurface.cellHeight + inset.top}px)`;
     }
     if (forceFullPaint) {
-      activeRenderer?.clear(windowFrame.colors?.background);
+      activeRenderer?.clear(themeColors.background);
     }
     activeRenderer?.paintFrame(windowFrame, buildOverlay(startRow, displayRows, forSurface));
     needsFullPaint = false;
     lastStartRow = startRow;
+    emitScrollMetrics(forSurface);
+  }
+
+  // Compute + publish (deduped) the scroll position/extent for the overlay
+  // scrollbar. History uses the DOM scroller (the spacer grows past the
+  // viewport); live reads the backend's scrollback metadata, since live wheel
+  // scrolling is backend-virtual and never moves the DOM.
+  let lastScrollMetricsKey = '';
+  function emitScrollMetrics(forSurface: TerminalSurface) {
+    if (!onScrollMetrics) return;
+    const cellHeight = forSurface.cellHeight;
+    const viewport = els.viewport;
+    let metrics: TerminalScrollMetrics;
+    if (historyMode && viewport) {
+      const total = viewport.scrollHeight;
+      const view = viewport.clientHeight;
+      const top = viewport.scrollTop;
+      const scrollable = total > view + 1;
+      metrics = {
+        mode: 'history',
+        scrollable,
+        atBottom: top + view >= total - SCROLL_FOLLOW_EPSILON_PX,
+        totalRows: Math.max(1, Math.round(total / cellHeight)),
+        viewportRows: Math.max(1, Math.round(view / cellHeight)),
+        offsetRows: Math.max(0, Math.round(top / cellHeight)),
+        thumbFraction: scrollable ? Math.min(1, view / total) : 1,
+        startFraction: total > 0 ? Math.min(1, top / total) : 0,
+      };
+    } else {
+      const sb = lastComposite?.scrollback;
+      const scrollbackRows = sb?.scrollbackRows ?? 0;
+      const viewportRows = forSurface.rows;
+      const totalRows = sb?.totalRows ?? scrollbackRows + viewportRows;
+      const offsetRows = sb?.viewportOffset ?? scrollbackRows;
+      const scrollable = scrollbackRows > 0 && totalRows > viewportRows;
+      metrics = {
+        mode: 'live',
+        scrollable,
+        atBottom: sb?.atBottom ?? true,
+        totalRows,
+        viewportRows,
+        offsetRows,
+        thumbFraction: totalRows > 0 ? Math.min(1, viewportRows / totalRows) : 1,
+        startFraction: totalRows > 0 ? Math.min(1, offsetRows / totalRows) : 0,
+      };
+    }
+    const key = `${metrics.mode}|${metrics.scrollable}|${metrics.atBottom}|${metrics.totalRows}|${metrics.viewportRows}|${metrics.offsetRows}`;
+    if (key === lastScrollMetricsKey) return;
+    lastScrollMetricsKey = key;
+    onScrollMetrics(metrics);
   }
 
   // Translate the buffer-coordinate interaction state into the window-local
@@ -445,6 +515,18 @@ export function createTerminalController(options: TerminalControllerOptions) {
     },
     resetRenderer() {
       renderer = null;
+    },
+    // Apply the active shell theme's terminal colors. Recreates the renderer so
+    // its default fg/bg pick up the new theme, then forces a full repaint of the
+    // current composite. The live backend terminal is updated separately (the
+    // hook calls set_terminal_theme), which also re-emits a themed frame.
+    setThemeColors(colors: TerminalThemeColors) {
+      themeColors = colors;
+      if (els.canvas && renderer) {
+        mountRenderer(renderer.rows);
+        needsFullPaint = true;
+        paintWindow();
+      }
     },
     requireRenderer(): TerminalRenderer {
       const active = renderer ?? mountRenderer();

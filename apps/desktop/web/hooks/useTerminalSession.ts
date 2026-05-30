@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -15,6 +16,7 @@ import {
   resizeTerminal,
   scrollTerminalViewport,
   scrollTerminalViewportToBottom,
+  setTerminalTheme,
   startSession,
   terminalHistoryInfo,
   terminalHistoryWindow,
@@ -47,7 +49,8 @@ import {
   type TerminalSurface,
   terminalSurfaceForBounds,
 } from '../terminalScrollback';
-import { useNavigationStore, useShellStore, useTerminalStore } from '../store';
+import { useNavigationStore, useShellStore, useTerminalStore, useUiStore } from '../store';
+import { TERMINAL_THEME } from '../themes/terminalTheme';
 import { openExternalUrl } from '../services/openApi';
 import { createTerminalController, type TerminalController } from '../terminal/terminalController';
 import {
@@ -112,6 +115,7 @@ export function useTerminalSession(params: {
       surface: TERMINAL_SURFACE,
       onScrollbackRowCount: count => useTerminalStore.getState().setScrollbackRowCount(count),
       onLiveFollow: live => useTerminalStore.getState().setTerminalLiveFollow(live),
+      onScrollMetrics: metrics => useTerminalStore.getState().setTerminalScroll(metrics),
       onComposite: () => applyFindOverlayRef.current(),
     });
   }
@@ -166,6 +170,9 @@ export function useTerminalSession(params: {
 
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
   const creationMode = useNavigationStore(s => s.creationMode);
+  // Reactive scroll metrics for the overlay scrollbar (the controller publishes
+  // them, deduped, on every paint).
+  const terminalScroll = useTerminalStore(s => s.terminalScroll);
 
   // Keep the controller pointed at the live DOM elements (they mount/unmount as
   // the terminal surface shows/hides), and bind/unbind the pointer island to the
@@ -179,6 +186,20 @@ export function useTerminalSession(params: {
     if (canvasRef.current) interaction.attach();
     else interaction.detach();
   });
+
+  // Keep the terminal colors matched to the active shell theme. On mount and on
+  // every light/dark switch: repaint the live canvas with the theme's default
+  // fg/bg (B), and push the same colors to the backend so Ghostty's reported
+  // defaults + any CLI that queries OSC 10/11 agree with the shell (D).
+  const theme = useUiStore(s => s.theme);
+  useEffect(() => {
+    const colors = TERMINAL_THEME[theme];
+    controller.setThemeColors(colors);
+    void setTerminalTheme(colors.foreground, colors.background).catch(error =>
+      writeLog(`Set terminal theme failed: ${errorMessage(error)}`),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- controller/writeLog are stable refs
+  }, [theme]);
 
   // Switching the displayed session drops any active selection/hover. Without
   // this, a selection made in session A would pin session B's viewport
@@ -228,68 +249,73 @@ export function useTerminalSession(params: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creationMode, selectedSession?.id, surfaceMode]);
 
-  // Resize the surface to the viewport and tell the backend to match.
-  useEffect(() => {
-    const viewport = surfaceViewportRef.current;
-    console.log(
-      '[RESIZE-DBG] effect run ' +
-        JSON.stringify({
-          surfaceMode,
-          selectedSessionId: selectedSession?.id,
-          hasViewport: !!viewport,
-          ch: viewport?.clientHeight,
-          cw: viewport?.clientWidth,
-        }),
-    );
-    if (!viewport) return;
+  // Resize the surface to the viewport and tell the backend to match. Bound to
+  // the viewport through a callback ref (`attachViewport`) instead of an effect
+  // reading `surfaceViewportRef`, because the old effect could run while the ref
+  // was still null (viewport height reports 0 for a frame on mount) and then
+  // never re-run, leaving the surface stuck at the default size. The callback ref
+  // sets the ResizeObserver up exactly when the live node mounts and tears it
+  // down on unmount, so resize always tracks. The applied-size closure lives in a
+  // ref so the long-lived observer always sees the latest services.
+  const applyViewportSizeRef = useRef<(width: number, height: number) => void>(() => {});
+  applyViewportSizeRef.current = (width: number, height: number) => {
+    // Skip degenerate readings: the viewport reports 0 height for a frame on
+    // mount before its grid track resolves. The observer fires again with the
+    // real size once layout settles.
+    if (!(width > 0) || !(height > 0)) return;
+    const previous = controller.getSurface();
+    const next = terminalSurfaceForBounds(width, height, previous);
+    if (next.cols === previous.cols && next.rows === previous.rows) return;
 
-    function applyViewportSize(width: number, height: number) {
-      const previous = controller.getSurface();
-      const next = terminalSurfaceForBounds(width, height, previous);
-      console.log(
-        '[RESIZE-DBG] applyViewportSize ' + JSON.stringify({ width, height, previous, next }),
-      );
-      if (next.cols === previous.cols && next.rows === previous.rows) return;
-
-      controller.setSurface(next);
-      useTerminalStore.getState().setTerminalSurface(next);
-      // In the full-history view, re-replay the transcript at the new width so a
-      // resize reflows deep history rather than clobbering it back to the live
-      // frame (the live repaint path is width-correct only for the live band).
-      if (controller.isHistoryMode()) {
-        const activeFind = findRef.current;
-        if (activeFind.open && activeFind.query.length > 0) {
-          // A resize while finding: reflow without jumping to the tail, then
-          // re-run the search so matches + the active position are recomputed
-          // for the new width and the viewport stays on the match.
-          void loadFullHistory(next, false).then(loaded => {
-            if (loaded) void runSearch(activeFind.query, activeFind.caseSensitive);
-          });
-        } else {
-          void loadFullHistory(next);
-        }
-      } else {
-        controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
-      }
-
-      const terminalId = useTerminalStore.getState().activeTerminalId;
-      if (terminalId && isTauriRuntime) {
-        void resizeTerminal(terminalId, next.cols, next.rows).catch(error => {
-          writeLog(`Terminal resize failed: ${errorMessage(error)}`);
+    controller.setSurface(next);
+    useTerminalStore.getState().setTerminalSurface(next);
+    // In the full-history view, re-replay the transcript at the new width so a
+    // resize reflows deep history rather than clobbering it back to the live
+    // frame (the live repaint path is width-correct only for the live band).
+    if (controller.isHistoryMode()) {
+      const activeFind = findRef.current;
+      if (activeFind.open && activeFind.query.length > 0) {
+        // A resize while finding: reflow without jumping to the tail, then
+        // re-run the search so matches + the active position are recomputed
+        // for the new width and the viewport stays on the match.
+        void loadFullHistory(next, false).then(loaded => {
+          if (loaded) void runSearch(activeFind.query, activeFind.caseSensitive);
         });
+      } else {
+        void loadFullHistory(next);
       }
+    } else {
+      controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
     }
 
+    const terminalId = useTerminalStore.getState().activeTerminalId;
+    if (terminalId && isTauriRuntime) {
+      void resizeTerminal(terminalId, next.cols, next.rows).catch(error => {
+        writeLog(`Terminal resize failed: ${errorMessage(error)}`);
+      });
+    }
+  };
+
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const attachViewport = useCallback((node: HTMLDivElement | null) => {
+    surfaceViewportRef.current = node;
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+    if (!node) return;
     const observer = new ResizeObserver(entries => {
       const entry = entries[0];
       if (!entry) return;
-      applyViewportSize(entry.contentRect.width, entry.contentRect.height);
+      applyViewportSizeRef.current(entry.contentRect.width, entry.contentRect.height);
     });
-    observer.observe(viewport);
-    applyViewportSize(viewport.clientWidth, viewport.clientHeight);
-    return () => observer.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isTauriRuntime, surfaceMode, selectedSession?.id]);
+    observer.observe(node);
+    resizeObserverRef.current = observer;
+    // Eager first measure, then one more next frame: the viewport often reports 0
+    // height for the first commit before its grid track resolves, so the eager
+    // read is skipped and this rAF (plus the observer's own initial delivery)
+    // catches the real size once layout settles.
+    applyViewportSizeRef.current(node.clientWidth, node.clientHeight);
+    requestAnimationFrame(() => applyViewportSizeRef.current(node.clientWidth, node.clientHeight));
+  }, []);
 
   async function recordMetrics(result: RenderMetrics) {
     try {
@@ -486,6 +512,15 @@ export function useTerminalSession(params: {
     if (existing) {
       activateSession(session);
       writeLog(`${session.title} already owns terminal ${shortId(existing.terminalId)}.`);
+      return;
+    }
+    // The binding is only registered after the first await below, so two
+    // launches for the same session in one tick would both pass the check
+    // above and each spawn a PTY (and a transcript writer) for that session,
+    // whose writers then race on the same chunk seq. `launchingSessionId` is
+    // set synchronously, so guarding on it collapses concurrent launches to one.
+    if (store.launchingSessionId === session.id) {
+      writeLog(`${session.title} is already launching; ignoring duplicate request.`);
       return;
     }
 
@@ -761,6 +796,30 @@ export function useTerminalSession(params: {
     await sendTerminalInput(input);
   }
 
+  // Insert text (a dropped file's quoted path) into a specific session's
+  // terminal, which need not be the active one (drag-to-tab routes to another
+  // session). Returns whether it reached an armed terminal. Bracketed-paste
+  // wrapping is applied only for the active session, whose live frame modes we
+  // know; for a background session we send the path text as-is.
+  async function insertTextIntoSession(sessionId: string, text: string): Promise<boolean> {
+    if (!text) return false;
+    const store = useTerminalStore.getState();
+    const binding = store.sessionTerminalBindings[sessionId];
+    if (!binding?.inputArmed) return false;
+    const isActive = binding.terminalId === store.activeTerminalId;
+    const payload =
+      isActive && controller.getLastFrameModes()?.bracketedPaste
+        ? `\x1b[200~${text}\x1b[201~`
+        : text;
+    try {
+      await writeTerminalInput(binding.terminalId, payload);
+      return true;
+    } catch (error) {
+      writeLog(`Drop insert failed: ${errorMessage(error)}`);
+      return false;
+    }
+  }
+
   function handleTerminalPaste(event: ClipboardEvent<HTMLCanvasElement>) {
     if (!inputReady()) return;
     const text = event.clipboardData.getData('text');
@@ -903,14 +962,59 @@ export function useTerminalSession(params: {
     controller.setLiveFollow(following);
   }
 
-  function handleTerminalWheel(event: WheelEvent<HTMLDivElement>) {
+  // Apply a wheel delta to the terminal: in the full-history view scroll the DOM
+  // viewport (the spacer is taller than the viewport there); while live, send the
+  // delta to the backend (live scrolling is backend-virtual and never moves the
+  // DOM). Returns whether it consumed the event (so the caller can preventDefault).
+  function applyWheelScroll(delta: { deltaY: number; deltaMode: number }): boolean {
+    const surface = controller.getSurface();
+    const deltaRows = terminalWheelDeltaRows(delta, surface);
+    if (deltaRows === 0) return false;
+    if (controller.isHistoryMode()) {
+      const viewport = controller.getViewport();
+      if (!viewport) return false;
+      viewport.scrollTop = Math.max(0, viewport.scrollTop + deltaRows * surface.cellHeight);
+      return true;
+    }
     const terminalId = useTerminalStore.getState().activeTerminalId;
-    if (!terminalId || controller.getLastFrameModes()?.mouseTracking) return;
-    const deltaRows = terminalWheelDeltaRows(event, controller.getSurface());
-    if (deltaRows === 0) return;
-    event.preventDefault();
+    if (!terminalId || controller.getLastFrameModes()?.mouseTracking) return false;
     if (deltaRows < 0) controller.setLiveFollow(false);
     void sendTerminalViewportScroll(deltaRows);
+    return true;
+  }
+
+  function handleTerminalWheel(event: WheelEvent<HTMLDivElement>) {
+    if (applyWheelScroll(event)) event.preventDefault();
+  }
+
+  // Edge-to-edge scroll target: the shell forwards wheel events that land in the
+  // gaps around the terminal (beside the sidebar, the window padding) so hovering
+  // anywhere over the stage scrolls the terminal, not just the grid itself.
+  function forwardWheel(delta: { deltaY: number; deltaMode: number }) {
+    applyWheelScroll(delta);
+  }
+
+  // Move the terminal to a scroll position (0 = top, 1 = bottom of content),
+  // driven by the overlay scrollbar's thumb. History sets the DOM scrollTop; live
+  // converts the target to a row delta for the backend.
+  function scrollToFraction(startFraction: number) {
+    const metrics = useTerminalStore.getState().terminalScroll;
+    if (!metrics?.scrollable) return;
+    if (metrics.mode === 'history') {
+      const viewport = controller.getViewport();
+      if (!viewport) return;
+      const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+      viewport.scrollTop = Math.max(0, Math.min(maxTop, startFraction * viewport.scrollHeight));
+      return;
+    }
+    const terminalId = useTerminalStore.getState().activeTerminalId;
+    if (!terminalId) return;
+    const target = Math.round(startFraction * metrics.totalRows);
+    const clamped = Math.max(0, Math.min(metrics.totalRows - metrics.viewportRows, target));
+    const delta = clamped - metrics.offsetRows;
+    if (delta === 0) return;
+    if (delta < 0) controller.setLiveFollow(false);
+    void sendTerminalViewportScroll(delta);
   }
 
   function followLiveTerminalOutput() {
@@ -988,6 +1092,7 @@ export function useTerminalSession(params: {
   return {
     canvasRef,
     surfaceViewportRef,
+    attachViewport,
     terminalScrollSpacerRef,
     handleTerminalKeyDown,
     handleTerminalPaste,
@@ -1017,8 +1122,14 @@ export function useTerminalSession(params: {
     findPrev: () => moveFind(-1),
     historyViewing,
     viewFullHistory,
+    forwardWheel,
+    scrollbar: {
+      metrics: terminalScroll,
+      scrollToFraction,
+    },
     clearSurface: () => controller.clear(),
     dropSession: (sessionId: string) => controller.dropSession(sessionId),
+    insertTextIntoSession,
   };
 }
 

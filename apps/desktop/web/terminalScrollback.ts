@@ -13,11 +13,46 @@ export const MAX_RENDERED_SCROLLBACK_ROWS = 2_000;
 export const MAX_SCROLLBACK_SPACER_HEIGHT_PX = 64_000;
 export const SCROLL_FOLLOW_EPSILON_PX = 4;
 
+// Blank scroll inset (in rows) injected above/below the terminal content. Like a
+// web page's top padding: when scrolled to the very top there is breathing room
+// above the first line, and the content never butts against the chrome. The
+// inset is virtual scroll space (it grows the spacer + offsets the canvas); it
+// does NOT change the measured grid, so cols/rows are unaffected.
+export const TERMINAL_TOP_INSET_ROWS = 1;
+export const TERMINAL_BOTTOM_INSET_ROWS = 0;
+
+export function terminalInsetPx(surface: TerminalSurface) {
+  return {
+    top: TERMINAL_TOP_INSET_ROWS * surface.cellHeight,
+    bottom: TERMINAL_BOTTOM_INSET_ROWS * surface.cellHeight,
+  };
+}
+
+// Cap the live terminal grid width so it keeps a calm, readable measure and a
+// centered inset on wide windows instead of stretching edge to edge. The scroll
+// /hover target stays full width; only the painted grid is clamped + centered.
+export const MAX_CONTENT_WIDTH_PX = 1_180;
+
 export interface TerminalSurface {
   cols: number;
   rows: number;
   cellWidth: number;
   cellHeight: number;
+}
+
+// What the custom overlay scrollbar needs to draw + drive itself, derived once
+// per paint by the controller (from the DOM in the full-history view, from the
+// backend's scrollback metadata while live). Kept renderer-agnostic so the React
+// scrollbar never reaches into terminal internals.
+export interface TerminalScrollMetrics {
+  mode: 'live' | 'history';
+  scrollable: boolean;
+  atBottom: boolean;
+  totalRows: number;
+  viewportRows: number;
+  offsetRows: number;
+  thumbFraction: number;
+  startFraction: number;
 }
 
 export interface TerminalScrollbackContract {
@@ -46,9 +81,12 @@ export function terminalSurfaceForBounds(
     return fallback;
   }
 
+  // Clamp the grid to a max readable width; the viewport (scroll/hover target)
+  // stays full width and the grid is centered within it.
+  const gridWidth = Math.min(width, MAX_CONTENT_WIDTH_PX);
   return {
     ...fallback,
-    cols: Math.max(40, Math.floor(width / fallback.cellWidth)),
+    cols: Math.max(40, Math.floor(gridWidth / fallback.cellWidth)),
     rows: Math.max(12, Math.floor(height / fallback.cellHeight)),
   };
 }
@@ -66,17 +104,18 @@ export function frameForSurface(frame: TerminalFrame, surface: TerminalSurface):
 
   const cursorRow = frame.cursor?.position?.row ?? frame.cursor?.row;
   const cursorCol = frame.cursor?.position?.col ?? frame.cursor?.col;
-  const cursor = Number.isFinite(cursorRow) && Number.isFinite(cursorCol)
-    ? {
-        ...frame.cursor,
-        row: Math.min(surface.rows - 1, Math.max(0, cursorRow as number)),
-        col: Math.min(surface.cols - 1, Math.max(0, cursorCol as number)),
-        position: {
+  const cursor =
+    Number.isFinite(cursorRow) && Number.isFinite(cursorCol)
+      ? {
+          ...frame.cursor,
           row: Math.min(surface.rows - 1, Math.max(0, cursorRow as number)),
           col: Math.min(surface.cols - 1, Math.max(0, cursorCol as number)),
-        },
-      }
-    : frame.cursor;
+          position: {
+            row: Math.min(surface.rows - 1, Math.max(0, cursorRow as number)),
+            col: Math.min(surface.cols - 1, Math.max(0, cursorCol as number)),
+          },
+        }
+      : frame.cursor;
 
   return {
     ...frame,
@@ -91,11 +130,17 @@ export function boundedRenderedScrollback(scrollbackRows: TerminalRow[], surface
 }
 
 export function maxRenderedScrollbackRows(surface: TerminalSurface) {
-  const maxSpacerRows = Math.max(surface.rows, Math.floor(MAX_SCROLLBACK_SPACER_HEIGHT_PX / surface.cellHeight));
+  const maxSpacerRows = Math.max(
+    surface.rows,
+    Math.floor(MAX_SCROLLBACK_SPACER_HEIGHT_PX / surface.cellHeight),
+  );
   return Math.max(0, Math.min(MAX_RENDERED_SCROLLBACK_ROWS, maxSpacerRows - surface.rows));
 }
 
-export function frameWithScrollback(scrollbackRows: TerminalRow[], viewportFrame: TerminalFrame): TerminalFrame {
+export function frameWithScrollback(
+  scrollbackRows: TerminalRow[],
+  viewportFrame: TerminalFrame,
+): TerminalFrame {
   const historyRows = scrollbackRows.map((row, index) => ({
     ...cloneTerminalRow(row),
     index,
@@ -108,17 +153,18 @@ export function frameWithScrollback(scrollbackRows: TerminalRow[], viewportFrame
   }));
   const cursorRow = viewportFrame.cursor?.position?.row ?? viewportFrame.cursor?.row;
   const cursorCol = viewportFrame.cursor?.position?.col ?? viewportFrame.cursor?.col;
-  const cursor = Number.isFinite(cursorRow) && Number.isFinite(cursorCol)
-    ? {
-        ...viewportFrame.cursor,
-        row: historyRows.length + (cursorRow as number),
-        col: cursorCol as number,
-        position: {
+  const cursor =
+    Number.isFinite(cursorRow) && Number.isFinite(cursorCol)
+      ? {
+          ...viewportFrame.cursor,
           row: historyRows.length + (cursorRow as number),
           col: cursorCol as number,
-        },
-      }
-    : viewportFrame.cursor;
+          position: {
+            row: historyRows.length + (cursorRow as number),
+            col: cursorCol as number,
+          },
+        }
+      : viewportFrame.cursor;
 
   return {
     ...viewportFrame,
@@ -128,7 +174,10 @@ export function frameWithScrollback(scrollbackRows: TerminalRow[], viewportFrame
   };
 }
 
-export function scrolledOffRows(previousRows: TerminalRow[], nextRows: TerminalRow[]): TerminalRow[] {
+export function scrolledOffRows(
+  previousRows: TerminalRow[],
+  nextRows: TerminalRow[],
+): TerminalRow[] {
   if (previousRows.length === 0 || nextRows.length === 0) return [];
 
   const maxOverlap = Math.min(previousRows.length, nextRows.length);
@@ -183,7 +232,6 @@ function rowsShareSignatures(
 
   return true;
 }
-
 
 function rowSignature(row: TerminalRow) {
   return rowPlainText(row).trimEnd();

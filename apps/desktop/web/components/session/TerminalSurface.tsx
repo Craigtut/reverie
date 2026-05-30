@@ -1,17 +1,13 @@
-import { ShieldWarning } from '@phosphor-icons/react';
+import { ArrowDown, ShieldWarning } from '@phosphor-icons/react';
 import { css } from '../../styled-system/css';
-import { agentLabel, sessionBreadcrumb, shortenCwd } from '../../domain';
-import type {
-  ActivityPermissionRequest,
-  SessionTerminalBinding,
-  ShellSession,
-  WorkspaceShellSnapshot,
-} from '../../domain';
+import { agentLabel } from '../../domain';
+import type { ActivityPermissionRequest, SessionTerminalBinding, ShellSession } from '../../domain';
 import type { TerminalSession } from '../../hooks';
 import { Typography } from '../primitives/Typography';
 import { SessionLaunchOverlay } from './SessionLaunchOverlay';
 import { TerminalContextMenu } from './TerminalContextMenu';
 import { TerminalFindBar } from './TerminalFindBar';
+import { TerminalScrollbar } from './TerminalScrollbar';
 
 // The slice of the terminal session handle this surface binds: the DOM refs and
 // the input/scroll handlers. The shell passes the whole handle; structural
@@ -19,7 +15,7 @@ import { TerminalFindBar } from './TerminalFindBar';
 type TerminalSurfaceHandle = Pick<
   TerminalSession,
   | 'canvasRef'
-  | 'surfaceViewportRef'
+  | 'attachViewport'
   | 'terminalScrollSpacerRef'
   | 'handleTerminalScroll'
   | 'handleTerminalWheel'
@@ -38,11 +34,11 @@ type TerminalSurfaceHandle = Pick<
   | 'findPrev'
   | 'historyViewing'
   | 'viewFullHistory'
+  | 'scrollbar'
 >;
 
 export interface TerminalSurfaceProps {
   session: ShellSession;
-  shell: WorkspaceShellSnapshot;
   terminalBinding: SessionTerminalBinding | null;
   runningLabel: string;
   terminalLiveFollow: boolean;
@@ -55,12 +51,13 @@ export interface TerminalSurfaceProps {
   onLaunch: () => void;
 }
 
-// The terminal viewport and its chrome: the meta strip, the optional permission
-// banner, the imperative Canvas island, and the launch overlay when no live
-// terminal is attached yet. The Canvas is owned by the terminal hook, not React.
+// The terminal viewport and its chrome: the optional permission banner, the
+// imperative Canvas island, and the launch overlay when no live terminal is
+// attached yet. The custom scrollbar lives in its own gutter to the RIGHT of the
+// terminal panel (not overlaying the content). Session identity and the terminal
+// view actions live in the tabs bar above. The Canvas is owned by the hook.
 export function TerminalSurface({
   session,
-  shell,
   terminalBinding,
   runningLabel,
   terminalLiveFollow,
@@ -73,179 +70,160 @@ export function TerminalSurface({
   onLaunch,
 }: TerminalSurfaceProps) {
   return (
-    <div
-      className={terminalBodyClass}
-      data-testid="terminal-body"
-      data-session-id={session.id}
-      data-terminal-id={terminalBinding?.terminalId ?? ''}
-    >
+    <div className={terminalRowClass}>
       <div
-        className={terminalMetaStripClass}
-        data-testid="terminal-meta-strip"
+        className={terminalBodyClass}
+        data-testid="terminal-body"
         data-session-id={session.id}
         data-terminal-id={terminalBinding?.terminalId ?? ''}
       >
-        <Typography as="span" variant="caption" tone="muted" className={metaStripBreadcrumbClass}>
-          {sessionBreadcrumb(session, shell)} · {session.title}
-        </Typography>
-        <Typography
-          as="span"
-          variant="tiny"
-          tone="faint"
-          uppercase
-          data-testid="terminal-status-label"
-          className={metaStripStatusClass}
-          style={{ letterSpacing: '0.08em' }}
-        >
-          {runningLabel}
-        </Typography>
-        <Typography
-          as="span"
-          variant="tiny"
-          tone="faint"
-          className={metaStripCwdClass}
-          title={session.cwd}
-          style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace' }}
-        >
-          {shortenCwd(session.cwd)}
-        </Typography>
-        {!terminal.historyViewing ? (
-          <button
-            type="button"
-            className={followLiveButtonClass}
-            data-testid="view-history-button"
-            onClick={terminal.viewFullHistory}
-            title="Scroll the whole session, back to the beginning"
+        {/* Hidden diagnostics: the visible meta strip was removed, but these keep
+          the harness-observable signals (running status, scroll position) in the
+          DOM without any chrome. */}
+        <div hidden className={diagnosticsClass}>
+          <span data-testid="terminal-status-label">{runningLabel}</span>
+          <span data-testid="scrollback-row-count">
+            {scrollbackRowCount.toLocaleString()} / {scrollbackMaxRows.toLocaleString()}
+          </span>
+          <span data-testid="follow-live-state">{terminalLiveFollow ? 'live' : 'history'}</span>
+        </div>
+        {permissionRequest ? (
+          <div
+            className={permissionBannerClass}
+            data-testid="session-permission-banner"
+            role="status"
           >
-            <Typography as="span" variant="tiny" tone="inherit">
-              Full history
+            <ShieldWarning size={14} weight="fill" />
+            <div className={permissionBannerBodyClass}>
+              <Typography as="strong" variant="caption" tone="default">
+                {agentLabel(session.agentKind)} wants to {permissionRequest.toolName}
+              </Typography>
+              <Typography
+                as="span"
+                variant="caption"
+                tone="muted"
+                data-testid="session-permission-banner-summary"
+                className={permissionBannerSummaryClass}
+                style={{
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                }}
+              >
+                {permissionRequest.displaySummary}
+              </Typography>
+            </div>
+            <Typography
+              as="span"
+              variant="tiny"
+              tone="warn"
+              uppercase
+              className={permissionBannerHintClass}
+              style={{ letterSpacing: '0.08em' }}
+            >
+              Respond in the terminal
             </Typography>
-          </button>
+          </div>
         ) : null}
+        <div
+          ref={terminal.attachViewport}
+          className={surfaceViewportClass}
+          data-testid="terminal-viewport"
+          onScroll={terminal.handleTerminalScroll}
+          onWheel={terminal.handleTerminalWheel}
+          onMouseDown={terminal.focusTerminalCanvas}
+        >
+          <div
+            ref={terminal.terminalScrollSpacerRef}
+            className={terminalScrollSpacerClass}
+            data-testid="terminal-scroll-spacer"
+          >
+            <canvas
+              ref={terminal.canvasRef}
+              className="terminal-canvas"
+              data-testid="terminal-canvas"
+              aria-label="Terminal runtime surface"
+              tabIndex={0}
+              onKeyDown={terminal.handleTerminalKeyDown}
+              onPaste={terminal.handleTerminalPaste}
+              onMouseDown={terminal.focusTerminalCanvas}
+            />
+          </div>
+          {!terminalBinding ? (
+            <SessionLaunchOverlay
+              session={session}
+              launching={launching}
+              disabled={busy && !launching}
+              onLaunch={onLaunch}
+            />
+          ) : null}
+          <TerminalFindBar
+            open={terminal.find.open}
+            query={terminal.find.query}
+            caseSensitive={terminal.find.caseSensitive}
+            current={terminal.find.current}
+            total={terminal.find.total}
+            capped={terminal.find.capped}
+            busy={terminal.find.busy}
+            onQueryChange={terminal.setFindQuery}
+            onToggleCase={terminal.toggleFindCase}
+            onNext={terminal.findNext}
+            onPrev={terminal.findPrev}
+            onClose={terminal.closeFind}
+          />
+        </div>
+        {/* Floating "jump to latest": only present once the user has scrolled up
+          off the live tail (or is in the full-history view). Anchored to the
+          panel's bottom-right, it drops them back to the newest output. */}
         {!terminalLiveFollow || terminal.historyViewing ? (
           <button
             type="button"
-            className={followLiveButtonClass}
+            className={jumpToLatestButtonClass}
             data-testid="follow-live-button"
+            aria-label="Jump to latest output"
+            title="Jump to latest"
             onClick={terminal.followLiveTerminalOutput}
           >
-            <Typography as="span" variant="tiny" tone="inherit">
-              Jump to latest
-            </Typography>
+            <ArrowDown size={18} weight="bold" />
           </button>
         ) : null}
-        <Typography
-          as="span"
-          variant="caption"
-          tone="faint"
-          data-testid="scrollback-row-count"
-          hidden
-        >
-          {scrollbackRowCount.toLocaleString()} / {scrollbackMaxRows.toLocaleString()}
-        </Typography>
-        <Typography as="span" variant="caption" tone="faint" data-testid="follow-live-state" hidden>
-          {terminalLiveFollow ? 'live' : 'history'}
-        </Typography>
+        <TerminalContextMenu model={terminal.contextMenu} onClose={terminal.closeContextMenu} />
       </div>
-      {permissionRequest ? (
-        <div
-          className={permissionBannerClass}
-          data-testid="session-permission-banner"
-          role="status"
-        >
-          <ShieldWarning size={14} weight="fill" />
-          <div className={permissionBannerBodyClass}>
-            <Typography as="strong" variant="caption" tone="default">
-              {agentLabel(session.agentKind)} wants to {permissionRequest.toolName}
-            </Typography>
-            <Typography
-              as="span"
-              variant="caption"
-              tone="muted"
-              data-testid="session-permission-banner-summary"
-              className={permissionBannerSummaryClass}
-              style={{
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-              }}
-            >
-              {permissionRequest.displaySummary}
-            </Typography>
-          </div>
-          <Typography
-            as="span"
-            variant="tiny"
-            tone="warn"
-            uppercase
-            className={permissionBannerHintClass}
-            style={{ letterSpacing: '0.08em' }}
-          >
-            Respond in the terminal
-          </Typography>
-        </div>
-      ) : null}
-      <div
-        ref={terminal.surfaceViewportRef}
-        className={surfaceViewportClass}
-        data-testid="terminal-viewport"
-        onScroll={terminal.handleTerminalScroll}
-        onWheel={terminal.handleTerminalWheel}
-        onMouseDown={terminal.focusTerminalCanvas}
-      >
-        <div
-          ref={terminal.terminalScrollSpacerRef}
-          className={terminalScrollSpacerClass}
-          data-testid="terminal-scroll-spacer"
-        >
-          <canvas
-            ref={terminal.canvasRef}
-            className="terminal-canvas"
-            data-testid="terminal-canvas"
-            aria-label="Terminal runtime surface"
-            tabIndex={0}
-            onKeyDown={terminal.handleTerminalKeyDown}
-            onPaste={terminal.handleTerminalPaste}
-            onMouseDown={terminal.focusTerminalCanvas}
-          />
-        </div>
-        {!terminalBinding ? (
-          <SessionLaunchOverlay
-            session={session}
-            launching={launching}
-            disabled={busy && !launching}
-            onLaunch={onLaunch}
-          />
-        ) : null}
-        <TerminalFindBar
-          open={terminal.find.open}
-          query={terminal.find.query}
-          caseSensitive={terminal.find.caseSensitive}
-          current={terminal.find.current}
-          total={terminal.find.total}
-          capped={terminal.find.capped}
-          busy={terminal.find.busy}
-          onQueryChange={terminal.setFindQuery}
-          onToggleCase={terminal.toggleFindCase}
-          onNext={terminal.findNext}
-          onPrev={terminal.findPrev}
-          onClose={terminal.closeFind}
-        />
-      </div>
-      <TerminalContextMenu model={terminal.contextMenu} onClose={terminal.closeContextMenu} />
+      {/* The scrollbar sits in its own gutter, outside the terminal panel. */}
+      <TerminalScrollbar model={terminal.scrollbar} />
     </div>
   );
 }
 
+// Lays the terminal panel and the scrollbar gutter side by side, so the
+// scrollbar reads as "just off to the right" of the terminal rather than
+// overlaying its content.
+const terminalRowClass = css({
+  flex: 1,
+  minHeight: 0,
+  display: 'flex',
+  flexDirection: 'row',
+  alignItems: 'stretch',
+  gap: '4px',
+});
+
 const terminalBodyClass = css({
   position: 'relative',
   flex: 1,
+  minWidth: 0,
   minHeight: 0,
   display: 'grid',
-  // meta strip | optional permission banner | viewport
-  gridTemplateRows: 'auto auto minmax(0, 1fr)',
+  // optional permission banner | viewport
+  gridTemplateRows: 'auto minmax(0, 1fr)',
   overflow: 'hidden',
-  borderRadius: '0 0 22px 22px',
+  // Square: rounded bottom corners were clipping the ends of the last terminal row.
+  borderRadius: 0,
   background: 'transparent',
-  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.025)',
+});
+
+const diagnosticsClass = css({
+  position: 'absolute',
+  width: '1px',
+  height: '1px',
+  overflow: 'hidden',
 });
 
 const permissionBannerClass = css({
@@ -276,60 +254,70 @@ const permissionBannerHintClass = css({
   flexShrink: 0,
 });
 
-const terminalMetaStripClass = css({
-  display: 'flex',
-  alignItems: 'center',
-  gap: '12px',
-  padding: '8px 14px',
-  borderBottom: '1px solid color-mix(in srgb, var(--line) 60%, transparent)',
-  whiteSpace: 'nowrap',
-  overflowX: 'auto',
-  '& [hidden]': { display: 'none' },
-});
-
-const metaStripBreadcrumbClass = css({
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  minWidth: 0,
-  flex: '0 1 auto',
-});
-
-const metaStripStatusClass = css({
-  flexShrink: 0,
-});
-
-const metaStripCwdClass = css({
-  marginLeft: 'auto',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-});
-
-const followLiveButtonClass = css({
-  color: 'var(--text-2)',
-  border: '1px solid var(--line)',
-  background: 'transparent',
-  borderRadius: '999px',
-  padding: '3px 9px',
-  cursor: 'pointer',
-  flexShrink: 0,
-  transition: 'color 140ms ease, border-color 140ms ease',
-  _hover: { color: 'var(--text)', borderColor: 'var(--line-strong)' },
-});
-
 const surfaceViewportClass = css({
   position: 'relative',
   minHeight: 0,
   height: '100%',
   overflow: 'auto',
-  // Reserve the scrollbar gutter so entering the full-history view (which grows
-  // the spacer past the viewport and reveals a scrollbar) never narrows the
-  // content width, which would otherwise fire a spurious resize.
-  scrollbarGutter: 'stable',
+  // The native scrollbar is hidden; a custom scrollbar (TerminalScrollbar) sits in
+  // its own gutter beside the panel and reflects position in both the live and
+  // full-history views. Hiding the native one drops its inner gutter too.
+  scrollbarWidth: 'none',
+  '&::-webkit-scrollbar': { width: 0, height: 0 },
   background: 'transparent',
 });
 
 const terminalScrollSpacerClass = css({
   position: 'relative',
   minHeight: '100%',
+  // Center the terminal grid within a wider viewport so the content keeps its
+  // calm inset + max measure while the scroll/hover target stays edge to edge.
+  margin: '0 auto',
   overflow: 'hidden',
+});
+
+// The floating jump-to-latest affordance. Anchored to the terminal body (which is
+// position: relative and does not scroll), so it stays pinned to the bottom-right
+// corner while content scrolls beneath it. Monochrome + the shell's elevation
+// tokens; all motion is shell-level, never in the paint loop.
+const jumpToLatestButtonClass = css({
+  position: 'absolute',
+  right: '18px',
+  bottom: '16px',
+  // Above the canvas + find bar, below the context menu.
+  zIndex: 4,
+  width: '40px',
+  height: '40px',
+  display: 'grid',
+  placeItems: 'center',
+  borderRadius: '999px',
+  color: 'var(--text-2)',
+  border: '1px solid var(--line-strong)',
+  // Slightly translucent + blurred so it reads as floating glass over the output,
+  // not a flat sticker. The terminal panel is dark in both themes, so the dark
+  // drop shadow lifts it cleanly either way.
+  background: 'color-mix(in srgb, var(--surface-2) 84%, transparent)',
+  backdropFilter: 'blur(10px) saturate(1.1)',
+  boxShadow: '0 6px 16px rgba(0, 0, 0, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.05)',
+  cursor: 'pointer',
+  // Calm rise-and-settle as it appears; reduced-motion collapses it to a fade.
+  animation: 'reverieJumpIn 240ms cubic-bezier(0.16, 1, 0.3, 1)',
+  transition:
+    'transform 180ms cubic-bezier(0.16, 1, 0.3, 1), color 160ms ease, background 160ms ease, border-color 160ms ease, box-shadow 200ms ease',
+  // Hover stays in place: just a gentle swell and a brighter highlight.
+  _hover: {
+    color: 'var(--text)',
+    background: 'var(--surface-3)',
+    borderColor: 'var(--line-strong)',
+    transform: 'scale(1.08)',
+    boxShadow: '0 8px 20px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.07)',
+  },
+  _active: {
+    transform: 'scale(0.96)',
+    boxShadow: '0 4px 10px rgba(0, 0, 0, 0.28)',
+  },
+  _focusVisible: {
+    outline: '2px solid var(--line-strong)',
+    outlineOffset: '3px',
+  },
 });

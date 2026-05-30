@@ -1,4 +1,7 @@
-import { errorMessage } from '../../domain';
+import { useEffect } from 'react';
+
+import { errorMessage, primaryGeneralFocus } from '../../domain';
+import { refreshStateFieldColors } from '../../stateField';
 import type {
   CreationForm,
   ShellNavigation,
@@ -6,6 +9,7 @@ import type {
   WorkspaceModel,
   WorkspaceMutations,
 } from '../../hooks';
+import { useTerminalFileDrop } from '../../hooks';
 import {
   useActivityStore,
   useNavigationStore,
@@ -18,13 +22,19 @@ import { css } from '../../styled-system/css';
 import { appShellClass } from '../../themes/appShell';
 import { DotField } from '../chrome';
 import { Sidebar } from '../nav';
-import { SessionHistorySurface, SessionTabsBar, TerminalSurface } from '../session';
+import {
+  SessionHistorySurface,
+  SessionTabsBar,
+  TerminalDropOverlay,
+  TerminalSurface,
+} from '../session';
 import { CommandPalette } from '../palette';
 import { EmptyState } from '../onboarding';
 import { DashboardSurface } from '../dashboard';
 import { CreationComposer } from '../creation';
 import { SettingsSurface } from '../settings';
 import { ConnectionPanel, ConnectionRequestBanner } from '../connections';
+import { ConfirmDialog, ToastStack } from '../overlays';
 import { useConnectionPanelStore } from '../../store';
 
 const canUseAppServices = true;
@@ -48,8 +58,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const busy = useUiStore(s => s.busy);
   const writeLog = useUiStore(s => s.appendLog);
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
-  const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
-  const setSelectedProjectId = useNavigationStore(s => s.setSelectedProjectId);
   const selectedFocusId = useNavigationStore(s => s.selectedFocusId);
   const creationMode = useNavigationStore(s => s.creationMode);
   const setCreationMode = useNavigationStore(s => s.setCreationMode);
@@ -63,34 +71,33 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const cortexActivity = useActivityStore(s => s.cortexActivity);
   const agentCliDetections = useShellStore(s => s.agentCliDetections);
 
+  // Re-resolve the state cells' colors from the themed shell whenever the theme
+  // flips, so their dots track light/dark like the rest of the UI.
+  useEffect(() => {
+    refreshStateFieldColors();
+  }, [theme]);
+
   const {
     shell,
     selectedProject,
     selectedFocus,
-    focusSessions,
     visibleSessions,
-    hiddenFocusSessions,
+    activeFocusSessions,
+    archivedFocusSessions,
     selectedSession,
     selectedTerminalBinding,
     isLaunchingSelectedSession,
     selectedPermissionRequest,
     liveSessionCount,
     effectiveDangerousMode,
+    dangerousToggleLocked,
     runningLabel,
     scrollbackContract,
   } = model;
-  const {
-    selectSessionTab,
-    goToDashboard,
-    openSessionFromDashboard,
-    openFocus,
-    openSessionHistory,
-  } = nav;
+  const { selectSessionTab, goToDashboard, openSessionFromDashboard, openFocus } = nav;
   const {
     newProjectName,
-    setNewProjectName,
     newProjectPath,
-    setNewProjectPath,
     newFocusTitle,
     setNewFocusTitle,
     newSessionTitle,
@@ -102,6 +109,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     newSessionDangerousMode,
     setNewSessionDangerousMode,
     openCreation,
+    createSessionInFocus,
     chooseProjectFolder,
     createProjectFromComposer,
     createFocusForSelection,
@@ -109,40 +117,79 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   } = creation;
   const {
     setWorkspaceDefaultDangerousMode,
+    setWorkspaceDefaultNewSessionDangerous,
     toggleSelectedSessionYolo,
-    hideSessionTab,
+    archiveSession,
     restoreSessionTab,
     removeSessionRecord,
     archiveFocusRecord,
     archiveProjectRecord,
   } = mutations;
 
+  // Native file drag-drop: resolves the session under the cursor (terminal body
+  // or a session tab) and inserts dropped paths into it. Drives the drop overlay.
+  const dropModel = useTerminalFileDrop({
+    insertTextIntoSession: terminal.insertTextIntoSession,
+  });
+  const tabDropTargetId =
+    dropModel.target?.kind === 'tab' &&
+    (dropModel.phase === 'over' || dropModel.phase === 'confirm')
+      ? dropModel.target.sessionId
+      : null;
+
+  // Starting a session in General targets its (implicit) focus; if a workspace
+  // somehow has no general focus, fall back to creating one.
+  const startGeneralSession = () => {
+    const general = primaryGeneralFocus(shell);
+    if (general) createSessionInFocus(null, general.id);
+    else openCreation('focus', null);
+  };
+
+  // True when an actual terminal screen is on stage (a selected session, not the
+  // creation composer). Drives the calmer terminal backdrop: solid (no gradient)
+  // background, no dot field, and the top-left glow over the terminal.
+  const terminalView = surfaceMode === 'terminal' && Boolean(selectedSession) && !creationMode;
+
   return (
     <main
       className={appShellClass}
       data-theme={theme}
+      data-terminal-view={terminalView ? 'true' : 'false'}
       data-app-focused={appFocused ? 'true' : 'false'}
       data-testid="reverie-app-shell"
+      onWheel={event => {
+        // Edge-to-edge scroll target: forward wheels that land in the gaps around
+        // the terminal (beside the sidebar, the window padding, the tabs band) to
+        // the terminal, so hovering anywhere over the stage scrolls it. The
+        // viewport handles its own wheel; the sidebar keeps its scroll.
+        if (surfaceMode !== 'terminal' || creationMode || paletteOpen) return;
+        const target = event.target as HTMLElement | null;
+        if (!target) return;
+        if (target.closest('[data-testid="terminal-viewport"]')) return;
+        if (target.closest('[data-testid="left-panel"]')) return;
+        terminal.forwardWheel(event);
+      }}
     >
       <div className={windowDragStripClass} data-tauri-drag-region aria-hidden="true" />
-      <DotField variant="ambient" />
+      {/* The ambient dot field is a backdrop for the dashboard/empty views; it is
+          hidden while a terminal screen is on stage so the session reads calm. */}
+      {!terminalView ? <DotField variant="ambient" /> : null}
 
       <Sidebar
         shell={shell}
         surfaceMode={surfaceMode}
-        selectedProjectId={selectedProjectId}
         selectedFocusId={selectedFocusId}
+        sessionTerminalBindings={sessionTerminalBindings}
+        cortexActivity={cortexActivity}
         liveSessionCount={liveSessionCount}
         busy={busy}
         canUseAppServices={canUseAppServices}
         onOpenCommandPalette={() => setPaletteOpen(true)}
         onGoToDashboard={goToDashboard}
-        onSelectProject={projectId => {
-          setSelectedProjectId(projectId);
-          setSurfaceMode('terminal');
-        }}
         onOpenFocus={openFocus}
-        onOpenSessionHistory={openSessionHistory}
+        onOpenSession={openSessionFromDashboard}
+        onCloseSession={session => void archiveSession(session)}
+        onCreateSession={createSessionInFocus}
         onArchiveFocus={focus => void archiveFocusRecord(focus)}
         onArchiveProject={project => void archiveProjectRecord(project)}
         onOpenCreation={openCreation}
@@ -159,23 +206,31 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             cortexActivity={cortexActivity}
             onOpenSession={openSessionFromDashboard}
             onCreateProject={() => openCreation('project')}
-            onCreateFocus={() => openCreation('focus')}
-            cliDetections={agentCliDetections}
+            onCreateGeneralSession={startGeneralSession}
+            onOpenSettings={() => setSurfaceMode('settings')}
             onSetWorkspaceDefaultDangerousMode={next => void setWorkspaceDefaultDangerousMode(next)}
           />
         ) : surfaceMode === 'settings' ? (
           <SettingsSurface
             newSessionAgentKind={newSessionAgentKind}
             setNewSessionAgentKind={setNewSessionAgentKind}
-            newSessionDangerousMode={newSessionDangerousMode}
-            setNewSessionDangerousMode={setNewSessionDangerousMode}
+            defaultNewSessionDangerous={shell.workspace.defaultNewSessionDangerous}
+            onSetDefaultNewSessionDangerous={next => {
+              // Persist the workspace default and reflect it in the live composer
+              // state immediately so the new-session form picks it up at once.
+              void setWorkspaceDefaultNewSessionDangerous(next);
+              setNewSessionDangerousMode(next);
+            }}
           />
         ) : surfaceMode === 'session-history' ? (
           <SessionHistorySurface
             focus={selectedFocus}
-            sessions={focusSessions}
-            visibleCount={visibleSessions.length}
-            hiddenCount={hiddenFocusSessions.length}
+            shell={shell}
+            activeSessions={activeFocusSessions}
+            archivedSessions={archivedFocusSessions}
+            sessionTerminalBindings={sessionTerminalBindings}
+            cortexActivity={cortexActivity}
+            onOpenSession={openSessionFromDashboard}
             onRestore={session =>
               restoreSessionTab(session).catch(error =>
                 writeLog(`Restore failed: ${errorMessage(error)}`),
@@ -186,7 +241,11 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 writeLog(`Delete failed: ${errorMessage(error)}`),
               )
             }
-            onCreateSession={() => openCreation('session')}
+            onCreateSession={() =>
+              selectedFocus
+                ? createSessionInFocus(selectedFocus.projectId ?? null, selectedFocus.id)
+                : openCreation('session')
+            }
             busy={busy}
           />
         ) : (
@@ -202,10 +261,17 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 hasSelectedSession={Boolean(selectedSession)}
                 hasTerminalBinding={Boolean(selectedTerminalBinding)}
                 effectiveDangerousMode={effectiveDangerousMode}
+                dangerousToggleLocked={dangerousToggleLocked}
+                dropTargetSessionId={tabDropTargetId}
+                historyViewing={terminal.historyViewing}
                 onSelectSession={selectSessionTab}
-                onCloseSession={hideSessionTab}
+                onCloseSession={(event, session) => {
+                  event.stopPropagation();
+                  void archiveSession(session);
+                }}
                 onCreateSession={() => openCreation('session')}
                 onToggleDangerousMode={() => void toggleSelectedSessionYolo()}
+                onViewFullHistory={terminal.viewFullHistory}
               />
             ) : null}
 
@@ -215,9 +281,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 selectedProject={selectedProject}
                 selectedFocus={selectedFocus}
                 newProjectName={newProjectName}
-                setNewProjectName={setNewProjectName}
                 newProjectPath={newProjectPath}
-                setNewProjectPath={setNewProjectPath}
                 newFocusTitle={newFocusTitle}
                 setNewFocusTitle={setNewFocusTitle}
                 newSessionTitle={newSessionTitle}
@@ -239,29 +303,37 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             ) : null}
 
             {selectedSession && !creationMode ? (
-              <TerminalSurface
-                session={selectedSession}
-                shell={shell}
-                terminalBinding={selectedTerminalBinding}
-                runningLabel={runningLabel}
-                terminalLiveFollow={terminalLiveFollow}
-                scrollbackRowCount={scrollbackRowCount}
-                scrollbackMaxRows={scrollbackContract.maxRenderedHistoryRows}
-                permissionRequest={selectedPermissionRequest}
-                launching={isLaunchingSelectedSession}
-                busy={busy}
-                terminal={terminal}
-                onLaunch={() => {
-                  void terminal.launchSession(selectedSession).catch(error => {
-                    writeLog(`Launch failed: ${errorMessage(error)}`);
-                  });
-                }}
-              />
+              // The drop host marks the terminal body as a file-drop target and
+              // anchors the drop overlay over it. data-session-id lets the drop
+              // controller route a release into this session.
+              <div
+                className={terminalDropHostClass}
+                data-drop-target="body"
+                data-session-id={selectedSession.id}
+              >
+                <TerminalSurface
+                  session={selectedSession}
+                  terminalBinding={selectedTerminalBinding}
+                  runningLabel={runningLabel}
+                  terminalLiveFollow={terminalLiveFollow}
+                  scrollbackRowCount={scrollbackRowCount}
+                  scrollbackMaxRows={scrollbackContract.maxRenderedHistoryRows}
+                  permissionRequest={selectedPermissionRequest}
+                  launching={isLaunchingSelectedSession}
+                  busy={busy}
+                  terminal={terminal}
+                  onLaunch={() => {
+                    void terminal.launchSession(selectedSession).catch(error => {
+                      writeLog(`Launch failed: ${errorMessage(error)}`);
+                    });
+                  }}
+                />
+                <TerminalDropOverlay model={dropModel} session={selectedSession} />
+              </div>
             ) : creationMode ? null : (
               <EmptyState
-                cliDetections={agentCliDetections}
-                createFocus={() => openCreation('focus')}
                 createProject={() => openCreation('project')}
+                createGeneralSession={startGeneralSession}
                 openSettings={() => setSurfaceMode('settings')}
                 workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
                 onSetWorkspaceDefaultDangerousMode={next =>
@@ -271,6 +343,11 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             )}
           </div>
         )}
+        {/* Frame-level top-left glow. Mounted inside the canvas stage so it
+            shares that stacking context (painting above the terminal but below
+            the tabs, which are lifted); position:fixed anchors it to the whole
+            window corner and keeps it from being clipped to the terminal panel. */}
+        {terminalView ? <div className={terminalGlowClass} aria-hidden="true" /> : null}
       </section>
 
       {paletteOpen ? (
@@ -286,6 +363,9 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
           }}
         />
       ) : null}
+
+      <ConfirmDialog />
+      <ToastStack />
     </main>
   );
 }
@@ -309,13 +389,45 @@ const canvasStageClass = css({
 });
 
 const activeSurfaceClass = css({
+  position: 'relative',
   height: '100%',
   minHeight: 0,
   display: 'flex',
   flexDirection: 'column',
   overflow: 'hidden',
-  borderRadius: '22px',
+  // Square corners: the terminal grid runs to the panel's bottom edge, so rounded
+  // corners clipped the last row's ends. The window itself stays rounded.
+  borderRadius: 0,
   background: 'transparent',
+});
+
+// Wraps the terminal surface so the file-drop overlay can layer over it and the
+// body can be marked as a drop target. Fills the stage; the surface keeps its
+// own flex sizing inside.
+const terminalDropHostClass = css({
+  position: 'relative',
+  flex: 1,
+  minHeight: 0,
+  display: 'flex',
+});
+
+// A massive, soft glow anchored to the whole window's top-left corner. It lives
+// in the canvas-stage stacking context (zIndex 2) at zIndex 1, which places it
+// ABOVE the terminal (zIndex auto) yet BELOW the lifted tabs (zIndex 2) and the
+// sidebar (zIndex 3): the light spills over the terminal but the chrome stays
+// crisp on top. position:fixed anchors it to the frame, not the terminal panel,
+// so it is never clipped to the panel; the native window mask rounds the corner.
+// pointer-events:none keeps the terminal fully interactive. Intentionally very
+// subtle (tune via --glow); this replaces the old backdrop radial-gradient.
+const terminalGlowClass = css({
+  position: 'fixed',
+  top: 0,
+  left: 0,
+  width: '58vw',
+  height: '66vh',
+  zIndex: 1,
+  pointerEvents: 'none',
+  background: 'radial-gradient(circle at top left, var(--glow), transparent 70%)',
 });
 
 function ConnectionPanelHost() {

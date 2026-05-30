@@ -70,13 +70,23 @@ export function computePaintWindow(args: {
   viewportHeight: number;
   needsFullPaint: boolean;
   lastStartRow: number | null;
+  // Blank scroll space (px) injected above the first row; subtracted from
+  // scrollTop so the window tracks the content, not the inset. Defaults to 0.
+  topInsetPx?: number;
 }): PaintWindow {
   const { frame, surface, scrollTop, viewportHeight, needsFullPaint, lastStartRow } = args;
+  const topInsetPx = args.topInsetPx ?? 0;
 
-  const targetDisplayRows = Math.max(surface.rows, Math.ceil(viewportHeight / surface.cellHeight) + OVERSCAN_ROWS * 2);
+  const targetDisplayRows = Math.max(
+    surface.rows,
+    Math.ceil(viewportHeight / surface.cellHeight) + OVERSCAN_ROWS * 2,
+  );
   const displayRows = Math.max(1, Math.min(frame.rows.length, targetDisplayRows));
   const maxStartRow = Math.max(0, frame.rows.length - displayRows);
-  const startRow = Math.min(maxStartRow, Math.max(0, Math.floor(scrollTop / surface.cellHeight) - OVERSCAN_ROWS));
+  const startRow = Math.min(
+    maxStartRow,
+    Math.max(0, Math.floor((scrollTop - topInsetPx) / surface.cellHeight) - OVERSCAN_ROWS),
+  );
   const endRow = startRow + displayRows;
   const forceFullPaint = needsFullPaint || lastStartRow !== startRow || frame.dirty !== 'partial';
 
@@ -90,7 +100,11 @@ export function computePaintWindow(args: {
 
   const cursorRow = frame.cursor?.position?.row ?? frame.cursor?.row;
   const cursorCol = frame.cursor?.position?.col ?? frame.cursor?.col;
-  const cursorVisible = Number.isFinite(cursorRow) && Number.isFinite(cursorCol) && (cursorRow as number) >= startRow && (cursorRow as number) < endRow;
+  const cursorVisible =
+    Number.isFinite(cursorRow) &&
+    Number.isFinite(cursorCol) &&
+    (cursorRow as number) >= startRow &&
+    (cursorRow as number) < endRow;
 
   const windowFrame: TerminalFrame = {
     ...frame,
