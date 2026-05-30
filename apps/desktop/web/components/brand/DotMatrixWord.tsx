@@ -46,6 +46,6 @@ const wordLetterClass = css({
   },
   '& i[data-on="true"]': {
     background: 'var(--dot-bright)',
-    boxShadow: '0 0 18px color-mix(in srgb, var(--dot-bright) 24%, transparent)',
+    boxShadow: '0 0 26px color-mix(in srgb, var(--dot-bright) 15%, transparent)',
   },
 });

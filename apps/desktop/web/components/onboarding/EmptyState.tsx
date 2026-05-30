@@ -1,114 +1,27 @@
 import { motion } from 'motion/react';
-import { GearSix, Plus, ShieldWarning, TerminalWindow } from '@phosphor-icons/react';
+import { GearSix, Plus, ShieldWarning, Sparkle, TerminalWindow } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import type { AgentCliDetection } from '../../domain';
 import { DotMatrixWord } from '../brand';
-import { AgentGlyph } from '../glyphs';
-import { cliChoiceClass, cliChoiceGridClass } from '../primitives/cliChoice';
 import { Typography } from '../primitives/Typography';
 
-// First-run onboarding panel shown when the workspace has no focuses yet:
-// the brand wordmark, the create-project/focus/settings actions, the
-// auto-approve default toggle, and a summary of detected agent CLIs.
+// First-run panel, shown only when the workspace has no sessions yet. It keeps
+// the few things that belong here: a way to start a session in General, create
+// a project, open settings, and set the auto-approve default. No per-step boxes
+// and no CLI roster (session creation surfaces the real CLI choices).
 export function EmptyState({
-  cliDetections,
-  createFocus,
   createProject,
+  createGeneralSession,
   openSettings,
   workspaceDefaultDangerousMode,
   onSetWorkspaceDefaultDangerousMode,
 }: {
-  cliDetections: AgentCliDetection[];
-  createFocus: () => void;
   createProject: () => void;
+  createGeneralSession: () => void;
   openSettings: () => void;
   workspaceDefaultDangerousMode: boolean;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
-  // Only detected, switched-on CLIs are real choices; hide the ones the user
-  // turned off so onboarding mirrors what session creation will offer.
-  const visibleDetections = cliDetections.filter(detection => detection.enabled);
-  const availableCliCount = visibleDetections.filter(detection => detection.available).length;
-  const onboardingGridClass = css({
-    width: 'min(860px, calc(100vw - 380px))',
-    display: 'grid',
-    gridTemplateColumns: '1.15fr 0.85fr',
-    gap: '18px',
-    alignItems: 'stretch',
-    lgDown: { width: 'min(720px, calc(100vw - 340px))', gridTemplateColumns: '1fr' },
-  });
-  const onboardingHeroClass = css({
-    display: 'grid',
-    justifyItems: 'start',
-    alignContent: 'center',
-    gap: '16px',
-    padding: '28px',
-    borderRadius: '28px',
-    border: '1px solid var(--line)',
-    background:
-      'linear-gradient(135deg, color-mix(in srgb, var(--surface-2) 72%, transparent), color-mix(in srgb, var(--surface-1) 88%, transparent))',
-    boxShadow: 'var(--shadow)',
-  });
-  const onboardingProseClass = css({
-    maxWidth: '520px',
-  });
-  const onboardingKickerClass = css({
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '8px',
-  });
-  const onboardingStepsClass = css({
-    display: 'grid',
-    gap: '10px',
-  });
-  const onboardingStepClass = css({
-    display: 'grid',
-    gap: '4px',
-    padding: '14px',
-    borderRadius: '18px',
-    border: '1px solid var(--line)',
-    background: 'color-mix(in srgb, var(--surface-1) 78%, transparent)',
-    textAlign: 'left',
-  });
-  const onboardingSafetyToggleClass = css({
-    display: 'inline-flex',
-    gap: '6px',
-    marginTop: '8px',
-    padding: '3px',
-    border: '1px solid var(--line)',
-    borderRadius: '999px',
-    background: 'color-mix(in srgb, var(--surface-2) 75%, transparent)',
-    width: 'fit-content',
-    '& button': {
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: '5px',
-      padding: '4px 11px',
-      borderRadius: '999px',
-      border: 0,
-      background: 'transparent',
-      color: 'var(--text-3)',
-      cursor: 'pointer',
-      transition: 'background 140ms ease, color 140ms ease',
-    },
-    '& button[data-active="true"]': {
-      background: 'var(--surface-hi)',
-      color: 'var(--text)',
-    },
-    '& button:hover': { color: 'var(--text)' },
-    '& button[data-testid="onboarding-safety-on"][data-active="true"]': {
-      background: 'color-mix(in srgb, var(--warn) 18%, var(--surface-hi) 82%)',
-      color: 'var(--warn)',
-    },
-  });
-  const onboardingCliClass = css({
-    gridColumn: '1 / -1',
-    display: 'grid',
-    gap: '8px',
-    paddingTop: '2px',
-  });
-
   return (
     <div className={emptyStateClass} data-testid="onboarding-panel">
       <motion.div
@@ -117,152 +30,92 @@ export function EmptyState({
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.28 }}
       >
-        <div className={onboardingGridClass}>
-          <section className={onboardingHeroClass} data-testid="onboarding-hero">
-            <Typography
-              as="span"
-              variant="caption"
-              tone="faint"
-              uppercase
-              className={onboardingKickerClass}
-              style={{ letterSpacing: '0.08em' }}
-            >
-              <TerminalWindow size={14} /> First run
-            </Typography>
-            <DotMatrixWord />
-            <Typography
-              as="p"
-              variant="smallBody"
-              tone="inherit"
-              align="left"
-              className={onboardingProseClass}
-              style={{ lineHeight: 1.7 }}
-            >
-              Start by giving Reverie one real working context. Create a project for folder-backed
-              work, or keep it general when the agent session is not tied to a repo.
-            </Typography>
-            <div className={emptyActionsClass}>
-              <button
-                type="button"
-                data-testid="empty-create-project-button"
-                onClick={createProject}
-              >
-                <Plus size={14} />{' '}
-                <Typography as="span" variant="smallBody" tone="inherit">
-                  Create project
-                </Typography>
-              </button>
-              <button type="button" data-testid="empty-create-focus-button" onClick={createFocus}>
-                <Plus size={14} />{' '}
-                <Typography as="span" variant="smallBody" tone="inherit">
-                  General focus
-                </Typography>
-              </button>
-              <button type="button" data-testid="empty-settings-button" onClick={openSettings}>
-                <GearSix size={14} />{' '}
-                <Typography as="span" variant="smallBody" tone="inherit">
-                  Settings
-                </Typography>
-              </button>
-            </div>
-          </section>
+        <Typography
+          as="span"
+          variant="caption"
+          tone="faint"
+          uppercase
+          className={kickerClass}
+          style={{ letterSpacing: '0.08em' }}
+        >
+          <TerminalWindow size={14} /> Agent Orchestrator
+        </Typography>
+        <DotMatrixWord />
+        <Typography
+          as="p"
+          variant="smallBody"
+          tone="inherit"
+          align="center"
+          className={proseClass}
+          style={{ lineHeight: 1.7 }}
+        >
+          A home for your terminal agent sessions, kept organized and ready to resume. Start a
+          general session to begin, or add a folder to create a project to work in.
+        </Typography>
 
-          <aside className={onboardingStepsClass} data-testid="onboarding-steps">
-            <div className={onboardingStepClass} data-testid="onboarding-safety-step">
-              <Typography as="strong" variant="smallBodyAlt" tone="default">
-                Auto-approve default
+        <div className={actionsClass}>
+          <button
+            type="button"
+            className="primary"
+            data-testid="empty-create-session-button"
+            onClick={createGeneralSession}
+          >
+            <Plus size={14} />{' '}
+            <Typography as="span" variant="smallBody" tone="inherit">
+              New session
+            </Typography>
+          </button>
+          <button type="button" data-testid="empty-create-project-button" onClick={createProject}>
+            <Plus size={14} />{' '}
+            <Typography as="span" variant="smallBody" tone="inherit">
+              Create project
+            </Typography>
+          </button>
+          <button type="button" data-testid="empty-settings-button" onClick={openSettings}>
+            <GearSix size={14} />{' '}
+            <Typography as="span" variant="smallBody" tone="inherit">
+              Settings
+            </Typography>
+          </button>
+        </div>
+
+        <div className={safetyCardClass} data-testid="onboarding-safety-step">
+          <div className={safetyCopyClass}>
+            <Typography as="strong" variant="smallBodyAlt" tone="default">
+              <Sparkle size={12} weight="fill" /> Auto-approve default
+            </Typography>
+            <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
+              Off by default. New sessions launch with full prompts unless you choose otherwise.
+              Override per session anytime.
+            </Typography>
+          </div>
+          <div className={safetyToggleClass} role="radiogroup" aria-label="Auto-approve default">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!workspaceDefaultDangerousMode}
+              data-active={!workspaceDefaultDangerousMode}
+              data-testid="onboarding-safety-off"
+              onClick={() => onSetWorkspaceDefaultDangerousMode(false)}
+            >
+              <Typography as="span" variant="caption" tone="inherit">
+                Off
               </Typography>
-              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
-                Off by default. New sessions launch with full prompts unless you choose otherwise.
-                You can override per session anytime.
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={workspaceDefaultDangerousMode}
+              data-active={workspaceDefaultDangerousMode}
+              data-testid="onboarding-safety-on"
+              onClick={() => onSetWorkspaceDefaultDangerousMode(true)}
+            >
+              <ShieldWarning size={11} />{' '}
+              <Typography as="span" variant="caption" tone="inherit">
+                Auto-approve
               </Typography>
-              <div
-                className={onboardingSafetyToggleClass}
-                role="radiogroup"
-                aria-label="Auto-approve default"
-              >
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={!workspaceDefaultDangerousMode}
-                  data-active={!workspaceDefaultDangerousMode}
-                  data-testid="onboarding-safety-off"
-                  onClick={() => onSetWorkspaceDefaultDangerousMode(false)}
-                >
-                  <Typography as="span" variant="caption" tone="inherit">
-                    Off
-                  </Typography>
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={workspaceDefaultDangerousMode}
-                  data-active={workspaceDefaultDangerousMode}
-                  data-testid="onboarding-safety-on"
-                  onClick={() => onSetWorkspaceDefaultDangerousMode(true)}
-                >
-                  <ShieldWarning size={11} />{' '}
-                  <Typography as="span" variant="caption" tone="inherit">
-                    Auto-approve
-                  </Typography>
-                </button>
-              </div>
-            </div>
-            <div className={onboardingStepClass}>
-              <Typography as="strong" variant="smallBodyAlt" tone="default">
-                1. Project
-              </Typography>
-              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
-                Optional folder-backed context for long-running work.
-              </Typography>
-            </div>
-            <div className={onboardingStepClass}>
-              <Typography as="strong" variant="smallBodyAlt" tone="default">
-                2. Focus
-              </Typography>
-              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
-                The human-sized thread inside a project or workspace.
-              </Typography>
-            </div>
-            <div className={onboardingStepClass}>
-              <Typography as="strong" variant="smallBodyAlt" tone="default">
-                3. Session
-              </Typography>
-              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
-                Choose a detected CLI, set the cwd, then launch or resume.
-              </Typography>
-            </div>
-            <div className={onboardingCliClass} data-testid="onboarding-cli-summary">
-              <Typography as="span" variant="caption" tone="faint" align="left">
-                {availableCliCount} CLI choices available in this harness
-              </Typography>
-              <div className={cliChoiceGridClass}>
-                {visibleDetections.map(detection => (
-                  <button
-                    key={detection.kind}
-                    type="button"
-                    className={cliChoiceClass({ active: false, available: detection.available })}
-                    data-testid="onboarding-cli-choice"
-                    data-cli-kind={detection.kind}
-                    data-available={detection.available ? 'true' : 'false'}
-                    disabled
-                  >
-                    <AgentGlyph kind={detection.kind} />
-                    <span>
-                      <Typography as="strong" variant="smallBodyAlt" tone="inherit">
-                        {detection.displayName}
-                      </Typography>
-                      <Typography as="small" variant="tiny" tone="faint" truncate>
-                        {detection.available
-                          ? 'Fixture-detected'
-                          : `Missing: ${detection.candidates.join(', ')}`}
-                      </Typography>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </aside>
+            </button>
+          </div>
         </div>
       </motion.div>
     </div>
@@ -276,16 +129,7 @@ const emptyStateClass = css({
   display: 'grid',
   placeItems: 'center',
   overflow: 'hidden',
-  background:
-    'radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--dot-ambient) 18%, transparent), transparent 42%), var(--bg)',
-  '&::before': {
-    content: '""',
-    position: 'absolute',
-    inset: 0,
-    backgroundImage: 'radial-gradient(var(--dot-bg) 1px, transparent 1px)',
-    backgroundSize: '18px 18px',
-    opacity: 0.8,
-  },
+  background: 'transparent',
 });
 
 const emptyCenterClass = css({
@@ -294,25 +138,97 @@ const emptyCenterClass = css({
   display: 'grid',
   justifyItems: 'center',
   gap: '18px',
+  width: 'min(440px, calc(100vw - 360px))',
   color: 'var(--text-2)',
   '& p': { margin: 0 },
 });
 
-const emptyActionsClass = css({
+const kickerClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '8px',
+});
+
+const proseClass = css({
+  maxWidth: '420px',
+});
+
+const actionsClass = css({
   display: 'flex',
   gap: '10px',
+  flexWrap: 'wrap',
+  justifyContent: 'center',
   '& button': {
     height: '34px',
     display: 'inline-flex',
     alignItems: 'center',
     gap: '7px',
-    padding: '0 12px',
+    padding: '0 14px',
     borderRadius: '999px',
     border: '1px solid var(--line)',
     color: 'var(--text-2)',
     background: 'var(--surface-1)',
     boxShadow: 'var(--shadow)',
     cursor: 'pointer',
+    transition: 'background 140ms ease, color 140ms ease, border-color 140ms ease',
     _hover: { color: 'var(--text)', background: 'var(--surface-2)' },
+  },
+  '& button.primary': {
+    borderColor: 'var(--line-strong)',
+    background: 'var(--surface-3)',
+    color: 'var(--text)',
+    _hover: { background: 'var(--surface-hi)' },
+  },
+});
+
+const safetyCardClass = css({
+  width: '100%',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '16px',
+  marginTop: '4px',
+  padding: '14px 16px',
+  borderRadius: '16px',
+  border: '1px solid var(--line)',
+  background: 'color-mix(in srgb, var(--surface-1) 80%, transparent)',
+  textAlign: 'left',
+});
+
+const safetyCopyClass = css({
+  display: 'grid',
+  gap: '3px',
+  minWidth: 0,
+  '& strong': { display: 'inline-flex', alignItems: 'center', gap: '6px' },
+});
+
+const safetyToggleClass = css({
+  display: 'inline-flex',
+  gap: '6px',
+  flexShrink: 0,
+  padding: '3px',
+  border: '1px solid var(--line)',
+  borderRadius: '999px',
+  background: 'color-mix(in srgb, var(--surface-2) 75%, transparent)',
+  '& button': {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '5px',
+    padding: '4px 11px',
+    borderRadius: '999px',
+    border: 0,
+    background: 'transparent',
+    color: 'var(--text-3)',
+    cursor: 'pointer',
+    transition: 'background 140ms ease, color 140ms ease',
+  },
+  '& button[data-active="true"]': {
+    background: 'var(--surface-hi)',
+    color: 'var(--text)',
+  },
+  '& button:hover': { color: 'var(--text)' },
+  '& button[data-testid="onboarding-safety-on"][data-active="true"]': {
+    background: 'color-mix(in srgb, var(--warn) 18%, var(--surface-hi) 82%)',
+    color: 'var(--warn)',
   },
 });
