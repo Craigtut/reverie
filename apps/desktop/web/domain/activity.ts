@@ -40,12 +40,21 @@ export function classifyForDashboard(
   return 'recent';
 }
 
-// Group a session into one of the four user-facing states the dashboard and
-// focus view partition by. Live activity wins; the persisted record status is
-// the fallback. "Needs you" (attention) folds in awaiting-permission, awaiting-
-// input, unrecoverable errors, and a failed restore: anything that wants the
-// user. Distinct from `classifyForDashboard`, which keeps the older three-tone
-// rail split used for card coloring.
+// Group a session into one of the user-facing states the dashboard and focus
+// view partition by. Live activity wins; the persisted record status is the
+// fallback. Key distinctions:
+//   - active  = a positive "working" signal (the agent is mid-turn).
+//   - idle    = the session is at rest, waiting for you. This covers both a live
+//               process (turn done / awaiting your next prompt / running with no
+//               activity feed) AND an exited-but-resumable session: opening
+//               either reopens the same conversation, so we deliberately do not
+//               split them. We also do NOT call a bare running process "active":
+//               without a working signal we cannot know it is working, and
+//               showing every live CLI as active misrepresents an agent that is
+//               just waiting for you.
+//   - attention only means a blocking ask (permission) or a hard failure, not
+//               the everyday "waiting for input" rest state.
+//   - fresh   = never launched, so there is no conversation to reopen yet.
 export function deriveSessionState(
   session: ShellSession,
   isBound: boolean,
@@ -54,14 +63,18 @@ export function deriveSessionState(
   if (activity) {
     if (activity.status === 'awaiting_permission') return 'attention';
     if (activity.lastError && !activity.lastError.recoverable) return 'attention';
-    if (activity.status === 'awaiting_input') return 'attention';
     if (activity.status === 'working') return 'active';
-    return 'finished'; // done | recoverable error
+    // awaiting_input | done | recoverable error: alive, waiting on you.
+    return 'idle';
   }
   if (session.status === 'restore_failed') return 'attention';
-  if (session.status === 'running' || isBound) return 'active';
-  if (session.status === 'not_started' && !session.nativeSessionRef) return 'fresh';
-  return 'finished'; // exited | restorable
+  // fresh = never launched, not currently bound, and no resume handle: there is
+  // genuinely no conversation to reopen. A bound not_started session is mid
+  // launch, so it is already alive (idle), not fresh.
+  if (session.status === 'not_started' && !isBound && !session.nativeSessionRef) return 'fresh';
+  // Alive (running / bound) and exited-but-resumable both rest here: open
+  // re-attaches or resumes transparently, so a user need not tell them apart.
+  return 'idle';
 }
 
 // Map a session state onto the existing card/rail tone so the card's color
@@ -69,7 +82,7 @@ export function deriveSessionState(
 export function dashboardToneForState(state: SessionState): DashboardStatus {
   if (state === 'attention') return 'attention';
   if (state === 'active') return 'live';
-  return 'recent'; // fresh | finished
+  return 'recent'; // idle | fresh
 }
 
 // What the left nav surfaces about a group of sessions (a focus, a project, or
@@ -81,7 +94,7 @@ export interface SessionRollup {
   attention: number;
   active: number;
   // The highest-priority tone among the sessions: 'attention' wins over 'live'
-  // wins over 'recent' (idle / finished / empty).
+  // wins over 'recent' (idle / fresh / empty).
   tone: DashboardStatus;
 }
 
@@ -105,7 +118,7 @@ export function rollupSessionStates(
 
 // The state the live WebGL StateCell renders. A superset of SessionState that
 // splits out a hard (unrecoverable) error so it can ping red rather than amber.
-export type CellSessionState = 'fresh' | 'active' | 'attention' | 'error' | 'finished';
+export type CellSessionState = 'fresh' | 'active' | 'idle' | 'attention' | 'error' | 'finished';
 
 export function cellStateFor(
   session: ShellSession,
@@ -118,7 +131,7 @@ export function cellStateFor(
 
 export type GroupedSessions = Record<SessionState, ShellSession[]>;
 
-// Partition a set of sessions into the four user-facing state buckets the Home
+// Partition a set of sessions into the user-facing state buckets the Home
 // dashboard and focus view render as sections. Shared so both surfaces classify
 // identically.
 export function groupSessionsByState(
@@ -126,7 +139,12 @@ export function groupSessionsByState(
   bindings: Record<string, SessionTerminalBinding>,
   cortexActivity: Record<string, ActivityState>,
 ): GroupedSessions {
-  const groups: GroupedSessions = { attention: [], active: [], fresh: [], finished: [] };
+  const groups: GroupedSessions = {
+    attention: [],
+    active: [],
+    idle: [],
+    fresh: [],
+  };
   for (const session of sessions) {
     const isBound = Boolean(bindings[session.id]);
     const activity = activityForSession(session, cortexActivity);
@@ -135,6 +153,12 @@ export function groupSessionsByState(
   return groups;
 }
 
+// A short, product-meaningful status for a session card. Describes what the
+// agent is doing or what the session needs from you, never its process
+// lifecycle: a user thinks in terms of "my session", so we never surface
+// "Running" / "Resumable" / "Ended". A live, an exited-but-resumable, and a
+// bare-running session all read "Waiting for you" because opening any of them
+// reopens the same conversation.
 export function plainLanguageStatus(
   session: ShellSession,
   isBound: boolean,
@@ -151,18 +175,16 @@ export function plainLanguageStatus(
         return 'Working';
       }
       case 'awaiting_input':
-        return isBound ? 'Idle · ready for next prompt' : 'Resumable';
       case 'done':
-        return 'Ended';
+        return 'Waiting for you';
       case 'error':
         return activity.lastError?.recoverable ? 'Recovered from error' : 'Errored';
     }
   }
   if (session.status === 'restore_failed') return 'Needs your attention';
-  if (session.status === 'running' || isBound) return 'Running';
-  if (session.status === 'restorable' || session.nativeSessionRef) return 'Resumable';
-  if (session.status === 'exited') return 'Ended';
-  return 'Ready to launch';
+  if (session.status === 'not_started' && !isBound && !session.nativeSessionRef)
+    return 'Ready to start';
+  return 'Waiting for you';
 }
 
 export function statusDotColor(tone: DashboardStatus): string {

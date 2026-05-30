@@ -21,6 +21,13 @@ export interface RenderMetrics {
   avgFrameMs: number;
   p95FrameMs: number;
   maxFrameMs: number;
+  frontendFrameBatches?: number;
+  coalescedFrames?: number;
+  avgFramesPerBatch?: number;
+  maxFramesPerBatch?: number;
+  avgBatchPaintMs?: number;
+  p95BatchPaintMs?: number;
+  maxBatchPaintMs?: number;
   cellsPerSecond: number;
   bridgeMs?: number;
   outputBytes?: number;
@@ -68,11 +75,26 @@ export interface GhosttyFrameSequencePayload {
 }
 
 export interface StartSessionRequest {
-  sessionId: string;
-  terminalId: string;
+  sessionId?: string | null;
+  terminalId?: string;
+  spawnSpec?: TerminalSpawnSpec;
+  cols?: number;
+  rows?: number;
+  maxScrollback?: number;
+}
+
+export interface TerminalSpawnSpec {
+  command: TerminalCommandSpec;
   cols: number;
   rows: number;
-  maxScrollback: number;
+  title?: string | null;
+}
+
+export interface TerminalCommandSpec {
+  program: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
 }
 
 export interface TerminalStreamStartedPayload {
@@ -343,9 +365,11 @@ export type DashboardStatus = 'attention' | 'live' | 'recent';
 // record status otherwise. `archived` is handled separately (a filter, not a
 // group), so it is not part of this set.
 //   active   = the agent is mid-turn, actively working
-//   idle     = the process is alive but waiting for your next prompt (the
-//              common resting state of an interactive CLI; turn done, nothing
-//              pending). Distinct from `finished`, where the process has exited.
-export type SessionState = 'attention' | 'active' | 'idle' | 'fresh' | 'finished';
+//   idle     = the session is waiting for you. Whether its process is still
+//              alive or has exited is deliberately not surfaced: opening it
+//              re-attaches if live and resumes if not, so both read the same to
+//              a user. `fresh` (never launched) stays separate because there is
+//              no conversation to reopen yet.
+export type SessionState = 'attention' | 'active' | 'idle' | 'fresh';
 
 export type GlyphState = 'working' | 'attention' | 'error' | 'idle';

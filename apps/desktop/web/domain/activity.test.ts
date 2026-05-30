@@ -3,11 +3,14 @@ import { describe, it, expect } from 'vitest';
 import {
   activityForSession,
   classifyForDashboard,
+  dashboardToneForState,
+  deriveSessionState,
   glyphStateFor,
+  groupSessionsByState,
   plainLanguageStatus,
   statusDotColor,
 } from './activity';
-import type { ActivityError, ActivityState, ShellSession } from './types';
+import type { ActivityError, ActivityState, SessionTerminalBinding, ShellSession } from './types';
 
 function makeSession(overrides: Partial<ShellSession> = {}): ShellSession {
   return {
@@ -66,13 +69,17 @@ describe('activityForSession', () => {
   });
 
   it('returns the activity for a matching native session id', () => {
-    const session = makeSession({ nativeSessionRef: { kind: 'claude_code', sessionId: 'native-1' } });
+    const session = makeSession({
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'native-1' },
+    });
     const activity = makeActivity();
     expect(activityForSession(session, { 'native-1': activity })).toBe(activity);
   });
 
   it('returns null on a lookup miss', () => {
-    const session = makeSession({ nativeSessionRef: { kind: 'claude_code', sessionId: 'missing' } });
+    const session = makeSession({
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'missing' },
+    });
     expect(activityForSession(session, { 'native-1': makeActivity() })).toBeNull();
   });
 });
@@ -80,7 +87,9 @@ describe('activityForSession', () => {
 describe('classifyForDashboard', () => {
   describe('with live activity', () => {
     it('classifies awaiting_permission as attention', () => {
-      expect(classifyForDashboard(makeSession(), false, makeActivity({ status: 'awaiting_permission' }))).toBe('attention');
+      expect(
+        classifyForDashboard(makeSession(), false, makeActivity({ status: 'awaiting_permission' })),
+      ).toBe('attention');
     });
 
     it('classifies a non-recoverable error as attention', () => {
@@ -94,19 +103,27 @@ describe('classifyForDashboard', () => {
     });
 
     it('classifies working as live', () => {
-      expect(classifyForDashboard(makeSession(), false, makeActivity({ status: 'working' }))).toBe('live');
+      expect(classifyForDashboard(makeSession(), false, makeActivity({ status: 'working' }))).toBe(
+        'live',
+      );
     });
 
     it('classifies awaiting_input as live when bound', () => {
-      expect(classifyForDashboard(makeSession(), true, makeActivity({ status: 'awaiting_input' }))).toBe('live');
+      expect(
+        classifyForDashboard(makeSession(), true, makeActivity({ status: 'awaiting_input' })),
+      ).toBe('live');
     });
 
     it('classifies awaiting_input as recent when not bound', () => {
-      expect(classifyForDashboard(makeSession(), false, makeActivity({ status: 'awaiting_input' }))).toBe('recent');
+      expect(
+        classifyForDashboard(makeSession(), false, makeActivity({ status: 'awaiting_input' })),
+      ).toBe('recent');
     });
 
     it('classifies done as recent', () => {
-      expect(classifyForDashboard(makeSession(), true, makeActivity({ status: 'done' }))).toBe('recent');
+      expect(classifyForDashboard(makeSession(), true, makeActivity({ status: 'done' }))).toBe(
+        'recent',
+      );
     });
 
     it('classifies a recoverable error as recent', () => {
@@ -117,7 +134,9 @@ describe('classifyForDashboard', () => {
 
   describe('without activity (record fallback)', () => {
     it('classifies restore_failed as attention', () => {
-      expect(classifyForDashboard(makeSession({ status: 'restore_failed' }), false, null)).toBe('attention');
+      expect(classifyForDashboard(makeSession({ status: 'restore_failed' }), false, null)).toBe(
+        'attention',
+      );
     });
 
     it('classifies running as live', () => {
@@ -129,22 +148,121 @@ describe('classifyForDashboard', () => {
     });
 
     it('falls back to recent otherwise', () => {
-      expect(classifyForDashboard(makeSession({ status: 'restorable' }), false, null)).toBe('recent');
-      expect(classifyForDashboard(makeSession({ status: 'not_started' }), false, null)).toBe('recent');
+      expect(classifyForDashboard(makeSession({ status: 'restorable' }), false, null)).toBe(
+        'recent',
+      );
+      expect(classifyForDashboard(makeSession({ status: 'not_started' }), false, null)).toBe(
+        'recent',
+      );
     });
+  });
+});
+
+describe('deriveSessionState', () => {
+  it('routes awaiting-permission and unrecoverable errors to attention', () => {
+    expect(
+      deriveSessionState(makeSession(), false, makeActivity({ status: 'awaiting_permission' })),
+    ).toBe('attention');
+    expect(
+      deriveSessionState(
+        makeSession(),
+        true,
+        makeActivity({ status: 'error', lastError: nonRecoverableError() }),
+      ),
+    ).toBe('attention');
+  });
+
+  it('routes only a working signal to active', () => {
+    expect(deriveSessionState(makeSession(), false, makeActivity({ status: 'working' }))).toBe(
+      'active',
+    );
+  });
+
+  it('routes awaiting-input, done, and recoverable errors to idle', () => {
+    expect(
+      deriveSessionState(makeSession(), true, makeActivity({ status: 'awaiting_input' })),
+    ).toBe('idle');
+    expect(deriveSessionState(makeSession(), false, makeActivity({ status: 'done' }))).toBe('idle');
+    expect(
+      deriveSessionState(
+        makeSession(),
+        false,
+        makeActivity({ status: 'error', lastError: recoverableError() }),
+      ),
+    ).toBe('idle');
+  });
+
+  describe('without activity (record fallback)', () => {
+    it('routes restore_failed to attention', () => {
+      expect(deriveSessionState(makeSession({ status: 'restore_failed' }), false, null)).toBe(
+        'attention',
+      );
+    });
+
+    it('routes a running or bound session to idle, not active (no working signal)', () => {
+      expect(deriveSessionState(makeSession({ status: 'running' }), false, null)).toBe('idle');
+      expect(deriveSessionState(makeSession({ status: 'not_started' }), true, null)).toBe('idle');
+    });
+
+    it('routes a never-launched session to fresh', () => {
+      expect(deriveSessionState(makeSession({ status: 'not_started' }), false, null)).toBe('fresh');
+    });
+
+    it('routes an exited or resumable session to idle (open resumes it transparently)', () => {
+      expect(deriveSessionState(makeSession({ status: 'restorable' }), false, null)).toBe('idle');
+      expect(deriveSessionState(makeSession({ status: 'exited' }), false, null)).toBe('idle');
+    });
+  });
+});
+
+describe('dashboardToneForState', () => {
+  it('maps states to card tones', () => {
+    expect(dashboardToneForState('attention')).toBe('attention');
+    expect(dashboardToneForState('active')).toBe('live');
+    expect(dashboardToneForState('idle')).toBe('recent');
+    expect(dashboardToneForState('fresh')).toBe('recent');
+  });
+});
+
+describe('groupSessionsByState', () => {
+  it('partitions sessions into the state buckets', () => {
+    const running = makeSession({ id: 'a', status: 'running' }); // no feed -> idle
+    const fresh = makeSession({ id: 'b', status: 'not_started' });
+    const resumable = makeSession({ id: 'c', status: 'restorable' }); // exited but resumable -> idle
+    const failed = makeSession({ id: 'd', status: 'restore_failed' });
+    const bindings: Record<string, SessionTerminalBinding> = {};
+    const groups = groupSessionsByState([running, fresh, resumable, failed], bindings, {});
+    expect(groups.idle.map(s => s.id)).toEqual(['a', 'c']);
+    expect(groups.fresh.map(s => s.id)).toEqual(['b']);
+    expect(groups.attention.map(s => s.id)).toEqual(['d']);
+    expect(groups.active).toHaveLength(0);
+  });
+
+  it('puts a session with a live working signal in active', () => {
+    const session = makeSession({
+      id: 'x',
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'n1' },
+    });
+    const groups = groupSessionsByState([session], {}, { n1: makeActivity({ status: 'working' }) });
+    expect(groups.active.map(s => s.id)).toEqual(['x']);
+    expect(groups.idle).toHaveLength(0);
   });
 });
 
 describe('plainLanguageStatus', () => {
   describe('with live activity', () => {
     it('reports awaiting_permission', () => {
-      expect(plainLanguageStatus(makeSession(), false, makeActivity({ status: 'awaiting_permission' }))).toBe('Needs your approval');
+      expect(
+        plainLanguageStatus(makeSession(), false, makeActivity({ status: 'awaiting_permission' })),
+      ).toBe('Needs your approval');
     });
 
     it('prefers a tool displaySummary while working', () => {
       const activity = makeActivity({
         status: 'working',
-        activeTools: [{ toolCallId: 't1', toolName: 'bash', startedAt: 'now', displaySummary: 'Running tests' }],
+        activeTools: [
+          { toolCallId: 't1', toolName: 'bash', startedAt: 'now', displaySummary: 'Running tests' },
+        ],
       });
       expect(plainLanguageStatus(makeSession(), true, activity)).toBe('Running tests');
     });
@@ -152,54 +270,97 @@ describe('plainLanguageStatus', () => {
     it('falls back to the tool name while working without a summary', () => {
       const activity = makeActivity({
         status: 'working',
-        activeTools: [{ toolCallId: 't1', toolName: 'bash', startedAt: 'now', displaySummary: null }],
+        activeTools: [
+          { toolCallId: 't1', toolName: 'bash', startedAt: 'now', displaySummary: null },
+        ],
       });
       expect(plainLanguageStatus(makeSession(), true, activity)).toBe('Running bash');
     });
 
     it('reports a generic Working when there is no active tool', () => {
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'working', activeTools: [] }))).toBe('Working');
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'working' }))).toBe('Working');
+      expect(
+        plainLanguageStatus(
+          makeSession(),
+          true,
+          makeActivity({ status: 'working', activeTools: [] }),
+        ),
+      ).toBe('Working');
+      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'working' }))).toBe(
+        'Working',
+      );
     });
 
-    it('reports awaiting_input by bound state', () => {
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'awaiting_input' }))).toBe('Idle · ready for next prompt');
-      expect(plainLanguageStatus(makeSession(), false, makeActivity({ status: 'awaiting_input' }))).toBe('Resumable');
+    it('reports awaiting_input as waiting, regardless of bound state', () => {
+      expect(
+        plainLanguageStatus(makeSession(), true, makeActivity({ status: 'awaiting_input' })),
+      ).toBe('Waiting for you');
+      expect(
+        plainLanguageStatus(makeSession(), false, makeActivity({ status: 'awaiting_input' })),
+      ).toBe('Waiting for you');
     });
 
-    it('reports done as Ended', () => {
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'done' }))).toBe('Ended');
+    it('reports done as waiting for you, never "Ended"', () => {
+      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'done' }))).toBe(
+        'Waiting for you',
+      );
     });
 
     it('distinguishes recovered and unrecovered errors', () => {
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'error', lastError: recoverableError() }))).toBe('Recovered from error');
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'error', lastError: nonRecoverableError() }))).toBe('Errored');
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'error', lastError: null }))).toBe('Errored');
+      expect(
+        plainLanguageStatus(
+          makeSession(),
+          true,
+          makeActivity({ status: 'error', lastError: recoverableError() }),
+        ),
+      ).toBe('Recovered from error');
+      expect(
+        plainLanguageStatus(
+          makeSession(),
+          true,
+          makeActivity({ status: 'error', lastError: nonRecoverableError() }),
+        ),
+      ).toBe('Errored');
+      expect(
+        plainLanguageStatus(
+          makeSession(),
+          true,
+          makeActivity({ status: 'error', lastError: null }),
+        ),
+      ).toBe('Errored');
     });
   });
 
   describe('without activity (record fallback)', () => {
     it('reports restore_failed as needing attention', () => {
-      expect(plainLanguageStatus(makeSession({ status: 'restore_failed' }), false, null)).toBe('Needs your attention');
+      expect(plainLanguageStatus(makeSession({ status: 'restore_failed' }), false, null)).toBe(
+        'Needs your attention',
+      );
     });
 
-    it('reports running and bound sessions as Running', () => {
-      expect(plainLanguageStatus(makeSession({ status: 'running' }), false, null)).toBe('Running');
-      expect(plainLanguageStatus(makeSession({ status: 'not_started' }), true, null)).toBe('Running');
+    it('reports running, resumable, and exited sessions all as "Waiting for you"', () => {
+      expect(plainLanguageStatus(makeSession({ status: 'running' }), false, null)).toBe(
+        'Waiting for you',
+      );
+      expect(plainLanguageStatus(makeSession({ status: 'not_started' }), true, null)).toBe(
+        'Waiting for you',
+      );
+      expect(plainLanguageStatus(makeSession({ status: 'restorable' }), false, null)).toBe(
+        'Waiting for you',
+      );
+      const withNative = makeSession({
+        status: 'not_started',
+        nativeSessionRef: { kind: 'claude_code', sessionId: 'n1' },
+      });
+      expect(plainLanguageStatus(withNative, false, null)).toBe('Waiting for you');
+      expect(plainLanguageStatus(makeSession({ status: 'exited' }), false, null)).toBe(
+        'Waiting for you',
+      );
     });
 
-    it('reports restorable or native-ref sessions as Resumable', () => {
-      expect(plainLanguageStatus(makeSession({ status: 'restorable' }), false, null)).toBe('Resumable');
-      const withNative = makeSession({ status: 'not_started', nativeSessionRef: { kind: 'claude_code', sessionId: 'n1' } });
-      expect(plainLanguageStatus(withNative, false, null)).toBe('Resumable');
-    });
-
-    it('reports exited sessions as Ended', () => {
-      expect(plainLanguageStatus(makeSession({ status: 'exited' }), false, null)).toBe('Ended');
-    });
-
-    it('reports a fresh session as Ready to launch', () => {
-      expect(plainLanguageStatus(makeSession({ status: 'not_started' }), false, null)).toBe('Ready to launch');
+    it('reports a never-launched session as "Ready to start"', () => {
+      expect(plainLanguageStatus(makeSession({ status: 'not_started' }), false, null)).toBe(
+        'Ready to start',
+      );
     });
   });
 });
@@ -218,7 +379,9 @@ describe('glyphStateFor', () => {
   });
 
   it('returns attention when awaiting permission', () => {
-    expect(glyphStateFor(makeActivity({ status: 'awaiting_permission' }), 'recent')).toBe('attention');
+    expect(glyphStateFor(makeActivity({ status: 'awaiting_permission' }), 'recent')).toBe(
+      'attention',
+    );
   });
 
   it('returns attention when the tone is attention even without activity', () => {
@@ -226,11 +389,15 @@ describe('glyphStateFor', () => {
   });
 
   it('returns error for a non-recoverable error activity', () => {
-    expect(glyphStateFor(makeActivity({ status: 'error', lastError: nonRecoverableError() }), 'recent')).toBe('error');
+    expect(
+      glyphStateFor(makeActivity({ status: 'error', lastError: nonRecoverableError() }), 'recent'),
+    ).toBe('error');
   });
 
   it('returns idle for a recoverable error activity', () => {
-    expect(glyphStateFor(makeActivity({ status: 'error', lastError: recoverableError() }), 'recent')).toBe('idle');
+    expect(
+      glyphStateFor(makeActivity({ status: 'error', lastError: recoverableError() }), 'recent'),
+    ).toBe('idle');
   });
 
   it('returns idle when there is no activity and the tone is not attention', () => {

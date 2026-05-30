@@ -1,11 +1,12 @@
 import { motion } from 'motion/react';
-import { Warning } from '@phosphor-icons/react';
+import { CheckCircle, Plus, Warning } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { activityForSession, classifyForDashboard } from '../../domain';
+import { groupSessionsByState } from '../../domain';
 import type {
   ActivityState,
-  AgentCliDetection,
+  DashboardStatus,
+  SessionState,
   SessionTerminalBinding,
   ShellSession,
   WorkspaceShellSnapshot,
@@ -14,17 +15,28 @@ import { EmptyState } from '../onboarding';
 import { Typography } from '../primitives/Typography';
 import { DashboardRail } from './DashboardRail';
 
-// The default surface: partitions visible sessions across attention / live /
-// recent rails (activity-state wins, persisted status is the fallback), or
-// shows the onboarding panel when the workspace has no sessions yet.
+// Order and presentation of the state sections, top (most demanding of the user)
+// to bottom.
+const SECTIONS: { key: SessionState; title: string; tone: DashboardStatus; attention?: boolean }[] =
+  [
+    { key: 'attention', title: 'Needs your attention', tone: 'attention', attention: true },
+    { key: 'active', title: 'Working', tone: 'live' },
+    { key: 'idle', title: 'Idle', tone: 'recent' },
+    { key: 'fresh', title: 'Fresh', tone: 'recent' },
+  ];
+
+// The default surface (Home): every non-archived session across the workspace,
+// grouped by state. Archived sessions are excluded here and live in each focus's
+// history. Shows first-run onboarding when there are no sessions at all, and a
+// calm "all caught up" panel once everything has been archived.
 export function DashboardSurface({
   shell,
   sessionTerminalBindings,
   cortexActivity,
   onOpenSession,
   onCreateProject,
-  onCreateFocus,
-  cliDetections,
+  onCreateGeneralSession,
+  onOpenSettings,
   onSetWorkspaceDefaultDangerousMode,
 }: {
   shell: WorkspaceShellSnapshot;
@@ -32,39 +44,55 @@ export function DashboardSurface({
   cortexActivity: Record<string, ActivityState>;
   onOpenSession: (session: ShellSession) => void;
   onCreateProject: () => void;
-  onCreateFocus: () => void;
-  cliDetections: AgentCliDetection[];
+  onCreateGeneralSession: () => void;
+  onOpenSettings: () => void;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
-  // Partition visible sessions across the three rails. Activity-state drives
-  // classification when available; the persisted record status is the fallback
-  // for sessions on CLIs without an activity surface yet.
-  const visible = shell.sessions.filter(s => s.tabVisible !== false);
-  const attention: ShellSession[] = [];
-  const live: ShellSession[] = [];
-  const recent: ShellSession[] = [];
-  for (const session of visible) {
-    const isBound = Boolean(sessionTerminalBindings[session.id]);
-    const activity = activityForSession(session, cortexActivity);
-    const tone = classifyForDashboard(session, isBound, activity);
-    if (tone === 'attention') attention.push(session);
-    else if (tone === 'live') live.push(session);
-    else recent.push(session);
-  }
+  const active = shell.sessions.filter(s => !s.archived);
+  const groups = groupSessionsByState(active, sessionTerminalBindings, cortexActivity);
 
-  const totalVisible = visible.length;
-  const isEmptyWorkspace = totalVisible === 0;
-
-  if (isEmptyWorkspace) {
+  if (shell.sessions.length === 0) {
     return (
       <EmptyState
-        cliDetections={cliDetections}
-        createFocus={onCreateFocus}
         createProject={onCreateProject}
-        openSettings={() => undefined}
+        createGeneralSession={onCreateGeneralSession}
+        openSettings={onOpenSettings}
         workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
         onSetWorkspaceDefaultDangerousMode={onSetWorkspaceDefaultDangerousMode}
       />
+    );
+  }
+
+  if (active.length === 0) {
+    return (
+      <div className={caughtUpClass} data-testid="dashboard-caught-up">
+        <motion.div
+          className={caughtUpCenterClass}
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <CheckCircle size={26} weight="duotone" />
+          <Typography as="h1" variant="subtitle" tone="default">
+            You're all caught up
+          </Typography>
+          <Typography as="p" variant="smallBody" tone="faint" align="center">
+            Nothing open right now. Closed sessions are kept in each focus's history, where you can
+            restore them anytime.
+          </Typography>
+          <button
+            type="button"
+            className={caughtUpActionClass}
+            data-testid="caught-up-new-session-button"
+            onClick={onCreateGeneralSession}
+          >
+            <Plus size={14} />
+            <Typography as="span" variant="smallBody" tone="inherit">
+              New session
+            </Typography>
+          </button>
+        </motion.div>
+      </div>
     );
   }
 
@@ -96,21 +124,27 @@ export function DashboardSurface({
               as="span"
               variant="caption"
               tone="muted"
-              data-tone={live.length > 0 ? 'live' : 'idle'}
+              data-tone={groups.active.length > 0 ? 'live' : 'idle'}
               data-testid="dashboard-live-count"
             >
-              <i style={{ background: live.length > 0 ? 'var(--good)' : 'var(--text-4)' }} />
-              {live.length} live
+              <i
+                style={{ background: groups.active.length > 0 ? 'var(--good)' : 'var(--text-4)' }}
+              />
+              {groups.active.length} working
             </Typography>
             <Typography
               as="span"
               variant="caption"
               tone="muted"
-              data-tone={attention.length > 0 ? 'attention' : 'idle'}
+              data-tone={groups.attention.length > 0 ? 'attention' : 'idle'}
               data-testid="dashboard-attention-count"
             >
-              <i style={{ background: attention.length > 0 ? 'var(--warn)' : 'var(--text-4)' }} />
-              {attention.length} need attention
+              <i
+                style={{
+                  background: groups.attention.length > 0 ? 'var(--warn)' : 'var(--text-4)',
+                }}
+              />
+              {groups.attention.length} need attention
             </Typography>
             <Typography
               as="span"
@@ -120,47 +154,26 @@ export function DashboardSurface({
               data-testid="dashboard-recent-count"
             >
               <i style={{ background: 'var(--text-4)' }} />
-              {recent.length} recent
+              {groups.idle.length} idle
             </Typography>
           </div>
         </header>
 
-        {attention.length > 0 ? (
-          <DashboardRail
-            title="Needs your attention"
-            icon={<Warning size={13} weight="fill" />}
-            tone="attention"
-            sessions={attention}
-            shell={shell}
-            bindings={sessionTerminalBindings}
-            cortexActivity={cortexActivity}
-            onOpenSession={onOpenSession}
-          />
-        ) : null}
-
-        {live.length > 0 ? (
-          <DashboardRail
-            title="Live now"
-            tone="live"
-            sessions={live}
-            shell={shell}
-            bindings={sessionTerminalBindings}
-            cortexActivity={cortexActivity}
-            onOpenSession={onOpenSession}
-          />
-        ) : null}
-
-        {recent.length > 0 ? (
-          <DashboardRail
-            title="Recent"
-            tone="recent"
-            sessions={recent}
-            shell={shell}
-            bindings={sessionTerminalBindings}
-            cortexActivity={cortexActivity}
-            onOpenSession={onOpenSession}
-          />
-        ) : null}
+        {SECTIONS.map(section =>
+          groups[section.key].length > 0 ? (
+            <DashboardRail
+              key={section.key}
+              title={section.title}
+              icon={section.attention ? <Warning size={13} weight="fill" /> : undefined}
+              tone={section.tone}
+              sessions={groups[section.key]}
+              shell={shell}
+              bindings={sessionTerminalBindings}
+              cortexActivity={cortexActivity}
+              onOpenSession={onOpenSession}
+            />
+          ) : null,
+        )}
       </motion.div>
     </div>
   );
@@ -229,4 +242,44 @@ const dashboardCountsClass = css({
     borderRadius: '50%',
     display: 'inline-block',
   },
+});
+
+const caughtUpClass = css({
+  position: 'relative',
+  flex: 1,
+  minHeight: 0,
+  display: 'grid',
+  placeItems: 'center',
+  overflow: 'hidden',
+  background: 'transparent',
+});
+
+const caughtUpCenterClass = css({
+  position: 'relative',
+  zIndex: 2,
+  display: 'grid',
+  justifyItems: 'center',
+  gap: '12px',
+  width: 'min(400px, calc(100vw - 360px))',
+  textAlign: 'center',
+  color: 'var(--text-3)',
+  '& > svg': { color: 'var(--good)' },
+  '& p': { margin: 0 },
+});
+
+const caughtUpActionClass = css({
+  marginTop: '6px',
+  height: '34px',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '7px',
+  padding: '0 14px',
+  borderRadius: '999px',
+  border: '1px solid var(--line-strong)',
+  color: 'var(--text)',
+  background: 'var(--surface-3)',
+  boxShadow: 'var(--shadow)',
+  cursor: 'pointer',
+  transition: 'background 140ms ease',
+  _hover: { background: 'var(--surface-hi)' },
 });
