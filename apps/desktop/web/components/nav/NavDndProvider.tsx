@@ -3,8 +3,10 @@ import {
   DndContext,
   PointerSensor,
   closestCenter,
+  pointerWithin,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -22,6 +24,31 @@ const EMPTY_DRAG: NavDragState = {
   activeKind: null,
   sourceFocusId: null,
   dropTargetFocusId: null,
+};
+
+// Forgiving, kind-aware collision detection. First narrow the candidate
+// droppables to only what a drag of this kind can land on (a project onto
+// projects, a topic within its own project, a session onto sessions / topic
+// headers / drop zones). Then prefer the droppable the POINTER is inside over
+// the nearest-by-center. The effect: the whole of a target row is a valid drop
+// area, so swapping two items (even two tall, expanded ones) just means moving
+// the cursor over the other one, instead of dragging a row's center all the way
+// past another's. Falls back to closest-center when the pointer is in a gap.
+const navCollisionDetection: CollisionDetection = args => {
+  const activeData = asNavDragData(args.active.data.current);
+  if (!activeData) return closestCenter(args);
+  const relevant = args.droppableContainers.filter(container => {
+    const item = asNavDragData(container.data.current);
+    const zone = asSessionZoneData(container.data.current);
+    if (activeData.kind === 'project') return item?.kind === 'project';
+    if (activeData.kind === 'topic') {
+      return item?.kind === 'topic' && item.containerId === activeData.containerId;
+    }
+    return item?.kind === 'session' || item?.kind === 'topic' || Boolean(zone);
+  });
+  const filtered = { ...args, droppableContainers: relevant };
+  const pointer = pointerWithin(filtered);
+  return pointer.length > 0 ? pointer : closestCenter(filtered);
 };
 
 // The single drag-and-drop context over the whole nav tree, so a session can be
@@ -116,7 +143,7 @@ export function NavDndProvider({
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCenter}
+      collisionDetection={navCollisionDetection}
       modifiers={[restrictToVerticalAxis, restrictToFirstScrollableAncestor]}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
