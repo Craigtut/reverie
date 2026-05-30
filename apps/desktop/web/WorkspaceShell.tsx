@@ -3,6 +3,7 @@ import { useEffect, useMemo } from 'react';
 import {
   useAgentClis,
   useAppFocus,
+  useAppQuit,
   useCommandPalette,
   useCreationForm,
   useNavPersistence,
@@ -56,6 +57,7 @@ export function WorkspaceShell() {
   });
 
   useCommandPalette();
+  useAppQuit(writeLog);
   useSessionActivity(writeLog, model.loadWorkspaceShell);
   useSessionTitle(writeLog);
   useAgentClis(creation.newSessionAgentKind, creation.setNewSessionAgentKind, writeLog);

@@ -1,4 +1,10 @@
-import { agentLabel, errorMessage, rollupSessionStates, shortId } from '../domain';
+import {
+  activityForSession,
+  agentLabel,
+  errorMessage,
+  rollupSessionStates,
+  shortId,
+} from '../domain';
 import type {
   ShellFocus,
   ShellProject,
@@ -171,16 +177,39 @@ export function useWorkspaceMutations({
     return snapshot;
   }
 
-  // Closing a session archives it: the CLI process is terminated, its tab is
-  // dropped, and it leaves Home and the sidebar for the focus's archived list.
-  // The record (title, focus, cwd, native session ref) stays, so restore can
-  // resume it later with `--resume <id>` and the current dangerous-mode
+  // Closing a session archives it: the CLI process tree is terminated, its tab
+  // is dropped, and it leaves Home and the sidebar for the focus's archived
+  // list. The record (title, focus, cwd, native session ref) stays, so restore
+  // can resume it later with `--resume <id>` and the current dangerous-mode
   // override. Invoked from the tab bar X and the sidebar session row X.
-  // Closing is always quiet and instant: no confirm sheet, even for a live or
-  // waiting session, since archival is reversible. We push an Undo toast so a
-  // mistaken close can be reverted, and stopping the process is harmless because
-  // restore resumes it.
+  //
+  // Closing an idle/dormant session stays quiet and instant (with an Undo
+  // toast), since archival is reversible and stopping a resting process is
+  // harmless. But if the agent is mid-work or waiting on a permission decision,
+  // closing throws away the in-progress step, so we confirm first.
   async function archiveSession(session: ShellSession) {
+    const cortexActivity = useActivityStore.getState().cortexActivity;
+    const status = activityForSession(session, cortexActivity)?.status;
+    const isBound = Boolean(useTerminalStore.getState().sessionTerminalBindings[session.id]);
+    if (isBound && (status === 'working' || status === 'awaiting_permission')) {
+      const awaitingPermission = status === 'awaiting_permission';
+      useOverlayStore.getState().requestConfirm({
+        title: awaitingPermission
+          ? `“${session.title}” is waiting for your approval`
+          : `“${session.title}” is still working`,
+        body: awaitingPermission
+          ? 'Closing it stops the agent now without finishing. The conversation is saved and you can resume it later.'
+          : 'Closing it stops the agent now. The conversation is saved and you can resume it later, but the current step won’t finish.',
+        confirmLabel: 'Close and stop',
+        danger: true,
+        onConfirm: () => void performArchiveSession(session),
+      });
+      return;
+    }
+    await performArchiveSession(session);
+  }
+
+  async function performArchiveSession(session: ShellSession) {
     const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
     if (binding) {
       try {

@@ -2,6 +2,7 @@
 // Each hook owns its own store wiring, so the shell just calls them.
 
 export { useAppFocus } from './useAppFocus';
+export { useAppQuit } from './useAppQuit';
 export { useCommandPalette } from './useCommandPalette';
 export { useSessionTabShortcuts } from './useSessionTabShortcuts';
 export { useSessionActivity } from './useSessionActivity';

@@ -1,6 +1,7 @@
 import { invoke } from './runtime';
 import type { GhosttyFrameSequencePayload, RenderMetrics, StartSessionRequest } from '../domain';
 import type { TerminalFrame } from '../terminalTypes';
+import type { FrameMatch } from '../terminal/findModel';
 
 // Typed wrappers over the terminal/session-runtime commands: launching and
 // terminating native sessions, writing input, resizing, scrolling the
@@ -13,6 +14,14 @@ export function startSession(request: StartSessionRequest) {
 
 export function terminateSession(terminalId: string) {
   return invoke('terminate_session', { terminalId });
+}
+
+// Finalize a deliberate quit: the backend gracefully stops every live session's
+// process tree, persists them as resumable, then exits the app. Invoked after
+// the user confirms (or when there is no in-flight work to confirm). The promise
+// may not resolve, since the process exits.
+export function confirmQuit() {
+  return invoke('confirm_quit');
 }
 
 export function writeTerminalInput(terminalId: string, input: string) {
@@ -33,6 +42,10 @@ export function scrollTerminalViewportToTop(terminalId: string) {
 
 export function scrollTerminalViewportToBottom(terminalId: string) {
   return invoke('scroll_terminal_viewport_to_bottom', { terminalId });
+}
+
+export function setTerminalFrontendActive(terminalId: string, active: boolean) {
+  return invoke('set_terminal_frontend_active', { terminalId, active });
 }
 
 // Push the active shell theme's default terminal colors (#rrggbb) into the
@@ -56,6 +69,19 @@ export interface TerminalHistoryWindow {
   frame: TerminalFrame;
 }
 
+export interface TerminalHistorySearchResult {
+  matches: FrameMatch[];
+  total: number;
+  capped: boolean;
+  totalRows: number;
+}
+
+export interface TerminalHistorySearchWindow {
+  search: TerminalHistorySearchResult;
+  startRow: number;
+  frame: TerminalFrame;
+}
+
 export function terminalHistoryInfo(sessionId: string, cols: number, rows: number) {
   return invoke<TerminalHistoryInfo>('terminal_history_info', { sessionId, cols, rows });
 }
@@ -64,11 +90,45 @@ export function terminalHistoryWindow(
   sessionId: string,
   startRow: number,
   cols: number,
-  rows: number,
+  surfaceRows: number,
+  rowCount: number,
 ) {
   return invoke<TerminalHistoryWindow>('terminal_history_window', {
     sessionId,
     startRow,
+    cols,
+    surfaceRows,
+    rowCount,
+  });
+}
+
+export function terminalHistorySearch(
+  sessionId: string,
+  query: string,
+  caseSensitive: boolean,
+  cols: number,
+  rows: number,
+) {
+  return invoke<TerminalHistorySearchResult>('terminal_history_search', {
+    sessionId,
+    query,
+    caseSensitive,
+    cols,
+    rows,
+  });
+}
+
+export function terminalHistorySearchWindow(
+  sessionId: string,
+  query: string,
+  caseSensitive: boolean,
+  cols: number,
+  rows: number,
+) {
+  return invoke<TerminalHistorySearchWindow>('terminal_history_search_window', {
+    sessionId,
+    query,
+    caseSensitive,
     cols,
     rows,
   });
