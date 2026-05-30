@@ -14,7 +14,6 @@ const DEFAULT_FONT_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consol
 const DEFAULT_FONT_SIZE = 14;
 const DEFAULT_FOREGROUND = '#e8e1d7';
 const DEFAULT_BACKGROUND = '#060605';
-const DEFAULT_CURSOR = '#f0e8dc';
 // How opaque the terminal's *default* (unstyled) background is painted.
 // 1 = fully opaque (classic terminal box), 0 = fully transparent so the shell
 // background shows through, values between = a tint. Cells with an explicit
@@ -65,7 +64,9 @@ export function createTerminalCanvasRenderer(
   const fontFamily = options.fontFamily ?? DEFAULT_FONT_FAMILY;
   const defaultForeground = options.foreground ?? DEFAULT_FOREGROUND;
   const defaultBackground = options.background ?? DEFAULT_BACKGROUND;
-  const defaultCursor = options.cursor ?? DEFAULT_CURSOR;
+  // Fall back to the (theme) foreground, not a fixed light color: when the VT
+  // reports no cursor color, a cream default would vanish on a light surface.
+  const defaultCursor = options.cursor ?? defaultForeground;
   const backgroundOpacity = Math.min(
     1,
     Math.max(0, options.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY),
