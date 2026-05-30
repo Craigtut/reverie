@@ -5,6 +5,13 @@ edition = "2024"
 license = "MIT"
 publish = false
 
+[lints.rust]
+# The `objc` 0.2 `msg_send!` macro expands to a `cfg!(feature = "cargo-clippy")`
+# check. This crate has no such feature, so the `unexpected_cfgs` lint flags
+# every `msg_send!` call. Declaring the value as expected silences only that
+# third-party false positive and leaves the lint live for genuine typos.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
