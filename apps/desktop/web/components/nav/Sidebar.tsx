@@ -246,7 +246,9 @@ export function Sidebar({
 // Layout-only; the rim-lit surface treatment is composed in via cx() at the
 // call site (see themes/surfaces.ts rimLitPanelClass).
 const leftPanelClass = css({
-  zIndex: 2,
+  // Above the frame glow (canvas stage is zIndex 2; the glow sits inside it), so
+  // the side panel reads as the top layer and the glow never washes over it.
+  zIndex: 3,
   display: 'flex',
   flexDirection: 'column',
   minHeight: 0,

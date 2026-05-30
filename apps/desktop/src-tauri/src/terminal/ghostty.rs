@@ -63,6 +63,19 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         self.terminal.vt_write(bytes);
     }
 
+    /// Set the terminal's default foreground/background by feeding Ghostty OSC 10
+    /// (foreground) and OSC 11 (background) sequences. libghostty-vt has no
+    /// color config on `TerminalOptions`, so without this it reports its
+    /// hardwired default of white-on-black. After this call the render state
+    /// reports these colors as the defaults, default-colored cells resolve to
+    /// them, and CLIs that query OSC 10/11 to pick a light/dark theme get a
+    /// truthful answer. Forces a full frame so the change repaints everywhere.
+    pub fn set_default_colors(&mut self, foreground: TerminalColor, background: TerminalColor) {
+        self.write(&osc_set_color(10, foreground));
+        self.write(&osc_set_color(11, background));
+        self.force_next_full_frame = true;
+    }
+
     pub fn on_pty_write(
         &mut self,
         mut callback: impl for<'data> FnMut(&'data [u8]) + 'cb,
@@ -298,6 +311,16 @@ fn extract_frame<'alloc, 'cb>(
     })
 }
 
+/// Build an `OSC <code>;rgb:rr/gg/bb` (BEL-terminated) sequence. Code 10 sets
+/// the default foreground, code 11 the default background.
+fn osc_set_color(code: u8, color: TerminalColor) -> Vec<u8> {
+    format!(
+        "\x1b]{code};rgb:{:02x}/{:02x}/{:02x}\x07",
+        color.r, color.g, color.b
+    )
+    .into_bytes()
+}
+
 fn cell_text(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<String> {
     if cell.graphemes_len()? == 0 {
         return Ok(" ".to_string());
@@ -372,6 +395,57 @@ mod tests {
 
         assert!(rendered.contains("Reverie terminal backend"));
         assert_eq!(frame.rows.len(), 8);
+    }
+
+    #[test]
+    fn ghostty_terminal_state_reports_injected_default_colors() {
+        let mut terminal = GhosttyTerminalState::new(20, 4, 50).unwrap();
+        // Default (no OSC) is Ghostty's hardwired white-on-black.
+        let default = terminal.frame().unwrap();
+        assert_eq!(
+            default.colors.background,
+            TerminalColor { r: 0, g: 0, b: 0 }
+        );
+        assert_eq!(
+            default.colors.foreground,
+            TerminalColor {
+                r: 255,
+                g: 255,
+                b: 255
+            }
+        );
+
+        // Light-theme values: cream background, near-black foreground.
+        terminal.set_default_colors(
+            TerminalColor {
+                r: 0x1b,
+                g: 0x18,
+                b: 0x14,
+            },
+            TerminalColor {
+                r: 0xf4,
+                g: 0xf1,
+                b: 0xeb,
+            },
+        );
+        let themed = terminal.frame().unwrap();
+        assert_eq!(
+            themed.colors.background,
+            TerminalColor {
+                r: 0xf4,
+                g: 0xf1,
+                b: 0xeb
+            }
+        );
+        assert_eq!(
+            themed.colors.foreground,
+            TerminalColor {
+                r: 0x1b,
+                g: 0x18,
+                b: 0x14
+            }
+        );
+        assert_eq!(themed.dirty, TerminalDirtyState::Full);
     }
 
     #[test]

@@ -17,13 +17,15 @@ use anyhow::Result;
 use reverie_core::terminal::TerminalFrame;
 
 use crate::terminal::ghostty::GhosttyTerminalState;
+use crate::terminal::runtime::TerminalThemeColors;
 
 // Headroom for the replay buffer. Ghostty allocates rows on demand, so this
 // caps memory at a few million rows rather than reserving them. Sessions longer
 // than this lose their oldest rows from deep scroll (still in the raw log).
 const HISTORY_MAX_SCROLLBACK: usize = 5_000_000;
 
-/// The full rendered height of the transcript at the given width.
+/// The full rendered height of the transcript at the given width. Colors do not
+/// affect row count, so this path needs no theme.
 pub fn history_total_rows(transcript: &[u8], cols: u16, rows: u16) -> Result<usize> {
     let mut state = GhosttyTerminalState::new(cols, rows.max(1), HISTORY_MAX_SCROLLBACK)?;
     if !transcript.is_empty() {
@@ -41,8 +43,13 @@ pub fn history_window(
     cols: u16,
     rows: u16,
     start_row: usize,
+    colors: TerminalThemeColors,
 ) -> Result<TerminalFrame> {
     let mut state = GhosttyTerminalState::new(cols, rows.max(1), HISTORY_MAX_SCROLLBACK)?;
+    // Seed the theme's default colors before replay so deep-history rows render
+    // with the same fg/bg as the live terminal (a transcript that set its own
+    // OSC 10/11 still wins, replayed after).
+    state.set_default_colors(colors.foreground, colors.background);
     if !transcript.is_empty() {
         state.write(transcript);
     }
@@ -88,7 +95,7 @@ mod tests {
         );
 
         // The window at the very beginning starts with the first line.
-        let frame = history_window(&transcript, 80, 24, 0).unwrap();
+        let frame = history_window(&transcript, 80, 24, 0, TerminalThemeColors::default()).unwrap();
         assert!(
             row_text(&frame, 0).starts_with("line0"),
             "row 0 was {:?}",
@@ -99,7 +106,7 @@ mod tests {
     #[test]
     fn empty_transcript_reports_viewport_rows() {
         assert!(history_total_rows(&[], 80, 24).unwrap() >= 1);
-        let frame = history_window(&[], 80, 24, 0).unwrap();
+        let frame = history_window(&[], 80, 24, 0, TerminalThemeColors::default()).unwrap();
         assert!(row_text(&frame, 0).trim().is_empty());
     }
 }

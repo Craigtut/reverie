@@ -606,9 +606,48 @@ pub(crate) fn terminal_history_window(
     let transcript = runtime
         .read_full_transcript(session_id)
         .map_err(|err| err.to_string())?;
-    let frame = crate::terminal::history::history_window(&transcript, cols, rows, start_row)
-        .map_err(|err| err.to_string())?;
+    let frame = crate::terminal::history::history_window(
+        &transcript,
+        cols,
+        rows,
+        start_row,
+        runtime.default_colors(),
+    )
+    .map_err(|err| err.to_string())?;
     Ok(TerminalHistoryWindow { start_row, frame })
+}
+
+/// Push the active shell theme's default terminal colors into the runtime.
+/// Applied to future spawns + history replay, and broadcast to every live
+/// terminal so a light/dark switch repaints without respawning. `foreground`
+/// and `background` are `#rrggbb` hex strings.
+#[tauri::command]
+pub(crate) fn set_terminal_theme(
+    runtime: State<'_, TerminalSessionRuntime>,
+    foreground: String,
+    background: String,
+) -> Result<(), String> {
+    let foreground = parse_hex_color(&foreground)?;
+    let background = parse_hex_color(&background)?;
+    runtime.set_theme_colors(foreground, background);
+    Ok(())
+}
+
+/// Parse a `#rrggbb` (or `rrggbb`) hex color into a `TerminalColor`.
+fn parse_hex_color(value: &str) -> Result<reverie_core::terminal::TerminalColor, String> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 {
+        return Err(format!("expected a #rrggbb hex color, got {value:?}"));
+    }
+    let channel = |start: usize| {
+        u8::from_str_radix(&hex[start..start + 2], 16)
+            .map_err(|_| format!("invalid hex color {value:?}"))
+    };
+    Ok(reverie_core::terminal::TerminalColor {
+        r: channel(0)?,
+        g: channel(2)?,
+        b: channel(4)?,
+    })
 }
 
 #[tauri::command]

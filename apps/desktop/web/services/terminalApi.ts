@@ -35,6 +35,14 @@ export function scrollTerminalViewportToBottom(terminalId: string) {
   return invoke('scroll_terminal_viewport_to_bottom', { terminalId });
 }
 
+// Push the active shell theme's default terminal colors (#rrggbb) into the
+// backend. Applied to future spawns + history replay and broadcast to every
+// live terminal, so Ghostty's reported default fg/bg (and any CLI that queries
+// OSC 10/11 to pick a light/dark theme) match the shell.
+export function setTerminalTheme(foreground: string, background: string) {
+  return invoke('set_terminal_theme', { foreground, background });
+}
+
 // Deep history (the full persisted transcript), keyed by SESSION id so it works
 // for live, exited, and restored sessions.
 export interface TerminalHistoryInfo {

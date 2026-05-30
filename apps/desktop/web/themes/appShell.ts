@@ -30,10 +30,16 @@ export const appShellClass = css({
   '--dot-bright': 'rgba(239, 233, 223, 0.95)',
   '--rim-1': 'rgba(255, 250, 240, 0.55)',
   '--rim-2': 'rgba(255, 250, 240, 0.04)',
+  // Top-left "glow" over the terminal view: a warm light that replaces the old
+  // backdrop gradient. Kept very subtle; tune the alpha here.
+  '--glow': 'rgba(255, 243, 224, 0.06)',
   '--good': '#6FB87A',
   '--warn': '#E5A24E',
   '--bad': '#D96B5C',
-  '--terminal-bg': '#060605',
+  // Mirrors TERMINAL_THEME in themes/terminalTheme.ts (the canvas renderer reads
+  // the colors from there, not this var); kept in sync as the surface the
+  // terminal panel matches.
+  '--terminal-bg': '#0B0A09',
   '--shadow': '0 30px 60px -20px rgba(0,0,0,0.55), 0 12px 32px -12px rgba(0,0,0,0.6)',
   position: 'fixed',
   inset: 0,
@@ -46,6 +52,12 @@ export const appShellClass = css({
   color: 'var(--text)',
   background:
     'radial-gradient(circle at 18% 10%, var(--surface-2), transparent 30%), linear-gradient(135deg, var(--bg), var(--bg-deep))',
+  // In the terminal view the backdrop is a flat solid (no gradient) so the
+  // terminal panel reads seamlessly against it; the top-left lift comes from the
+  // glow overlay instead. Other surfaces (dashboard, etc.) keep the gradient.
+  '&[data-terminal-view="true"]': {
+    background: 'var(--bg)',
+  },
   fontSize: '13px',
   lineHeight: '1.45',
   letterSpacing: '-0.005em',
@@ -69,11 +81,13 @@ export const appShellClass = css({
     '--dot-bright': 'rgba(20, 14, 6, 0.90)',
     '--rim-1': 'rgba(255, 255, 255, 0.95)',
     '--rim-2': 'rgba(255, 255, 255, 0.15)',
+    '--glow': 'rgba(255, 255, 255, 0.30)',
     '--good': '#4A8F58',
     '--warn': '#B07A1E',
     '--bad': '#B14738',
     '--terminal-bg': '#11100e',
-    '--shadow': '0 30px 60px -22px rgba(60, 40, 20, 0.18), 0 12px 28px -14px rgba(60, 40, 20, 0.18)',
+    '--shadow':
+      '0 30px 60px -22px rgba(60, 40, 20, 0.18), 0 12px 28px -14px rgba(60, 40, 20, 0.18)',
   },
   lgDown: {
     gridTemplateColumns: '260px minmax(0, 1fr)',

@@ -326,8 +326,13 @@ export function createTerminalCanvasRenderer(
 
   function paintFrame(frame: TerminalFrame, overlay?: TerminalOverlay) {
     const paintRows = rowsToPaint(frame);
-    const foreground = colorToCss(frame.colors?.foreground, defaultForeground);
-    const background = colorToCss(frame.colors?.background, defaultBackground);
+    // The default foreground/background are Reverie's theme colors (the renderer
+    // options), not Ghostty's hardwired white-on-black `frame.colors`. Cells the
+    // CLI styled carry explicit fg/bg and still paint with their own colors;
+    // every unstyled cell resolves to the theme default here, so the terminal
+    // reads as a solid themed panel that matches the shell.
+    const foreground = defaultForeground;
+    const background = defaultBackground;
 
     for (const row of paintRows) {
       paintDefaultBackground(0, row.index * cellHeight, cols * cellWidth, cellHeight, background);

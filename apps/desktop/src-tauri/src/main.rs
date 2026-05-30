@@ -242,6 +242,7 @@ fn main() {
             commands::search_terminal,
             commands::terminal_history_info,
             commands::terminal_history_window,
+            commands::set_terminal_theme,
             commands::terminate_session,
             commands::record_render_metrics,
             commands::open_url,

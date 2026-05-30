@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use reverie_core::TerminalSpawnSpec;
 use reverie_core::domain::SessionId;
 use reverie_core::pty::{PtyController, PtyProcess};
-use reverie_core::terminal::{TerminalFrame, TerminalId};
+use reverie_core::terminal::{TerminalColor, TerminalFrame, TerminalId};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -24,6 +24,35 @@ use reverie_core::transcript::TranscriptStore;
 const READ_BUFFER_BYTES: usize = 4096;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
+/// The terminal's default foreground/background. libghostty-vt has no color
+/// config, so Reverie sources these from the active shell theme and feeds them
+/// into each terminal as OSC 10/11 (see `GhosttyTerminalState::set_default_colors`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalThemeColors {
+    pub foreground: TerminalColor,
+    pub background: TerminalColor,
+}
+
+impl Default for TerminalThemeColors {
+    fn default() -> Self {
+        // Dark-theme values (the shell's `--text` / `--bg` tokens). The app
+        // boots dark, so a terminal spawned before the frontend pushes the
+        // active theme via `set_terminal_theme` already looks right.
+        Self {
+            foreground: TerminalColor {
+                r: 0xEF,
+                g: 0xE9,
+                b: 0xDF,
+            },
+            background: TerminalColor {
+                r: 0x0B,
+                g: 0x0A,
+                b: 0x09,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct TerminalSessionRuntime {
     sessions: Arc<Mutex<HashMap<TerminalId, TerminalSessionRecord>>>,
@@ -33,6 +62,9 @@ pub struct TerminalSessionRuntime {
     // repository exists). When present, each session's raw PTY bytes are
     // captured for full-history scrollback + search.
     transcript_store: Arc<Mutex<Option<Arc<dyn TranscriptStore>>>>,
+    // The active shell theme's default terminal colors, pushed from the
+    // frontend. Applied to each terminal at spawn and re-broadcast on change.
+    default_colors: Arc<Mutex<TerminalThemeColors>>,
 }
 
 enum TerminalRuntimeCommand {
@@ -44,6 +76,11 @@ enum TerminalRuntimeCommand {
     ScrollTop,
     ScrollBottom,
     ScrollToRow(usize),
+    // Push new default fg/bg into the live terminal (theme switch).
+    SetDefaultColors {
+        foreground: TerminalColor,
+        background: TerminalColor,
+    },
     // Search runs on the worker thread (which owns &mut terminal) and replies
     // over the carried channel.
     Search {
@@ -146,6 +183,35 @@ struct TerminalFailedEvent {
 }
 
 impl TerminalSessionRuntime {
+    /// The active theme's default terminal colors (dark until the frontend
+    /// pushes the live theme). Read at spawn and by history replay.
+    pub fn default_colors(&self) -> TerminalThemeColors {
+        self.default_colors
+            .lock()
+            .map(|colors| *colors)
+            .unwrap_or_default()
+    }
+
+    /// Set the default terminal colors for the active theme. Stored for
+    /// future spawns + history replay, and broadcast to every live terminal so
+    /// a theme switch repaints without respawning sessions.
+    pub fn set_theme_colors(&self, foreground: TerminalColor, background: TerminalColor) {
+        if let Ok(mut colors) = self.default_colors.lock() {
+            *colors = TerminalThemeColors {
+                foreground,
+                background,
+            };
+        }
+        if let Ok(senders) = self.command_senders.lock() {
+            for sender in senders.values() {
+                let _ = sender.send(TerminalRuntimeCommand::SetDefaultColors {
+                    foreground,
+                    background,
+                });
+            }
+        }
+    }
+
     pub fn spawn_session_stream(
         &self,
         app: AppHandle,
@@ -305,6 +371,11 @@ impl TerminalSessionRuntime {
         let spec = request.spawn_spec;
         let launch_started_ms = unix_time_millis();
         let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows, request.max_scrollback)?;
+        // Seed the terminal's default colors from the active theme before any
+        // PTY output arrives, so default-colored cells + the base background
+        // match the shell instead of Ghostty's hardwired white-on-black.
+        let theme = self.default_colors();
+        terminal.set_default_colors(theme.foreground, theme.background);
         let process = PtyProcess::spawn(request.terminal_id, &spec)
             .context("failed to spawn terminal session PTY process")?;
         let (reader, controller) = process.split();
@@ -717,6 +788,13 @@ fn apply_terminal_commands(
             TerminalRuntimeCommand::ScrollToRow(row) => {
                 terminal.scroll_to_row(row)?;
                 viewport_state.follow_tail = false;
+                needs_frame = true;
+            }
+            TerminalRuntimeCommand::SetDefaultColors {
+                foreground,
+                background,
+            } => {
+                terminal.set_default_colors(foreground, background);
                 needs_frame = true;
             }
             TerminalRuntimeCommand::Search {
