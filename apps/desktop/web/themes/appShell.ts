@@ -50,13 +50,24 @@ export const appShellClass = css({
   overflow: 'hidden',
   borderRadius: '44px',
   color: 'var(--text)',
-  background:
+  // An opaque base color always sits under the gradient so the shell can never go
+  // see-through. The `background` shorthand resets background-color to transparent,
+  // which the opaque gradient image hides; but switching to the terminal view then
+  // animates background-color from transparent to var(--bg) over the 0.45s
+  // transition while the gradient image flips off at once, opening a window where
+  // the transparent native frame shows through (a flash to the desktop). Splitting
+  // color (opaque, constant) from image (the gradient) keeps the base solid through
+  // every transition and theme flip.
+  backgroundColor: 'var(--bg)',
+  backgroundImage:
     'radial-gradient(circle at 18% 10%, var(--surface-2), transparent 30%), linear-gradient(135deg, var(--bg), var(--bg-deep))',
   // In the terminal view the backdrop is a flat solid (no gradient) so the
   // terminal panel reads seamlessly against it; the top-left lift comes from the
-  // glow overlay instead. Other surfaces (dashboard, etc.) keep the gradient.
+  // glow overlay instead. Other surfaces (dashboard, etc.) keep the gradient. The
+  // base backgroundColor stays var(--bg), so dropping the image never exposes the
+  // frame.
   '&[data-terminal-view="true"]': {
-    background: 'var(--bg)',
+    backgroundImage: 'none',
   },
   fontSize: '13px',
   lineHeight: '1.45',
