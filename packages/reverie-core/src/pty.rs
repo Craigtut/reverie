@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
@@ -17,6 +18,10 @@ pub struct PtyProcess {
     size: Arc<Mutex<PtySize>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: SharedChild,
+    /// OS process id of the spawned child. Because the child is a `setsid`
+    /// session leader (portable-pty), this id is also its process-group id, so
+    /// signalling the group reaches the agent and everything it spawned.
+    pid: Option<u32>,
     reader: Box<dyn Read + Send>,
     writer: SharedWriter,
 }
@@ -42,6 +47,7 @@ pub struct PtyController {
     size: Arc<Mutex<PtySize>>,
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     child: SharedChild,
+    pid: Option<u32>,
     writer: SharedWriter,
 }
 
@@ -57,6 +63,9 @@ impl PtyProcess {
         let child = pair.slave.spawn_command(command).with_context(|| {
             format!("failed to spawn PTY command for {:?}", spec.command.program)
         })?;
+        // Snapshot the pid now, while we still own the child directly, so the
+        // controller can signal the whole process group on termination.
+        let pid = child.process_id();
         let reader = pair
             .master
             .try_clone_reader()
@@ -71,6 +80,7 @@ impl PtyProcess {
             size: Arc::new(Mutex::new(size)),
             master: Arc::new(Mutex::new(pair.master)),
             child: Arc::new(Mutex::new(child)),
+            pid,
             reader,
             writer: Arc::new(Mutex::new(writer)),
         })
@@ -94,6 +104,7 @@ impl PtyProcess {
             size: Arc::clone(&self.size),
             master: Arc::clone(&self.master),
             child: Arc::clone(&self.child),
+            pid: self.pid,
             writer: Arc::clone(&self.writer),
         };
         let reader = PtyReader {
@@ -130,7 +141,7 @@ impl PtyProcess {
     }
 
     pub fn terminate(&mut self) -> Result<()> {
-        terminate_child(&self.child)
+        terminate_tree_graceful(&self.child, self.pid)
     }
 }
 
@@ -172,8 +183,27 @@ impl PtyController {
         try_wait_child(&self.child)
     }
 
+    /// Gracefully terminate the session's entire process tree: SIGTERM the
+    /// process group, allow a brief grace period to exit cleanly, then SIGKILL
+    /// the group if anything is still alive. The child is a `setsid` session
+    /// leader (portable-pty), so its pid is the process-group id and a group
+    /// signal reaches the agent plus anything it spawned (dev servers, `&`
+    /// jobs) instead of orphaning them.
     pub fn terminate(&self) -> Result<()> {
-        terminate_child(&self.child)
+        terminate_tree_graceful(&self.child, self.pid)
+    }
+
+    /// Immediately SIGKILL the whole process group with no grace period. Used by
+    /// the app-exit backstop, where blocking is not an option.
+    pub fn terminate_now(&self) -> Result<()> {
+        terminate_tree_now(&self.child, self.pid)
+    }
+
+    /// SIGTERM the whole process group without waiting. Batch shutdown signals
+    /// every session first, then waits once, then SIGKILLs any stragglers via
+    /// [`terminate_now`].
+    pub fn request_terminate(&self) {
+        group_term(&self.child, self.pid);
     }
 }
 
@@ -231,6 +261,78 @@ fn terminate_child(child: &SharedChild) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("PTY child lock is poisoned"))?
         .kill()
         .context("failed to terminate PTY child")
+}
+
+/// How long a graceful tree-kill waits for SIGTERM to take effect before
+/// escalating to SIGKILL.
+const TERMINATE_GRACE: Duration = Duration::from_millis(400);
+/// How often the grace loop polls the child for exit.
+const TERMINATE_POLL: Duration = Duration::from_millis(20);
+
+/// SIGTERM the child's whole process group. Falls back to killing just the
+/// direct child if the pid is unknown or the group signal fails.
+#[cfg(unix)]
+fn group_term(child: &SharedChild, pid: Option<u32>) {
+    if let Some(pid) = pid {
+        // SAFETY: killpg targets the process group whose id is the setsid
+        // leader's pid; it is async-signal-safe and never dereferences memory.
+        if unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) } == 0 {
+            return;
+        }
+    }
+    let _ = terminate_child(child);
+}
+
+/// SIGKILL the child's whole process group. Falls back to killing just the
+/// direct child if the pid is unknown or the group signal fails.
+#[cfg(unix)]
+fn group_kill(child: &SharedChild, pid: Option<u32>) {
+    if let Some(pid) = pid {
+        if unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) } == 0 {
+            return;
+        }
+    }
+    let _ = terminate_child(child);
+}
+
+#[cfg(not(unix))]
+fn group_term(child: &SharedChild, _pid: Option<u32>) {
+    let _ = terminate_child(child);
+}
+
+#[cfg(not(unix))]
+fn group_kill(child: &SharedChild, _pid: Option<u32>) {
+    let _ = terminate_child(child);
+}
+
+/// SIGTERM the process group, wait briefly for a clean exit, then SIGKILL the
+/// group if it is still alive. Always reaps so the child does not linger as a
+/// zombie.
+fn terminate_tree_graceful(child: &SharedChild, pid: Option<u32>) -> Result<()> {
+    group_term(child, pid);
+    let deadline = Instant::now() + TERMINATE_GRACE;
+    loop {
+        match try_wait_child(child) {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            // If we can no longer poll the child, fall through to SIGKILL.
+            Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(TERMINATE_POLL);
+    }
+    group_kill(child, pid);
+    let _ = try_wait_child(child);
+    Ok(())
+}
+
+/// SIGKILL the whole process group immediately, then reap.
+fn terminate_tree_now(child: &SharedChild, pid: Option<u32>) -> Result<()> {
+    group_kill(child, pid);
+    let _ = try_wait_child(child);
+    Ok(())
 }
 
 pub fn command_builder(spec: &CommandSpec) -> CommandBuilder {
@@ -392,5 +494,79 @@ mod tests {
             "output was: {output:?}"
         );
         handle.join().expect("PTY reader thread should finish");
+    }
+
+    /// A graceful terminate must take down the agent's entire process group,
+    /// not just the direct child. We spawn a shell that backgrounds a
+    /// long-lived grandchild (in the shell's process group, since job control
+    /// is off for non-interactive shells), confirm the grandchild is alive,
+    /// terminate the session, then confirm the grandchild is gone.
+    #[cfg(unix)]
+    #[test]
+    fn terminate_kills_whole_process_group() {
+        let command =
+            CommandSpec::new("/bin/sh", "/tmp").with_args(["-c", "sleep 600 & echo gc:$!; wait"]);
+        let mut spec = TerminalSpawnSpec::new(command);
+        spec.cols = 80;
+        spec.rows = 24;
+
+        let process = PtyProcess::spawn(TerminalId::new_v4(), &spec).expect("PTY should spawn");
+        let (mut reader, controller) = process.split();
+
+        // Read until the shell reports the backgrounded grandchild's pid.
+        let mut output = Vec::new();
+        let mut buf = [0_u8; 512];
+        let read_deadline = Instant::now() + Duration::from_secs(3);
+        let grandchild_pid = loop {
+            if Instant::now() >= read_deadline {
+                let _ = controller.terminate();
+                panic!(
+                    "never saw grandchild pid; output={:?}",
+                    String::from_utf8_lossy(&output)
+                );
+            }
+            let read = reader
+                .read_chunk(&mut buf)
+                .expect("PTY read should succeed");
+            if read == 0 {
+                let _ = controller.terminate();
+                panic!("PTY closed before reporting grandchild pid");
+            }
+            output.extend_from_slice(&buf[..read]);
+            let text = String::from_utf8_lossy(&output);
+            if let Some(rest) = text.split("gc:").nth(1) {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !digits.is_empty()
+                    && (text.contains('\n') || rest.len() > digits.len())
+                    && let Ok(pid) = digits.parse::<libc::pid_t>()
+                {
+                    break pid;
+                }
+            }
+        };
+
+        // Sanity: the grandchild should be alive right now.
+        assert_eq!(
+            unsafe { libc::kill(grandchild_pid, 0) },
+            0,
+            "grandchild {grandchild_pid} should be alive before terminate"
+        );
+
+        controller
+            .terminate()
+            .expect("graceful terminate should succeed");
+
+        // After a graceful tree-kill the grandchild must be gone. Poll briefly
+        // to allow signal delivery + reaping by launchd after reparenting.
+        let dead_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if unsafe { libc::kill(grandchild_pid, 0) } != 0 {
+                break;
+            }
+            if Instant::now() >= dead_deadline {
+                panic!("grandchild {grandchild_pid} survived the tree-kill");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
