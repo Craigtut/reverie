@@ -1,29 +1,36 @@
 import { useState, type ReactNode } from 'react';
 import {
   DndContext,
-  DragOverlay,
   PointerSensor,
-  closestCorners,
+  closestCenter,
   useSensor,
   useSensors,
   type DragEndEvent,
+  type DragOverEvent,
   type DragStartEvent,
+  type Over,
 } from '@dnd-kit/core';
+import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import type { WorkspaceShellSnapshot } from '../../domain';
 import { useNavReorder } from '../../hooks/useNavReorder';
-import { css, cx } from '../../styled-system/css';
-import { rimLitPanelClass } from '../../themes/surfaces';
-import { Typography } from '../primitives/Typography';
-import { asNavDragData, asSessionZoneData, type NavDragKind } from './navDnd';
+import { asNavDragData, asSessionZoneData } from './navDnd';
+import { NavDragStateProvider, type NavDragState } from './navDragContext';
+
+const EMPTY_DRAG: NavDragState = {
+  activeKind: null,
+  sourceFocusId: null,
+  dropTargetFocusId: null,
+};
 
 // The single drag-and-drop context over the whole nav tree, so a session can be
-// dragged from one topic into another. We resolve everything on drop (drag-over
-// does no live reparenting): read what is being dragged and what it landed on,
-// then dispatch the matching reorder/move. Every branch is defensive: an invalid
-// pairing (a topic dropped on a project, a session dropped on a project header,
-// a cross-project topic move) is simply a no-op.
+// dragged from one topic into another. There is no drag overlay: the real row
+// lifts and moves in place (constrained to the vertical axis and to the
+// scrollable nav, so it can't leave the panel), and neighbours reflow to open a
+// gap. We resolve everything on drop; drag-over only tracks which topic a
+// dragged session would land in, so that topic (often a collapsed one) can light
+// up. Every branch is defensive: an invalid pairing is simply a no-op.
 export function NavDndProvider({
   shell,
   children,
@@ -32,7 +39,7 @@ export function NavDndProvider({
   children: ReactNode;
 }) {
   const { reorderProjects, reorderTopics, reorderSessions, moveSession } = useNavReorder();
-  const [activeLabel, setActiveLabel] = useState<string | null>(null);
+  const [drag, setDrag] = useState<NavDragState>(EMPTY_DRAG);
 
   // Under 8px of movement stays a click (open / expand / close still fire); past
   // it, a drag begins. This is what lets "grab anywhere" coexist with the row's
@@ -41,18 +48,33 @@ export function NavDndProvider({
 
   function onDragStart(event: DragStartEvent) {
     const data = asNavDragData(event.active.data.current);
-    setActiveLabel(data ? labelForActive(shell, data.kind, data.entityId) : null);
+    if (!data) return;
+    setDrag({
+      activeKind: data.kind,
+      sourceFocusId: data.kind === 'session' ? focusIdOf(shell, data.entityId) : null,
+      dropTargetFocusId: null,
+    });
+  }
+
+  function onDragOver(event: DragOverEvent) {
+    const activeData = asNavDragData(event.active.data.current);
+    if (!activeData || activeData.kind !== 'session') return;
+    const target = sessionDropTarget(shell, event.over);
+    setDrag(prev =>
+      prev.dropTargetFocusId === (target?.focusId ?? null)
+        ? prev
+        : { ...prev, dropTargetFocusId: target?.focusId ?? null },
+    );
   }
 
   function onDragEnd(event: DragEndEvent) {
-    setActiveLabel(null);
+    setDrag(EMPTY_DRAG);
     const { active, over } = event;
     if (!over) return;
 
     const activeData = asNavDragData(active.data.current);
     if (!activeData) return;
     const overItem = asNavDragData(over.data.current);
-    const overZone = asSessionZoneData(over.data.current);
 
     if (activeData.kind === 'project') {
       if (overItem?.kind !== 'project') return;
@@ -77,20 +99,10 @@ export function NavDndProvider({
 
     // Sessions: reorder within a topic, or move to another topic.
     const sourceFocusId = focusIdOf(shell, activeData.entityId);
-    if (!sourceFocusId) return;
+    const target = sessionDropTarget(shell, over);
+    if (!sourceFocusId || !target) return;
 
-    let targetFocusId: string | null = null;
-    if (overItem?.kind === 'session') {
-      targetFocusId = focusIdOf(shell, overItem.entityId);
-    } else if (overItem?.kind === 'topic') {
-      // Dropped on a topic header (e.g. a collapsed topic) → drop into it.
-      targetFocusId = overItem.entityId;
-    } else if (overZone) {
-      targetFocusId = overZone.focusId;
-    }
-    if (!targetFocusId) return;
-
-    if (targetFocusId === sourceFocusId) {
+    if (target.focusId === sourceFocusId) {
       const ids = orderedSessionIds(shell, sourceFocusId);
       const from = ids.indexOf(activeData.entityId);
       const to = overItem?.kind === 'session' ? ids.indexOf(overItem.entityId) : ids.length - 1;
@@ -98,35 +110,50 @@ export function NavDndProvider({
       reorderSessions(arrayMove(ids, from, to));
       return;
     }
-
-    // Cross-topic move: index = position of the session we dropped on, or the
-    // end when dropped on a header / empty area.
-    const targetIds = orderedSessionIds(shell, targetFocusId);
-    const targetIndex =
-      overItem?.kind === 'session' ? targetIds.indexOf(overItem.entityId) : targetIds.length;
-    moveSession(activeData.entityId, targetFocusId, Math.max(0, targetIndex));
+    moveSession(activeData.entityId, target.focusId, Math.max(0, target.index));
   }
 
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCorners}
+      collisionDetection={closestCenter}
+      modifiers={[restrictToVerticalAxis, restrictToFirstScrollableAncestor]}
       onDragStart={onDragStart}
+      onDragOver={onDragOver}
       onDragEnd={onDragEnd}
-      onDragCancel={() => setActiveLabel(null)}
+      onDragCancel={() => setDrag(EMPTY_DRAG)}
     >
-      {children}
-      <DragOverlay dropAnimation={null}>
-        {activeLabel ? (
-          <div className={cx(rimLitPanelClass, overlayClass)}>
-            <Typography as="span" variant="smallBody" tone="default">
-              {activeLabel}
-            </Typography>
-          </div>
-        ) : null}
-      </DragOverlay>
+      <NavDragStateProvider value={drag}>{children}</NavDragStateProvider>
     </DndContext>
   );
+}
+
+// Where a dragged session would land: the focus it drops into and the index
+// within that focus's ordered sessions. Used both to dispatch the move and to
+// highlight the target topic during the drag.
+function sessionDropTarget(
+  shell: WorkspaceShellSnapshot,
+  over: Over | null,
+): { focusId: string; index: number } | null {
+  if (!over) return null;
+  const overItem = asNavDragData(over.data.current);
+  const overZone = asSessionZoneData(over.data.current);
+  if (overItem?.kind === 'session') {
+    const focusId = focusIdOf(shell, overItem.entityId);
+    if (!focusId) return null;
+    return { focusId, index: orderedSessionIds(shell, focusId).indexOf(overItem.entityId) };
+  }
+  if (overItem?.kind === 'topic') {
+    // Dropped on a topic header (e.g. a collapsed topic) → append into it.
+    return {
+      focusId: overItem.entityId,
+      index: orderedSessionIds(shell, overItem.entityId).length,
+    };
+  }
+  if (overZone) {
+    return { focusId: overZone.focusId, index: orderedSessionIds(shell, overZone.focusId).length };
+  }
+  return null;
 }
 
 function orderedProjectIds(shell: WorkspaceShellSnapshot): string[] {
@@ -157,29 +184,3 @@ function orderedSessionIds(shell: WorkspaceShellSnapshot, focusId: string): stri
 function focusIdOf(shell: WorkspaceShellSnapshot, sessionId: string): string | null {
   return shell.sessions.find(session => session.id === sessionId)?.focusId ?? null;
 }
-
-function labelForActive(
-  shell: WorkspaceShellSnapshot,
-  kind: NavDragKind,
-  entityId: string,
-): string {
-  if (kind === 'project') {
-    return shell.projects.find(project => project.id === entityId)?.name ?? 'Project';
-  }
-  if (kind === 'topic') {
-    return shell.focuses.find(focus => focus.id === entityId)?.title ?? 'Topic';
-  }
-  return shell.sessions.find(session => session.id === entityId)?.title?.trim() || 'Session';
-}
-
-const overlayClass = css({
-  display: 'inline-flex',
-  alignItems: 'center',
-  padding: '6px 12px',
-  borderRadius: '9px',
-  cursor: 'grabbing',
-  maxWidth: '220px',
-  whiteSpace: 'nowrap',
-  overflow: 'hidden',
-  textOverflow: 'ellipsis',
-});
