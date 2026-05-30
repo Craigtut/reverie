@@ -29,6 +29,29 @@ pub(crate) struct BridgeBinaries {
     pub(crate) preturn_hook: PathBuf,
 }
 
+impl BridgeBinaries {
+    /// Verify both helper binaries exist on disk before we write their paths
+    /// into a CLI config. Writing a path that does not exist is exactly the
+    /// failure that surfaced as the agent's "MCP client failed to start: No
+    /// such file or directory" error. The fix is to refuse the write and point
+    /// at the staging step instead of silently poisoning the config.
+    pub(crate) fn ensure_present(&self) -> Result<()> {
+        for (label, path) in [
+            ("reverie-bridge", &self.reverie_bridge),
+            ("reverie-bridge-preturn-hook", &self.preturn_hook),
+        ] {
+            if !path.exists() {
+                anyhow::bail!(
+                    "{label} helper not found at {}; the app build is incomplete \
+                     (run `npm run stage:bridge`)",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Reported status for one CLI's bridge installation.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +92,7 @@ pub(crate) fn cortex_hooks_path() -> Result<PathBuf> {
 /// Install the bridge entries into Cortex's global config files. Idempotent.
 /// Returns the status after writing.
 pub(crate) fn install_cortex_bridge(binaries: &BridgeBinaries) -> Result<BridgeInstallationStatus> {
+    binaries.ensure_present()?;
     let mcp_path = cortex_mcp_path()?;
     let hooks_path = cortex_hooks_path()?;
     write_cortex_mcp_entry(&mcp_path, &binaries.reverie_bridge)?;
@@ -206,6 +230,7 @@ pub(crate) fn claude_config_path() -> Result<PathBuf> {
 /// into the top-level `mcpServers` object (Claude's documented user-scope
 /// key). Idempotent.
 pub(crate) fn install_claude_bridge(binaries: &BridgeBinaries) -> Result<BridgeInstallationStatus> {
+    binaries.ensure_present()?;
     let path = claude_config_path()?;
     write_claude_mcp_entry(&path, &binaries.reverie_bridge)?;
     inspect_claude_status(binaries)
@@ -284,6 +309,7 @@ pub(crate) fn codex_config_path() -> Result<PathBuf> {
 /// Codex's MCP server table sits under `[mcp_servers.<name>]`; we add the
 /// `reverie_bridge` namespace.
 pub(crate) fn install_codex_bridge(binaries: &BridgeBinaries) -> Result<BridgeInstallationStatus> {
+    binaries.ensure_present()?;
     let path = codex_config_path()?;
     write_codex_mcp_entry(&path, &binaries.reverie_bridge)?;
     inspect_codex_status(binaries)
@@ -352,6 +378,18 @@ fn write_codex_mcp_entry(path: &PathBuf, helper: &PathBuf) -> Result<()> {
     // SDK reads ms but Codex normalises). 600 seconds = 10 min, comfortably
     // covers a human-decision window for connection requests.
     entry.insert("tool_timeout_sec", value(600_i64));
+
+    // Codex does NOT inherit the parent shell's full environment for MCP
+    // subprocesses by default. We have to list the variable names we want
+    // forwarded, otherwise the helper boots with REVERIE_* unset and exits
+    // immediately, producing a "Broken pipe" on Codex's `initialize`
+    // request. Listing the three identity vars is sufficient.
+    let mut env_vars = Array::default();
+    env_vars.push("REVERIE_SESSION_ID");
+    env_vars.push("REVERIE_SESSION_SECRET");
+    env_vars.push("REVERIE_BRIDGE_SOCK");
+    entry.insert("env_vars", value(env_vars));
+
     mcp_servers.insert(REVERIE_BRIDGE_KEY, Item::Table(entry));
     write_toml_atomic(path, &doc)
 }
@@ -653,6 +691,16 @@ mod tests {
             "config.toml should contain reverie_bridge table, got:\n{toml_text}"
         );
         assert!(toml_text.contains("tool_timeout_sec = 600"));
+        // The env_vars list is what makes Codex actually forward our identity
+        // env to the helper subprocess. Without it the helper boots without
+        // REVERIE_SESSION_ID and exits, producing a broken-pipe on Codex's
+        // first `initialize` send.
+        assert!(
+            toml_text.contains("REVERIE_SESSION_ID"),
+            "REVERIE_SESSION_ID must be listed in env_vars, got:\n{toml_text}"
+        );
+        assert!(toml_text.contains("REVERIE_SESSION_SECRET"));
+        assert!(toml_text.contains("REVERIE_BRIDGE_SOCK"));
 
         let status = inspect_codex_status(&bins).unwrap();
         assert!(status.mcp_installed);
@@ -691,10 +739,11 @@ mod tests {
             "model = \"gpt-4\"\n\n[mcp_servers.weather]\ncommand = \"node\"\nargs = [\"weather.js\"]\n",
         )
         .unwrap();
-        let bins = binaries(
-            &PathBuf::from("/bin/reverie-bridge"),
-            &PathBuf::from("/bin/hook"),
-        );
+        let helper = tmp.path().join("reverie-bridge");
+        let hook = tmp.path().join("reverie-bridge-preturn-hook");
+        fs::write(&helper, b"").unwrap();
+        fs::write(&hook, b"").unwrap();
+        let bins = binaries(&helper, &hook);
         install_codex_bridge(&bins).unwrap();
         let updated = fs::read_to_string(&config_path).unwrap();
         assert!(updated.contains("model = \"gpt-4\""));
@@ -776,10 +825,11 @@ mod tests {
             r#"{"telemetry":{"enabled":true},"mcpServers":{"weather":{"command":"node"}}}"#,
         )
         .unwrap();
-        let bins = binaries(
-            &PathBuf::from("/bin/reverie-bridge"),
-            &PathBuf::from("/bin/hook"),
-        );
+        let helper = tmp.path().join("reverie-bridge");
+        let hook = tmp.path().join("reverie-bridge-preturn-hook");
+        fs::write(&helper, b"").unwrap();
+        fs::write(&hook, b"").unwrap();
+        let bins = binaries(&helper, &hook);
         install_claude_bridge(&bins).unwrap();
         let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(parsed["telemetry"]["enabled"], true);
