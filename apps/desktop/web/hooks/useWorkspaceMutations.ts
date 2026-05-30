@@ -1,11 +1,4 @@
-import {
-  activityForSession,
-  agentLabel,
-  deriveSessionState,
-  errorMessage,
-  rollupSessionStates,
-  shortId,
-} from '../domain';
+import { agentLabel, errorMessage, rollupSessionStates, shortId } from '../domain';
 import type {
   ShellFocus,
   ShellProject,
@@ -183,29 +176,11 @@ export function useWorkspaceMutations({
   // The record (title, focus, cwd, native session ref) stays, so restore can
   // resume it later with `--resume <id>` and the current dangerous-mode
   // override. Invoked from the tab bar X and the sidebar session row X.
-  // Closing a session archives it. When the session is idle this is quiet and
-  // instant with an Undo; when it is still running or waiting on the user we ask
-  // first, since closing stops a live process.
+  // Closing is always quiet and instant: no confirm sheet, even for a live or
+  // waiting session, since archival is reversible. We push an Undo toast so a
+  // mistaken close can be reverted, and stopping the process is harmless because
+  // restore resumes it.
   async function archiveSession(session: ShellSession) {
-    const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
-    const activity = activityForSession(session, useActivityStore.getState().cortexActivity);
-    const state = deriveSessionState(session, Boolean(binding), activity);
-    if (binding || state === 'active' || state === 'attention') {
-      useOverlayStore.getState().requestConfirm({
-        title: `Close “${session.title}”?`,
-        body:
-          state === 'attention'
-            ? 'This session is waiting on you. Closing archives it; you can resume it later from the focus history.'
-            : 'This session is still running. Closing stops the process and archives it; you can resume it later.',
-        confirmLabel: 'Close session',
-        onConfirm: () => void performArchiveSession(session),
-      });
-      return;
-    }
-    await performArchiveSession(session);
-  }
-
-  async function performArchiveSession(session: ShellSession) {
     const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
     if (binding) {
       try {
