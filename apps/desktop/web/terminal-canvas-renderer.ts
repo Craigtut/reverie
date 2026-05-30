@@ -20,12 +20,14 @@ const DEFAULT_BACKGROUND = '#060605';
 // non-default background are always painted opaque regardless of this.
 const DEFAULT_BACKGROUND_OPACITY = 1;
 // Selection highlight is a translucent tint of the foreground (monochrome, no
-// status color) laid over the glyphs so selected text stays legible.
-const SELECTION_ALPHA = 0.26;
+// status color) laid over the glyphs so selected text stays legible. Tuned to
+// read clearly over the near-black terminal panel (close to macOS-native
+// selection), while staying translucent enough to keep the glyphs legible.
+const SELECTION_ALPHA = 0.38;
 // Search-match wash (all matches) + the active match's stronger fill. Monochrome
 // (foreground-tinted); the active match also gets a 1px outline.
-const SEARCH_MATCH_ALPHA = 0.16;
-const ACTIVE_MATCH_ALPHA = 0.34;
+const SEARCH_MATCH_ALPHA = 0.22;
+const ACTIVE_MATCH_ALPHA = 0.48;
 // Link underline is drawn at the foreground color; the hovered link gets a
 // slightly thicker rule.
 const LINK_UNDERLINE_HEIGHT = 1;
