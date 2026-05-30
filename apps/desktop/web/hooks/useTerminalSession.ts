@@ -187,6 +187,15 @@ export function useTerminalSession(params: {
     else interaction.detach();
   });
 
+  // Tear the pointer island's listeners off the canvas on unmount. The attach
+  // effect above runs every render (and attach() is idempotent), so it never
+  // cleans up on its own; without this, unmounting the terminal surface leaks a
+  // pointerdown/contextmenu handler bound to the detached canvas.
+  useEffect(() => {
+    return () => interaction.detach();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only; interaction is a stable ref
+  }, []);
+
   // Keep the terminal colors matched to the active shell theme. On mount and on
   // every light/dark switch: repaint the live canvas with the theme's default
   // fg/bg (B), and push the same colors to the backend so Ghostty's reported
@@ -705,7 +714,10 @@ export function useTerminalSession(params: {
   }
 
   function openFind(prefill?: string) {
-    const query = prefill && prefill.length > 0 ? prefill : findRef.current.query;
+    // Find matches within a single row, so a multi-line selection prefill (lines
+    // joined with \n) could never match. Seed from the first line of the prefill.
+    const firstLine = prefill?.split('\n', 1)[0] ?? '';
+    const query = firstLine.length > 0 ? firstLine : findRef.current.query;
     updateFind({ open: true, query });
     controller.setSearchActive(true);
     if (query.length > 0) void runSearch(query, findRef.current.caseSensitive);

@@ -166,7 +166,11 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
     const cell = cellAtEvent(event);
     if (!cell) return;
 
-    const now = event.timeStamp;
+    // Use a monotonic clock, not event.timeStamp: synthetic/replayed pointer
+    // events (and some WebView event sources) carry a timeStamp whose origin is
+    // not performance.now()'s, so the delta could be garbage and double/triple
+    // click (word/line select) would silently never escalate.
+    const now = performance.now();
     if (now - lastDownTime < MULTI_CLICK_MS && sameCell(lastDownCell, cell)) {
       clickCount += 1;
     } else {
