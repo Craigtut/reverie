@@ -347,8 +347,6 @@ fn write_codex_mcp_entry(path: &PathBuf, helper: &PathBuf) -> Result<()> {
 
     let mut entry = Table::new();
     entry.insert("command", value(helper.to_string_lossy().into_owned()));
-    let mut args = Array::default();
-    let _ = args; // empty
     entry.insert("args", value(Array::default()));
     // `tool_timeout_sec` is the Codex-side name (Codex uses seconds; the
     // SDK reads ms but Codex normalises). 600 seconds = 10 min, comfortably
