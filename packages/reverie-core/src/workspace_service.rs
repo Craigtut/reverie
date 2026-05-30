@@ -27,8 +27,20 @@ use crate::terminal::TerminalSpawnSpec;
 /// regardless of which backend seeded it.
 const SEED_WORKSPACE_ID: &str = "0f70f21f-55c0-4e2a-923e-73360342db80";
 
+#[derive(Clone)]
 pub struct WorkspaceService {
     repo: Arc<dyn WorkspaceRepository>,
+}
+
+/// A session's terminal spawn spec plus the context the runtime needs to derive
+/// a live session title from the CLI's OSC titles.
+#[derive(Clone, Debug)]
+pub struct AgentLaunch {
+    pub spec: TerminalSpawnSpec,
+    pub agent_kind: AgentKind,
+    /// The session working-directory basename, used to suppress CLIs that
+    /// default their title to the folder name (e.g. Codex).
+    pub folder_name: String,
 }
 
 impl WorkspaceService {
@@ -447,6 +459,21 @@ impl WorkspaceService {
         })
     }
 
+    /// Persist a session's display title, derived live from the OSC terminal
+    /// title its agent CLI emits. Trims and ignores empty input so a CLI's blank
+    /// or whitespace title never clears a good label (the terminal runtime
+    /// already suppresses defaults before calling this). Touches `title` only.
+    pub fn set_session_title(
+        &self,
+        session_id: SessionId,
+        title: String,
+    ) -> Result<WorkspaceSnapshot> {
+        let title = required_text(title, "session title")?;
+        self.update_session(session_id, |session| {
+            session.title = title;
+        })
+    }
+
     /// Explicit Cortex capture (FE-triggered): read the session's `meta.json`,
     /// verify it matches the Reverie session, and attach it as a resume ref.
     pub fn capture_cortex_session(
@@ -605,6 +632,12 @@ impl WorkspaceService {
     /// Persist activity for a session looked up by its Reverie id, capturing the
     /// CLI's native session id into `native_session_ref` the first time it is
     /// seen so future launches use the adapter's resume path.
+    ///
+    /// Returns `true` only when this call captured the native session id into the
+    /// record for the first time. The caller uses that to nudge the frontend to
+    /// refetch the session record: until the record carries the native ref, the
+    /// dashboard cannot bind the (native-id-keyed) activity to the session.
+    /// A stale (out-of-order) update or an unknown session returns `false`.
     pub fn record_session_activity_by_id(
         &self,
         reverie_session_id: SessionId,
@@ -619,7 +652,8 @@ impl WorkspaceService {
                 return Ok(false);
             }
         }
-        if session.native_session_ref.is_none() {
+        let captured_native_session = session.native_session_ref.is_none();
+        if captured_native_session {
             session.native_session_ref = Some(NativeSessionRef {
                 kind: session.agent_kind,
                 session_id: Some(native_session_id.to_owned()),
@@ -629,7 +663,7 @@ impl WorkspaceService {
         }
         session.latest_activity = Some(activity);
         self.repo.upsert_session(&session)?;
-        Ok(true)
+        Ok(captured_native_session)
     }
 
     pub fn clear_session_activity_by_id(&self, reverie_session_id: SessionId) -> Result<bool> {
@@ -651,6 +685,19 @@ impl WorkspaceService {
         cols: u16,
         rows: u16,
     ) -> Result<TerminalSpawnSpec> {
+        Ok(self.build_agent_launch(session_id, cols, rows)?.spec)
+    }
+
+    /// Build the spawn spec plus the launch context the terminal runtime needs
+    /// to derive a live session title: the session's agent kind (which per-CLI
+    /// title rule to apply) and its working-folder basename (the default title
+    /// CLIs like Codex emit, which we suppress). Loads the snapshot once.
+    pub fn build_agent_launch(
+        &self,
+        session_id: SessionId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<AgentLaunch> {
         let snapshot = self.repo.load_snapshot()?;
         let session = snapshot
             .sessions
@@ -675,14 +722,25 @@ impl WorkspaceService {
             .find(|f| f.id == session.focus_id)
             .and_then(|f| f.default_dangerous_mode)
             .unwrap_or(snapshot.workspace.default_dangerous_mode);
-        build_spawn_spec(
+        let agent_kind = session.agent_kind;
+        let folder_name = session
+            .cwd
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let spec = build_spawn_spec(
             session,
             focus_or_workspace_default,
             cols,
             rows,
             executable_path,
             adapter.as_ref(),
-        )
+        )?;
+        Ok(AgentLaunch {
+            spec,
+            agent_kind,
+            folder_name,
+        })
     }
 
     fn update_session(
@@ -1108,6 +1166,35 @@ mod tests {
         let finished = service.mark_session_finished(id, true).unwrap();
         assert_eq!(finished.sessions[0].status, SessionStatus::Exited);
         assert_eq!(finished.sessions[0].last_exit_code, Some(0));
+    }
+
+    #[test]
+    fn set_session_title_persists_and_only_touches_title() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let snapshot = service
+            .create_session(
+                focus,
+                "Claude Code".to_owned(),
+                AgentKind::ClaudeCode,
+                "/tmp".into(),
+                None,
+            )
+            .unwrap();
+        let id = snapshot.sessions[0].id;
+        let status_before = snapshot.sessions[0].status;
+
+        let updated = service
+            .set_session_title(id, "  Fixing the parser  ".to_owned())
+            .unwrap();
+        assert_eq!(updated.sessions[0].title, "Fixing the parser");
+        // Status (and other fields) are untouched by a title update.
+        assert_eq!(updated.sessions[0].status, status_before);
+
+        // Empty/whitespace input never clears a good title.
+        assert!(service.set_session_title(id, "   ".to_owned()).is_err());
+        let after = service.snapshot().unwrap();
+        assert_eq!(after.sessions[0].title, "Fixing the parser");
     }
 
     #[test]
