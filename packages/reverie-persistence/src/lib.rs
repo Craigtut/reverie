@@ -164,7 +164,7 @@ const CONNECTION_MESSAGE_COLUMNS: &str =
 
 const SESSION_COLUMNS: &str = "id, focus_id, title, agent_kind, cwd, native_session_ref_json, \
      launch_mode, dangerous_mode_override, status, last_exit_code, tab_visible, \
-     latest_activity_json, archived";
+     latest_activity_json, archived, sort_order";
 
 pub struct SqliteWorkspaceRepository {
     conn: Mutex<Connection>,
@@ -209,6 +209,28 @@ fn migrate(conn: &Connection) -> RepoResult<()> {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(backend)?;
     let mut current = current as usize;
+    // A database stamped *newer* than this build knows about means a shipped
+    // migration was removed or reordered, or the file was written by a future
+    // Reverie. Because migration keys are positional (the count of applied
+    // entries), reading on with a stale schema would later blow up on a missing
+    // column and look like vanished data. Refuse loudly instead so the failure
+    // surfaces as a real error, not a silently empty workspace.
+    if current > MIGRATIONS.len() {
+        return Err(PersistenceError::Backend(format!(
+            "workspace database schema version {current} is newer than this build of Reverie \
+             supports ({}); the database was created by a newer version or migrations were \
+             reordered. Refusing to open it with a mismatched schema.",
+            MIGRATIONS.len()
+        )));
+    }
+    if current < MIGRATIONS.len() {
+        // One concise line so a dev watching `npm run dev` can see migrations
+        // run (and notice an unexpected jump that signals a desync).
+        eprintln!(
+            "[reverie-persistence] migrating workspace database from v{current} to v{}",
+            MIGRATIONS.len()
+        );
+    }
     while current < MIGRATIONS.len() {
         conn.execute_batch(MIGRATIONS[current]).map_err(backend)?;
         current += 1;
@@ -295,14 +317,16 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
     fn upsert_project(&self, project: &Project) -> RepoResult<()> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO projects (id, name, path, archived) VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO projects (id, name, path, archived, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
-                name = excluded.name, path = excluded.path, archived = excluded.archived",
+                name = excluded.name, path = excluded.path, archived = excluded.archived,
+                sort_order = excluded.sort_order",
             params![
                 project.id.to_string(),
                 project.name,
                 path_to_db(&project.path),
                 bool_to_int(project.archived),
+                project.sort_order,
             ],
         )
         .map_err(backend)?;
@@ -312,12 +336,13 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
     fn upsert_focus(&self, focus: &Focus) -> RepoResult<()> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO focuses (id, project_id, title, description, sort_order, archived)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO focuses (id, project_id, title, description, sort_order, archived, default_dangerous_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(id) DO UPDATE SET
                 project_id = excluded.project_id, title = excluded.title,
                 description = excluded.description, sort_order = excluded.sort_order,
-                archived = excluded.archived",
+                archived = excluded.archived,
+                default_dangerous_mode = excluded.default_dangerous_mode",
             params![
                 focus.id.to_string(),
                 focus.project_id.map(|id| id.to_string()),
@@ -325,6 +350,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 focus.description,
                 focus.sort_order,
                 bool_to_int(focus.archived),
+                focus.default_dangerous_mode.map(bool_to_int),
             ],
         )
         .map_err(backend)?;
@@ -345,8 +371,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
             "INSERT INTO sessions (
                 id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
                 dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json,
-                archived
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                archived, sort_order
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
                 focus_id = excluded.focus_id, title = excluded.title,
                 agent_kind = excluded.agent_kind, cwd = excluded.cwd,
@@ -356,7 +382,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 status = excluded.status, last_exit_code = excluded.last_exit_code,
                 tab_visible = excluded.tab_visible,
                 latest_activity_json = excluded.latest_activity_json,
-                archived = excluded.archived",
+                archived = excluded.archived,
+                sort_order = excluded.sort_order",
             params![
                 session.id.to_string(),
                 session.focus_id.to_string(),
@@ -371,6 +398,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 bool_to_int(session.tab_visible),
                 latest_activity_json,
                 bool_to_int(session.archived),
+                session.sort_order,
             ],
         )
         .map_err(backend)?;
@@ -828,7 +856,10 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
 
 fn load_projects(conn: &Connection) -> RepoResult<Vec<Project>> {
     let mut statement = conn
-        .prepare("SELECT id, name, path, archived FROM projects ORDER BY name COLLATE NOCASE")
+        .prepare(
+            "SELECT id, name, path, archived, sort_order
+             FROM projects ORDER BY sort_order, name COLLATE NOCASE",
+        )
         .map_err(backend)?;
     let rows = statement
         .query_map([], |row| {
@@ -837,6 +868,7 @@ fn load_projects(conn: &Connection) -> RepoResult<Vec<Project>> {
                 name: row.get(1)?,
                 path: PathBuf::from(row.get::<_, String>(2)?),
                 archived: int_to_bool(row.get::<_, i64>(3)?),
+                sort_order: row.get(4)?,
             })
         })
         .map_err(backend)?;
@@ -846,7 +878,7 @@ fn load_projects(conn: &Connection) -> RepoResult<Vec<Project>> {
 fn load_focuses(conn: &Connection) -> RepoResult<Vec<Focus>> {
     let mut statement = conn
         .prepare(
-            "SELECT id, project_id, title, description, sort_order, archived
+            "SELECT id, project_id, title, description, sort_order, archived, default_dangerous_mode
              FROM focuses
              ORDER BY COALESCE(project_id, ''), sort_order, title COLLATE NOCASE",
         )
@@ -864,6 +896,7 @@ fn load_focuses(conn: &Connection) -> RepoResult<Vec<Focus>> {
                 description: row.get(3)?,
                 sort_order: row.get(4)?,
                 archived: int_to_bool(row.get::<_, i64>(5)?),
+                default_dangerous_mode: row.get::<_, Option<i64>>(6)?.map(int_to_bool),
             })
         })
         .map_err(backend)?;
@@ -892,6 +925,7 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         tab_visible: int_to_bool(row.get::<_, i64>(10)?),
         latest_activity: activity_state_from_db(row.get::<_, Option<String>>(11)?)?,
         archived: int_to_bool(row.get::<_, i64>(12)?),
+        sort_order: row.get(13)?,
     })
 }
 
@@ -1301,6 +1335,21 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(after as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn migrate_refuses_a_database_newer_than_the_build() {
+        // A file stamped beyond the known migration count (downgrade, or a
+        // reordered/removed migration) must be refused loudly rather than read
+        // with a mismatched schema that later fails on a missing column.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!("PRAGMA user_version = {};", MIGRATIONS.len() + 1))
+            .unwrap();
+        let err = migrate(&conn).unwrap_err();
+        assert!(
+            matches!(err, PersistenceError::Backend(message) if message.contains("newer than this build")),
+            "expected a clear schema-too-new backend error"
+        );
     }
 
     #[test]

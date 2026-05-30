@@ -63,13 +63,32 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         self.terminal.vt_write(bytes);
     }
 
-    /// Set the terminal's default foreground/background by feeding Ghostty OSC 10
-    /// (foreground) and OSC 11 (background) sequences. libghostty-vt has no
-    /// color config on `TerminalOptions`, so without this it reports its
-    /// hardwired default of white-on-black. After this call the render state
-    /// reports these colors as the defaults, default-colored cells resolve to
-    /// them, and CLIs that query OSC 10/11 to pick a light/dark theme get a
-    /// truthful answer. Forces a full frame so the change repaints everywhere.
+    /// The terminal title most recently set by the program via OSC 0/1/2, or
+    /// `None` when none has been set. Copied to an owned `String` immediately:
+    /// libghostty borrows the title only until the next `vt_write`/`reset`, so
+    /// callers must not hold the borrow across a write.
+    pub fn title(&self) -> Option<String> {
+        match self.terminal.title() {
+            Ok(title) if !title.is_empty() => Some(title.to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Seed the terminal's default foreground/background by feeding Ghostty OSC 10
+    /// (foreground) and OSC 11 (background). libghostty-vt has no color config on
+    /// `TerminalOptions`, so without this the render state reports its hardwired
+    /// white-on-black default; after this, `colors()` reflects the active theme.
+    ///
+    /// NOTE: this is NOT the paint path. The frontend Canvas renderer is the
+    /// authoritative source for the painted default colors: it draws from the
+    /// shell theme and ignores `frame.colors`, because the theme is tied to the
+    /// shell's CSS and must re-theme live, exited, and cached sessions instantly
+    /// on a light/dark toggle (a VT-side default can't re-theme an exited session
+    /// without replaying it). So this call is currently a forward-looking mirror
+    /// that keeps the VT model honest. It becomes load-bearing only if/when
+    /// libghostty-vt can answer OSC 10/11 color *queries* (letting a CLI auto-pick
+    /// a matching theme); 0.1.1 cannot, so nothing consumes these values yet.
+    /// Forces a full frame so the change repaints everywhere.
     pub fn set_default_colors(&mut self, foreground: TerminalColor, background: TerminalColor) {
         self.write(&osc_set_color(10, foreground));
         self.write(&osc_set_color(11, background));

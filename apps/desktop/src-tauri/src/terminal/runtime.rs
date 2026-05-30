@@ -10,7 +10,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use reverie_core::TerminalSpawnSpec;
-use reverie_core::domain::SessionId;
+use reverie_core::agents::derive_session_title;
+use reverie_core::domain::{AgentKind, SessionId};
 use reverie_core::pty::{PtyController, PtyProcess};
 use reverie_core::terminal::{TerminalColor, TerminalFrame, TerminalId};
 use serde::Serialize;
@@ -110,6 +111,12 @@ pub struct TerminalStreamRequest {
     pub spawn_spec: TerminalSpawnSpec,
     pub max_scrollback: usize,
     pub target_frames: Option<usize>,
+    /// Which CLI runs in this session, so the worker can apply that CLI's title
+    /// rule to its OSC titles. `None` for the bench/proof path (no live title).
+    pub agent_kind: Option<AgentKind>,
+    /// The session working-folder basename, used to suppress CLIs that default
+    /// their title to the folder name. `None` for the bench/proof path.
+    pub folder_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -156,6 +163,16 @@ struct TerminalFrameEvent {
     chunk_bytes: usize,
     rust_elapsed_ms: f64,
     frame: TerminalFrame,
+}
+
+/// Emitted when a session's normalized OSC title changes, so the frontend can
+/// update the session's live label without refetching the whole snapshot.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalTitleChangedEvent {
+    session_id: SessionId,
+    terminal_id: TerminalId,
+    title: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -429,6 +446,20 @@ impl TerminalSessionRuntime {
             .checked_sub(TERMINAL_FRAME_INTERVAL)
             .unwrap_or_else(Instant::now);
         let mut viewport_state = TerminalViewportState { follow_tail: true };
+        // Live session title: apply this CLI's OSC-title rule and push label
+        // changes up to the frontend. Only for real product sessions with a
+        // known CLI (the bench/proof path has neither, so it skips this).
+        let title_ctx = match (request.session_id, request.agent_kind) {
+            (Some(session_id), Some(agent_kind)) => Some(TitleContext {
+                session_id,
+                terminal_id: request.terminal_id,
+                agent_kind,
+                folder_name: request.folder_name.clone().unwrap_or_default(),
+            }),
+            _ => None,
+        };
+        let mut last_raw_title: Option<String> = None;
+        let mut last_emitted_title: Option<String> = None;
         let child_success = loop {
             if apply_terminal_commands(&command_rx, &mut terminal, &mut viewport_state)? {
                 pending_frame = true;
@@ -462,6 +493,17 @@ impl TerminalSessionRuntime {
                     bytes_since_last_frame += chunk.len();
 
                     terminal.write(&chunk);
+                    // A title only changes as a side effect of program output,
+                    // so poll it right after the VT write (deduped internally).
+                    if let Some(ctx) = &title_ctx {
+                        poll_session_title(
+                            &app,
+                            ctx,
+                            &terminal,
+                            &mut last_raw_title,
+                            &mut last_emitted_title,
+                        );
+                    }
                     // Capture the raw bytes durably (the chunk is no longer
                     // needed after the VT write). Cheap: just a channel send.
                     if let Some(writer) = &transcript_writer {
@@ -868,6 +910,68 @@ fn persist_shell_session_failed(app: &AppHandle, session_id: Option<SessionId>) 
     }
 }
 
+/// The per-session context the worker needs to turn raw OSC titles into live
+/// session labels. Built once per launch for real product sessions only.
+struct TitleContext {
+    session_id: SessionId,
+    terminal_id: TerminalId,
+    agent_kind: AgentKind,
+    folder_name: String,
+}
+
+/// Poll the terminal's current OSC title and, if it has changed into a new
+/// meaningful label, persist then emit it. Deduped twice: on the raw title (it
+/// re-emits with every output chunk) and on the normalized label (so a CLI's
+/// spinner churn that normalizes to the same text never re-fires). A normalized
+/// result of `None` (the CLI's default or pure decoration) is left as a no-op so
+/// a good label is sticky and never reverts.
+fn poll_session_title(
+    app: &AppHandle,
+    ctx: &TitleContext,
+    terminal: &GhosttyTerminalState<'_, '_>,
+    last_raw: &mut Option<String>,
+    last_emitted: &mut Option<String>,
+) {
+    let Some(raw) = terminal.title() else {
+        return;
+    };
+    if last_raw.as_deref() == Some(raw.as_str()) {
+        return;
+    }
+    *last_raw = Some(raw.clone());
+
+    let Some(display) = derive_session_title(ctx.agent_kind, &raw, &ctx.folder_name) else {
+        return;
+    };
+    if last_emitted.as_deref() == Some(display.as_str()) {
+        return;
+    }
+    *last_emitted = Some(display.clone());
+
+    // Persist before emitting: a snapshot refetch triggered around launch then
+    // can only observe the new title, never revert the live label to a stale one.
+    persist_session_title(app, ctx.session_id, display.clone());
+    let _ = app.emit(
+        "terminal_title_changed",
+        TerminalTitleChangedEvent {
+            session_id: ctx.session_id,
+            terminal_id: ctx.terminal_id,
+            title: display,
+        },
+    );
+}
+
+fn persist_session_title(app: &AppHandle, session_id: SessionId, title: String) {
+    if let Some((service, session_id)) = workspace_service(app, Some(session_id)) {
+        // TODO(bridge): the inter-agent connection registers SessionAddress with
+        // the title captured at spawn; a live title change leaves that peer-facing
+        // label stale. A correct refresh needs a secret-preserving
+        // ConnectionService::update_session_address (naive re-register rotates the
+        // live session secret). Deferred: cosmetic, Unix-only.
+        let _ = service.set_session_title(session_id, title);
+    }
+}
+
 fn workspace_service(
     app: &AppHandle,
     session_id: Option<SessionId>,
@@ -937,6 +1041,8 @@ mod tests {
             },
             max_scrollback: 100,
             target_frames: Some(1),
+            agent_kind: None,
+            folder_name: None,
         };
 
         runtime.register_starting(&request).unwrap();

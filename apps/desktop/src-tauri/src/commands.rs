@@ -3,13 +3,14 @@
 //! Handlers are thin wrappers over `WorkspaceService` and the terminal runtime.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use reverie_core::agents::built_in_adapters;
+use reverie_core::agents::{AgentAdapter, ClaudeCodeAdapter, built_in_adapters};
 use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId, ThemeMode};
-use reverie_core::hook_server::HookServerControl;
+use reverie_core::hook_config::{hook_url, write_claude_settings};
+use reverie_core::hook_server::{HookServerControl, HookSource};
 use reverie_core::terminal::{TerminalFrame, TerminalId};
 use reverie_core::{
     AdapterDetection, ConnectionService, RegisteredSession, SessionAddress, TerminalSpawnSpec,
@@ -21,7 +22,7 @@ use tauri_plugin_opener::OpenerExt;
 
 #[cfg(unix)]
 use crate::bridge::{BridgeInfo, mint_session_secret};
-use crate::state::{HookServerInfo, HookTokenRegistry};
+use crate::state::{HookServerInfo, HookTokenRegistry, WorkspaceBoot};
 use crate::terminal::ghostty::GhosttyTerminalState;
 use crate::terminal::runtime::{
     TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest,
@@ -172,11 +173,21 @@ pub(crate) fn app_status() -> &'static str {
     "reverie-desktop-product-shell"
 }
 
+/// Sentinel returned while the backend is still opening + seeding the database.
+/// The frontend treats this as a transient, retryable condition (it re-invokes
+/// with backoff) rather than a real load failure, so a cold-start race never
+/// leaves the user on a phantom-empty workspace.
+pub(crate) const WORKSPACE_STARTING_UP: &str = "reverie:workspace-starting-up";
+
 #[tauri::command]
-pub(crate) fn workspace_shell(
-    service: State<'_, WorkspaceService>,
-) -> Result<WorkspaceSnapshot, String> {
-    service.snapshot().map_err(|err| err.to_string())
+pub(crate) fn workspace_shell(boot: State<'_, WorkspaceBoot>) -> Result<WorkspaceSnapshot, String> {
+    // `boot` is managed from the very start, so this never hits Tauri's hard
+    // "state not managed" error; until `setup` has finished seeding, it simply
+    // has no service yet and we report a retryable starting-up signal.
+    match boot.get() {
+        Some(service) => service.snapshot().map_err(|err| err.to_string()),
+        None => Err(WORKSPACE_STARTING_UP.to_owned()),
+    }
 }
 
 #[tauri::command]
@@ -321,11 +332,58 @@ pub(crate) fn choose_project_folder() -> Result<Option<ProjectFolderSelection>, 
     }))
 }
 
+/// Validate and normalize a path the user dropped onto the new-project surface
+/// into a real project folder. Drag-drop (unlike the folder picker) hands us file
+/// paths and folder paths alike, so we verify here: a dropped folder is used
+/// as-is; a dropped file resolves to its containing folder; a path that does not
+/// exist is rejected with a message the composer shows inline. This guarantees a
+/// project is always backed by an existing directory.
+#[tauri::command]
+pub(crate) fn resolve_project_folder(path: String) -> Result<ProjectFolderSelection, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("No path was provided.".to_owned());
+    }
+    let candidate = PathBuf::from(trimmed);
+    let metadata = std::fs::metadata(&candidate)
+        .map_err(|_| format!("That path could not be found: {trimmed}"))?;
+
+    let folder = if metadata.is_dir() {
+        candidate
+    } else {
+        candidate
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "That file has no containing folder to use.".to_owned())?
+    };
+
+    let name = folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("New project")
+        .to_owned();
+
+    Ok(ProjectFolderSelection {
+        name,
+        path: folder.display().to_string(),
+    })
+}
+
 #[tauri::command]
 pub(crate) fn create_project(
     service: State<'_, WorkspaceService>,
     request: CreateProjectRequest,
 ) -> Result<WorkspaceSnapshot, String> {
+    // Defense in depth: a project must point at a real directory. The picker and
+    // the drag-drop resolver both guarantee this already, but reject here too so
+    // a stale or hand-edited path can never create a file-backed project.
+    if !request.path.as_os_str().is_empty() && !request.path.is_dir() {
+        return Err(format!(
+            "Project path is not a folder: {}",
+            request.path.display()
+        ));
+    }
     service
         .create_project(request.name, request.path)
         .map_err(|err| err.to_string())
@@ -398,10 +456,31 @@ pub(crate) fn remove_session(
             control.revoke_session(source, &token);
         }
     }
+    cleanup_session_hook_config(&app, session_id);
     unregister_session_from_bridge(&app, session_id);
     service
         .remove_session(session_id)
         .map_err(|err| err.to_string())
+}
+
+/// Delete the per-session hook config directory written under the app cache at
+/// launch (`<cache>/sessions/<id>`). Best-effort: a leftover dir is harmless and
+/// is rewritten on the next launch, so any failure only logs. The token itself
+/// is revoked separately; a terminated-but-resumable session deliberately keeps
+/// its token until removal or the next launch replaces it.
+fn cleanup_session_hook_config(app: &AppHandle, session_id: SessionId) {
+    let Ok(base) = app.path().app_cache_dir() else {
+        return;
+    };
+    let dir = base.join("sessions").join(session_id.to_string());
+    if dir.exists() {
+        if let Err(err) = std::fs::remove_dir_all(&dir) {
+            eprintln!(
+                "[reverie-hooks] failed removing session hook dir {}: {err}",
+                dir.display()
+            );
+        }
+    }
 }
 
 #[tauri::command]
@@ -551,30 +630,43 @@ pub(crate) fn start_session(
 ) -> Result<TerminalId, String> {
     let terminal_id = request.terminal_id.unwrap_or_else(TerminalId::new_v4);
     let session_id = request.session_id;
-    let mut spawn_spec = match request.spawn_spec {
-        Some(spawn_spec) => spawn_spec,
+    // `agent_kind` + `folder_name` give the OSC-title worker what it needs to
+    // apply this CLI's title rule and suppress folder-name defaults. The
+    // caller-supplied-spec path (bench/proof) has no session, so both stay
+    // `None` and the worker skips title derivation. One snapshot load builds all.
+    let (mut spawn_spec, agent_kind, folder_name) = match request.spawn_spec {
+        Some(spawn_spec) => (spawn_spec, None, None),
         None => {
             let shell_session_id = session_id.ok_or_else(|| {
                 "start_session requires sessionId when spawnSpec is omitted".to_owned()
             })?;
-            service
-                .build_agent_spawn_spec(
+            let launch = service
+                .build_agent_launch(
                     shell_session_id,
                     request.cols.unwrap_or(120),
                     request.rows.unwrap_or(32),
                 )
-                .map_err(|err| err.to_string())?
+                .map_err(|err| err.to_string())?;
+            (
+                launch.spec,
+                Some(launch.agent_kind),
+                Some(launch.folder_name),
+            )
         }
     };
 
-    // Claude Code and Codex must inherit the user's normal local auth/config
-    // locations. The earlier hook prototype injected CLAUDE_CONFIG_DIR/CODEX_HOME
-    // to point at Reverie-owned per-session config dirs, which can make those CLIs
-    // behave like a fresh install and prompt for sign-in again. Until hooks can be
-    // attached without redirecting credential homes, keep the spawn env clean.
+    // Claude Code and Codex must keep their normal credential/config homes:
+    // redirecting CLAUDE_CONFIG_DIR / CODEX_HOME makes them behave like a fresh
+    // install and re-prompt for sign-in. We attach Reverie's lifecycle hooks a
+    // different way that does not touch those homes (Claude: a per-session
+    // `--settings` file Claude merges over the user's settings), then assert no
+    // credential-home env var slipped onto the spawn.
     if let Some(shell_session_id) = session_id {
         keep_cli_auth_env_unmodified(&service, shell_session_id, &spawn_spec)
             .map_err(|err| err.to_string())?;
+        if agent_kind == Some(AgentKind::ClaudeCode) {
+            attach_claude_hooks(&app, shell_session_id, &mut spawn_spec);
+        }
     }
 
     // Inter-agent bridge wiring. If the connection service is managed (it
@@ -596,6 +688,8 @@ pub(crate) fn start_session(
                 spawn_spec,
                 max_scrollback: request.max_scrollback.unwrap_or(10_000),
                 target_frames: None,
+                agent_kind,
+                folder_name,
             },
         )
         .map_err(|err| err.to_string())
@@ -843,6 +937,74 @@ fn keep_cli_auth_env_unmodified(
         .ok_or_else(|| anyhow::anyhow!("unknown Reverie session {shell_session_id}"))?;
 
     assert_safe_cli_env(session.agent_kind, &spawn_spec.command.env)
+}
+
+/// Attach Reverie's per-session Claude Code lifecycle hooks to the spawn.
+///
+/// Mints a token, registers it with the hook server, writes a private
+/// `settings.json` under the app cache, and appends `--settings <file>` to the
+/// launch via the adapter so Claude POSTs its lifecycle hooks to Reverie's
+/// localhost server. Best-effort: if the hook server is not managed or the
+/// cache dir cannot be resolved, the session still launches and the transcript
+/// scanner remains the capture fallback. We never set `CLAUDE_CONFIG_DIR`, so
+/// `~/.claude` credentials are untouched and `assert_safe_cli_env` keeps passing
+/// (the attach adds a CLI arg, not an env var).
+fn attach_claude_hooks(
+    app: &AppHandle,
+    shell_session_id: SessionId,
+    spawn_spec: &mut TerminalSpawnSpec,
+) {
+    let (control, registry) = match (
+        app.try_state::<HookServerControl>(),
+        app.try_state::<HookTokenRegistry>(),
+    ) {
+        (Some(control), Some(registry)) => (control, registry),
+        _ => return,
+    };
+
+    let config_dir = match app.path().app_cache_dir() {
+        Ok(base) => base
+            .join("sessions")
+            .join(shell_session_id.to_string())
+            .join("claude"),
+        Err(err) => {
+            eprintln!("[reverie-hooks] cannot resolve app cache dir: {err}");
+            return;
+        }
+    };
+
+    let token = uuid::Uuid::new_v4().to_string();
+    // Revoke any token left from a previous launch of this session before
+    // registering the new one, so a stale CLI process can't keep pushing state.
+    if let Some((prev_source, prev_token)) =
+        registry.replace(shell_session_id, HookSource::ClaudeCode, token.clone())
+    {
+        control.revoke_session(prev_source, &prev_token);
+    }
+    control.register_session(
+        HookSource::ClaudeCode,
+        token.clone(),
+        shell_session_id.to_string(),
+    );
+
+    let url = hook_url(HookSource::ClaudeCode, control.port, &token);
+    let written = match write_claude_settings(&config_dir, &url) {
+        Ok(written) => written,
+        Err(err) => {
+            eprintln!("[reverie-hooks] failed writing Claude settings.json: {err}");
+            // Undo the registration so we never leave an authorized token with
+            // no config pointing the CLI at it.
+            registry.take(shell_session_id);
+            control.revoke_session(HookSource::ClaudeCode, &token);
+            return;
+        }
+    };
+
+    // The adapter owns the `--settings` flag; the shell owns the file + token.
+    spawn_spec
+        .command
+        .args
+        .extend(ClaudeCodeAdapter.hook_config_args(&written.config_file));
 }
 
 /// Refuse launches that would redirect a CLI's credential or config home.
