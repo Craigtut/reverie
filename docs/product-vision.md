@@ -4,7 +4,7 @@
 
 ## One sentence
 
-Reverie is a local-first **agentic workspace** — a calm home for running, organizing, and resuming many terminal-based AI agent sessions in parallel, for anyone, not just software engineers.
+Reverie is a local-first **agentic workspace** — a home for running, organizing, and resuming many terminal-based AI agent sessions in parallel, for anyone, not just software engineers.
 
 ## The problem we are reacting to
 
@@ -46,7 +46,7 @@ Workspace
 ```
 
 - **Workspace** — the top of the hierarchy. It exists in the model but is intentionally underexpressed in the UI today; users mostly live in projects and focuses.
-- **Project** — essentially just a folder on your computer. There is also a **General** project that defaults to a `.reverie` folder, for work that isn't tied to a specific folder. **Projects never require git.**
+- **Project** — essentially just a folder on your computer. There is also a **General** lane for work that isn't tied to a specific folder: each General session runs in its own fresh, temporary scratch workspace that Reverie creates and cleans up. **Projects never require git.**
 - **Focus** — a set of things you want to work on: a logical grouping or area. Examples: *security updates*, *branding*, *product design*, *UX design*, *login*, *sign-up*. It's a masthead for related sessions, intentionally looser than a "task" or "ticket."
 - **Session** — an actual CLI session with a supported agentic harness. Each session gives you a terminal running that harness, and the session is stored as metadata attached to its tab so you can leave and resume it later with full context.
 

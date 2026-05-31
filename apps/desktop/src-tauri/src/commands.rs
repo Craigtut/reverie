@@ -406,15 +406,32 @@ pub(crate) fn create_focus(
 
 #[tauri::command]
 pub(crate) fn create_session(
+    app: AppHandle,
     service: State<'_, WorkspaceService>,
     request: CreateSessionRequest,
 ) -> Result<WorkspaceSnapshot, String> {
+    // A General (project-less) session is not tied to a folder, so Reverie
+    // provisions a fresh, isolated scratch workspace for it and launches the CLI
+    // there instead of whatever cwd the frontend sent. Sessions in a
+    // project-backed focus keep using the project's folder.
+    let snapshot = service.snapshot().map_err(|err| err.to_string())?;
+    let project_less = snapshot
+        .focuses
+        .iter()
+        .find(|focus| focus.id == request.focus_id)
+        .map(|focus| focus.project_id.is_none())
+        .ok_or_else(|| format!("unknown focus {}", request.focus_id))?;
+    let cwd = if project_less {
+        provision_general_workspace(&app)?
+    } else {
+        request.cwd
+    };
     service
         .create_session(
             request.focus_id,
             request.title,
             request.agent_kind,
-            request.cwd,
+            cwd,
             request.dangerous_mode_override,
         )
         .map_err(|err| err.to_string())
@@ -458,9 +475,23 @@ pub(crate) fn remove_session(
     }
     cleanup_session_hook_config(&app, session_id);
     unregister_session_from_bridge(&app, session_id);
-    service
+    // Capture the session's cwd before the record is gone so we can remove its
+    // scratch workspace afterward (General sessions only; see
+    // `cleanup_general_workspace`).
+    let scratch_cwd = service.snapshot().ok().and_then(|snapshot| {
+        snapshot
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+            .map(|session| session.cwd)
+    });
+    let snapshot = service
         .remove_session(session_id)
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    if let Some(cwd) = scratch_cwd {
+        cleanup_general_workspace(&app, &cwd);
+    }
+    Ok(snapshot)
 }
 
 /// Delete the per-session hook config directory written under the app cache at
@@ -479,6 +510,113 @@ fn cleanup_session_hook_config(app: &AppHandle, session_id: SessionId) {
                 "[reverie-hooks] failed removing session hook dir {}: {err}",
                 dir.display()
             );
+        }
+    }
+}
+
+/// Orientation written into every General session's scratch workspace.
+const GENERAL_WORKSPACE_GUIDE: &str = "# Reverie general workspace
+
+This is a temporary scratch workspace for a Reverie \"General\" session. It is not
+tied to any project. Files you create here are ephemeral and may be removed when
+this session is deleted.
+
+If the user wants to keep this work, help them move it into a real project folder
+(a folder on their computer that they choose) rather than leaving it here.
+";
+
+/// Root that holds the per-session scratch workspaces for General (project-less)
+/// sessions, kept under the app data dir next to the database.
+fn general_sessions_root(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|base| base.join("general-sessions"))
+        .map_err(|err| format!("failed to resolve app data dir: {err}"))
+}
+
+/// Create a fresh, isolated scratch workspace for a General session and return
+/// its path. The folder token is independent of the session id (which does not
+/// exist yet at create time); the session's stored cwd is the only link back. The
+/// directory is seeded with a CLAUDE.md plus a relative AGENTS.md symlink so any
+/// CLI launched here gets the same orientation.
+fn provision_general_workspace(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = general_sessions_root(app)?.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        format!(
+            "failed to create general workspace {}: {err}",
+            dir.display()
+        )
+    })?;
+    scaffold_general_workspace(&dir).map_err(|err| {
+        format!(
+            "failed to scaffold general workspace {}: {err}",
+            dir.display()
+        )
+    })?;
+    Ok(dir)
+}
+
+/// Write the CLAUDE.md guide and a relative AGENTS.md symlink into a scratch
+/// workspace. Idempotent: an already-present symlink is fine.
+fn scaffold_general_workspace(dir: &Path) -> std::io::Result<()> {
+    std::fs::write(dir.join("CLAUDE.md"), GENERAL_WORKSPACE_GUIDE)?;
+    #[cfg(unix)]
+    {
+        let agents = dir.join("AGENTS.md");
+        match std::os::unix::fs::symlink("CLAUDE.md", &agents) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+/// Remove a General session's scratch workspace once its record is deleted.
+/// Scoped to the managed general-sessions root, so a project folder (or any path
+/// outside that root) is never touched. Best-effort: a leftover dir is harmless.
+fn cleanup_general_workspace(app: &AppHandle, cwd: &Path) {
+    let Ok(root) = general_sessions_root(app) else {
+        return;
+    };
+    if !cwd.starts_with(&root) || !cwd.exists() {
+        return;
+    }
+    if let Err(err) = std::fs::remove_dir_all(cwd) {
+        eprintln!(
+            "[reverie-general] failed removing scratch workspace {}: {err}",
+            cwd.display()
+        );
+    }
+}
+
+/// On boot, remove scratch workspaces under the general-sessions root that no
+/// longer belong to any session (e.g. left behind if a crash interrupted
+/// delete-time cleanup). Best-effort and quiet: never blocks startup.
+pub(crate) fn sweep_orphan_general_sessions(app: &AppHandle, service: &WorkspaceService) {
+    let Ok(root) = general_sessions_root(app) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    let Ok(snapshot) = service.snapshot() else {
+        return;
+    };
+    let live: std::collections::HashSet<PathBuf> = snapshot
+        .sessions
+        .into_iter()
+        .map(|session| session.cwd)
+        .collect();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() && !live.contains(&path) {
+            if let Err(err) = std::fs::remove_dir_all(&path) {
+                eprintln!(
+                    "[reverie-general] failed sweeping orphan workspace {}: {err}",
+                    path.display()
+                );
+            }
         }
     }
 }

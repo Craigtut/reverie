@@ -1,13 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { invoke } from '../services/runtime';
-import {
-  USER_HOME,
-  agentLabel,
-  defaultCwdForFocus,
-  errorMessage,
-  folderNameFromPath,
-} from '../domain';
+import { agentLabel, defaultCwdForFocus, errorMessage, folderNameFromPath } from '../domain';
 import type {
   AgentKind,
   CreateFocusRequest,
@@ -55,7 +49,7 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
   const [newFocusDangerousMode, setNewFocusDangerousMode] = useState(
     model.shell.workspace.defaultDangerousMode,
   );
-  const [newSessionCwd, setNewSessionCwd] = useState(USER_HOME);
+  const [newSessionCwd, setNewSessionCwd] = useState('');
   const [newSessionAgentKind, setNewSessionAgentKind] = useState<AgentKind>(
     model.shell.workspace.defaultAgentKind,
   );

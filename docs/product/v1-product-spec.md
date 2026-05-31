@@ -49,11 +49,13 @@ Workspace
 
 The user's local Reverie home. Stores app settings, detected CLIs, project list, general workspace foci, sessions, restore metadata, and terminal/session preferences.
 
-Likely local path:
+Local path (macOS):
 
 ```text
-~/.reverie/
+~/Library/Application Support/com.animus.reverie/
 ```
+
+General (project-less) sessions each get a fresh, temporary scratch working directory under `general-sessions/` in that same app data directory, created when the session starts and removed when the session is deleted.
 
 ### Project
 
@@ -121,7 +123,7 @@ Projects are introduced as useful context, not as a gate.
 2. User names the focus.
 3. User creates a session tab.
 4. Reverie asks which installed CLI to use.
-5. Reverie launches the CLI in the general workspace directory.
+5. Reverie launches the CLI in a fresh, temporary scratch workspace created for that session.
 6. Reverie stores mapping between the Reverie session and the CLI-native session metadata once available.
 
 ### Add a project

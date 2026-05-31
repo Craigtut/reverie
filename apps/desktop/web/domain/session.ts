@@ -1,4 +1,3 @@
-import { USER_HOME } from './constants';
 import { shortId } from './format';
 import type { AgentCliDetection, ShellFocus, ShellSession, WorkspaceShellSnapshot } from './types';
 
@@ -54,13 +53,15 @@ export function activeGeneralSessions(shell: WorkspaceShellSnapshot) {
 }
 
 // The cwd a new session should default to: the focus's project folder when the
-// focus is project-backed, otherwise the user's home directory.
+// focus is project-backed. General (project-less) sessions return an empty
+// string, because the backend provisions a fresh scratch workspace for each one
+// and ignores whatever cwd the frontend sends.
 export function defaultCwdForFocus(
   focus: ShellFocus | null,
   shell: WorkspaceShellSnapshot,
 ): string {
-  if (!focus?.projectId) return USER_HOME;
-  return shell.projects.find(project => project.id === focus.projectId)?.path ?? USER_HOME;
+  if (!focus?.projectId) return '';
+  return shell.projects.find(project => project.id === focus.projectId)?.path ?? '';
 }
 
 export function sessionBreadcrumb(session: ShellSession, shell: WorkspaceShellSnapshot): string {
@@ -69,6 +70,19 @@ export function sessionBreadcrumb(session: ShellSession, shell: WorkspaceShellSn
   if (!focus.projectId) return focus.title;
   const project = shell.projects.find(p => p.id === focus.projectId);
   return project ? `${project.name} · ${focus.title}` : focus.title;
+}
+
+// The breadcrumb split into its parts so a surface can give each its own weight
+// (e.g. the dashboard card leads with the project, the cross-project key). A
+// General session has no project, so `project` is null and the topic stands alone.
+export function sessionContext(
+  session: ShellSession,
+  shell: WorkspaceShellSnapshot,
+): { project: string | null; topic: string } {
+  const focus = shell.focuses.find(f => f.id === session.focusId);
+  if (!focus) return { project: null, topic: 'Workspace' };
+  const project = focus.projectId ? shell.projects.find(p => p.id === focus.projectId) : null;
+  return { project: project?.name ?? null, topic: focus.title };
 }
 
 export function agentLabel(value: string) {

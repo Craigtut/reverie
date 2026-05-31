@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react';
 
 import { invoke } from '../services/runtime';
-import { USER_HOME, activityForSession, dangerousLabel, errorMessage } from '../domain';
+import { activityForSession, dangerousLabel, errorMessage } from '../domain';
 import type {
   ActivityPermissionRequest,
   ActivityState,
@@ -91,7 +91,7 @@ export function useWorkspaceModel() {
   const selectedFocusProject = selectedFocus?.projectId
     ? (shell.projects.find(project => project.id === selectedFocus.projectId) ?? null)
     : null;
-  const selectedFocusDefaultCwd = selectedFocusProject?.path ?? USER_HOME;
+  const selectedFocusDefaultCwd = selectedFocusProject?.path ?? '';
   const focusSessions = useMemo(() => {
     if (!selectedFocus) return [];
     return shell.sessions.filter(session => session.focusId === selectedFocus.id);

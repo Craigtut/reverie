@@ -12,18 +12,17 @@ mod correlator;
 mod state;
 mod terminal;
 
-use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
+use std::{env, fs::OpenOptions, io::Write};
 
-use reverie_core::CodexLogSource;
 use reverie_core::TranscriptStore;
 use reverie_core::WorkspaceService;
-use reverie_core::activity_watcher::watch_cortex_activity;
 use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
 use reverie_core::session_log::start_session_log_watcher;
+use reverie_core::{CodexLogSource, CompositeLogSource, CortexStateSource};
 use reverie_persistence::SqliteWorkspaceRepository;
 use tauri::{Emitter, Manager, Url};
 
-use crate::activity_bridge::{drain_codex_activity, drain_cortex_activity, drain_hook_activity};
+use crate::activity_bridge::{drain_file_activity, drain_hook_activity};
 use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
 use crate::terminal::runtime::TerminalSessionRuntime;
 
@@ -88,17 +87,6 @@ fn unix_time_millis_for_log() -> i64 {
         .unwrap_or_default()
 }
 
-/// Resolve the directory the Cortex activity watcher should attach to. Returns
-/// `None` if neither `CORTEX_HOME` nor `HOME` (Unix) / `USERPROFILE` (Windows)
-/// is available, in which case the watcher is silently skipped.
-fn cortex_sessions_root() -> Option<PathBuf> {
-    if let Some(path) = env::var_os("CORTEX_HOME") {
-        return Some(PathBuf::from(path).join("sessions"));
-    }
-    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".cortex").join("sessions"))
-}
-
 fn main() {
     install_dev_panic_logger();
 
@@ -128,6 +116,9 @@ fn main() {
             );
             let service = WorkspaceService::new(repository.clone());
             service.ensure_seeded()?;
+            // Reap scratch workspaces left by General sessions that no longer
+            // exist (e.g. if a crash interrupted delete-time cleanup).
+            commands::sweep_orphan_general_sessions(app.handle(), &service);
             // Publish the service only after the database is opened, migrated,
             // and seeded. `WorkspaceBoot` is managed on the builder below, so it
             // is available the instant the webview fires its first
@@ -164,44 +155,44 @@ fn main() {
                 }
             }
 
-            // Start the Cortex activity-state watcher. Best-effort: if
-            // ~/.cortex/sessions cannot be located (no HOME, etc.), Reverie
-            // still boots; the watcher just stays off and the dashboard
-            // falls back to record status.
-            if let Some(sessions_root) = cortex_sessions_root() {
-                match watch_cortex_activity(sessions_root) {
-                    Ok(stream) => {
-                        let app_handle = app.handle().clone();
-                        std::thread::Builder::new()
-                            .name("reverie-cortex-activity-bridge".to_owned())
-                            .spawn(move || drain_cortex_activity(stream, app_handle))
-                            .ok();
-                    }
-                    Err(error) => {
-                        eprintln!("[reverie] Cortex activity watcher disabled: {error:#}");
-                    }
-                }
-            } else {
-                eprintln!("[reverie] Cortex home not located; activity watcher disabled");
-            }
-
-            // Codex session-log watcher: the active-file, incremental-tail engine
-            // for Codex live state. Unlike Cortex's snapshot file, the Codex
-            // rollout is an append-only log, so the engine watches only the
-            // rollout files the launch path registers (via the managed
-            // `SessionLogControl`) and tails only newly appended bytes. Cost
-            // scales with active sessions and new output, not with history.
-            match start_session_log_watcher(std::sync::Arc::new(CodexLogSource)) {
+            // Activity file watcher: one active-file, incremental-tail engine that
+            // serves every file-transport CLI through a composite source. Codex
+            // rollouts (append-log) and Cortex snapshots both flow through it. It
+            // watches only the live-state files the launch path registers (via the
+            // managed `SessionLogControl`), so cost scales with active sessions and
+            // new output, not with the whole sessions tree or accumulated history.
+            let file_source = std::sync::Arc::new(CompositeLogSource::new(vec![
+                std::sync::Arc::new(CodexLogSource),
+                std::sync::Arc::new(CortexStateSource),
+            ]));
+            match start_session_log_watcher(file_source) {
                 Ok(watcher) => {
-                    app.manage(watcher.control.clone());
+                    let control = watcher.control.clone();
+                    app.manage(control.clone());
+                    // Boot-time registration: re-watch the live-state file of every
+                    // persisted session that already carries a file-transport native
+                    // ref, so a session still running when Reverie starts shows live
+                    // state immediately. This is the old Cortex startup scan, now
+                    // scoped to the sessions Reverie actually owns.
+                    if let Ok(snapshot) = app.state::<WorkspaceService>().snapshot() {
+                        for session in &snapshot.sessions {
+                            if let Some(reference) = &session.native_session_ref {
+                                if let Some(path) =
+                                    crate::terminal::runtime::watch_path_for_ref(reference)
+                                {
+                                    control.register(path);
+                                }
+                            }
+                        }
+                    }
                     let app_handle = app.handle().clone();
                     std::thread::Builder::new()
-                        .name("reverie-codex-activity-bridge".to_owned())
-                        .spawn(move || drain_codex_activity(watcher, app_handle))
+                        .name("reverie-activity-file-bridge".to_owned())
+                        .spawn(move || drain_file_activity(watcher, app_handle))
                         .ok();
                 }
                 Err(error) => {
-                    eprintln!("[reverie] Codex session-log watcher disabled: {error:#}");
+                    eprintln!("[reverie] activity file watcher disabled: {error:#}");
                 }
             }
 

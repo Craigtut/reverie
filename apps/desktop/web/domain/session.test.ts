@@ -4,11 +4,13 @@ import {
   agentLabel,
   agentTabLabel,
   dangerousLabel,
+  defaultCwdForFocus,
   fallbackAgentCliDetections,
   fallbackShellSnapshot,
   launchButtonLabel,
   nativeSessionSummary,
   sessionBreadcrumb,
+  sessionContext,
   sessionsForProject,
 } from './session';
 import type { ShellFocus, ShellProject, ShellSession, WorkspaceShellSnapshot } from './types';
@@ -136,6 +138,26 @@ describe('sessionsForProject', () => {
   });
 });
 
+describe('defaultCwdForFocus', () => {
+  it('returns an empty string for a General (project-less) focus', () => {
+    // General sessions get a backend-provisioned scratch workspace, so the
+    // frontend sends no cwd of its own.
+    const shell = makeShell();
+    expect(defaultCwdForFocus(makeFocus({ id: 'g', projectId: null }), shell)).toBe('');
+  });
+
+  it('returns the project folder for a project-backed focus', () => {
+    const shell = makeShell({ projects: [makeProject({ id: 'p', path: '/work/repo' })] });
+    expect(defaultCwdForFocus(makeFocus({ id: 'f', projectId: 'p' }), shell)).toBe('/work/repo');
+  });
+
+  it('returns an empty string for a null focus or an unresolved project', () => {
+    const shell = makeShell();
+    expect(defaultCwdForFocus(null, shell)).toBe('');
+    expect(defaultCwdForFocus(makeFocus({ projectId: 'missing' }), shell)).toBe('');
+  });
+});
+
 describe('sessionBreadcrumb', () => {
   it('returns Workspace when the session focus is missing', () => {
     const shell = makeShell({ focuses: [] });
@@ -161,6 +183,37 @@ describe('sessionBreadcrumb', () => {
       focuses: [makeFocus({ id: 'f', projectId: 'ghost', title: 'Terminal' })],
     });
     expect(sessionBreadcrumb(makeSession({ focusId: 'f' }), shell)).toBe('Terminal');
+  });
+});
+
+describe('sessionContext', () => {
+  it('splits project and topic when the project resolves', () => {
+    const shell = makeShell({
+      projects: [makeProject({ id: 'p', name: 'Reverie' })],
+      focuses: [makeFocus({ id: 'f', projectId: 'p', title: 'Terminal' })],
+    });
+    expect(sessionContext(makeSession({ focusId: 'f' }), shell)).toEqual({
+      project: 'Reverie',
+      topic: 'Terminal',
+    });
+  });
+
+  it('returns a null project for a General (project-less) session', () => {
+    const shell = makeShell({
+      focuses: [makeFocus({ id: 'f', projectId: null, title: 'General' })],
+    });
+    expect(sessionContext(makeSession({ focusId: 'f' }), shell)).toEqual({
+      project: null,
+      topic: 'General',
+    });
+  });
+
+  it('falls back to a Workspace topic when the focus is missing', () => {
+    const shell = makeShell({ focuses: [] });
+    expect(sessionContext(makeSession({ focusId: 'gone' }), shell)).toEqual({
+      project: null,
+      topic: 'Workspace',
+    });
   });
 });
 
