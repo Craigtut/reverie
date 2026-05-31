@@ -93,13 +93,47 @@ impl BridgeEnv {
 /// The transport MUST already be handshaked (see [`handshake`]). `run` does
 /// not perform handshake itself so tests can drive it with a mock transport
 /// that has no handshake step.
-pub fn run<R, W, T>(transport: &mut T, mut reader: R, mut writer: W) -> Result<()>
+pub fn run<R, W, T>(transport: &mut T, reader: R, writer: W) -> Result<()>
 where
     R: BufRead,
     W: Write,
     T: BridgeTransport,
 {
     let mut initialized = false;
+    run_loop(reader, writer, |request| {
+        handle_request(transport, &mut initialized, request)
+    })
+}
+
+/// Drive the MCP loop in *degraded* mode: speak MCP normally (initialize +
+/// tools/list) but advertise an empty tool catalog and return a clean error
+/// for any tools/call.
+///
+/// Used when the helper is invoked outside Reverie (no `REVERIE_*` env, or
+/// the bridge socket is not listening). Without this, the helper would exit
+/// during startup and the parent CLI would surface a confusing
+/// "MCP startup failed: connection closed" error to the user on every
+/// non-Reverie session. In degraded mode the parent CLI just sees a
+/// well-behaved server with zero tools and moves on quietly.
+pub fn run_unavailable<R, W>(reader: R, writer: W, reason: impl Into<String>) -> Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    let reason = reason.into();
+    run_loop(reader, writer, |request| {
+        handle_degraded_request(&reason, request)
+    })
+}
+
+/// Shared MCP frame loop used by [`run`] and [`run_unavailable`]. The caller
+/// supplies a dispatcher that maps a request to its response.
+fn run_loop<R, W, H>(mut reader: R, mut writer: W, mut handle: H) -> Result<()>
+where
+    R: BufRead,
+    W: Write,
+    H: FnMut(McpRequest) -> McpResponse,
+{
     let mut line_buf = String::new();
     loop {
         line_buf.clear();
@@ -132,20 +166,23 @@ where
 
         match frame {
             McpFrame::Request(request) => {
-                let response = handle_request(transport, &mut initialized, request);
+                let response = handle(request);
                 write_frame(&mut writer, &McpFrame::Response(response))?;
             }
             McpFrame::Notification(notif) => match notif.method.as_str() {
                 mcp_methods::NOTIFICATIONS_INITIALIZED => {
-                    initialized = true;
+                    // No state mutation needed in the shared loop; the
+                    // per-mode dispatcher already serves tools/list
+                    // regardless of `initialized`.
                 }
                 mcp_methods::NOTIFICATIONS_CANCELLED => {
                     // v1 ignores cancellations; no in-flight cancellation
                     // wiring exists yet.
                 }
                 _ => {
-                    // Unknown notifications are silently ignored per JSON-RPC
-                    // spec: notifications never receive a response.
+                    // Unknown notifications are silently ignored per
+                    // JSON-RPC spec: notifications never receive a
+                    // response.
                 }
             },
             McpFrame::Response(_) => {
@@ -156,23 +193,46 @@ where
     }
 }
 
+/// Dispatcher used in [`run_unavailable`]. Returns a successful initialize
+/// (so the parent CLI starts cleanly), an empty tools/list, a degraded
+/// tools/call result, and method-not-found for anything else.
+fn handle_degraded_request(reason: &str, request: McpRequest) -> McpResponse {
+    let id = request.id.clone();
+    match request.method.as_str() {
+        mcp_methods::INITIALIZE => handle_initialize(id, &request.params),
+        mcp_methods::PING => McpResponse::ok(id, &serde_json::json!({})),
+        mcp_methods::TOOLS_LIST => McpResponse::ok(
+            id,
+            &ListToolsResult {
+                tools: Vec::<ToolDefinition>::new(),
+            },
+        ),
+        mcp_methods::TOOLS_CALL => McpResponse::ok(
+            id,
+            &CallToolResult::text_err(format!("reverie bridge unavailable: {reason}")),
+        ),
+        unknown => McpResponse::err(
+            id,
+            McpError::new(
+                mcp_error_codes::METHOD_NOT_FOUND,
+                format!("unknown method: {unknown}"),
+            ),
+        ),
+    }
+}
+
 fn handle_request<T: BridgeTransport>(
     transport: &mut T,
-    initialized: &mut bool,
+    _initialized: &mut bool,
     request: McpRequest,
 ) -> McpResponse {
     let id = request.id.clone();
     match request.method.as_str() {
         mcp_methods::INITIALIZE => handle_initialize(id, &request.params),
         mcp_methods::PING => McpResponse::ok(id, &serde_json::json!({})),
-        mcp_methods::TOOLS_LIST => {
-            if !*initialized {
-                // Per MCP, tools/list after initialize is required regardless
-                // of notifications/initialized; some clients send it before
-                // the notification. Be lenient and serve it anyway.
-            }
-            McpResponse::ok(id, &ListToolsResult { tools: catalog() })
-        }
+        // tools/list is served regardless of whether notifications/initialized
+        // has arrived; some clients send tools/list before the notification.
+        mcp_methods::TOOLS_LIST => McpResponse::ok(id, &ListToolsResult { tools: catalog() }),
         mcp_methods::TOOLS_CALL => handle_tools_call(transport, id, &request.params),
         unknown => McpResponse::err(
             id,

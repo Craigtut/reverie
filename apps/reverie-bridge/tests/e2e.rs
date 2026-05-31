@@ -251,8 +251,12 @@ fn end_to_end_handshake_then_list_peers_through_stdio_mcp() {
 }
 
 #[test]
-fn helper_exits_nonzero_when_session_env_missing() {
-    let helper = Command::new(HELPER_BIN)
+fn helper_runs_degraded_mode_when_session_env_missing() {
+    // Without `REVERIE_*` the helper does NOT crash. It runs the MCP loop
+    // in unavailable mode so a non-Reverie CLI session does not surface a
+    // "MCP startup failed" error to the user. Exit code is 0 and tools/list
+    // returns an empty catalog.
+    let mut helper = Command::new(HELPER_BIN)
         .env_remove("REVERIE_SESSION_ID")
         .env_remove("REVERIE_SESSION_SECRET")
         .env_remove("REVERIE_BRIDGE_SOCK")
@@ -261,23 +265,45 @@ fn helper_exits_nonzero_when_session_env_missing() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn helper");
+    let mut stdin = helper.stdin.take().expect("helper stdin");
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        })
+    )
+    .expect("write tools/list frame");
+    drop(stdin);
     let output = helper.wait_with_output().expect("helper exits");
     assert!(
-        !output.status.success(),
-        "helper without REVERIE_* must exit non-zero"
+        output.status.success(),
+        "degraded helper must exit 0; got {:?}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("response line on stdout");
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("response is JSON");
+    let tools = parsed["result"]["tools"].as_array().expect("tools array");
+    assert!(tools.is_empty(), "degraded mode must advertise zero tools");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("REVERIE_SESSION_ID") || stderr.contains("bridge environment"),
-        "stderr should name the missing env var, got: {stderr}"
+        stderr.contains("degraded"),
+        "stderr should mention degraded mode, got: {stderr}"
     );
 }
 
 #[test]
-fn helper_exits_nonzero_when_bridge_socket_unreachable() {
+fn helper_runs_degraded_mode_when_bridge_socket_unreachable() {
     let tmp = TempDir::new().expect("temp dir");
     let socket_path = tmp.path().join("missing.sock");
-    let helper = Command::new(HELPER_BIN)
+    let mut helper = Command::new(HELPER_BIN)
         .env("REVERIE_SESSION_ID", Uuid::new_v4().to_string())
         .env("REVERIE_SESSION_SECRET", "s")
         .env("REVERIE_BRIDGE_SOCK", &socket_path)
@@ -286,14 +312,29 @@ fn helper_exits_nonzero_when_bridge_socket_unreachable() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn helper");
+    let mut stdin = helper.stdin.take().expect("helper stdin");
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        })
+    )
+    .expect("write tools/list frame");
+    drop(stdin);
     let output = helper.wait_with_output().expect("helper exits");
     assert!(
-        !output.status.success(),
-        "helper without a listening socket must exit non-zero"
+        output.status.success(),
+        "degraded helper must exit 0 even with no socket; got {:?}",
+        output.status,
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("connect") || stderr.contains("socket"),
-        "stderr should name the connection failure, got: {stderr}"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .expect("response line on stdout");
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("response is JSON");
+    assert!(parsed["result"]["tools"].as_array().unwrap().is_empty());
 }
