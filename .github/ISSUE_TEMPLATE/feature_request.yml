@@ -4,7 +4,7 @@ labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
-      value: Ideas are welcome. Reverie is a calm, local-first agentic workspace, not an IDE, so please keep that framing in mind.
+      value: Ideas are welcome. Reverie is a local-first agentic workspace, not an IDE, so please keep that framing in mind.
   - type: textarea
     id: problem
     attributes:
