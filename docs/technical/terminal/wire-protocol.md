@@ -30,6 +30,40 @@ Each cell is a few bytes, packed binary, decoded straight into the typed arrays 
 
 A row on the wire is its position plus a run of these. A frame or reply is a small header (kind, dimensions, cursor, generation) plus its rows.
 
+## Binary frame encoding (concrete)
+
+The frame stream over the Channel is a compact little-endian binary encoding of Reverie's `TerminalFrame`. Each `Channel.send` carries exactly one frame message; the Channel preserves message boundaries and order, so no inter-message length prefix is needed. The frontend decodes each message back into the same `TerminalFrame` shape the buffer already consumes. This encoding changes the transport and serialization only, not the frame semantics (rows stay viewport-relative with a scrollback offset, as today).
+
+All integers little-endian. A frame message:
+
+```
+u8    kind            // 1 = frame
+u32   generation      // per-session, bumped on resize
+u8    dirty           // 0 Clean, 1 Partial (diff), 2 Full (snapshot/seed)
+u16   cols
+u16   rows            // viewport rows
+Cursor                // u8 flags (bit0 visible, bit1 blinking, bit2 has_position),
+                      // u8 style (0 Block,1 BlockHollow,2 Bar,3 Underline),
+                      // u16 col, u16 row  (col/row present only if has_position)
+Modes                 // u16 flags (bit0 cursor_key_app,1 keypad_app,2 bracketed_paste,
+                      //   3 sync_output,4 mouse_tracking,5 alternate_screen), u8 kitty_flags
+Colors                // Color fg, Color bg, u8 has_cursor, Color cursor (if has_cursor)
+Scrollback            // u32 total_rows, u32 scrollback_rows, u32 viewport_offset,
+                      //   u32 viewport_rows, u8 at_bottom
+u32   row_count
+Row[] rows
+
+Row    = u16 index (viewport-relative), u8 dirty, u16 cell_count, Cell[] cells
+Cell   = u16 col, u16 width, u16 style, u8 color_flags,
+         Color fg (if color_flags bit0), Color bg (if color_flags bit1),
+         u16 text_len, u8[text_len] utf8   // grapheme cluster
+Color  = u8 r, u8 g, u8 b
+```
+
+`Cell.style` bits: 0 bold, 1 italic, 2 faint, 3 blink, 4 invisible, 5 inverse, 6 strikethrough, 7 overline; bits 8 to 10 hold the underline kind (0 None, 1 Single, 2 Double, 3 Curly, 4 Dotted, 5 Dashed).
+
+Generation rules: the frontend tracks the latest generation it has seen. A `Full` frame adopts its generation and rebuilds the mirror; a frame whose generation is older than the latest is dropped; a resize bumps the backend generation and is immediately followed by a `Full` frame. Control and lifecycle messages (`terminal_stream_started`, `terminal_exit`, `terminal_failed`, title, bell) stay low-rate JSON events for now; only the frame stream is binary. The decoder is shared between the Tauri Channel path and the harness bridge's transport, so both exercise the same wire format.
+
 ## Transport
 
 Use Tauri 2's binary-capable, ordered transports:
