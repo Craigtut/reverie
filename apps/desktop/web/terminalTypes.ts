@@ -88,8 +88,6 @@ export interface TerminalOverlay {
   selection?: RowSpan[];
   links?: RowSpan[];
   hoverLink?: RowSpan;
-  searchMatches?: RowSpan[];
-  activeMatch?: RowSpan;
 }
 
 export type TerminalRendererBackend = 'webgpu' | 'webgl2' | 'canvas2d';

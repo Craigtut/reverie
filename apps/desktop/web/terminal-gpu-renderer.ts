@@ -23,8 +23,6 @@ const DEFAULT_FOREGROUND = '#e8e1d7';
 const DEFAULT_BACKGROUND = '#060605';
 const DEFAULT_BACKGROUND_OPACITY = 1;
 const SELECTION_ALPHA = 0.38;
-const SEARCH_MATCH_ALPHA = 0.22;
-const ACTIVE_MATCH_ALPHA = 0.48;
 const FAINT_ALPHA = 0.55;
 const LINK_UNDERLINE_HEIGHT = 1;
 const HOVER_LINK_UNDERLINE_HEIGHT = 2;
@@ -557,19 +555,9 @@ export function createTerminalWebGl2Renderer(
   ) {
     if (!overlay) return;
     const selection = { ...defaultForeground, a: SELECTION_ALPHA };
-    const search = { ...defaultForeground, a: SEARCH_MATCH_ALPHA };
-    const active = { ...defaultForeground, a: ACTIVE_MATCH_ALPHA };
     for (const span of overlay.selection ?? []) {
       if (!paintedRows.has(span.row)) continue;
       pushSpan(rects, span, cellWidth, cellHeight, selection);
-    }
-    for (const span of overlay.searchMatches ?? []) {
-      if (!paintedRows.has(span.row)) continue;
-      pushSpan(rects, span, cellWidth, cellHeight, search);
-    }
-    if (overlay.activeMatch && paintedRows.has(overlay.activeMatch.row)) {
-      pushSpan(rects, overlay.activeMatch, cellWidth, cellHeight, active);
-      pushOutline(rects, overlay.activeMatch, cellWidth, cellHeight, defaultForeground);
     }
     for (const span of overlay.links ?? []) {
       if (!paintedRows.has(span.row)) continue;
@@ -993,23 +981,6 @@ function pushUnderline(
     height,
     color,
   );
-}
-
-function pushOutline(
-  vertices: VertexBatch,
-  span: { row: number; startCol: number; endCol: number },
-  cellWidth: number,
-  cellHeight: number,
-  color: Rgba,
-) {
-  const x = span.startCol * cellWidth;
-  const y = span.row * cellHeight;
-  const width = (span.endCol - span.startCol) * cellWidth;
-  if (width <= 0) return;
-  pushRect(vertices, x, y, width, 1, color);
-  pushRect(vertices, x, y + cellHeight - 1, width, 1, color);
-  pushRect(vertices, x, y, 1, cellHeight, color);
-  pushRect(vertices, x + width - 1, y, 1, cellHeight, color);
 }
 
 function pushCellUnderline(

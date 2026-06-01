@@ -29,10 +29,6 @@ const DEFAULT_BACKGROUND_OPACITY = 1;
 // read clearly over the near-black terminal panel (close to macOS-native
 // selection), while staying translucent enough to keep the glyphs legible.
 const SELECTION_ALPHA = 0.38;
-// Search-match wash (all matches) + the active match's stronger fill. Monochrome
-// (foreground-tinted); the active match also gets a 1px outline.
-const SEARCH_MATCH_ALPHA = 0.22;
-const ACTIVE_MATCH_ALPHA = 0.48;
 const FAINT_ALPHA = 0.55;
 // Link underline is drawn at the foreground color; the hovered link gets a
 // slightly thicker rule.
@@ -356,35 +352,6 @@ export function createTerminalCanvasRenderer(
         if (paintedRows.has(span.row)) fillSpanRow(span);
       }
       ctx.globalAlpha = previousAlpha;
-    }
-
-    // Search matches: a lighter foreground wash for every match in view, with
-    // the active match a stronger fill plus a 1px outline (no status color, so
-    // it stays within the monochrome design rule).
-    const searchMatches = overlay.searchMatches ?? [];
-    if (searchMatches.length > 0) {
-      const previousAlpha = ctx.globalAlpha;
-      ctx.globalAlpha = SEARCH_MATCH_ALPHA;
-      ctx.fillStyle = foreground;
-      for (const span of searchMatches) {
-        if (paintedRows.has(span.row)) fillSpanRow(span);
-      }
-      ctx.globalAlpha = previousAlpha;
-    }
-    const active = overlay.activeMatch;
-    if (active && paintedRows.has(active.row)) {
-      const previousAlpha = ctx.globalAlpha;
-      ctx.globalAlpha = ACTIVE_MATCH_ALPHA;
-      ctx.fillStyle = foreground;
-      fillSpanRow(active);
-      ctx.globalAlpha = previousAlpha;
-      const x = active.startCol * cellWidth;
-      const width = (active.endCol - active.startCol) * cellWidth;
-      if (width > 0) {
-        ctx.strokeStyle = foreground;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x + 0.5, active.row * cellHeight + 0.5, width - 1, cellHeight - 1);
-      }
     }
 
     const links = overlay.links ?? [];

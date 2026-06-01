@@ -252,12 +252,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let selection: SelectionRange | null = null;
   let links: BufferLinkSpan[] = [];
   let hoverLink: BufferLinkSpan | null = null;
-  // Find-in-terminal overlay state, also in buffer coordinates.
-  let searchMatches: RowSpan[] = [];
-  let activeMatch: RowSpan | null = null;
-  // While find is navigating, pin the viewport (don't auto-jump to the tail on
-  // new output) so the active match stays put.
-  let searchActive = false;
   // History view: the frontend buffer owns a sparse cache of replayed transcript
   // rows, virtualized by the scroll spacer so the user can scroll to row 0. Live
   // frames are cached but not painted until the view is exited.
@@ -1221,44 +1215,13 @@ export function createTerminalController(options: TerminalControllerOptions) {
         )
       : null;
 
-    const searchSpans: RowSpan[] = [];
-    for (const match of searchMatches) {
-      const span = rowSpanInWindow(
-        match.row,
-        match.startCol,
-        match.endCol,
-        startRow,
-        displayRows,
-        forSurface.cols,
-      );
-      if (span) searchSpans.push(span);
-    }
-    const activeSpan = activeMatch
-      ? rowSpanInWindow(
-          activeMatch.row,
-          activeMatch.startCol,
-          activeMatch.endCol,
-          startRow,
-          displayRows,
-          forSurface.cols,
-        )
-      : null;
-
-    if (
-      selectionSpans.length === 0 &&
-      linkSpans.length === 0 &&
-      !hoverSpan &&
-      searchSpans.length === 0 &&
-      !activeSpan
-    ) {
+    if (selectionSpans.length === 0 && linkSpans.length === 0 && !hoverSpan) {
       return undefined;
     }
     return {
       selection: selectionSpans.length > 0 ? selectionSpans : undefined,
       links: linkSpans.length > 0 ? linkSpans : undefined,
       hoverLink: hoverSpan ?? undefined,
-      searchMatches: searchSpans.length > 0 ? searchSpans : undefined,
-      activeMatch: activeSpan ?? undefined,
     };
   }
 
@@ -1273,8 +1236,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
     }
     for (const link of links) addOverlayRow(rows, link.row, startRow, endRow);
     if (hoverLink) addOverlayRow(rows, hoverLink.row, startRow, endRow);
-    for (const match of searchMatches) addOverlayRow(rows, match.row, startRow, endRow);
-    if (activeMatch) addOverlayRow(rows, activeMatch.row, startRow, endRow);
 
     return rows;
   }
@@ -1298,9 +1259,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
   }
 
   function shouldAutoFollow() {
-    // An active selection (or find navigation) pins the viewport: output keeps
-    // painting underneath, but we never auto-jump to the tail.
-    return liveFollow && selection === null && !searchActive;
+    // An active selection pins the viewport: output keeps painting underneath,
+    // but we never auto-jump to the tail.
+    return liveFollow && selection === null;
   }
 
   // Rescan the composite frame for URLs so hover/underline/click have up-to-date
@@ -1494,8 +1455,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
     selection = null;
     links = [];
     hoverLink = null;
-    searchMatches = [];
-    activeMatch = null;
   }
 
   function bufferedPaintWindowNeedsRepaint(
@@ -2292,18 +2251,11 @@ export function createTerminalController(options: TerminalControllerOptions) {
     // and rebuilt by recomputeLinks on the next applied view, so they are left
     // alone here.
     resetInteraction() {
-      if (
-        selection === null &&
-        hoverLink === null &&
-        searchMatches.length === 0 &&
-        activeMatch === null
-      ) {
+      if (selection === null && hoverLink === null) {
         return;
       }
       selection = null;
       hoverLink = null;
-      searchMatches = [];
-      activeMatch = null;
       repaintOverlay();
     },
     getSelectionText(): string {
@@ -2331,21 +2283,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
       hoverLink = next;
       repaintOverlay();
     },
-    // Find-in-terminal overlay: match spans (buffer coords) + the active match.
-    setSearchMatches(next: RowSpan[]) {
-      searchMatches = next;
-      repaintOverlay();
-    },
-    setActiveMatch(next: RowSpan | null) {
-      activeMatch = next;
-      repaintOverlay();
-    },
-    clearSearch() {
-      if (searchMatches.length === 0 && activeMatch === null) return;
-      searchMatches = [];
-      activeMatch = null;
-      repaintOverlay();
-    },
     selectAll() {
       const range = activeBuffer
         ? selectAllTerminalBufferRange(activeBuffer, surface.cols)
@@ -2355,9 +2292,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
       if (!range) return;
       selection = range;
       repaintOverlay();
-    },
-    setSearchActive(active: boolean) {
-      searchActive = active;
     },
     enterHistory,
     enterHistoryWindow,

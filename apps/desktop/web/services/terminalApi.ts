@@ -1,7 +1,6 @@
 import { invoke } from './runtime';
 import type { GhosttyFrameSequencePayload, RenderMetrics, StartSessionRequest } from '../domain';
 import type { TerminalFrame } from '../terminalTypes';
-import type { FrameMatch } from '../terminal/findModel';
 
 // Typed wrappers over the terminal/session-runtime commands: launching and
 // terminating native sessions, writing input, resizing, scrolling the
@@ -69,19 +68,6 @@ export interface TerminalHistoryWindow {
   frame: TerminalFrame;
 }
 
-export interface TerminalHistorySearchResult {
-  matches: FrameMatch[];
-  total: number;
-  capped: boolean;
-  totalRows: number;
-}
-
-export interface TerminalHistorySearchWindow {
-  search: TerminalHistorySearchResult;
-  startRow: number;
-  frame: TerminalFrame;
-}
-
 export function terminalHistoryInfo(sessionId: string, cols: number, rows: number) {
   return invoke<TerminalHistoryInfo>('terminal_history_info', { sessionId, cols, rows });
 }
@@ -99,38 +85,6 @@ export function terminalHistoryWindow(
     cols,
     surfaceRows,
     rowCount,
-  });
-}
-
-export function terminalHistorySearch(
-  sessionId: string,
-  query: string,
-  caseSensitive: boolean,
-  cols: number,
-  rows: number,
-) {
-  return invoke<TerminalHistorySearchResult>('terminal_history_search', {
-    sessionId,
-    query,
-    caseSensitive,
-    cols,
-    rows,
-  });
-}
-
-export function terminalHistorySearchWindow(
-  sessionId: string,
-  query: string,
-  caseSensitive: boolean,
-  cols: number,
-  rows: number,
-) {
-  return invoke<TerminalHistorySearchWindow>('terminal_history_search_window', {
-    sessionId,
-    query,
-    caseSensitive,
-    cols,
-    rows,
   });
 }
 

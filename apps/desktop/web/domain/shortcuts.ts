@@ -4,8 +4,7 @@
 // owned by its hook/component:
 //   ⌘K / Esc ............ useCommandPalette
 //   ⌘1–9, ⌃Tab .......... useSessionTabShortcuts
-//   ⌘F, ⌘C / ⌃⇧C ........ useTerminalSession
-//   ⏎ / ⇧⏎ / Esc ........ TerminalFindBar
+//   ⌘C / ⌃⇧C ............ useTerminalSession
 //   ↑ ↓ ⏎ Esc ........... CommandPalette
 // Keep this in sync when a shortcut is added or changed.
 
@@ -29,7 +28,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: 'General',
     shortcuts: [
       { id: 'command-palette', label: 'Open the command palette', chords: [['⌘', 'K']] },
-      { id: 'dismiss', label: 'Dismiss the palette, find bar, or menu', chords: [['Esc']] },
+      { id: 'dismiss', label: 'Dismiss the palette or menu', chords: [['Esc']] },
     ],
   },
   {
@@ -46,7 +45,6 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     id: 'terminal',
     title: 'Terminal',
     shortcuts: [
-      { id: 'find', label: 'Find in the terminal', chords: [['⌘', 'F']] },
       {
         id: 'copy',
         label: 'Copy the selection',
@@ -56,15 +54,6 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
         ],
       },
       { id: 'clear-selection', label: 'Clear the selection', chords: [['Esc']] },
-    ],
-  },
-  {
-    id: 'find',
-    title: 'Find bar',
-    shortcuts: [
-      { id: 'find-next', label: 'Next match', chords: [['⏎']] },
-      { id: 'find-prev', label: 'Previous match', chords: [['⇧', '⏎']] },
-      { id: 'find-close', label: 'Close find', chords: [['Esc']] },
     ],
   },
   {

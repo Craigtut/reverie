@@ -17,7 +17,7 @@ use reverie_core::terminal::{TerminalColor, TerminalFrame, TerminalId};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::terminal::ghostty::{GhosttyTerminalState, TerminalSearchResult};
+use crate::terminal::ghostty::GhosttyTerminalState;
 use crate::terminal::transcript::TranscriptWriter;
 use reverie_core::WorkspaceService;
 use reverie_core::session_log::SessionLogControl;
@@ -131,14 +131,6 @@ enum TerminalRuntimeCommand {
     SetDefaultColors {
         foreground: TerminalColor,
         background: TerminalColor,
-    },
-    // Search runs on the worker thread (which owns &mut terminal) and replies
-    // over the carried channel.
-    Search {
-        query: String,
-        case_sensitive: bool,
-        max_matches: usize,
-        reply: Sender<TerminalSearchResult>,
     },
     SetFrontendActive(bool),
 }
@@ -621,29 +613,6 @@ impl TerminalSessionRuntime {
             .lock()
             .ok()
             .and_then(|guard| *guard)
-    }
-
-    /// Search the terminal's buffer. Dispatched to the worker thread (which owns
-    /// the Ghostty state) and waits for the reply.
-    pub fn search_terminal(
-        &self,
-        terminal_id: TerminalId,
-        query: String,
-        case_sensitive: bool,
-        max_matches: usize,
-    ) -> Result<TerminalSearchResult> {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.command_sender_for(terminal_id)?
-            .send(TerminalRuntimeCommand::Search {
-                query,
-                case_sensitive,
-                max_matches,
-                reply: reply_tx,
-            })
-            .context("failed to queue terminal search command")?;
-        reply_rx
-            .recv_timeout(Duration::from_secs(5))
-            .context("terminal search timed out")
     }
 
     pub fn terminate_session(&self, terminal_id: TerminalId) -> Result<()> {
@@ -1260,23 +1229,6 @@ fn apply_terminal_commands(
             } => {
                 terminal.set_default_colors(foreground, background);
                 needs_frame = true;
-            }
-            TerminalRuntimeCommand::Search {
-                query,
-                case_sensitive,
-                max_matches,
-                reply,
-            } => {
-                // Read-only; does not move the viewport or request a frame.
-                let result = terminal
-                    .search(&query, case_sensitive, max_matches)
-                    .unwrap_or(TerminalSearchResult {
-                        matches: Vec::new(),
-                        total: 0,
-                        capped: false,
-                        total_rows: 0,
-                    });
-                let _ = reply.send(result);
             }
             TerminalRuntimeCommand::SetFrontendActive(active) => {
                 viewport_state.frontend_active = active;

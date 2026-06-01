@@ -926,25 +926,6 @@ pub(crate) fn set_terminal_frontend_active(
         .map_err(|err| err.to_string())
 }
 
-const SEARCH_MAX_MATCHES: usize = 2_000;
-
-/// Substring search over the live terminal buffer (viewport + scrollback).
-#[tauri::command]
-pub(crate) async fn search_terminal(
-    runtime: State<'_, TerminalSessionRuntime>,
-    terminal_id: TerminalId,
-    query: String,
-    case_sensitive: bool,
-) -> Result<crate::terminal::ghostty::TerminalSearchResult, String> {
-    let runtime = runtime.inner().clone();
-    run_terminal_blocking_command(move || {
-        runtime
-            .search_terminal(terminal_id, query, case_sensitive, SEARCH_MAX_MATCHES)
-            .map_err(|err| err.to_string())
-    })
-    .await
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TerminalHistoryInfo {
@@ -1067,75 +1048,6 @@ pub(crate) async fn terminal_history_window(
             frame.clone(),
         );
         Ok(TerminalHistoryWindow {
-            start_row: frame.scrollback.viewport_offset,
-            frame,
-        })
-    })
-    .await
-}
-
-/// Search the session's durable transcript by replaying it through Ghostty
-/// without returning the full rendered history to the WebView.
-#[tauri::command]
-pub(crate) async fn terminal_history_search(
-    runtime: State<'_, TerminalSessionRuntime>,
-    session_id: SessionId,
-    query: String,
-    case_sensitive: bool,
-    cols: u16,
-    rows: u16,
-) -> Result<crate::terminal::ghostty::TerminalSearchResult, String> {
-    let runtime = runtime.inner().clone();
-    run_terminal_blocking_command(move || {
-        let transcripts = read_history_transcript_segments(&runtime, session_id)?;
-        crate::terminal::history::history_search_segments(
-            &transcripts,
-            cols,
-            rows,
-            &query,
-            case_sensitive,
-            SEARCH_MAX_MATCHES,
-            runtime.default_colors(),
-        )
-        .map_err(|err| err.to_string())
-    })
-    .await
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct TerminalHistorySearchWindow {
-    search: crate::terminal::ghostty::TerminalSearchResult,
-    start_row: usize,
-    frame: TerminalFrame,
-}
-
-/// Search the durable transcript and return the first paintable history window
-/// from the same Ghostty replay.
-#[tauri::command]
-pub(crate) async fn terminal_history_search_window(
-    runtime: State<'_, TerminalSessionRuntime>,
-    session_id: SessionId,
-    query: String,
-    case_sensitive: bool,
-    cols: u16,
-    rows: u16,
-) -> Result<TerminalHistorySearchWindow, String> {
-    let runtime = runtime.inner().clone();
-    run_terminal_blocking_command(move || {
-        let transcripts = read_history_transcript_segments(&runtime, session_id)?;
-        let (search, frame) = crate::terminal::history::history_search_window_segments(
-            &transcripts,
-            cols,
-            rows,
-            &query,
-            case_sensitive,
-            SEARCH_MAX_MATCHES,
-            runtime.default_colors(),
-        )
-        .map_err(|err| err.to_string())?;
-        Ok(TerminalHistorySearchWindow {
-            search,
             start_row: frame.scrollback.viewport_offset,
             frame,
         })

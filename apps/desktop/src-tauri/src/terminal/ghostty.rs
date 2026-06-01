@@ -2,7 +2,6 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use libghostty_vt::ffi;
-use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{RgbColor, Style, Underline as GhosttyUnderline};
@@ -13,41 +12,11 @@ use reverie_core::terminal::{
     TerminalCursorStyle, TerminalDirtyState, TerminalFrame, TerminalModes, TerminalPosition,
     TerminalRow, TerminalScrollback, TerminalUnderline,
 };
-use serde::Serialize;
 
 const DEFAULT_CELL_WIDTH_PX: u32 = 9;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 18;
 const SCROLLBACK_BYTES_PER_CELL: usize = 16;
 const MIN_SCROLLBACK_BYTES: usize = 1024 * 1024;
-
-/// One substring match in the terminal buffer. `row` is the screen row index
-/// from the top of the current buffer (scrollback included); columns are
-/// half-open cell columns. `line_text` is the full (trimmed) row text.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalSearchMatch {
-    pub row: usize,
-    pub start_col: u16,
-    pub end_col: u16,
-    pub line_text: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalSearchResult {
-    pub matches: Vec<TerminalSearchMatch>,
-    /// Total matches found (may exceed `matches.len()` when capped).
-    pub total: usize,
-    pub capped: bool,
-    pub total_rows: usize,
-}
-
-struct PendingSearchMatch {
-    row: usize,
-    start_chars: usize,
-    end_chars: usize,
-    line_text: String,
-}
 
 /// Ghostty-backed terminal state for converting VT byte streams into Reverie frames.
 ///
@@ -195,129 +164,6 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
             self.force_next_full_frame = true;
         }
         Ok(())
-    }
-
-    /// Substring search over the whole current buffer (viewport + scrollback) as
-    /// plain text. Case-insensitive when `case_sensitive` is false. Stops
-    /// collecting matches at `max_matches` but keeps counting (so the UI can show
-    /// "N+"). Matches are within a single rendered row (v1 does not span wraps).
-    pub fn search(
-        &mut self,
-        query: &str,
-        case_sensitive: bool,
-        max_matches: usize,
-    ) -> Result<TerminalSearchResult> {
-        let total_rows = self.total_rows()?;
-        if query.is_empty() {
-            return Ok(TerminalSearchResult {
-                matches: Vec::new(),
-                total: 0,
-                capped: false,
-                total_rows,
-            });
-        }
-        let text = {
-            let mut formatter = Formatter::new(
-                &self.terminal,
-                FormatterOptions {
-                    format: Format::Plain,
-                    trim: true,
-                    unwrap: false,
-                },
-            )?;
-            let len = formatter.format_len()?;
-            let mut buf = vec![0u8; len];
-            let written = formatter.format_buf(&mut buf)?;
-            buf.truncate(written);
-            String::from_utf8_lossy(&buf).into_owned()
-        };
-
-        let needle = if case_sensitive {
-            query.to_owned()
-        } else {
-            query.to_lowercase()
-        };
-        let mut pending_matches = Vec::new();
-        let mut total = 0_usize;
-        let mut capped = false;
-
-        for (row, line) in text.lines().enumerate() {
-            let haystack = if case_sensitive {
-                line.to_owned()
-            } else {
-                line.to_lowercase()
-            };
-            let mut from = 0_usize;
-            while let Some(rel) = haystack[from..].find(&needle) {
-                let byte_start = from + rel;
-                let byte_end = byte_start + needle.len();
-                total += 1;
-                if pending_matches.len() < max_matches {
-                    pending_matches.push(PendingSearchMatch {
-                        row,
-                        start_chars: haystack[..byte_start].chars().count(),
-                        end_chars: haystack[..byte_end].chars().count(),
-                        line_text: line.to_owned(),
-                    });
-                } else {
-                    capped = true;
-                }
-                from = byte_end; // non-overlapping
-                if from >= haystack.len() {
-                    break;
-                }
-            }
-        }
-
-        let original_offset = self.terminal.scrollbar()?.offset as usize;
-        let cols = self.terminal.cols()?;
-        let mut row_cache = HashMap::new();
-        let mut matches = Vec::with_capacity(pending_matches.len());
-        for pending in pending_matches {
-            if !row_cache.contains_key(&pending.row) {
-                let row = self.absolute_row(pending.row).ok().flatten();
-                row_cache.insert(pending.row, row);
-            }
-            let row = row_cache.get(&pending.row).and_then(Option::as_ref);
-            let (start_col, end_col) = row
-                .map(|row| {
-                    cell_span_for_char_range(row, cols, pending.start_chars, pending.end_chars)
-                })
-                .unwrap_or((
-                    saturating_usize_to_u16(pending.start_chars),
-                    saturating_usize_to_u16(pending.end_chars),
-                ));
-            matches.push(TerminalSearchMatch {
-                row: pending.row,
-                start_col,
-                end_col,
-                line_text: pending.line_text,
-            });
-        }
-        self.scroll_to_row_start(original_offset)?;
-        self.force_next_full_frame = true;
-
-        Ok(TerminalSearchResult {
-            matches,
-            total,
-            capped,
-            total_rows,
-        })
-    }
-
-    fn absolute_row(&mut self, row: usize) -> Result<Option<TerminalRow>> {
-        self.scroll_to_row_start(row)?;
-        let scrollbar = self.terminal.scrollbar()?;
-        let offset = scrollbar.offset as usize;
-        let local_row = match row.checked_sub(offset) {
-            Some(local) => local,
-            None => return Ok(None),
-        };
-        let frame = self.frame()?;
-        Ok(frame
-            .rows
-            .into_iter()
-            .find(|terminal_row| usize::from(terminal_row.index) == local_row))
     }
 
     pub fn frame(&mut self) -> Result<TerminalFrame> {
@@ -535,56 +381,6 @@ fn cell_text(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<Stri
     Ok(cell.graphemes()?.into_iter().collect())
 }
 
-fn cell_span_for_char_range(
-    row: &TerminalRow,
-    cols: u16,
-    start_chars: usize,
-    end_chars: usize,
-) -> (u16, u16) {
-    let boundaries = row_text_boundaries(row, cols);
-    let max = boundaries.len().saturating_sub(1);
-    let start = start_chars.min(max);
-    let end = end_chars.min(max).max(start);
-    (boundaries[start], boundaries[end])
-}
-
-fn row_text_boundaries(row: &TerminalRow, cols: u16) -> Vec<u16> {
-    let mut boundaries = vec![0_u16];
-    let mut col = 0_u16;
-    let mut cells = row.cells.iter().collect::<Vec<_>>();
-    cells.sort_by_key(|cell| cell.col);
-
-    for cell in cells {
-        let start = cell.col.min(cols);
-        let end = cell.col.saturating_add(cell.width.max(1)).min(cols);
-        if start >= cols || end <= col {
-            continue;
-        }
-        while col < start {
-            boundaries.push(col.saturating_add(1));
-            col = col.saturating_add(1);
-        }
-        append_text_boundaries(&mut boundaries, &cell.text, start, end);
-        col = end;
-    }
-
-    boundaries
-}
-
-fn append_text_boundaries(boundaries: &mut Vec<u16>, text: &str, start: u16, end: u16) {
-    let len = text.chars().count();
-    if len == 0 {
-        return;
-    }
-    for index in 1..=len {
-        boundaries.push(if index == len { end } else { start });
-    }
-}
-
-fn saturating_usize_to_u16(value: usize) -> u16 {
-    u16::try_from(value).unwrap_or(u16::MAX)
-}
-
 fn map_dirty(dirty: Dirty) -> TerminalDirtyState {
     match dirty {
         Dirty::Clean => TerminalDirtyState::Clean,
@@ -707,23 +503,6 @@ mod tests {
                 .iter()
                 .any(|cell| cell.col == 2 && cell.text == " ")
         );
-    }
-
-    #[test]
-    fn ghostty_terminal_search_maps_wide_cells_to_cell_columns() {
-        let mut terminal = GhosttyTerminalState::new(20, 4, 100).unwrap();
-        terminal.write("A界B\r\n".as_bytes());
-
-        let after_wide = terminal.search("B", false, 10).unwrap();
-        assert_eq!(after_wide.total, 1);
-        assert_eq!(after_wide.matches[0].start_col, 3);
-        assert_eq!(after_wide.matches[0].end_col, 4);
-
-        let across_wide = terminal.search("界B", false, 10).unwrap();
-        assert_eq!(across_wide.total, 1);
-        assert_eq!(across_wide.matches[0].start_col, 1);
-        assert_eq!(across_wide.matches[0].end_col, 4);
-        assert_eq!(across_wide.matches[0].line_text, "A界B");
     }
 
     #[test]

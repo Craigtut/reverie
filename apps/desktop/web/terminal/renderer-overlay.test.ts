@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { createTerminalCanvasRenderer } from '../terminal-canvas-renderer';
 import type { TerminalFrame, TerminalOverlay } from '../terminalTypes';
 
-// Regression guard: the renderer must actually paint the selection/search wash.
+// Regression guard: the renderer must actually paint the selection wash.
 // A stale compiled `terminal-canvas-renderer.js` once shadowed the `.ts` (imports
 // are extensionless and the bundler prefers `.js`), so the app loaded a renderer
 // with no overlay pass: selection worked + copied, but never highlighted. This
@@ -104,12 +104,6 @@ describe('renderer overlay pass', () => {
     const fills = render({ selection: [{ row: 0, startCol: 0, endCol: 5 }] });
     // cols 0..5 at cellWidth 9 = 45px wide, on row 0 (y 0), height = cellHeight.
     const wash = fills.filter(f => f.alpha < 1 && f.y === 0 && f.h === 18 && f.w === 45);
-    expect(wash.length).toBeGreaterThan(0);
-  });
-
-  it('fills a search match span with a translucent wash', () => {
-    const fills = render({ searchMatches: [{ row: 0, startCol: 1, endCol: 4 }] });
-    const wash = fills.filter(f => f.alpha < 1 && f.y === 0 && f.w === 27);
     expect(wash.length).toBeGreaterThan(0);
   });
 

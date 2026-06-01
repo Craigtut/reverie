@@ -14,7 +14,6 @@ import {
   terminalRowTextSlice,
   terminalTextRangeToCellSpan,
 } from './cellGeometry';
-import { findMatchesInLine, type FrameMatch } from './findModel';
 
 export const DEFAULT_TERMINAL_BUFFER_ROW_LIMIT = 100_000;
 
@@ -36,12 +35,6 @@ export interface TerminalBufferState {
 export interface TerminalBufferRowRange {
   start: number;
   end: number;
-}
-
-export interface TerminalBufferSearchResult {
-  matches: FrameMatch[];
-  total: number;
-  capped: boolean;
 }
 
 export interface TerminalBufferRange {
@@ -392,42 +385,6 @@ export function selectAllTerminalBufferRange(
     start: { row: firstRow, col: 0 },
     end: { row: lastRow ?? firstRow, col: Math.max(0, cols - 1) },
   };
-}
-
-export function findMatchesInTerminalBuffer(
-  state: TerminalBufferState,
-  query: string,
-  caseSensitive: boolean,
-  maxMatches = Number.POSITIVE_INFINITY,
-): TerminalBufferSearchResult {
-  if (query.length === 0) return { matches: [], total: 0, capped: false };
-
-  const matches: FrameMatch[] = [];
-  let total = 0;
-  let capped = false;
-  const rowIds = [...state.rowsById.keys()].sort((left, right) => left - right);
-
-  for (const rowId of rowIds) {
-    const layout = terminalRowTextLayout(state.rowsById.get(rowId), state.cols);
-    const lineText = layout.text.replace(/\s+$/u, '');
-    if (lineText.length === 0) continue;
-    for (const match of findMatchesInLine(lineText, query, caseSensitive)) {
-      total += 1;
-      if (matches.length < maxMatches) {
-        const span = terminalTextRangeToCellSpan(layout, match.startCol, match.endCol);
-        matches.push({
-          row: rowId,
-          startCol: span.startCol,
-          endCol: span.endCol,
-          lineText,
-        });
-      } else {
-        capped = true;
-      }
-    }
-  }
-
-  return { matches, total, capped };
 }
 
 function normalizeViewportRows(

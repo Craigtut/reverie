@@ -23,11 +23,9 @@ import {
   setTerminalTheme,
   startSession,
   terminalHistoryInfo,
-  terminalHistorySearchWindow,
   terminalHistoryWindow,
   writeTerminalInput,
 } from '../services/terminalApi';
-import { cycleIndex, resolvedActiveMatchIndex, type FrameMatch } from '../terminal/findModel';
 import {
   DEFAULT_TERMINAL_SCROLLBACK_ROWS,
   getUserHome,
@@ -99,17 +97,6 @@ import {
 // Register the built-in resolvers + actions once, before any menu is built.
 registerDefaultInteractions();
 
-interface FindState {
-  open: boolean;
-  query: string;
-  caseSensitive: boolean;
-  matches: FrameMatch[];
-  activeIndex: number; // 0-based into matches, -1 when none
-  total: number;
-  capped: boolean;
-  busy: boolean;
-}
-
 interface TerminalRenderAggregate {
   backend?: string;
   paintTimings: TerminalMetricSamples;
@@ -156,12 +143,6 @@ interface TerminalDebugApi {
   summary: () => Record<string, unknown>;
   visibleRows: () => Array<{ index: number; text: string }>;
 }
-
-const FIND_DEBOUNCE_MS = 120;
-// Find searches the whole session, so a single query can match thousands of
-// times; cap the kept matches (still report the true total) so navigation and
-// the overlay stay cheap.
-const FIND_MAX_MATCHES = 2_000;
 
 function terminalInputArmedForActiveId(
   bindings: Record<string, SessionTerminalBinding>,
@@ -391,9 +372,6 @@ export function useTerminalSession(params: {
   const terminalWheelListenerRef = useRef<((event: globalThis.WheelEvent) => void) | null>(null);
   const terminalInputQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
 
-  // Re-maps find matches onto the (possibly scrolled) viewport after each frame.
-  // Held in a ref so the long-lived controller can call the latest closure.
-  const applyFindOverlayRef = useRef<() => void>(() => {});
   const requestHistoryRowsRef = useRef<(request: TerminalHistoryRowsRequest) => void>(() => {});
   const requestLiveRowsRef = useRef<(request: TerminalHistoryRowsRequest) => boolean>(() => false);
   const historyWindowRequestsRef = useRef<Set<string>>(new Set());
@@ -467,7 +445,6 @@ export function useTerminalSession(params: {
         if (live && !wasLive) clearHistoryWorkForLiveFollow();
       },
       onScrollMetrics: metrics => useTerminalStore.getState().setTerminalScroll(metrics),
-      onComposite: () => applyFindOverlayRef.current(),
       onMissingHistoryRows: request => {
         requestHistoryRowsRef.current(request);
         return true;
@@ -617,33 +594,8 @@ export function useTerminalSession(params: {
   const interaction = interactionRef.current;
   const [contextMenu, setContextMenu] = useState<MenuModel | null>(null);
 
-  // Find-in-terminal state. `findRef` is the authoritative copy so the
-  // controller's onComposite callback + async search resolution always read
-  // fresh matches; `find` drives the React find bar.
-  const initialFind: FindState = {
-    open: false,
-    query: '',
-    caseSensitive: false,
-    matches: [],
-    activeIndex: -1,
-    total: 0,
-    capped: false,
-    busy: false,
-  };
-  const [find, setFind] = useState<FindState>(initialFind);
-  const findRef = useRef<FindState>(initialFind);
-  const findDebounceRef = useRef<number>(0);
-  const findSearchSeqRef = useRef(0);
   // Whether the full-history (deep scroll) view is showing.
   const [historyViewing, setHistoryViewing] = useState(false);
-  // True when Find was the thing that opened the full-history view, so closing
-  // Find returns to the live tail (but leaves history alone if the user had
-  // opened it themselves via "Full history").
-  const findEnteredHistoryRef = useRef(false);
-  function updateFind(patch: Partial<FindState>) {
-    findRef.current = { ...findRef.current, ...patch };
-    setFind(findRef.current);
-  }
 
   function invalidateHistoryRequests(
     options: {
@@ -918,10 +870,8 @@ export function useTerminalSession(params: {
   useEffect(() => {
     invalidateHistoryRequests();
     controller.resetInteraction();
-    // Hard-reset find on session switch: clear the bar without the live-tail
-    // dance (which would target the newly-selected session), then drop history.
-    findEnteredHistoryRef.current = false;
-    closeFind();
+    // Drop the full-history view on session switch so the newly-selected session
+    // lands on its live tail.
     if (controller.isHistoryMode()) {
       controller.exitHistory();
       setHistoryViewing(false);
@@ -983,14 +933,8 @@ export function useTerminalSession(params: {
     // the terminal flicker and fall behind.
     if (wasHistoryMode) {
       pendingHistoryScrollTargetRowRef.current = null;
-      const activeFind = findRef.current;
       if (next.cols === previous.cols) {
         controller.paintWindow(undefined, next, 'history');
-      } else if (activeFind.open && activeFind.query.length > 0) {
-        // A resize while finding: reflow without jumping to the tail, then
-        // re-run the search so matches + the active position are recomputed
-        // for the new width and the viewport stays on the match.
-        void runSearch(activeFind.query, activeFind.caseSensitive);
       } else {
         pendingHistoryScrollTargetRowRef.current = historyTopRow;
         controller.paintWindow(undefined, next, 'history');
@@ -1512,193 +1456,8 @@ export function useTerminalSession(params: {
     }
   }
 
-  // --- Find in terminal ---
-
-  // Push the stored matches (absolute composite-row coords) to the renderer
-  // overlay; the controller clips them to the painted window. Re-runs on every
-  // painted frame (via the controller's onComposite) so highlights track
-  // scrolling. Find operates on absolute history rows, so matches survive sparse
-  // history-window swaps as the buffer fills.
-  function applyFindOverlay() {
-    const state = findRef.current;
-    if (!state.open || state.matches.length === 0) {
-      controller.clearSearch();
-      return;
-    }
-    controller.setSearchMatches(
-      state.matches.map(match => ({
-        row: match.row,
-        startCol: match.startCol,
-        endCol: match.endCol,
-      })),
-    );
-    const active = state.activeIndex >= 0 ? state.matches[state.activeIndex] : undefined;
-    controller.setActiveMatch(
-      active ? { row: active.row, startCol: active.startCol, endCol: active.endCol } : null,
-    );
-  }
-  applyFindOverlayRef.current = applyFindOverlay;
-
-  function scrollToActiveMatch() {
-    const state = findRef.current;
-    const match = state.activeIndex >= 0 ? state.matches[state.activeIndex] : undefined;
-    if (!match) return;
-    // Find lives in the full-history view, so navigation scrolls the frontend
-    // viewport to the match's absolute row; the repaint re-applies the overlay.
-    controller.scrollToHistoryRow(match.row);
-    applyFindOverlay();
-  }
-
-  function topRowForMatch(row: number, surface: TerminalSurface) {
-    return Math.max(0, row - Math.floor(surface.rows / 3));
-  }
-
-  function activeIndexForResolvedSearch(
-    matches: FrameMatch[],
-    query: string,
-    caseSensitive: boolean,
-  ) {
-    const latest = findRef.current;
-    const active = latest.activeIndex >= 0 ? latest.matches[latest.activeIndex] : undefined;
-    return resolvedActiveMatchIndex(
-      matches,
-      latest.query === query && latest.caseSensitive === caseSensitive ? active : undefined,
-    );
-  }
-
-  // Find searches the entire persisted session, not just the visible area. Rust
-  // replays the durable transcript through Ghostty and returns capped row/column
-  // matches plus the first paintable history window from the same replay.
-  async function runSearch(query: string, caseSensitive: boolean) {
-    findSearchSeqRef.current += 1;
-    const searchSeq = findSearchSeqRef.current;
-    const sessionId = useNavigationStore.getState().selectedSessionId;
-    if (!sessionId || query.length === 0) {
-      updateFind({ matches: [], total: 0, capped: false, activeIndex: -1, busy: false });
-      controller.clearSearch();
-      controller.setSearchActive(false);
-      return;
-    }
-    updateFind({ busy: true });
-    try {
-      const surface = controller.getSurface();
-      const historyRequest = startHistoryRequest(sessionId, surface);
-      const openedHistory = !controller.isHistoryMode();
-      const result = await terminalHistorySearchWindow(
-        sessionId,
-        query,
-        caseSensitive,
-        surface.cols,
-        surface.rows,
-      );
-      if (searchSeq !== findSearchSeqRef.current || !historyRequestIsCurrent(historyRequest)) {
-        return;
-      }
-      const matches = result.search.matches.slice(0, FIND_MAX_MATCHES);
-      const activeIndex = activeIndexForResolvedSearch(matches, query, caseSensitive);
-      const totalRows = resolveHistoryTotalRows(
-        result.frame.scrollback?.totalRows,
-        result.search.totalRows,
-        surface.rows,
-      );
-      updateFind({
-        matches,
-        total: result.search.total,
-        capped: result.search.capped || result.search.matches.length > matches.length,
-        activeIndex,
-        busy: false,
-      });
-      controller.enterHistoryWindow(
-        result.frame,
-        result.startRow,
-        totalRows,
-        false,
-        activeIndex >= 0 ? topRowForMatch(matches[activeIndex].row, surface) : 0,
-      );
-      setHistoryViewing(true);
-      if (activeIndex >= 0) {
-        if (openedHistory) findEnteredHistoryRef.current = true;
-        controller.setSearchActive(true);
-        requestAnimationFrame(() => scrollToActiveMatch());
-      } else {
-        controller.clearSearch();
-        controller.setSearchActive(false);
-        if (openedHistory) {
-          findEnteredHistoryRef.current = true;
-        }
-      }
-    } catch (error) {
-      if (searchSeq !== findSearchSeqRef.current) return;
-      updateFind({ busy: false });
-      writeLog(`Find failed: ${errorMessage(error)}`);
-    }
-  }
-
-  function scheduleSearch(query: string, caseSensitive: boolean) {
-    window.clearTimeout(findDebounceRef.current);
-    findDebounceRef.current = window.setTimeout(() => {
-      void runSearch(query, caseSensitive);
-    }, FIND_DEBOUNCE_MS);
-  }
-
-  function openFind(prefill?: string) {
-    // Find matches within a single row, so a multi-line selection prefill (lines
-    // joined with \n) could never match. Seed from the first line of the prefill.
-    const firstLine = prefill?.split('\n', 1)[0] ?? '';
-    const query = firstLine.length > 0 ? firstLine : findRef.current.query;
-    updateFind({ open: true, query });
-    controller.setSearchActive(true);
-    if (query.length > 0) void runSearch(query, findRef.current.caseSensitive);
-  }
-
-  function closeFind() {
-    window.clearTimeout(findDebounceRef.current);
-    findSearchSeqRef.current += 1;
-    // If Find opened the full-history view, closing it returns to the live tail
-    // (which also clears the find bar). Otherwise just dismiss the bar and stay
-    // wherever the user is (e.g. a history view they opened themselves).
-    if (findEnteredHistoryRef.current) {
-      followLiveTerminalOutput();
-      return;
-    }
-    controller.clearSearch();
-    controller.setSearchActive(false);
-    updateFind({ open: false, query: '', matches: [], total: 0, capped: false, activeIndex: -1 });
-    controller.focusCanvas();
-  }
-
-  function setFindQuery(query: string) {
-    updateFind({ query });
-    scheduleSearch(query, findRef.current.caseSensitive);
-  }
-
-  function toggleFindCase() {
-    const caseSensitive = !findRef.current.caseSensitive;
-    updateFind({ caseSensitive });
-    void runSearch(findRef.current.query, caseSensitive);
-  }
-
-  function moveFind(delta: number) {
-    const state = findRef.current;
-    if (state.matches.length === 0) return;
-    updateFind({ activeIndex: cycleIndex(state.activeIndex, state.matches.length, delta) });
-    scrollToActiveMatch();
-  }
-
   function handleTerminalKeyDown(event: KeyboardEvent<HTMLCanvasElement | HTMLTextAreaElement>) {
     if (terminalTextComposingRef.current || event.nativeEvent.isComposing) return;
-
-    // Cmd/Ctrl-F opens the find bar (never reaches the PTY), prefilled with the
-    // current selection if any. Takes precedence over the selection shortcuts.
-    if (
-      (event.metaKey || event.ctrlKey) &&
-      !event.shiftKey &&
-      (event.key === 'f' || event.key === 'F')
-    ) {
-      event.preventDefault();
-      openFind(controller.getSelectionText() || undefined);
-      return;
-    }
 
     // Selection-aware shortcuts take precedence while a selection exists. We do
     // not intercept a plain Ctrl-C (that stays SIGINT); copy is Cmd-C (macOS) or
@@ -1882,7 +1641,6 @@ export function useTerminalSession(params: {
       clearSelection: () => controller.clearSelection(),
       openExternal: href => openExternalUrl(href),
       askAgent: prompt => askAgentAbout(prompt),
-      openFind: prefill => openFind(prefill),
       canSendInput: () => inputReady(),
     };
   }
@@ -2217,16 +1975,6 @@ export function useTerminalSession(params: {
 
   function followLiveTerminalOutput() {
     invalidateHistoryRequests();
-    // Returning to the live tail also ends any full-history find session (its
-    // match coordinates belong to the frozen history composite).
-    if (findRef.current.open) {
-      window.clearTimeout(findDebounceRef.current);
-      findSearchSeqRef.current += 1;
-      controller.clearSearch();
-      controller.setSearchActive(false);
-      findEnteredHistoryRef.current = false;
-      updateFind({ open: false, query: '', matches: [], total: 0, capped: false, activeIndex: -1 });
-    }
     // "Jump to latest" also leaves the full-history view.
     if (controller.isHistoryMode()) {
       controller.exitHistory();
@@ -2692,21 +2440,6 @@ export function useTerminalSession(params: {
     autostartSession,
     contextMenu,
     closeContextMenu: () => setContextMenu(null),
-    find: {
-      open: find.open,
-      query: find.query,
-      caseSensitive: find.caseSensitive,
-      current: find.activeIndex >= 0 ? find.activeIndex + 1 : 0,
-      total: find.total,
-      capped: find.capped,
-      busy: find.busy,
-    },
-    openFind,
-    closeFind,
-    setFindQuery,
-    toggleFindCase,
-    findNext: () => moveFind(1),
-    findPrev: () => moveFind(-1),
     historyViewing,
     viewFullHistory,
     forwardWheel,

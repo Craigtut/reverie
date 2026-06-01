@@ -1,6 +1,4 @@
 import { makeSyntheticFrame } from '../terminal-canvas-renderer';
-import { findMatchesInFrame } from '../terminal/findModel';
-import { planHistoryWindowForTargetRow } from '../terminal/historyWindowing';
 import type { TerminalFrame } from '../terminalTypes';
 import type {
   AgentCliDetection,
@@ -11,8 +9,8 @@ import type {
 import type { EventHandler, UnlistenFn } from './types';
 
 // The most recent frame per terminal. The history fixtures serve it as the whole
-// replayed transcript, so the harness can exercise full-history scroll + find
-// without a real replay engine.
+// replayed transcript, so the harness can exercise full-history scroll without a
+// real replay engine.
 const lastFixtureFrames = new Map<string, TerminalFrame>();
 
 // Browser fixture backend: an in-memory, localStorage-persisted stand-in for
@@ -121,10 +119,6 @@ export async function invokeBrowserFixture<T>(
       return undefined as T;
     case 'terminal_history_info':
       return historyInfoFixture(args) as T;
-    case 'terminal_history_search':
-      return historySearchFixture(args) as T;
-    case 'terminal_history_search_window':
-      return historySearchWindowFixture(args) as T;
     case 'terminal_history_window':
       return historyWindowFixture(args) as T;
     case 'record_render_metrics':
@@ -498,35 +492,6 @@ function historyWindowFixture(args?: Record<string, unknown>) {
   const rowCount = Number(args?.rowCount ?? args?.rows ?? 0);
   const frame = fixtureSessionFrame() ?? { dirty: 'full', rows: [] };
   return historyWindowFromFixtureFrame(frame, startRow, rowCount);
-}
-
-function historySearchFixture(args?: Record<string, unknown>) {
-  const frame = fixtureSessionFrame() ?? { dirty: 'full', rows: [] };
-  const query = String(args?.query ?? '');
-  const caseSensitive = Boolean(args?.caseSensitive);
-  const cols = Number(args?.cols ?? 80);
-  const all = findMatchesInFrame(frame, query, caseSensitive, cols);
-  const maxMatches = 2_000;
-  return {
-    matches: all.slice(0, maxMatches),
-    total: all.length,
-    capped: all.length > maxMatches,
-    totalRows: frame.rows.length,
-  };
-}
-
-function historySearchWindowFixture(args?: Record<string, unknown>) {
-  const frame = fixtureSessionFrame() ?? { dirty: 'full', rows: [] };
-  const search = historySearchFixture(args);
-  const surfaceRows = Number(args?.rows ?? frame.rows.length);
-  const targetRow = search.matches[0]?.row ?? 0;
-  const plan = planHistoryWindowForTargetRow(targetRow, surfaceRows, search.totalRows);
-  const window = historyWindowFromFixtureFrame(frame, plan.startRow, plan.rowCount);
-  return {
-    search,
-    startRow: window.startRow,
-    frame: window.frame,
-  };
 }
 
 function historyWindowFromFixtureFrame(frame: TerminalFrame, startRow: number, rowCount: number) {

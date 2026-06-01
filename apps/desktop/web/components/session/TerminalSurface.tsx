@@ -6,7 +6,6 @@ import type { TerminalSession } from '../../hooks';
 import { Typography } from '../primitives/Typography';
 import { SessionLaunchOverlay } from './SessionLaunchOverlay';
 import { TerminalContextMenu } from './TerminalContextMenu';
-import { TerminalFindBar } from './TerminalFindBar';
 import { TerminalScrollbar } from './TerminalScrollbar';
 
 // The slice of the terminal session handle this surface binds: the DOM refs and
@@ -28,13 +27,6 @@ type TerminalSurfaceHandle = Pick<
   | 'followLiveTerminalOutput'
   | 'contextMenu'
   | 'closeContextMenu'
-  | 'find'
-  | 'openFind'
-  | 'closeFind'
-  | 'setFindQuery'
-  | 'toggleFindCase'
-  | 'findNext'
-  | 'findPrev'
   | 'historyViewing'
   | 'viewFullHistory'
   | 'scrollbar'
@@ -176,20 +168,6 @@ export function TerminalSurface({
               onLaunch={onLaunch}
             />
           ) : null}
-          <TerminalFindBar
-            open={terminal.find.open}
-            query={terminal.find.query}
-            caseSensitive={terminal.find.caseSensitive}
-            current={terminal.find.current}
-            total={terminal.find.total}
-            capped={terminal.find.capped}
-            busy={terminal.find.busy}
-            onQueryChange={terminal.setFindQuery}
-            onToggleCase={terminal.toggleFindCase}
-            onNext={terminal.findNext}
-            onPrev={terminal.findPrev}
-            onClose={terminal.closeFind}
-          />
         </div>
         {/* Floating "jump to latest": only present once the user has scrolled up
           off the live tail (or is in the full-history view). Anchored to the
@@ -326,7 +304,7 @@ const jumpToLatestButtonClass = css({
   position: 'absolute',
   right: '18px',
   bottom: '16px',
-  // Above the canvas + find bar, below the context menu.
+  // Above the canvas, below the context menu.
   zIndex: 4,
   width: '40px',
   height: '40px',

@@ -6,7 +6,6 @@ import {
   createTerminalBuffer,
   expandTerminalBufferRangeToCellBounds,
   frameFromBufferAbsoluteWindow,
-  findMatchesInTerminalBuffer,
   frameFromBufferSnapshot,
   frameFromBufferWindow,
   mergeHistoryWindowIntoBuffer,
@@ -83,11 +82,6 @@ describe('terminal buffer model', () => {
     expect(
       terminalBufferSelectionText(state, { start: { row: 0, col: 2 }, end: { row: 0, col: 2 } }),
     ).toBe('界');
-    expect(findMatchesInTerminalBuffer(state, 'B', false)).toEqual({
-      matches: [{ row: 0, startCol: 3, endCol: 4, lineText: 'A界B' }],
-      total: 1,
-      capped: false,
-    });
   });
 
   it('updates dirty rows in place so character animations keep one row identity', () => {
@@ -191,11 +185,6 @@ describe('terminal buffer model', () => {
 
     expect([...state.rowsById.keys()]).toEqual([0, 1, 2]);
     expect(state.cachedRanges).toEqual([{ start: 0, end: 3 }]);
-    expect(findMatchesInTerminalBuffer(state, 'old', false)).toEqual({
-      matches: [],
-      total: 0,
-      capped: false,
-    });
     expect(terminalBufferRowText(state, 0, true)).toBe('new');
   });
 
@@ -218,11 +207,6 @@ describe('terminal buffer model', () => {
     expect(state.totalRows).toBe(3);
     expect([...state.rowsById.keys()]).toEqual([0, 1, 2]);
     expect(state.cachedRanges).toEqual([{ start: 0, end: 3 }]);
-    expect(findMatchesInTerminalBuffer(state, 'old-tail', false)).toEqual({
-      matches: [],
-      total: 0,
-      capped: false,
-    });
     expect(terminalBufferRowText(state, 0, true)).toBe('fresh');
   });
 
@@ -464,7 +448,7 @@ describe('terminal buffer model', () => {
     expect(windowFrame.cursor?.position).toEqual({ row: 1, col: 4 });
   });
 
-  it('creates an absolute-row snapshot for selection, links, and find', () => {
+  it('creates an absolute-row snapshot for selection and links', () => {
     let state = createTerminalBuffer(surface);
     state = applyViewportFrameToBuffer(
       state,
@@ -673,26 +657,7 @@ describe('terminal buffer model', () => {
     expect(state.totalRows).toBe(3);
     expect([...state.rowsById.keys()]).toEqual([0, 1, 2]);
     expect(state.cachedRanges).toEqual([{ start: 0, end: 3 }]);
-    expect(findMatchesInTerminalBuffer(state, 'old-tail', false)).toEqual({
-      matches: [],
-      total: 0,
-      capped: false,
-    });
-  });
-
-  it('searches known buffer rows in reading order and reports capped totals', () => {
-    let state = createTerminalBuffer(surface);
-    state = applyViewportFrameToBuffer(
-      state,
-      frame([row(0, 'find me'), row(1, 'me too'), row(2, 'nope')]),
-      surface,
-    );
-
-    expect(findMatchesInTerminalBuffer(state, 'me', false, 1)).toEqual({
-      matches: [{ row: 0, startCol: 5, endCol: 7, lineText: 'find me' }],
-      total: 2,
-      capped: true,
-    });
+    expect(terminalBufferRowText(state, 0, true)).toBe('new-head');
   });
 
   it('reconstructs selection text from absolute cached rows', () => {

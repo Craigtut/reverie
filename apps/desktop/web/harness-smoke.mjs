@@ -42,11 +42,6 @@ const allScenarios = [
     profileGroup: 'terminal-alternate-screen',
   },
   {
-    name: 'terminal-history-find',
-    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-history-find',
-    profileGroup: 'terminal-history-find',
-  },
-  {
     name: 'terminal-resize-storm',
     query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-resize-storm',
     profileGroup: 'terminal-resize-storm',

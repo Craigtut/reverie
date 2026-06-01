@@ -1,6 +1,5 @@
 import { createTerminalGpuRenderer } from './terminal-gpu-renderer';
 import { makeSyntheticFrame, percentile, TERMINAL_SURFACE } from './terminal-canvas-renderer';
-import { OVERSCAN_ROWS } from './terminal/frameModel';
 import type { RenderMetrics } from './domain';
 import type { TerminalFrame } from './terminalTypes';
 
@@ -11,7 +10,6 @@ type HarnessScenario =
   | 'terminal-interaction'
   | 'terminal-concurrent-sessions'
   | 'terminal-alternate-screen'
-  | 'terminal-history-find'
   | 'terminal-resize-storm'
   | 'terminal-long-history-scroll'
   | 'terminal-render-performance';
@@ -67,9 +65,6 @@ async function runHarnessSmokeScenario(scenario: HarnessScenario) {
       break;
     case 'terminal-alternate-screen':
       await runTerminalAlternateScreenScenario();
-      break;
-    case 'terminal-history-find':
-      await runTerminalHistoryFindScenario();
       break;
     case 'terminal-resize-storm':
       await runTerminalResizeStormScenario();
@@ -1057,117 +1052,6 @@ async function runTerminalAlternateScreenScenario() {
   assertions.push('alternate-screen composite selection contains only current rows');
 }
 
-async function runTerminalHistoryFindScenario() {
-  await clickTestId('empty-create-project-button');
-  await clickTestId('choose-project-folder-button');
-  await waitFor(
-    () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
-    'project folder is selected',
-  );
-  await waitFor(
-    () => !isDisabled(requireTestId('submit-project-button')),
-    'project submit enables',
-  );
-  await clickTestId('submit-project-button');
-  fillInput('focus-title-input', 'History Find Topic');
-  await waitFor(
-    () => !isDisabled(requireSelector(selectorForCli('codex_cli'))),
-    'Codex tile enables after the topic is named',
-  );
-  await clickCliChoice('codex_cli');
-  await expectTestId('terminal-body', 'history-find session opens terminal body');
-  await waitForTextIncludes('terminal-status-label', 'Running', 'history-find session starts');
-  const terminalId = await waitForTerminalId('history-find session has a terminal id');
-  const viewport = requireTestId<HTMLDivElement>('terminal-viewport');
-  viewport.style.height = `${TERMINAL_SURFACE.rows * TERMINAL_SURFACE.cellHeight}px`;
-  viewport.style.maxHeight = viewport.style.height;
-  await flushDom();
-
-  const fixture = fixtureHook();
-  fixture.stopStream(terminalId);
-  const lines = Array.from({ length: 160 }, (_, index) => {
-    if (index === 8) return 'lower needle first';
-    if (index === 96) return 'A界Needle second';
-    if (index === 144) return 'lower needle third';
-    return `history filler ${index}`;
-  });
-  fixture.emitRawTerminalFrame(terminalId, terminalHistoryFindFrame(lines));
-  await flushDom();
-
-  const input = requireTestId<HTMLTextAreaElement>('terminal-text-input');
-  input.dispatchEvent(
-    new KeyboardEvent('keydown', {
-      bubbles: true,
-      cancelable: true,
-      key: 'f',
-      metaKey: true,
-    }),
-  );
-  await expectTestId('terminal-find-bar', 'Cmd-F opens terminal find');
-  fillInput('terminal-find-input', 'needle');
-  await waitForTextIncludes(
-    'terminal-find-count',
-    '1 / 3',
-    'find searches the replayed terminal history',
-  );
-  const firstMatchScrollTop = viewport.scrollTop;
-  await clickTestId('terminal-find-next');
-  await waitForTextIncludes(
-    'terminal-find-count',
-    '2 / 3',
-    'find next advances across replayed terminal history',
-  );
-  await waitFor(
-    () => viewport.scrollTop > firstMatchScrollTop,
-    'find next scrolls the replayed history viewport to the active match',
-  );
-  assertions.push('find next scrolls the replayed history viewport to the active match');
-  await waitFor(() => {
-    const localRow = Math.floor(TERMINAL_SURFACE.rows / 3) + OVERSCAN_ROWS;
-    const coveredWideCellSignal = canvasCellTopEdgeSignal(
-      requireTestId<HTMLCanvasElement>('terminal-canvas'),
-      localRow,
-      2,
-    );
-    const matchStartSignal = canvasCellTopEdgeSignal(
-      requireTestId<HTMLCanvasElement>('terminal-canvas'),
-      localRow,
-      3,
-    );
-    return matchStartSignal > coveredWideCellSignal * 1.2;
-  }, 'wide-cell find highlight starts after the wide glyph');
-  assertions.push('wide-cell find highlight starts after the wide glyph');
-  const secondMatchScrollTop = viewport.scrollTop;
-  await clickTestId('terminal-find-next');
-  await waitForTextIncludes(
-    'terminal-find-count',
-    '3 / 3',
-    'find next reaches matches outside the initial history window',
-  );
-  await waitFor(
-    () => viewport.scrollTop > secondMatchScrollTop,
-    'find next scrolls into a lazily fetched history window',
-  );
-  assertions.push('find next scrolls into a lazily fetched history window');
-  await clickTestId('terminal-find-prev');
-  await waitForTextIncludes(
-    'terminal-find-count',
-    '2 / 3',
-    'find previous returns across replayed terminal history',
-  );
-
-  await clickTestId('terminal-find-case-toggle');
-  await waitForTextIncludes(
-    'terminal-find-count',
-    '1 / 2',
-    'case-sensitive find recomputes replayed history matches',
-  );
-
-  await clickTestId('terminal-find-close');
-  await flushDom();
-  expectAbsentTestId('terminal-find-bar', 'closing find hides the terminal find bar');
-}
-
 function terminalFrameFromLines(
   lines: string[],
   options: {
@@ -1223,25 +1107,6 @@ function terminalWideCellFrame(text: 'A界B'): TerminalFrame {
   };
 }
 
-function terminalHistoryFindFrame(lines: string[]): TerminalFrame {
-  const frame = terminalFrameFromLines(lines);
-  return {
-    ...frame,
-    rows: frame.rows.map(row =>
-      row.index === 96
-        ? {
-            ...row,
-            cells: [
-              { col: 0, text: 'A' },
-              { col: 1, width: 2, text: '界' },
-              ...'Needle second'.split('').map((text, index) => ({ col: 3 + index, text })),
-            ],
-          }
-        : row,
-    ),
-  };
-}
-
 function openContextMenu(canvas: HTMLCanvasElement, col: number, rowPx = 9) {
   const rect = canvas.getBoundingClientRect();
   canvas.dispatchEvent(
@@ -1292,22 +1157,6 @@ function canvasBackingScale(canvas: HTMLCanvasElement) {
 function parseCssPx(value: string) {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function canvasCellTopEdgeSignal(canvas: HTMLCanvasElement, row: number, col: number) {
-  const backingScale = canvasBackingScale(canvas);
-  const cellHeight = TERMINAL_SURFACE.cellHeight * backingScale;
-  const cellWidth = TERMINAL_SURFACE.cellWidth * backingScale;
-  const x = Math.max(0, Math.round(col * cellWidth));
-  const y = Math.max(0, Math.round(row * cellHeight));
-  const width = Math.max(1, Math.round(cellWidth));
-  const height = Math.max(1, Math.round(Math.min(cellHeight, 2 * backingScale)));
-  const data = canvasRegionPixels(canvas, x, y, width, height);
-  let signal = 0;
-  for (let offset = 0; offset < data.length; offset += 4) {
-    signal += (data[offset] ?? 0) + (data[offset + 1] ?? 0) + (data[offset + 2] ?? 0);
-  }
-  return signal / Math.max(1, data.length / 4);
 }
 
 function canvasRegionPixels(
