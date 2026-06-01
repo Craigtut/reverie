@@ -29,13 +29,12 @@ mod ghostty;
 #[allow(dead_code)]
 mod wire;
 
-use ghostty::{GhosttyTerminalState, ghostty_scrollback_bytes_for_rows};
-use wire::encode_frame;
+use ghostty::GhosttyTerminalState;
+use wire::{encode_frame, encode_row_band};
 
 const DEFAULT_BIND: &str = "127.0.0.1:17777";
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
-const DEFAULT_SCROLLBACK_ROWS: usize = 100_000;
 const PTY_DRAIN_MAX_BYTES: usize = 64 * 1024;
 const PTY_DRAIN_MAX_CHUNKS: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -165,10 +164,20 @@ impl Broadcaster {
 }
 
 enum WorkerCommand {
-    Resize { cols: u16, rows: u16 },
-    ScrollDelta(isize),
-    ScrollTop,
-    ScrollBottom,
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    // Serve a history band straight from libghostty's buffer (decisions.md
+    // D6/D7), mirroring the desktop runtime's `ReadRows`. The worker runs
+    // `read_rows` and replies with the encoded band so the harness can prefetch
+    // scroll-back over the same wire format the Tauri command returns.
+    ReadRows {
+        start: usize,
+        count: usize,
+        generation: u32,
+        reply: Sender<Vec<u8>>,
+    },
     SetFrontendActive(bool),
     Terminate,
 }
@@ -209,7 +218,6 @@ struct StartSessionRequest {
     cols: Option<u16>,
     rows: Option<u16>,
     spawn_spec: Option<TerminalSpawnSpec>,
-    max_scrollback: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -235,9 +243,11 @@ struct InputBody {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ScrollBody {
+struct ReadRowsBody {
     terminal_id: TerminalId,
-    delta_rows: isize,
+    start_row: usize,
+    count: usize,
+    generation: u32,
 }
 
 #[derive(Deserialize)]
@@ -308,20 +318,14 @@ fn handle_connection(mut stream: TcpStream, server: Arc<BridgeServer>) -> Result
             server.input(body)?;
             write_json_response(&mut stream, &json!(null))?;
         }
-        ("POST", "/scroll") => {
-            let body: ScrollBody = parse_json(&request.body)?;
-            server.scroll_delta(body)?;
-            write_json_response(&mut stream, &json!(null))?;
-        }
-        ("POST", "/scroll_top") => {
-            let body: TerminalIdBody = parse_json(&request.body)?;
-            server.command_for(body.terminal_id, WorkerCommand::ScrollTop)?;
-            write_json_response(&mut stream, &json!(null))?;
-        }
-        ("POST", "/scroll_bottom") => {
-            let body: TerminalIdBody = parse_json(&request.body)?;
-            server.command_for(body.terminal_id, WorkerCommand::ScrollBottom)?;
-            write_json_response(&mut stream, &json!(null))?;
+        ("POST", "/read_rows") => {
+            // Serve a history band over the same wire format the Tauri command
+            // returns, base64'd so the frontend bridge decodes it with the same
+            // `decodeRowBand`. Scrolling itself is fully frontend-local; this is
+            // the harness's prefetch path (decisions.md D6/D7).
+            let body: ReadRowsBody = parse_json(&request.body)?;
+            let band = server.read_rows(body)?;
+            write_json_response(&mut stream, &base64_encode(&band))?;
         }
         ("POST", "/active") => {
             let body: ActiveBody = parse_json(&request.body)?;
@@ -350,11 +354,9 @@ impl BridgeServer {
         let spec = terminal_spawn_spec(&body)?;
         let cols = spec.cols;
         let rows = spec.rows;
-        let max_scrollback_rows = body
-            .request
-            .max_scrollback
-            .unwrap_or(DEFAULT_SCROLLBACK_ROWS);
-        let max_scrollback = ghostty_scrollback_bytes_for_rows(max_scrollback_rows, cols);
+        // Scrollback is the fixed 100 MB dial applied at terminal construction
+        // (ghostty::SCROLLBACK_LIMIT_BYTES), matching the desktop runtime; the
+        // request's `maxScrollback`, if any, is ignored.
         eprintln!(
             "bridge starting terminal {terminal_id} {cols}x{rows}, commandOverride bytes={}",
             body.command_override
@@ -362,13 +364,8 @@ impl BridgeServer {
                 .map_or(0, |value| value.len())
         );
         let (command_tx, command_rx) = mpsc::channel();
-        let controller = spawn_terminal_worker(
-            terminal_id,
-            spec,
-            max_scrollback,
-            command_rx,
-            Arc::clone(&self.broadcaster),
-        )?;
+        let controller =
+            spawn_terminal_worker(terminal_id, spec, command_rx, Arc::clone(&self.broadcaster))?;
 
         *self
             .session
@@ -410,11 +407,23 @@ impl BridgeServer {
         session.controller.write_input(body.input.as_bytes())
     }
 
-    fn scroll_delta(&self, body: ScrollBody) -> Result<()> {
+    /// Serve a history band on the worker thread and return the encoded bytes,
+    /// blocking on the worker's oneshot reply (the same shape as the desktop
+    /// runtime's `read_terminal_rows`).
+    fn read_rows(&self, body: ReadRowsBody) -> Result<Vec<u8>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
         self.command_for(
             body.terminal_id,
-            WorkerCommand::ScrollDelta(body.delta_rows),
-        )
+            WorkerCommand::ReadRows {
+                start: body.start_row,
+                count: body.count,
+                generation: body.generation,
+                reply: reply_tx,
+            },
+        )?;
+        reply_rx
+            .recv()
+            .context("terminal bridge worker dropped the history-range reply")
     }
 
     fn command_for(&self, terminal_id: TerminalId, command: WorkerCommand) -> Result<()> {
@@ -479,7 +488,6 @@ struct BridgeSessionRef {
 fn spawn_terminal_worker(
     terminal_id: TerminalId,
     spec: TerminalSpawnSpec,
-    max_scrollback: usize,
     command_rx: Receiver<WorkerCommand>,
     broadcaster: Arc<Broadcaster>,
 ) -> Result<PtyController> {
@@ -508,14 +516,7 @@ fn spawn_terminal_worker(
     });
 
     thread::spawn(move || {
-        if let Err(error) = terminal_worker(
-            terminal_id,
-            spec,
-            max_scrollback,
-            command_rx,
-            read_rx,
-            broadcaster,
-        ) {
+        if let Err(error) = terminal_worker(terminal_id, spec, command_rx, read_rx, broadcaster) {
             eprintln!("terminal bridge worker failed: {error:#}");
         }
     });
@@ -526,14 +527,12 @@ fn spawn_terminal_worker(
 fn terminal_worker(
     terminal_id: TerminalId,
     spec: TerminalSpawnSpec,
-    max_scrollback: usize,
     command_rx: Receiver<WorkerCommand>,
     read_rx: Receiver<PtyReadEvent>,
     broadcaster: Arc<Broadcaster>,
 ) -> Result<()> {
     let started = Instant::now();
-    let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows, max_scrollback)?;
-    let mut follow_tail = true;
+    let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows)?;
     let mut frontend_active = true;
     // Per-session frame generation, bumped on resize, stamped into every encoded
     // frame, exactly as the Tauri runtime worker does. See wire-protocol.md.
@@ -554,26 +553,21 @@ fn terminal_worker(
             match command {
                 WorkerCommand::Resize { cols, rows } => {
                     terminal.resize(cols, rows)?;
-                    if follow_tail {
-                        terminal.scroll_bottom();
-                    }
                     generation = generation.saturating_add(1);
                     pending_frame = true;
                 }
-                WorkerCommand::ScrollDelta(rows) => {
-                    terminal.scroll_delta(rows);
-                    follow_tail = terminal.is_viewport_at_bottom()?;
-                    pending_frame = true;
-                }
-                WorkerCommand::ScrollTop => {
-                    terminal.scroll_top();
-                    follow_tail = false;
-                    pending_frame = true;
-                }
-                WorkerCommand::ScrollBottom => {
-                    terminal.scroll_bottom();
-                    follow_tail = true;
-                    pending_frame = true;
+                WorkerCommand::ReadRows {
+                    start,
+                    count,
+                    generation: requested_generation,
+                    reply,
+                } => {
+                    let rows = if requested_generation == generation {
+                        terminal.read_rows(start, count)?
+                    } else {
+                        Vec::new()
+                    };
+                    let _ = reply.send(encode_row_band(&rows, generation, start as u32));
                 }
                 WorkerCommand::SetFrontendActive(active) => {
                     frontend_active = active;
@@ -615,9 +609,10 @@ fn terminal_worker(
                 chunks_read += batch.chunks;
                 bytes_read += batch.bytes.len();
                 terminal.write(&batch.bytes);
-                if follow_tail {
-                    terminal.scroll_bottom();
-                }
+                // Always keep the pin on the active tail before the next live
+                // extract; scrolling is frontend-driven (D6) and a read_rows serve
+                // restores the pin too.
+                terminal.scroll_bottom();
                 pending_frame = true;
                 if let Some(deferred_event) = batch.deferred_event {
                     match deferred_event {

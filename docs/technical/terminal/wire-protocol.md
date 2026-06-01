@@ -90,7 +90,7 @@ Do not use the JSON event system for frames or rows. Tauri documents events as J
 
 ## History-range request and reply
 
-When the user scrolls up and the frontend's mirror runs low on older rows, the frontend pulls a band of rows from the backend. This is a request/reply (a Tauri command that returns binary), not part of the frame Channel.
+When the user scrolls up and the frontend's mirror runs low on older rows, the frontend pulls a band of rows from the backend. This is a request/reply (the `read_terminal_rows` Tauri command, which returns binary), not part of the frame Channel.
 
 The request (frontend to backend) is tiny and infrequent, so it travels as ordinary command arguments: the terminal id, the absolute `start_row`, the `count` of rows wanted, and the `generation` the frontend currently holds. The backend serves the rows from `libghostty`'s live buffer (see [`backend.md`](backend.md) for the mechanism) and replies with a binary row band:
 

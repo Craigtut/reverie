@@ -23,8 +23,11 @@ use reverie_core::terminal::{
     TerminalRow, TerminalScrollback, TerminalUnderline,
 };
 
-/// Message kind discriminator. Currently only frames cross the binary stream.
+/// Message kind discriminators. `KIND_FRAME` rides the streaming Channel;
+/// `KIND_ROW_BAND` is the history-range reply (a request/reply command that
+/// returns binary), per `wire-protocol.md` ("History-range request and reply").
 const KIND_FRAME: u8 = 1;
+const KIND_ROW_BAND: u8 = 2;
 
 /// The decoded result of [`decode_frame`]: the frame plus the generation marker
 /// it was stamped with. Used by tests to assert the full round-trip.
@@ -40,6 +43,18 @@ const KIND_FRAME: u8 = 1;
 pub struct DecodedFrameMessage {
     pub generation: u32,
     pub frame: TerminalFrame,
+}
+
+/// The decoded result of [`decode_row_band`]: a contiguous run of rows starting
+/// at `start_row`, tagged with the generation they were read at. Used by the
+/// round-trip + golden tests (the production path only encodes; the TS
+/// `decodeRowBand` is the runtime consumer).
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedRowBand {
+    pub generation: u32,
+    pub start_row: u32,
+    pub rows: Vec<TerminalRow>,
 }
 
 // --- dirty-state codes -----------------------------------------------------
@@ -340,6 +355,35 @@ fn estimate_frame_bytes(frame: &TerminalFrame) -> usize {
     bytes
 }
 
+/// Encode a contiguous band of history rows (the reply to a history-range
+/// request) into the wire format from `wire-protocol.md` ("Row band reply").
+/// The rows are contiguous from `start_row`, so unlike a frame they carry no
+/// per-row index or dirty flag, only a cell count plus the cells. The `Cell`
+/// encoding is identical to a frame's (the same [`encode_cell`]), so one encoder
+/// and one decoder serve both messages.
+pub fn encode_row_band(rows: &[TerminalRow], generation: u32, start_row: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(estimate_row_band_bytes(rows));
+    out.push(KIND_ROW_BAND);
+    out.extend_from_slice(&generation.to_le_bytes());
+    out.extend_from_slice(&start_row.to_le_bytes());
+    out.extend_from_slice(&(rows.len() as u32).to_le_bytes());
+    for row in rows {
+        out.extend_from_slice(&(row.cells.len() as u16).to_le_bytes());
+        for cell in &row.cells {
+            encode_cell(&mut out, cell);
+        }
+    }
+    out
+}
+
+fn estimate_row_band_bytes(rows: &[TerminalRow]) -> usize {
+    let mut bytes = 13; // kind + generation + start_row + row_count
+    for row in rows {
+        bytes += 2 + row.cells.len() * 16;
+    }
+    bytes
+}
+
 /// Errors that [`decode_frame`] can return on a malformed buffer.
 #[allow(dead_code)] // decode-only (see DecodedFrameMessage)
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -459,6 +503,42 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DecodedFrameMessage, WireDecodeError
             scrollback,
             rows,
         },
+    })
+}
+
+/// Decode a row-band reply (kind 2) back into its rows and the generation +
+/// start row they belong to. Symmetric with [`encode_row_band`]; the band rows
+/// are contiguous from `start_row`, so each decoded row's `index` is its 0-based
+/// offset within the band (the caller adds `start_row` to place it absolutely).
+#[allow(dead_code)] // decode-only reference impl (see DecodedRowBand)
+pub fn decode_row_band(bytes: &[u8]) -> Result<DecodedRowBand, WireDecodeError> {
+    let mut reader = Reader::new(bytes);
+
+    let kind = reader.u8("kind")?;
+    if kind != KIND_ROW_BAND {
+        return Err(WireDecodeError::InvalidKind { value: kind });
+    }
+    let generation = reader.u32("generation")?;
+    let start_row = reader.u32("start_row")?;
+    let row_count = reader.u32("row_count")? as usize;
+    let mut rows = Vec::with_capacity(row_count);
+    for index in 0..row_count {
+        let cell_count = reader.u16("band_row.cell_count")? as usize;
+        let mut cells = Vec::with_capacity(cell_count);
+        for _ in 0..cell_count {
+            cells.push(decode_cell(&mut reader)?);
+        }
+        rows.push(TerminalRow {
+            index: index as u16,
+            dirty: true,
+            cells,
+        });
+    }
+
+    Ok(DecodedRowBand {
+        generation,
+        start_row,
+        rows,
     })
 }
 
@@ -931,5 +1011,174 @@ mod tests {
         let decoded = decode_frame(GOLDEN_BYTES).expect("golden bytes should decode");
         assert_eq!(decoded.generation, 1);
         assert_eq!(decoded.frame, golden_frame());
+    }
+
+    // --- row band (history-range reply) -----------------------------------
+
+    /// A band that exercises the row-band shape: a row with styled cells (one
+    /// fg-only, one wide CJK with fg+bg and several style bits), then an empty
+    /// row (zero cells), proving contiguous rows carry only a cell count.
+    fn band_rows() -> Vec<TerminalRow> {
+        vec![
+            TerminalRow {
+                // The band drops per-row index/dirty on the wire; the decoder
+                // reconstructs index = offset within the band, dirty = true.
+                index: 0,
+                dirty: true,
+                cells: vec![
+                    TerminalCell {
+                        col: 0,
+                        width: 1,
+                        text: "R".to_owned(),
+                        fg: Some(color(0x12, 0x34, 0x56)),
+                        bg: None,
+                        style: TerminalCellStyle {
+                            bold: false,
+                            italic: true,
+                            faint: false,
+                            blink: false,
+                            invisible: false,
+                            underline: TerminalUnderline::Dotted,
+                            inverse: false,
+                            strikethrough: false,
+                            overline: false,
+                        },
+                    },
+                    TerminalCell {
+                        col: 1,
+                        width: 2,
+                        text: "界".to_owned(),
+                        fg: Some(color(0xaa, 0xbb, 0xcc)),
+                        bg: Some(color(0x10, 0x20, 0x30)),
+                        style: TerminalCellStyle {
+                            bold: true,
+                            italic: false,
+                            faint: false,
+                            blink: false,
+                            invisible: false,
+                            underline: TerminalUnderline::None,
+                            inverse: true,
+                            strikethrough: false,
+                            overline: false,
+                        },
+                    },
+                ],
+            },
+            TerminalRow {
+                index: 1,
+                dirty: true,
+                cells: Vec::new(),
+            },
+        ]
+    }
+
+    #[test]
+    fn round_trips_a_row_band() {
+        let rows = band_rows();
+        let generation = 0xABCD_1234;
+        let start_row = 4_096;
+        let bytes = encode_row_band(&rows, generation, start_row);
+        let decoded = decode_row_band(&bytes).expect("row band should decode");
+        assert_eq!(decoded.generation, generation);
+        assert_eq!(decoded.start_row, start_row);
+        assert_eq!(decoded.rows, rows);
+    }
+
+    #[test]
+    fn row_band_rejects_an_unknown_kind() {
+        let mut bytes = encode_row_band(&band_rows(), 1, 0);
+        bytes[0] = KIND_FRAME; // a frame kind is not a row band
+        assert!(matches!(
+            decode_row_band(&bytes),
+            Err(WireDecodeError::InvalidKind { value: 1 })
+        ));
+    }
+
+    #[test]
+    fn row_band_rejects_a_truncated_buffer() {
+        let bytes = encode_row_band(&band_rows(), 1, 0);
+        let truncated = &bytes[..bytes.len() - 1];
+        assert!(matches!(
+            decode_row_band(truncated),
+            Err(WireDecodeError::UnexpectedEof { .. })
+        ));
+    }
+
+    /// A small, fully specified row band whose exact bytes are asserted below.
+    /// The TypeScript `decodeRowBand` test embeds the same byte array (see
+    /// `apps/desktop/web/terminal/wireDecode.test.ts`), so both implementations
+    /// are checked against one shared reference vector.
+    fn golden_band_rows() -> Vec<TerminalRow> {
+        vec![
+            TerminalRow {
+                index: 0,
+                dirty: true,
+                cells: vec![TerminalCell {
+                    col: 0,
+                    width: 1,
+                    text: "H".to_owned(),
+                    fg: Some(color(0xFF, 0x00, 0x00)),
+                    bg: None,
+                    style: TerminalCellStyle {
+                        bold: true,
+                        italic: false,
+                        faint: false,
+                        blink: false,
+                        invisible: false,
+                        underline: TerminalUnderline::Single,
+                        inverse: false,
+                        strikethrough: false,
+                        overline: false,
+                    },
+                }],
+            },
+            TerminalRow {
+                index: 1,
+                dirty: true,
+                cells: Vec::new(),
+            },
+        ]
+    }
+
+    /// The exact byte vector the golden band encodes to at generation 1, start
+    /// row 2. Shared fixture cross-checked by the TS decoder test; if the
+    /// encoding changes intentionally, update this array and the TS copy
+    /// together. The single populated cell reuses the frame golden's `H` cell,
+    /// so the shared `Cell` encoding is visibly identical across both messages.
+    const GOLDEN_BAND_BYTES: &[u8] = &[
+        // kind (2 = row band), generation (u32 LE = 1)
+        0x02, 0x01, 0x00, 0x00, 0x00, //
+        // start_row (u32 = 2)
+        0x02, 0x00, 0x00, 0x00, //
+        // row_count (u32 = 2)
+        0x02, 0x00, 0x00, 0x00, //
+        // band row[0]: cell_count (u16 = 1)
+        0x01, 0x00, //
+        // cell[0]: col=0, width=1, style (bold|underline Single = 0x0101),
+        // color_flags (fg only = 1)
+        0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, //
+        // cell[0].fg (FF 00 00)
+        0xFF, 0x00, 0x00, //
+        // cell[0].text_len (u16 = 1), 'H'
+        0x01, 0x00, 0x48, //
+        // band row[1]: cell_count (u16 = 0)
+        0x00, 0x00, //
+    ];
+
+    #[test]
+    fn golden_band_encodes_to_exact_bytes() {
+        let bytes = encode_row_band(&golden_band_rows(), 1, 2);
+        assert_eq!(
+            bytes, GOLDEN_BAND_BYTES,
+            "golden row band encoding changed; update GOLDEN_BAND_BYTES here and the TS copy in wireDecode.test.ts"
+        );
+    }
+
+    #[test]
+    fn golden_band_bytes_decode_to_the_golden_band() {
+        let decoded = decode_row_band(GOLDEN_BAND_BYTES).expect("golden band should decode");
+        assert_eq!(decoded.generation, 1);
+        assert_eq!(decoded.start_row, 2);
+        assert_eq!(decoded.rows, golden_band_rows());
     }
 }

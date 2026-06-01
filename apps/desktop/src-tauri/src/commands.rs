@@ -26,7 +26,7 @@ use tauri_plugin_opener::OpenerExt;
 #[cfg(unix)]
 use crate::bridge::{BridgeInfo, mint_session_secret};
 use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
-use crate::terminal::ghostty::{GhosttyTerminalState, ghostty_scrollback_bytes_for_rows};
+use crate::terminal::ghostty::GhosttyTerminalState;
 use crate::terminal::runtime::{
     TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest,
 };
@@ -52,7 +52,6 @@ pub(crate) struct StartSessionRequest {
     spawn_spec: Option<TerminalSpawnSpec>,
     cols: Option<u16>,
     rows: Option<u16>,
-    max_scrollback: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -826,9 +825,9 @@ pub(crate) fn start_session(
         register_session_with_bridge(&app, &service, shell_session_id, &mut spawn_spec);
     }
 
-    let max_scrollback_rows = request.max_scrollback.unwrap_or(10_000);
-    let max_scrollback = ghostty_scrollback_bytes_for_rows(max_scrollback_rows, spawn_spec.cols);
-
+    // The scrollback budget is a fixed 100 MB dial applied at terminal
+    // construction (see ghostty::SCROLLBACK_LIMIT_BYTES, decisions.md D7), so the
+    // request carries no per-session row count.
     runtime
         .spawn_session_stream(
             app,
@@ -836,7 +835,6 @@ pub(crate) fn start_session(
                 session_id,
                 terminal_id,
                 spawn_spec,
-                max_scrollback,
                 target_frames: None,
                 agent_kind,
                 folder_name,
@@ -881,45 +879,23 @@ pub(crate) fn resize_terminal(
         .map_err(|err| err.to_string())
 }
 
+/// Serve a contiguous band of history rows for the frontend's scroll-back
+/// prefetch (decisions.md D6/D7). Returns the binary row band from
+/// `wire-protocol.md`, which the frontend decodes with `decodeRowBand` and
+/// merges into its mirror (only when the generation still matches). This is the
+/// one place the frontend pulls rows from the backend; scrolling itself is fully
+/// frontend-local with no round-trip. The bytes are returned to the WebView as
+/// an `ArrayBuffer` (a Tauri `Vec<u8>` response).
 #[tauri::command]
-pub(crate) fn scroll_terminal_viewport(
+pub(crate) fn read_terminal_rows(
     runtime: State<'_, TerminalSessionRuntime>,
     terminal_id: TerminalId,
-    delta_rows: i32,
-) -> Result<(), String> {
+    start_row: usize,
+    count: usize,
+    generation: u32,
+) -> Result<Vec<u8>, String> {
     runtime
-        .scroll_terminal(terminal_id, delta_rows as isize)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub(crate) fn scroll_terminal_viewport_to_top(
-    runtime: State<'_, TerminalSessionRuntime>,
-    terminal_id: TerminalId,
-) -> Result<(), String> {
-    runtime
-        .scroll_terminal_to_top(terminal_id)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub(crate) fn scroll_terminal_viewport_to_bottom(
-    runtime: State<'_, TerminalSessionRuntime>,
-    terminal_id: TerminalId,
-) -> Result<(), String> {
-    runtime
-        .scroll_terminal_to_bottom(terminal_id)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub(crate) fn scroll_terminal_viewport_to_row(
-    runtime: State<'_, TerminalSessionRuntime>,
-    terminal_id: TerminalId,
-    row: usize,
-) -> Result<(), String> {
-    runtime
-        .scroll_terminal_to_row(terminal_id, row)
+        .read_terminal_rows(terminal_id, start_row, count, generation)
         .map_err(|err| err.to_string())
 }
 
@@ -1293,11 +1269,7 @@ fn unregister_session_from_bridge(app: &AppHandle, session_id: SessionId) {
 fn unregister_session_from_bridge(_app: &AppHandle, _session_id: SessionId) {}
 
 fn build_ghostty_frame_sequence() -> Result<GhosttyFrameSequence> {
-    let mut terminal = GhosttyTerminalState::new(
-        PROOF_COLS,
-        PROOF_ROWS,
-        PROOF_FRAMES + PROOF_ROWS as usize + 100,
-    )?;
+    let mut terminal = GhosttyTerminalState::new(PROOF_COLS, PROOF_ROWS)?;
     let mut frames = Vec::with_capacity((PROOF_FRAMES / 2) + 2);
     let mut output_bytes = 0_usize;
 

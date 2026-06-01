@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { decodeTerminalFrame, decodeTerminalFrameBase64 } from './wireDecode';
+import {
+  decodeRowBand,
+  decodeRowBandBase64,
+  decodeTerminalFrame,
+  decodeTerminalFrameBase64,
+} from './wireDecode';
 
 // The exact byte vector produced by the Rust encoder's golden test
 // (terminal::wire::tests::GOLDEN_BYTES in
@@ -152,5 +157,80 @@ describe('decodeTerminalFrame (golden cross-check with Rust encoder)', () => {
     const fromNumberArray = decodeTerminalFrame(Array.from(GOLDEN_BYTES));
     expect(fromTypedArray).toEqual(fromArrayBuffer);
     expect(fromNumberArray).toEqual(fromArrayBuffer);
+  });
+});
+
+// The exact byte vector produced by the Rust encoder's golden row-band test
+// (terminal::wire::tests::GOLDEN_BAND_BYTES in
+// apps/desktop/src-tauri/src/terminal/wire.rs) for a small fixed band at
+// generation 1, start row 2. This cross-checks the two row-band implementations:
+// if either side changes the encoding, this array and the Rust copy must be
+// updated together. The single populated cell is the frame golden's 'H' cell, so
+// the shared `Cell` encoding is visibly identical across both messages.
+const GOLDEN_BAND_BYTES = new Uint8Array([
+  // kind (2 = row band), generation (u32 LE = 1)
+  0x02, 0x01, 0x00, 0x00, 0x00,
+  // start_row (u32 = 2)
+  0x02, 0x00, 0x00, 0x00,
+  // row_count (u32 = 2)
+  0x02, 0x00, 0x00, 0x00,
+  // band row[0]: cell_count (u16 = 1)
+  0x01, 0x00,
+  // cell[0]: col=0, width=1, style (bold|underline Single = 0x0101),
+  // color_flags (fg only = 1)
+  0x00, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01,
+  // cell[0].fg (FF 00 00)
+  0xff, 0x00, 0x00,
+  // cell[0].text_len (u16 = 1), 'H'
+  0x01, 0x00, 0x48,
+  // band row[1]: cell_count (u16 = 0)
+  0x00, 0x00,
+]);
+
+describe('decodeRowBand (golden cross-check with Rust encoder)', () => {
+  it('decodes the golden band bytes to the expected rows, generation and start row', () => {
+    const decoded = decodeRowBand(GOLDEN_BAND_BYTES.buffer);
+
+    expect(decoded.generation).toBe(1);
+    expect(decoded.startRow).toBe(2);
+    expect(decoded.rows).toEqual([
+      {
+        index: 0,
+        dirty: true,
+        cells: [
+          {
+            col: 0,
+            width: 1,
+            text: 'H',
+            fg: { r: 0xff, g: 0x00, b: 0x00 },
+            style: {
+              bold: true,
+              italic: false,
+              faint: false,
+              blink: false,
+              invisible: false,
+              underline: 'single',
+              inverse: false,
+              strikethrough: false,
+              overline: false,
+            },
+          },
+        ],
+      },
+      { index: 1, dirty: true, cells: [] },
+    ]);
+  });
+
+  it('decodes the same band from a base64 SSE payload (harness bridge path)', () => {
+    const base64 = Buffer.from(GOLDEN_BAND_BYTES).toString('base64');
+    const fromBase64 = decodeRowBandBase64(base64);
+    const fromBuffer = decodeRowBand(GOLDEN_BAND_BYTES.buffer);
+    expect(fromBase64).toEqual(fromBuffer);
+  });
+
+  it('rejects a band with an unexpected kind byte', () => {
+    const bad = GOLDEN_BAND_BYTES.slice();
+    bad[0] = 0x01; // a frame kind is not a row band
+    expect(() => decodeRowBand(bad.buffer)).toThrow(/unexpected message kind/);
   });
 });

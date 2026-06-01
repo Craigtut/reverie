@@ -15,8 +15,21 @@ use reverie_core::terminal::{
 
 const DEFAULT_CELL_WIDTH_PX: u32 = 9;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 18;
-const SCROLLBACK_BYTES_PER_CELL: usize = 16;
-const MIN_SCROLLBACK_BYTES: usize = 1024 * 1024;
+
+/// Upper bound on the rows one `read_rows` serve will gather, so a pathological
+/// history-range request can never make the worker walk the whole page list in
+/// one call. A prefetch band is a viewport plus overscan (tens of rows); this
+/// cap is far above any real band while still bounding the excursion.
+const MAX_READ_ROWS: usize = 4_096;
+
+/// libghostty's scrollback budget per session, in bytes (the `max_scrollback`
+/// option is a byte cap, not a row count; see `libghostty-history-limits.md`).
+/// libghostty's own default is 10 MB; Reverie sets the dial to 100 MB per
+/// session (decisions.md D7). Allocation is lazy, so a budget this large only
+/// costs what a session actually produces, and background buffers are shed under
+/// memory pressure. This is the sole source of scroll-back reach (D6/D7): the
+/// backend serves rows only from this live buffer and persists nothing.
+pub const SCROLLBACK_LIMIT_BYTES: usize = 100 * 1024 * 1024;
 
 /// Ghostty-backed terminal state for converting VT byte streams into Reverie frames.
 ///
@@ -31,12 +44,17 @@ pub struct GhosttyTerminalState<'alloc, 'cb> {
 }
 
 impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
-    pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
+    /// Construct a terminal sized `cols`x`rows`. The scrollback budget is always
+    /// the fixed [`SCROLLBACK_LIMIT_BYTES`] dial (100 MB, lazily allocated;
+    /// decisions.md D7): `max_scrollback` is libghostty's byte cap, and the
+    /// frontend, not a per-session row count, decides reach by scrolling, so the
+    /// budget is a single constant applied here at construction.
+    pub fn new(cols: u16, rows: u16) -> Result<Self> {
         Ok(Self {
             terminal: Terminal::new(TerminalOptions {
                 cols,
                 rows,
-                max_scrollback,
+                max_scrollback: SCROLLBACK_LIMIT_BYTES,
             })?,
             render_state: RenderState::new()?,
             force_next_full_frame: true,
@@ -100,59 +118,39 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         Ok(())
     }
 
-    pub fn scroll_delta(&mut self, rows: isize) {
-        self.terminal.scroll_viewport(ScrollViewport::Delta(rows));
-        self.force_next_full_frame = true;
-    }
-
-    pub fn scroll_top(&mut self) {
-        self.terminal.scroll_viewport(ScrollViewport::Top);
-        self.force_next_full_frame = true;
-    }
-
-    pub fn scroll_bottom(&mut self) {
-        if matches!(self.is_viewport_at_bottom(), Ok(true)) {
-            return;
-        }
-        self.terminal.scroll_viewport(ScrollViewport::Bottom);
-        self.force_next_full_frame = true;
-    }
-
+    /// Whether the viewport currently shows the active area (the tail). Used by
+    /// `scroll_bottom` to skip a redundant re-pin, and indirectly by the worker
+    /// which keeps the tail pinned before each live extract.
     pub fn is_viewport_at_bottom(&self) -> Result<bool> {
         let scrollbar = self.terminal.scrollbar()?;
         Ok(scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total)
     }
 
+    /// Pin the viewport to the active area (the tail), forcing a full next frame
+    /// when it actually moved. The worker calls this before each live extract so
+    /// the live stream always emits the tail; the frontend, not the backend,
+    /// decides whether the tail is on screen. The early return keeps a steady
+    /// tail-follow from re-pinning every frame. `read_rows` uses
+    /// [`Self::scroll_bottom_unconditional`] instead, because after a serve
+    /// excursion the pin is in scrollback and the at-bottom check would be stale.
+    pub fn scroll_bottom(&mut self) {
+        if matches!(self.is_viewport_at_bottom(), Ok(true)) {
+            return;
+        }
+        self.scroll_bottom_unconditional();
+    }
+
     /// Total rows currently held in libghostty's live buffer (scrollback +
-    /// viewport). Retained for the live-buffer scroll-back work that serves
-    /// history ranges straight from libghostty (see decisions.md D6/D7).
-    #[allow(dead_code)]
+    /// viewport). The frontend uses this (via the frame's scrollback block) to
+    /// size its scroll-back and address history-range requests; `read_rows`
+    /// clamps its band to it.
     pub fn total_rows(&self) -> Result<usize> {
         Ok(self.terminal.total_rows()?)
     }
 
-    /// Scroll the viewport so screen row `row` is visible, aimed about a third
-    /// down from the top for context. Implemented as a delta because
-    /// libghostty-vt exposes only relative/top/bottom scrolling.
-    pub fn scroll_to_row(&mut self, row: usize) -> Result<()> {
-        let scrollbar = self.terminal.scrollbar()?;
-        let total = scrollbar.total as usize;
-        let len = scrollbar.len as usize;
-        let offset = scrollbar.offset as usize;
-        let max_offset = total.saturating_sub(len);
-        let target = row.saturating_sub(len / 3).min(max_offset);
-        let delta = target as isize - offset as isize;
-        if delta != 0 {
-            self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
-            self.force_next_full_frame = true;
-        }
-        Ok(())
-    }
-
     /// Scroll the viewport so `row` is the first rendered row, clamped to the
-    /// last valid viewport start. Unlike `scroll_to_row`, this is exact.
-    /// Retained for the live-buffer scroll-back work (decisions.md D6/D7).
-    #[allow(dead_code)]
+    /// last valid viewport start. This is the exact move `read_rows` uses to
+    /// position the pin over a requested history band before extracting it.
     pub fn scroll_to_row_start(&mut self, row: usize) -> Result<()> {
         let scrollbar = self.terminal.scrollbar()?;
         let total = scrollbar.total as usize;
@@ -172,6 +170,108 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         let force_full_frame = std::mem::take(&mut self.force_next_full_frame);
         let frame = extract_frame(&mut self.render_state, &self.terminal)?;
         Ok(self.diff_frame(frame, force_full_frame))
+    }
+
+    /// Serve a contiguous band of history rows for the frontend's scroll-back
+    /// prefetch (decisions.md D6/D7). Returns up to `count` rows starting at
+    /// absolute row `start_row`, each indexed 0-based within the band.
+    ///
+    /// Mechanism (shaped by the binding, see `libghostty-history-limits.md`):
+    /// the `libghostty` binding can only read cells through `RenderState`, which
+    /// always reflects the current viewport, so a by-position read of arbitrary
+    /// scrollback rows is done by *moving the viewport pin*. We momentarily move
+    /// the pin to `start_row` (via the exact `scroll_to_row_start`), extract the
+    /// visible rows, and step the pin down by a viewport height at a time until
+    /// `count` rows are gathered or the buffer is exhausted, then RESTORE the pin
+    /// to the active area (`scroll_bottom`) before returning, so the next live
+    /// extract still shows the tail. This runs only on the worker thread that
+    /// solely owns the terminal, so a serve is never interleaved with a live
+    /// extract and the user never sees the excursion.
+    ///
+    /// Returns an empty band when `start_row` is at or past the end of the
+    /// buffer. `count` is clamped to a sane maximum.
+    pub fn read_rows(&mut self, start_row: usize, count: usize) -> Result<Vec<TerminalRow>> {
+        // Run the serve, then ALWAYS restore the pin to the tail, even if an
+        // extract or scroll errored mid-serve. Otherwise an error would leave the
+        // pin parked in scrollback and the next live extract would paint a stale
+        // history excursion instead of the tail. The restore happens before we
+        // surface the error to the caller.
+        let result = self.read_rows_inner(start_row, count);
+        self.scroll_bottom_unconditional();
+        result
+    }
+
+    /// The serve loop for [`Self::read_rows`]. Kept separate so the caller can
+    /// restore the viewport pin unconditionally afterward, regardless of whether
+    /// this returned `Ok` or `Err`.
+    fn read_rows_inner(&mut self, start_row: usize, count: usize) -> Result<Vec<TerminalRow>> {
+        let count = count.min(MAX_READ_ROWS);
+        let total_rows = self.total_rows()?;
+        if count == 0 || start_row >= total_rows {
+            return Ok(Vec::new());
+        }
+
+        let end_row = start_row.saturating_add(count).min(total_rows);
+        let mut rows: Vec<TerminalRow> = Vec::with_capacity(end_row - start_row);
+        let mut next_row = start_row;
+
+        // Step the pin down a viewport at a time, copying the rows that fall in
+        // [start_row, end_row). `scroll_to_row_start` clamps to the last valid
+        // viewport start, so near the bottom the landed offset can be < the
+        // requested row; we read the real offset back and skip rows before
+        // `next_row`, and we always advance by at least one row to terminate.
+        while next_row < end_row {
+            self.scroll_to_row_start(next_row)?;
+            let offset = self.viewport_offset()?;
+            let window = extract_frame(&mut self.render_state, &self.terminal)?;
+            let window_len = window.rows.len();
+            if window_len == 0 {
+                break;
+            }
+
+            for row in window.rows {
+                let absolute = offset.saturating_add(row.index as usize);
+                if absolute < next_row || absolute >= end_row {
+                    continue;
+                }
+                let band_index = absolute - start_row;
+                rows.push(TerminalRow {
+                    index: band_index as u16,
+                    dirty: true,
+                    cells: row.cells,
+                });
+            }
+
+            // Guarantee forward progress even if the window contributed no rows
+            // in range (e.g. a clamp landed entirely below `next_row`). A zero-row
+            // window already broke above, so `advanced_to > offset` always holds
+            // here; the `max` only matters when the band is shorter than the
+            // viewport and the clamp lands the offset before `next_row`.
+            next_row = offset.saturating_add(window_len).max(next_row + 1);
+        }
+
+        // Rows are gathered top-down in viewport-height steps but a clamp can
+        // surface them out of order at the boundary; sort + dedup by band index
+        // so the band is strictly contiguous and ascending.
+        rows.sort_by_key(|row| row.index);
+        rows.dedup_by_key(|row| row.index);
+        Ok(rows)
+    }
+
+    /// The current viewport's top absolute row (the scrollbar offset).
+    fn viewport_offset(&self) -> Result<usize> {
+        let scrollbar = self.terminal.scrollbar()?;
+        Ok(usize::try_from(scrollbar.offset).unwrap_or(usize::MAX))
+    }
+
+    /// Move the viewport pin to the active area (tail) unconditionally, forcing a
+    /// full next frame. Used by `read_rows` to restore the pin after a serve and
+    /// by the worker before each live extract; unlike `scroll_bottom` it does not
+    /// early-return when already at the bottom, because after a serve excursion
+    /// the pin is in scrollback and must be reset.
+    pub fn scroll_bottom_unconditional(&mut self) {
+        self.terminal.scroll_viewport(ScrollViewport::Bottom);
+        self.force_next_full_frame = true;
     }
 
     fn diff_frame(&mut self, mut frame: TerminalFrame, force_full_frame: bool) -> TerminalFrame {
@@ -196,21 +296,6 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         }
         frame
     }
-}
-
-/// Convert Reverie's user-facing scrollback row budget to Ghostty's byte budget.
-///
-/// libghostty-vt names this option `max_scrollback`, but Ghostty's screen
-/// implementation treats it as bytes. Keep the app contract in rows and give
-/// Ghostty enough backing storage for typical styled terminal cells.
-pub fn ghostty_scrollback_bytes_for_rows(rows: usize, cols: u16) -> usize {
-    if rows == 0 {
-        return 0;
-    }
-    let cols = usize::from(cols.max(1));
-    rows.saturating_mul(cols)
-        .saturating_mul(SCROLLBACK_BYTES_PER_CELL)
-        .max(MIN_SCROLLBACK_BYTES)
 }
 
 fn canonical_frame(frame: &TerminalFrame) -> TerminalFrame {
@@ -463,7 +548,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_renders_reverie_frame() {
-        let mut terminal = GhosttyTerminalState::new(40, 8, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(40, 8).unwrap();
         terminal.write(b"\x1b[1;36mReverie\x1b[0m terminal backend\r\n");
         let frame = terminal.frame().unwrap();
 
@@ -480,7 +565,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_preserves_wide_cell_widths() {
-        let mut terminal = GhosttyTerminalState::new(20, 4, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
         terminal.write("A界B\r\n".as_bytes());
         let frame = terminal.frame().unwrap();
         let row = frame.rows.iter().find(|row| row.index == 0).unwrap();
@@ -509,7 +594,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_reports_injected_default_colors() {
-        let mut terminal = GhosttyTerminalState::new(20, 4, 50).unwrap();
+        let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
         // Default (no OSC) is Ghostty's hardwired white-on-black.
         let default = terminal.frame().unwrap();
         assert_eq!(
@@ -560,7 +645,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_preserves_truecolor_cells() {
-        let mut terminal = GhosttyTerminalState::new(40, 4, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(40, 4).unwrap();
         terminal.write(b"\x1b[38;2;1;2;3mfg\x1b[48;2;4;5;6mbg\x1b[0m\r\n");
         let frame = terminal.frame().unwrap();
         let styled_cell = frame.rows[0]
@@ -581,7 +666,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_preserves_inverse_video_style() {
-        let mut terminal = GhosttyTerminalState::new(24, 4, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(24, 4).unwrap();
         terminal.write(b"normal \x1b[7minverse\x1b[0m\r\n");
         let frame = terminal.frame().unwrap();
         let inverse_cell = frame.rows[0]
@@ -595,7 +680,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_preserves_text_decoration_styles() {
-        let mut terminal = GhosttyTerminalState::new(40, 4, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(40, 4).unwrap();
         terminal.write(
             b"\x1b[2mfaint\x1b[0m \x1b[5mblink\x1b[0m \x1b[8minvis\x1b[0m \x1b[9mstrike\x1b[0m \x1b[53mover\x1b[0m\r\n",
         );
@@ -635,7 +720,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_preserves_cortex_startup_truecolor() {
-        let mut terminal = GhosttyTerminalState::new(96, 16, 200).unwrap();
+        let mut terminal = GhosttyTerminalState::new(96, 16).unwrap();
         terminal.write(
             b"\x1b[?2004h\x1b[?u\x1b[?25l\x1b[?2026h\x1b[0m\x1b]8;;\x07\r\r\n\
               \x1b[38;2;0;229;204mCORETEXT\x1b[39m\x1b[0m\x1b]8;;\x07\r\r\n\
@@ -689,7 +774,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_exposes_input_modes_to_frontend() {
-        let mut terminal = GhosttyTerminalState::new(40, 8, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(40, 8).unwrap();
         terminal.write(b"\x1b[?1h\x1b[?66h\x1b[?2004h\x1b[?2026h\x1b[?1049h");
         let frame = terminal.frame().unwrap();
 
@@ -711,7 +796,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_preserves_alternate_screen_redraw_rows() {
-        let mut terminal = GhosttyTerminalState::new(40, 6, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(40, 6).unwrap();
         terminal.write(b"\x1b[?1049h\x1b[Hstatus-one\r\nstable-line");
         let first = terminal.frame().unwrap();
 
@@ -753,7 +838,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_resize_reflows_primary_screen() {
-        let mut terminal = GhosttyTerminalState::new(24, 8, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(24, 8).unwrap();
         terminal.write(b"reverie resize proof keeps wrapped text intact across shape change\r\n");
         let initial = terminal.frame().unwrap();
 
@@ -771,7 +856,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_forces_full_frame_after_resize() {
-        let mut terminal = GhosttyTerminalState::new(24, 4, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(24, 4).unwrap();
         terminal.write(b"resize dirty proof\r\n");
         let _ = terminal.frame().unwrap();
 
@@ -783,25 +868,8 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_terminal_state_forces_full_frame_after_viewport_scroll() {
-        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
-        for index in 1..=10 {
-            terminal.write(format!("L{index:02}\r\n").as_bytes());
-        }
-        terminal.scroll_bottom();
-        let _ = terminal.frame().unwrap();
-
-        terminal.scroll_top();
-        let top = terminal.frame().unwrap();
-
-        assert_eq!(top.dirty, TerminalDirtyState::Full);
-        assert!(top.rows.iter().all(|row| row.dirty));
-        assert_eq!(top.rows[0].plain_text().trim_end(), "L01");
-    }
-
-    #[test]
     fn scroll_bottom_does_not_force_clean_tail_frame_full() {
-        let mut terminal = GhosttyTerminalState::new(24, 4, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(24, 4).unwrap();
         terminal.write(b"status-one\r\nstable-line");
         let _ = terminal.frame().unwrap();
 
@@ -816,7 +884,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_forces_full_frame_when_viewport_offset_changes() {
-        let mut terminal = GhosttyTerminalState::new(24, 3, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(24, 3).unwrap();
         for _ in 0..4 {
             terminal.write(b"repeat\r\n");
         }
@@ -832,6 +900,158 @@ mod tests {
         assert_eq!(after.dirty, TerminalDirtyState::Full);
         assert_eq!(after.rows.len(), 3);
         assert!(after.rows.iter().all(|row| row.dirty));
+    }
+
+    #[test]
+    fn read_rows_serves_a_history_band_from_the_top() {
+        // 30 lines into a 3-row viewport leaves a deep scrollback to serve from.
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        for index in 1..=30 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        // Serve the first five rows of history (taller than the 3-row viewport,
+        // so read_rows must step the pin down to gather them all).
+        let band = terminal.read_rows(0, 5).unwrap();
+        let text = band
+            .iter()
+            .map(TerminalRow::plain_text)
+            .map(|line| line.trim_end().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(text, vec!["L01", "L02", "L03", "L04", "L05"]);
+        // Band rows are contiguous and 0-based within the band.
+        assert_eq!(
+            band.iter().map(|row| row.index).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn read_rows_serves_a_band_from_the_middle() {
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        for index in 1..=30 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        // Rows 9..13 (0-based absolute) correspond to L10..L14.
+        let band = terminal.read_rows(9, 4).unwrap();
+        let text = band
+            .iter()
+            .map(TerminalRow::plain_text)
+            .map(|line| line.trim_end().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(text, vec!["L10", "L11", "L12", "L13"]);
+    }
+
+    #[test]
+    fn read_rows_restores_the_pin_so_the_next_live_extract_shows_the_tail() {
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        for index in 1..=30 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        // Drain the seed frame; the viewport is now at the tail.
+        let tail_before = terminal.frame().unwrap();
+        assert!(tail_before.scrollback.at_bottom);
+
+        // Serve a history band from the top: this moves the pin deep into
+        // scrollback to extract those rows.
+        let band = terminal.read_rows(0, 5).unwrap();
+        assert_eq!(band.len(), 5);
+
+        // The very next live extract must still show the active tail, proving the
+        // serve restored the pin (scroll_bottom) before returning. After the
+        // empty trailing line the last printed line L30 sits one row up.
+        let after = terminal.frame().unwrap();
+        assert!(
+            after.scrollback.at_bottom,
+            "pin must be back at the active area after a serve"
+        );
+        // A serve forces the next frame Full (the pin moved), so the tail repaints
+        // cleanly rather than diffing against a stale scrolled baseline.
+        assert_eq!(after.dirty, TerminalDirtyState::Full);
+        let tail_text = after
+            .rows
+            .iter()
+            .map(TerminalRow::plain_text)
+            .map(|line| line.trim_end().to_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            tail_text.iter().any(|line| line == "L30"),
+            "tail should show the latest output after the serve, got {tail_text:?}"
+        );
+    }
+
+    #[test]
+    fn read_rows_returns_empty_past_the_buffer_and_still_restores_the_pin() {
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        for index in 1..=12 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        let total = terminal.total_rows().unwrap();
+        let band = terminal.read_rows(total + 5, 4).unwrap();
+        assert!(band.is_empty(), "a request past the buffer returns no rows");
+
+        // Even the empty path restores the pin to the tail.
+        let after = terminal.frame().unwrap();
+        assert!(after.scrollback.at_bottom);
+    }
+
+    #[test]
+    fn read_rows_clamps_count_to_the_available_buffer() {
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        for index in 1..=8 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        let total = terminal.total_rows().unwrap();
+        // Ask for far more rows than exist: the band is bounded by the buffer.
+        let band = terminal.read_rows(0, total + 1_000).unwrap();
+        assert_eq!(band.len(), total);
+        assert_eq!(
+            band.iter().map(|row| row.index).collect::<Vec<_>>(),
+            (0..total as u16).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn read_rows_restores_the_pin_even_when_the_inner_serve_takes_an_early_exit() {
+        // `read_rows` splits into `read_rows_inner` (the serve loop, which can
+        // `?`-return early or error) plus an UNCONDITIONAL pin restore in the
+        // outer wrapper. This guards the early-exit path: even when the inner
+        // serve does no work (here `count == 0`, an early `Ok` return before the
+        // loop), and even after the pin was already parked in scrollback by a
+        // prior serve, the outer restore must put it back on the tail. The same
+        // wrapper restores the pin if the inner serve errors mid-loop, so a failed
+        // read can never leave the next live extract painting a history excursion.
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        for index in 1..=20 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        // Park the pin deep in scrollback via a normal serve...
+        let _ = terminal.read_rows(0, 5).unwrap();
+        // ...then a no-op serve (count == 0) takes the inner early exit. The outer
+        // wrapper still restores the pin.
+        let band = terminal.read_rows(0, 0).unwrap();
+        assert!(band.is_empty());
+
+        let after = terminal.frame().unwrap();
+        assert!(
+            after.scrollback.at_bottom,
+            "the unconditional restore must put the pin back on the tail on any exit path"
+        );
     }
 
     fn count_non_empty_rows(frame: &TerminalFrame) -> usize {

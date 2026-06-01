@@ -9,9 +9,7 @@ const TERMINAL_BRIDGE_COMMANDS = new Set([
   'terminate_session',
   'write_terminal_input',
   'resize_terminal',
-  'scroll_terminal_viewport',
-  'scroll_terminal_viewport_to_top',
-  'scroll_terminal_viewport_to_bottom',
+  'read_terminal_rows',
   'set_terminal_frontend_active',
   'set_terminal_theme',
 ]);
@@ -136,15 +134,18 @@ export async function invokeTerminalBridge<T = unknown>(
         cols: args?.cols,
         rows: args?.rows,
       });
-    case 'scroll_terminal_viewport':
-      return bridgePost<T>('/scroll', {
+    case 'read_terminal_rows': {
+      // The bridge returns the row band as base64 of the SAME wire bytes the
+      // Tauri command returns; decode it to an ArrayBuffer so callers get the
+      // uniform binary shape and decode it with the same `decodeRowBand`.
+      const base64 = await bridgePost<string>('/read_rows', {
         terminalId: args?.terminalId,
-        deltaRows: args?.deltaRows,
+        startRow: args?.startRow,
+        count: args?.count,
+        generation: args?.generation,
       });
-    case 'scroll_terminal_viewport_to_top':
-      return bridgePost<T>('/scroll_top', { terminalId: args?.terminalId });
-    case 'scroll_terminal_viewport_to_bottom':
-      return bridgePost<T>('/scroll_bottom', { terminalId: args?.terminalId });
+      return base64ToArrayBuffer(base64) as T;
+    }
     case 'set_terminal_frontend_active':
       return bridgePost<T>('/active', {
         terminalId: args?.terminalId,
@@ -220,20 +221,17 @@ export function writeTerminalBridgeInput(terminalId: string, input: string) {
   return bridgePost<null>('/input', { terminalId, input });
 }
 
-export function scrollTerminalBridgeViewport(terminalId: string, deltaRows: number) {
-  return bridgePost<null>('/scroll', { terminalId, deltaRows });
-}
-
-export function scrollTerminalBridgeViewportToBottom(terminalId: string) {
-  return bridgePost<null>('/scroll_bottom', { terminalId });
-}
-
-export function scrollTerminalBridgeViewportToTop(terminalId: string) {
-  return bridgePost<null>('/scroll_top', { terminalId });
-}
-
 export function terminateTerminalBridgeSession(terminalId: string) {
   return bridgePost<null>('/terminate', { terminalId });
+}
+
+// Decode the bridge's base64 row-band response into an ArrayBuffer, so the
+// caller decodes it with the same `decodeRowBand` the Tauri path uses.
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
 }
 
 export async function terminalBridgeHealth() {

@@ -6,7 +6,6 @@ import { Typography } from './components/primitives/Typography';
 import {
   listenTerminalBridge,
   resizeTerminalBridgeSession,
-  scrollTerminalBridgeViewportToBottom,
   startTerminalBridgeSession,
   terminateTerminalBridgeSession,
   terminalBridgeBaseUrl,
@@ -418,10 +417,10 @@ export function TerminalBridgeDebug() {
   }, []);
 
   function followLiveForUserInput() {
+    // Following the live tail is now fully frontend-local: re-pin and snap the
+    // viewport to the tail. The mirror already holds the latest rows, so there
+    // is no backend round-trip (decisions.md D6).
     if (!controller.isLiveFollow()) controller.setLiveFollow(true);
-    void scrollTerminalBridgeViewportToBottom(terminalIdRef.current).catch(scrollError => {
-      setError(errorMessage(scrollError));
-    });
     requestAnimationFrame(() => {
       controller.scrollToTail();
       controller.focusCanvas();

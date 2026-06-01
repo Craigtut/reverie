@@ -2,9 +2,11 @@ import { invoke } from './runtime';
 import type { GhosttyFrameSequencePayload, RenderMetrics, StartSessionRequest } from '../domain';
 
 // Typed wrappers over the terminal/session-runtime commands: launching and
-// terminating native sessions, writing input, resizing, scrolling the
-// viewport, and the synthetic benchmark frame sequence. The event side
-// (terminal_frame, terminal_exit, ...) is subscribed via runtime.listen.
+// terminating native sessions, writing input, resizing, serving history-range
+// row bands, and the synthetic benchmark frame sequence. Scrolling itself is
+// fully frontend-local (no backend round-trip); the only pull from the backend
+// is `readTerminalRows`. The event side (terminal_frame, terminal_exit, ...) is
+// subscribed via runtime.listen.
 
 // `onFrame` is a Tauri `Channel<ArrayBuffer>` (typed `unknown` here so this
 // module stays free of a static `@tauri-apps/api` import; the hook constructs
@@ -36,16 +38,19 @@ export function resizeTerminal(terminalId: string, cols: number, rows: number) {
   return invoke('resize_terminal', { terminalId, cols, rows });
 }
 
-export function scrollTerminalViewport(terminalId: string, deltaRows: number) {
-  return invoke('scroll_terminal_viewport', { terminalId, deltaRows });
-}
-
-export function scrollTerminalViewportToTop(terminalId: string) {
-  return invoke('scroll_terminal_viewport_to_top', { terminalId });
-}
-
-export function scrollTerminalViewportToBottom(terminalId: string) {
-  return invoke('scroll_terminal_viewport_to_bottom', { terminalId });
+// Serve a contiguous band of history rows for scroll-back prefetch (decisions.md
+// D6/D7). The backend reads the rows straight from libghostty's live buffer and
+// returns the binary row band (the same wire format the harness bridge base64s);
+// Tauri hands a `Vec<u8>` response back as an ArrayBuffer. The caller decodes it
+// with `decodeRowBand` and merges it into the mirror only when the generation
+// still matches. This is the one place the frontend pulls from the backend.
+export function readTerminalRows(
+  terminalId: string,
+  startRow: number,
+  count: number,
+  generation: number,
+) {
+  return invoke<ArrayBuffer>('read_terminal_rows', { terminalId, startRow, count, generation });
 }
 
 export function setTerminalFrontendActive(terminalId: string, active: boolean) {

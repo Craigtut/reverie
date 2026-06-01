@@ -238,10 +238,15 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let selection: SelectionRange | null = null;
   let links: BufferLinkSpan[] = [];
   let hoverLink: BufferLinkSpan | null = null;
-  // Generation counter that invalidates in-flight async live-row fills when the
-  // surface reflows (a width change renumbers libghostty's rows), so a stale
-  // fetch can never merge rows addressed against the old generation.
-  let historyGeneration = 0;
+  // The backend-adopted per-session generation, synced from the frame stream via
+  // `setLiveGeneration` (the hook calls it whenever it accepts/adopts a frame's
+  // generation). The backend starts at 1 and bumps on every resize, re-seeding
+  // with a Full frame; history-range requests are stamped with this value and a
+  // band whose generation no longer matches is dropped, so a stale fetch can
+  // never merge rows addressed against an old (pre-resize, renumbered) buffer.
+  // This must be the backend's generation, not a frontend-only token, or the
+  // serve gate never matches and every range request comes back empty.
+  let liveGeneration = 0;
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
   const sessionBuffers: Record<string, TerminalBufferState> = {};
@@ -627,7 +632,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
             rowCount: tailWindow.displayRows,
             displayRows: tailWindow.displayRows,
             totalRows: buffer.totalRows,
-            generation: historyGeneration,
+            generation: liveGeneration,
             cachedRange: cacheStatus.cachedRange,
             requested: cacheStatus.requested,
           });
@@ -671,7 +676,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
             rowCount: 0,
             displayRows: fallbackDisplayRows,
             totalRows: buffer.totalRows,
-            generation: historyGeneration,
+            generation: liveGeneration,
             cachedRange: null,
             requested: cacheStatus.requested,
           });
@@ -689,7 +694,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
           rowCount: Math.max(1, Math.min(buffer.totalRows - sourceStartRow, fallbackDisplayRows)),
           displayRows: fallbackDisplayRows,
           totalRows: buffer.totalRows,
-          generation: historyGeneration,
+          generation: liveGeneration,
           cachedRange: cacheStatus.cachedRange,
           requested: cacheStatus.requested,
         });
@@ -851,9 +856,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
         startRow,
         rowCount,
         totalRows: buffer.totalRows,
-        generation: historyGeneration,
+        generation: liveGeneration,
       };
-      const missTraceKey = `live:${historyGeneration}:${startRow}:${rowCount}:${buffer.totalRows}:${displayRows}`;
+      const missTraceKey = `live:${liveGeneration}:${startRow}:${rowCount}:${buffer.totalRows}:${displayRows}`;
       if (missTraceKey !== lastBufferCacheMissTraceKey) {
         lastBufferCacheMissTraceKey = missTraceKey;
         trace({
@@ -863,13 +868,13 @@ export function createTerminalController(options: TerminalControllerOptions) {
           rowCount,
           displayRows,
           totalRows: buffer.totalRows,
-          generation: historyGeneration,
+          generation: liveGeneration,
           cachedRange,
         });
       }
       const requested = requestMissingLiveRows(buffer, request);
       if (requested) {
-        const requestTraceKey = `miss:${historyGeneration}:${startRow}:${rowCount}:${buffer.totalRows}`;
+        const requestTraceKey = `miss:${liveGeneration}:${startRow}:${rowCount}:${buffer.totalRows}`;
         if (requestTraceKey !== lastHistoryRowsRequestTraceKey) {
           lastHistoryRowsRequestTraceKey = requestTraceKey;
           trace({
@@ -878,7 +883,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
             startRow,
             rowCount,
             totalRows: buffer.totalRows,
-            generation: historyGeneration,
+            generation: liveGeneration,
           });
         }
       }
@@ -1639,9 +1644,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
     frame: TerminalFrame,
     startRow: number,
     totalRows: number,
-    generation = historyGeneration,
+    generation = liveGeneration,
   ) {
-    if (generation !== historyGeneration || !activeSessionId) return false;
+    if (generation !== liveGeneration || !activeSessionId) return false;
     const previous =
       sessionBuffers[activeSessionId] ?? activeBuffer ?? createTerminalBuffer(surface);
     // A live session keeps appending rows while the fill round-trips, so the
@@ -1805,7 +1810,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
         });
       }
       if (next.cols !== surface.cols) {
-        historyGeneration += 1;
+        // No generation bump here: the backend bumps the generation on every
+        // resize and re-seeds with a Full frame (which `setLiveGeneration`
+        // adopts), and that subsumes the reflow invalidation. A frontend-only
+        // bump would only desync the serve gate from the backend's generation.
+        // `markResizeReflowPending` is still needed for the blank-frame paint
+        // guard during reflow churn, which is independent of the generation.
         markResizeReflowPending();
         resizeAlternateSessionViews(next);
         needsFullPaint = true;
@@ -1877,6 +1887,17 @@ export function createTerminalController(options: TerminalControllerOptions) {
       return liveFollow;
     },
     setLiveFollow,
+    // Sync the backend-adopted generation from the frame stream. The hook calls
+    // this from `handleDecodedFrame` whenever it accepts a frame (adopting a new
+    // generation from a Full frame). History-range requests and the merge gate
+    // use this value, so they always agree with the backend's generation; never
+    // a frontend-only token, or the serve gate would never match.
+    setLiveGeneration(generation: number) {
+      liveGeneration = generation;
+    },
+    getLiveGeneration() {
+      return liveGeneration;
+    },
     isAutoScrolling() {
       return autoScrolling;
     },

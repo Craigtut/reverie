@@ -14,11 +14,10 @@ import {
 
 import { listen, type UnlistenFn } from '../services/runtime';
 import {
+  readTerminalRows,
   recordRenderMetrics,
   recordTerminalDiagnostics,
   resizeTerminal,
-  scrollTerminalViewport,
-  scrollTerminalViewportToBottom,
   setTerminalFrontendActive,
   setTerminalTheme,
   startSession,
@@ -43,13 +42,16 @@ import type {
   TerminalStreamStartedPayload,
 } from '../domain';
 import type { TerminalFrame } from '../terminalTypes';
-import { decodeTerminalFrame, type DecodedTerminalFrame } from '../terminal/wireDecode';
+import {
+  decodeRowBand,
+  decodeTerminalFrame,
+  type DecodedTerminalFrame,
+} from '../terminal/wireDecode';
 import type { TerminalBridgeFramePayload } from '../services/terminalBridge';
 import { createSession } from '../services/shellApi';
 import { TERMINAL_SURFACE } from '../terminal-canvas-renderer';
 import {
   SCROLL_FOLLOW_EPSILON_PX,
-  type TerminalSurface,
   terminalInsetPx,
   terminalSurfaceForBounds,
 } from '../terminalScrollback';
@@ -59,6 +61,7 @@ import { openExternalUrl } from '../services/openApi';
 import {
   createTerminalController,
   type TerminalController,
+  type TerminalHistoryRowsRequest,
   type TimedTerminalControllerTraceEvent,
 } from '../terminal/terminalController';
 import type { TerminalPaintSample, TerminalRow } from '../terminalTypes';
@@ -349,6 +352,12 @@ export function useTerminalSession(params: {
   const terminalWheelHandlerRef = useRef<(event: globalThis.WheelEvent) => void>(() => {});
   const terminalWheelListenerRef = useRef<((event: globalThis.WheelEvent) => void) | null>(null);
   const terminalInputQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
+  // In-flight history-range prefetches, keyed by `terminalId:generation:start:count`,
+  // so a band that is still round-tripping is never re-requested every paint (the
+  // paint loop asks again until the rows land in the mirror). Cleared per key when
+  // the fetch settles. Lives in a ref so the long-lived controller callback always
+  // sees the current set without re-creating the controller.
+  const inFlightRowFetchesRef = useRef<Set<string>>(new Set());
 
   const lastLiveFollowRef = useRef(true);
   const renderSampleCollectorsRef = useRef(
@@ -379,6 +388,16 @@ export function useTerminalSession(params: {
   const terminalDiagnosticEventsRef = useRef<unknown[]>([]);
   const terminalDiagnosticTimerRef = useRef(0);
 
+  // The controller calls this (synchronously, from the paint loop) when scrolling
+  // up lands on rows the mirror does not have yet. We kick off an async
+  // history-range prefetch and return true so the controller marks the request
+  // issued; the rows are merged later via `controller.mergeLiveRows` when the
+  // band lands. Dispatched through a ref so the long-lived controller callback
+  // always sees the latest closure without re-creating the controller.
+  const requestMissingLiveRowsRef = useRef<
+    (request: TerminalHistoryRowsRequest) => boolean | undefined
+  >(() => false);
+
   const controllerRef = useRef<TerminalController | null>(null);
   if (controllerRef.current === null) {
     controllerRef.current = createTerminalController({
@@ -388,6 +407,7 @@ export function useTerminalSession(params: {
         lastLiveFollowRef.current = live;
         useTerminalStore.getState().setTerminalLiveFollow(live);
       },
+      onMissingLiveRows: request => requestMissingLiveRowsRef.current(request),
       onScrollMetrics: metrics => useTerminalStore.getState().setTerminalScroll(metrics),
       onPaintSample: sample => {
         const activeTerminalId = useTerminalStore.getState().activeTerminalId;
@@ -893,6 +913,16 @@ export function useTerminalSession(params: {
         return;
       }
 
+      // Sync the controller to the backend-adopted generation so history-range
+      // requests and the merge gate are stamped with the backend's generation
+      // (which starts at 1 and bumps on every resize), not a frontend-only token.
+      // Without this the serve gate never matches and scroll-back past the live
+      // mirror fetches nothing. Only sync for the active terminal: a background
+      // session's frames must not move the visible session's request generation.
+      if (useTerminalStore.getState().activeTerminalId === terminalId) {
+        controller.setLiveGeneration(latestGeneration);
+      }
+
       terminalEventDebugRef.current.frameEventsMatched += 1;
       terminalEventDebugRef.current.lastMatchedFrameSeq = framesReceived;
 
@@ -1138,25 +1168,54 @@ export function useTerminalSession(params: {
     await next;
   }
 
-  async function sendTerminalViewportScroll(deltaRows: number) {
+  // Prefetch a band of older rows the mirror is missing, straight from
+  // libghostty's live buffer (decisions.md D6/D7). The controller calls the
+  // synchronous `requestMissingLiveRows` below from its paint loop; this async
+  // worker does the actual round-trip and merges the decoded band back into the
+  // mirror. Scrolling itself never waits on this: the view keeps moving over the
+  // mirror while the top-up lands in the background.
+  async function fetchHistoryRowBand(request: TerminalHistoryRowsRequest): Promise<void> {
     const terminalId = useTerminalStore.getState().activeTerminalId;
-    if (!terminalId || deltaRows === 0) return;
+    if (!terminalId) return;
+    const startRow = Math.max(0, Math.floor(request.startRow));
+    const count = Math.max(1, Math.floor(request.rowCount));
+    const key = `${terminalId}:${request.generation}:${startRow}:${count}`;
+    const inFlight = inFlightRowFetchesRef.current;
+    if (inFlight.has(key)) return;
+    inFlight.add(key);
     try {
-      await scrollTerminalViewport(terminalId, deltaRows);
+      const bytes = await readTerminalRows(terminalId, startRow, count, request.generation);
+      // The active terminal may have changed while the band round-tripped; the
+      // band belongs to the terminal we asked, so drop it if focus moved on
+      // (the new session's own prefetch will fill its mirror).
+      if (useTerminalStore.getState().activeTerminalId !== terminalId) return;
+      const band = decodeRowBand(bytes);
+      if (band.rows.length === 0) return;
+      // The band rows are contiguous from `band.startRow` and 0-indexed within
+      // the band, which is exactly the frame shape `mergeLiveRows` expects. The
+      // merge is dropped if the generation no longer matches the live mirror (a
+      // resize bumped it), so a stale band can never mix rows across generations.
+      const frame: TerminalFrame = {
+        dirty: 'full',
+        cols: controller.getSurface().cols,
+        rows: band.rows,
+      };
+      controller.mergeLiveRows(frame, band.startRow, request.totalRows, band.generation);
     } catch (error) {
-      writeLog(`Terminal scroll failed: ${errorMessage(error)}`);
+      writeLog(`History rows fetch failed: ${errorMessage(error)}`);
+    } finally {
+      inFlight.delete(key);
     }
   }
 
-  async function sendTerminalViewportToBottom() {
-    const terminalId = useTerminalStore.getState().activeTerminalId;
-    if (!terminalId) return;
-    try {
-      await scrollTerminalViewportToBottom(terminalId);
-    } catch (error) {
-      writeLog(`Follow live failed: ${errorMessage(error)}`);
-    }
-  }
+  // Synchronous entry point the controller calls from its paint loop. Kick off
+  // the async prefetch and report the request as issued (true) so the controller
+  // does not keep re-tracing a miss; an in-flight band is deduped inside
+  // `fetchHistoryRowBand`.
+  requestMissingLiveRowsRef.current = request => {
+    void fetchHistoryRowBand(request);
+    return true;
+  };
 
   async function copySelectionToClipboard(): Promise<boolean> {
     const text = controller.getSelectionText();
@@ -1418,9 +1477,10 @@ export function useTerminalSession(params: {
       viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
     controller.setLiveFollow(following);
     if (!following) {
-      // Scrolled up off the live tail: paint from the cached buffer at the
-      // viewport's top row. Range-fetching rows beyond what the live frames
-      // delivered is reworked in a later phase (serve straight from libghostty).
+      // Scrolled up off the live tail: paint from the mirror at the viewport's
+      // top row. When the mirror runs low near the top, the controller prefetches
+      // a band straight from libghostty's buffer via `onMissingLiveRows`
+      // (decisions.md D6/D7); scrolling itself never round-trips.
       const surface = controller.getSurface();
       const inset = terminalInsetPx(surface);
       const targetRow = Math.max(
@@ -1520,9 +1580,12 @@ export function useTerminalSession(params: {
     controller.scrollBufferedToRow(clamped);
   }
 
+  // Jump back to the live tail and re-pin (the jump-to-bottom button + resume on
+  // input). Fully frontend-local: the mirror already holds the latest rows, so
+  // re-pinning and snapping the viewport to the tail is all it takes, with no
+  // backend round-trip (decisions.md D6).
   function followLiveTerminalOutput() {
     controller.setLiveFollow(true);
-    void sendTerminalViewportToBottom();
     requestAnimationFrame(() => {
       controller.scrollToTail();
       controller.focusCanvas();

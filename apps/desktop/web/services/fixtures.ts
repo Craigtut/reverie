@@ -99,12 +99,15 @@ export async function invokeBrowserFixture<T>(
     }
     case 'resize_terminal':
       return undefined as T;
-    case 'scroll_terminal_viewport':
-      return undefined as T;
-    case 'scroll_terminal_viewport_to_top':
-      return undefined as T;
-    case 'scroll_terminal_viewport_to_bottom':
-      return undefined as T;
+    case 'read_terminal_rows': {
+      // The in-memory fixture has no real libghostty scrollback to serve, so it
+      // returns an empty row band (kind 2, the requested generation, zero rows)
+      // in the same binary shape the real command returns. The frontend decodes
+      // it with `decodeRowBand` and merges nothing.
+      const startRow = typeof args?.startRow === 'number' ? args.startRow : 0;
+      const generation = typeof args?.generation === 'number' ? args.generation : 0;
+      return emptyRowBandBytes(generation, startRow) as T;
+    }
     case 'set_terminal_frontend_active': {
       const terminalId = readDirectArg<string>(args, 'terminalId');
       const active = readDirectArg<boolean>(args, 'active');
@@ -637,6 +640,20 @@ function readDirectArg<T>(args: Record<string, unknown> | undefined, key: string
     throw new Error(`Missing command argument: ${key}`);
   }
   return value as T;
+}
+
+// Encode an empty history row band (kind 2, no rows) as an ArrayBuffer, matching
+// the real `read_terminal_rows` binary shape so the harness fixture decodes with
+// the same `decodeRowBand`. Little-endian: u8 kind, u32 generation, u32
+// start_row, u32 row_count (0).
+function emptyRowBandBytes(generation: number, startRow: number): ArrayBuffer {
+  const buffer = new ArrayBuffer(13);
+  const view = new DataView(buffer);
+  view.setUint8(0, 2);
+  view.setUint32(1, generation >>> 0, true);
+  view.setUint32(5, startRow >>> 0, true);
+  view.setUint32(9, 0, true);
+  return buffer;
 }
 
 function clone<T>(value: T): T {

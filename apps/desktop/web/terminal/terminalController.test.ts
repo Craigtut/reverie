@@ -14,6 +14,7 @@ import {
   type TerminalBufferState,
 } from './bufferModel';
 import { createTerminalController } from './terminalController';
+import { decodeRowBand } from './wireDecode';
 
 const surface: TerminalSurface = { cols: 80, rows: 4, cellWidth: 8, cellHeight: 10 };
 
@@ -2632,6 +2633,144 @@ describe('createTerminalController', () => {
     expect(canvas.style.top).toBe('170px');
   });
 
+  it('stamps requests with the backend-adopted generation and merges a gen-1 band (front-to-back boundary)', () => {
+    // The real boundary the running app crosses: the backend starts at generation
+    // 1 (fresh, un-resized) and re-seeds with a Full frame; the hook adopts that 1
+    // and calls `setLiveGeneration(1)`. The request the controller issues must then
+    // carry generation 1 (NOT the old frontend-only token that started at 0, which
+    // never matched the backend and made every serve come back empty), and a band
+    // the backend serves at generation 1 must pass the merge gate. This builds the
+    // band with the exact `encode_row_band` wire bytes and decodes them with the
+    // shared `decodeRowBand`, so it crosses the real wire format too.
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    // Capture the last request the controller issues so we can assert its
+    // generation and reuse its totalRows for the merge, without depending on the
+    // mock-call tuple typing.
+    type HistoryRequest = {
+      startRow: number;
+      rowCount: number;
+      totalRows: number;
+      generation: number;
+    };
+    let lastRequest: HistoryRequest | null = null;
+    const onMissingLiveRows = vi.fn((request: HistoryRequest) => {
+      lastRequest = request;
+      return true;
+    });
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 60, scrollHeight: 210, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    // The hook does this from `handleDecodedFrame` when it adopts the backend's
+    // generation from the first Full frame. The backend's fresh generation is 1.
+    controller.setLiveGeneration(1);
+    expect(controller.getLiveGeneration()).toBe(1);
+
+    // Ingest a live tail with a gap above it (rows 16..19 cached out of 20 total,
+    // viewport scrolled to the top), so the controller asks for the missing older
+    // rows as it paints. Ingesting (not a manual applyView) sets the active
+    // session, which the merge gate requires, and is the real runtime path.
+    controller.ingestFrame(
+      'session-1',
+      liveFrameAtBottom(16, [row(0, '16'), row(1, '17'), row(2, '18'), row(3, '19')]),
+      true,
+    );
+
+    // THE FIX: the request carries the backend-adopted generation 1, not 0.
+    expect(onMissingLiveRows).toHaveBeenCalled();
+    if (!lastRequest) throw new Error('expected a history-range request to be issued');
+    const request: HistoryRequest = lastRequest;
+    expect(request.generation).toBe(1);
+
+    // A row band the backend serves at generation 1, start row 8, one row 'H'
+    // then a blank, in the exact `encode_row_band` wire format. Decoding it with
+    // the shared `decodeRowBand` and merging at the band's generation must be
+    // accepted, because the controller's live generation is now 1.
+    const bandBytes = new Uint8Array([
+      0x02, // kind = row band
+      0x01,
+      0x00,
+      0x00,
+      0x00, // generation = 1
+      0x08,
+      0x00,
+      0x00,
+      0x00, // start_row = 8
+      0x02,
+      0x00,
+      0x00,
+      0x00, // row_count = 2
+      0x01,
+      0x00, // row[0] cell_count = 1
+      0x00,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x00, // cell col=0 width=1 style=0 colorFlags=0
+      0x01,
+      0x00,
+      0x48, // text_len=1, 'H'
+      0x00,
+      0x00, // row[1] cell_count = 0
+    ]);
+    const band = decodeRowBand(bandBytes.buffer);
+    expect(band.generation).toBe(1);
+    const bandFrame: TerminalFrame = { dirty: 'full', cols: surface.cols, rows: band.rows };
+    const merged = controller.mergeLiveRows(
+      bandFrame,
+      band.startRow,
+      request.totalRows,
+      band.generation,
+    );
+
+    // Accepted: the gen-1 gate matches the gen-1 request, the band is merged, and
+    // its rows now back the mirror at absolute ids 8..9.
+    expect(merged).toBe(true);
+    const debug = controller.getBufferDebug();
+    const coversBand = debug?.cachedRanges.some(range => range.start <= 8 && range.end >= 10);
+    expect(coversBand).toBe(true);
+  });
+
+  it('drops a band whose generation no longer matches the backend-adopted generation', () => {
+    // The complement of the boundary test: after a resize the backend bumps to 2
+    // and the hook calls `setLiveGeneration(2)`; a band still tagged generation 1
+    // (in flight across the resize, or served stale) must be dropped, never merged
+    // across the renumber.
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      liveFrameAtBottom(16, [row(0, '16'), row(1, '17'), row(2, '18'), row(3, '19')]),
+      true,
+    );
+    controller.setLiveGeneration(2);
+
+    const merged = controller.mergeLiveRows(frame([row(0, 'stale-8')]), 8, 20, 1);
+    expect(merged).toBe(false);
+  });
+
   it('paints cached stale-width rows while a shape-correct live cache fill is requested', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
@@ -2688,11 +2827,15 @@ describe('createTerminalController', () => {
     controller.setSurface(resized);
     controller.applyView(view, resized, buffer);
 
+    // The request carries the backend-synced live generation, which is the
+    // un-synced default 0 here: `setSurface` no longer bumps a frontend-only
+    // generation on a column change (the backend bumps on resize and re-seeds
+    // with a Full frame that the hook adopts via `setLiveGeneration`).
     expect(onMissingLiveRows).toHaveBeenCalledWith({
       startRow: 6,
       rowCount: 14,
       totalRows: 20,
-      generation: 1,
+      generation: 0,
     });
     expect(createRenderer).toHaveBeenCalledTimes(1);
     expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 100 }));
@@ -2770,11 +2913,14 @@ describe('createTerminalController', () => {
     controller.setSurface(resized);
     controller.applyView(view, resized, buffer);
 
+    // Generation is the un-synced default 0: a column-change resize no longer
+    // bumps a frontend-only generation (see the boundary test for why the live
+    // generation is backend-synced instead).
     expect(onMissingLiveRows).toHaveBeenCalledWith({
       startRow: 63,
       rowCount: 14,
       totalRows: 80,
-      generation: 1,
+      generation: 0,
     });
     expect(createRenderer).toHaveBeenCalledTimes(1);
     expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 100 }));
@@ -2867,11 +3013,13 @@ describe('createTerminalController', () => {
     controller.setSurface(resized);
     controller.applyView(shortTailView, resized, shortTailBuffer);
 
+    // Generation is the un-synced default 0: a column-change resize no longer
+    // bumps a frontend-only generation.
     expect(onMissingLiveRows).toHaveBeenCalledWith({
       startRow: 114,
       rowCount: 47,
       totalRows: 161,
-      generation: 1,
+      generation: 0,
     });
     expect(createRenderer).not.toHaveBeenCalled();
     expect(paintFrame).not.toHaveBeenCalled();
@@ -3028,6 +3176,81 @@ describe('createTerminalController', () => {
 
     expect(merged).toBe(true);
     expect(controller.getRowCount()).toBe(21);
+  });
+
+  it('merges a decoded history row band (the read_terminal_rows prefetch path)', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    // Seed a live tail so the mirror exists, advancing the buffer to 20 rows.
+    controller.ingestFrame(
+      'session-1',
+      liveFrameAtBottom(16, [row(0, '16'), row(1, '17'), row(2, '18'), row(3, '19')]),
+      true,
+    );
+
+    // A row band exactly as the backend `read_terminal_rows` returns it: kind 2,
+    // start row 8, two contiguous rows ('H' then a blank). Decoding it yields the
+    // 0-based-within-band rows the hook wraps into a frame and merges absolutely.
+    const bandBytes = new Uint8Array([
+      0x02,
+      0x00,
+      0x00,
+      0x00,
+      0x00, // kind=2, generation=0
+      0x08,
+      0x00,
+      0x00,
+      0x00, // start_row=8
+      0x02,
+      0x00,
+      0x00,
+      0x00, // row_count=2
+      0x01,
+      0x00, // row[0]: cell_count=1
+      0x00,
+      0x00,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x00, // cell col=0 width=1 style=0 colorFlags=0
+      0x01,
+      0x00,
+      0x48, // text_len=1, 'H'
+      0x00,
+      0x00, // row[1]: cell_count=0
+    ]);
+    const band = decodeRowBand(bandBytes.buffer);
+    expect(band.startRow).toBe(8);
+    expect(band.rows.map(r => r.index)).toEqual([0, 1]);
+    expect(band.rows[0].cells.map(c => c.text)).toEqual(['H']);
+
+    // The hook builds this exact frame shape from the decoded band and merges it
+    // at the band's absolute start row. The merge is accepted (generation 0
+    // matches the un-resized mirror) and the prefetched band extends the mirror's
+    // cached range upward to include row 8, without shrinking the live total.
+    const bandFrame: TerminalFrame = { dirty: 'full', cols: surface.cols, rows: band.rows };
+    const merged = controller.mergeLiveRows(bandFrame, band.startRow, 20, band.generation);
+
+    expect(merged).toBe(true);
+    expect(controller.getRowCount()).toBe(20);
+    const debug = controller.getBufferDebug();
+    // The band's rows (ids 8..9) are now cached in the mirror alongside the live
+    // tail (16..19), so a scroll back to row 8 paints from the mirror with no
+    // further round-trip.
+    const coversBand = debug?.cachedRanges.some(range => range.start <= 8 && range.end >= 10);
+    expect(coversBand).toBe(true);
   });
 
   it('does not paint an all-blank live resize miss over cached text', () => {

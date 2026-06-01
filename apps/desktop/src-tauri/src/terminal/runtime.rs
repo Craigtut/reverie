@@ -19,7 +19,7 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::terminal::ghostty::GhosttyTerminalState;
-use crate::terminal::wire::encode_frame;
+use crate::terminal::wire::{encode_frame, encode_row_band};
 use reverie_core::WorkspaceService;
 use reverie_core::session_log::SessionLogControl;
 
@@ -81,10 +81,18 @@ enum TerminalRuntimeCommand {
         cols: u16,
         rows: u16,
     },
-    ScrollDelta(isize),
-    ScrollTop,
-    ScrollBottom,
-    ScrollToRow(usize),
+    // Serve a contiguous history band straight from libghostty's live buffer
+    // (decisions.md D6/D7). Scrolling is frontend-driven, so the backend never
+    // moves the viewport in response to a scroll; this is the one place the
+    // frontend pulls rows. The worker runs `read_rows` (which moves the pin to
+    // the band, extracts it, and restores the pin to the tail) on its own thread
+    // and replies with the encoded row band over the oneshot `reply` channel.
+    ReadRows {
+        start: usize,
+        count: usize,
+        generation: u32,
+        reply: Sender<Vec<u8>>,
+    },
     // Push new default fg/bg into the live terminal (theme switch).
     SetDefaultColors {
         foreground: TerminalColor,
@@ -111,9 +119,12 @@ enum DeferredPtyReadEvent {
     Failed(String),
 }
 
+// Worker-side view state. The backend no longer tracks follow-tail: scrolling is
+// frontend-driven (decisions.md D6), so the worker always emits the active tail
+// and the frontend decides whether the tail is on screen. Only the frame cadence
+// (foreground vs. background) lives here now.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalViewportState {
-    follow_tail: bool,
     frontend_active: bool,
 }
 
@@ -125,7 +136,6 @@ pub struct TerminalStreamRequest {
     pub session_id: Option<SessionId>,
     pub terminal_id: TerminalId,
     pub spawn_spec: TerminalSpawnSpec,
-    pub max_scrollback: usize,
     pub target_frames: Option<usize>,
     /// Which CLI runs in this session, so the worker can apply that CLI's title
     /// rule to its OSC titles. `None` for the bench/proof path (no live title).
@@ -326,32 +336,33 @@ impl TerminalSessionRuntime {
         })
     }
 
-    pub fn scroll_terminal(&self, terminal_id: TerminalId, delta_rows: isize) -> Result<()> {
-        if delta_rows == 0 {
-            return Ok(());
-        }
-
+    /// Serve a contiguous band of history rows for the frontend's scroll-back
+    /// prefetch (decisions.md D6/D7). Dispatches a `ReadRows` command to the
+    /// session's worker thread (the sole owner of the VT state), which runs
+    /// `read_rows` and replies with the encoded binary row band (see
+    /// `wire-protocol.md`). Blocks the calling command thread on the worker's
+    /// reply; the worker serializes this with live extracts, so the user never
+    /// sees the pin excursion. The frontend tags each request with the
+    /// generation it holds and drops a band whose generation no longer matches.
+    pub fn read_terminal_rows(
+        &self,
+        terminal_id: TerminalId,
+        start_row: usize,
+        count: usize,
+        generation: u32,
+    ) -> Result<Vec<u8>> {
+        let (reply_tx, reply_rx) = mpsc::channel();
         self.command_sender_for(terminal_id)?
-            .send(TerminalRuntimeCommand::ScrollDelta(delta_rows))
-            .context("failed to queue terminal scroll command")
-    }
-
-    pub fn scroll_terminal_to_top(&self, terminal_id: TerminalId) -> Result<()> {
-        self.command_sender_for(terminal_id)?
-            .send(TerminalRuntimeCommand::ScrollTop)
-            .context("failed to queue terminal scroll-to-top command")
-    }
-
-    pub fn scroll_terminal_to_bottom(&self, terminal_id: TerminalId) -> Result<()> {
-        self.command_sender_for(terminal_id)?
-            .send(TerminalRuntimeCommand::ScrollBottom)
-            .context("failed to queue terminal scroll-to-bottom command")
-    }
-
-    pub fn scroll_terminal_to_row(&self, terminal_id: TerminalId, row: usize) -> Result<()> {
-        self.command_sender_for(terminal_id)?
-            .send(TerminalRuntimeCommand::ScrollToRow(row))
-            .context("failed to queue terminal scroll-to-row command")
+            .send(TerminalRuntimeCommand::ReadRows {
+                start: start_row,
+                count,
+                generation,
+                reply: reply_tx,
+            })
+            .context("failed to queue terminal history-range request")?;
+        reply_rx
+            .recv()
+            .context("terminal worker dropped the history-range reply")
     }
 
     pub fn set_frontend_active(&self, terminal_id: TerminalId, active: bool) -> Result<()> {
@@ -431,7 +442,7 @@ impl TerminalSessionRuntime {
     fn run_stream_worker(&self, app: AppHandle, request: TerminalStreamRequest) -> Result<()> {
         let spec = request.spawn_spec;
         let launch_started_ms = unix_time_millis();
-        let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows, request.max_scrollback)?;
+        let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows)?;
         // Seed the terminal's default colors from the active theme before any
         // PTY output arrives, so default-colored cells + the base background
         // match the shell instead of Ghostty's hardwired white-on-black.
@@ -491,7 +502,6 @@ impl TerminalSessionRuntime {
             .unwrap_or_else(Instant::now);
         let mut sync_output_started_at = None;
         let mut viewport_state = TerminalViewportState {
-            follow_tail: true,
             frontend_active: true,
         };
         // Live session title: apply this CLI's OSC-title rule and push label
@@ -515,8 +525,17 @@ impl TerminalSessionRuntime {
         let mut generation: u32 = 1;
         let frame_channel = request.frame_channel.as_ref();
         let child_success = loop {
-            let applied = apply_terminal_commands(&command_rx, &mut terminal, &mut viewport_state)?;
-            generation = generation.saturating_add(applied.resizes);
+            // Drains resize/read-rows/theme/active commands. Resizes bump the
+            // shared `generation` in place (so a history-range reply drained after
+            // a resize is stamped with the post-resize generation), and history
+            // bands are served inline on this worker thread.
+            let applied = apply_terminal_commands(
+                request.terminal_id,
+                &command_rx,
+                &mut terminal,
+                &mut viewport_state,
+                &mut generation,
+            )?;
             if applied.needs_frame {
                 pending_frame = true;
             }
@@ -567,9 +586,12 @@ impl TerminalSessionRuntime {
                             &mut last_emitted_title,
                         );
                     }
-                    if viewport_state.follow_tail {
-                        terminal.scroll_bottom();
-                    }
+                    // Always keep the pin on the active tail before the next live
+                    // extract: scrolling is frontend-driven (D6), so the live
+                    // stream emits the tail unconditionally and the frontend
+                    // decides whether the tail is on screen. A `read_rows` serve
+                    // restores the pin too, so this stays correct after a serve.
+                    terminal.scroll_bottom();
                     pending_frame = true;
                     if let Some(deferred_event) = deferred_event {
                         match deferred_event {
@@ -907,19 +929,20 @@ fn spawn_pty_reader_thread(
     Ok(())
 }
 
-/// Result of draining the worker's command queue for one loop iteration:
-/// whether a frame should be emitted, and how many resizes were applied (each
-/// bumps the session generation, per the wire protocol's generation rules).
+/// Result of draining the worker's command queue for one loop iteration. The
+/// session generation is bumped in place on resize (see `apply_terminal_commands`),
+/// so this only reports whether a frame should be emitted afterward.
 #[derive(Clone, Copy, Debug, Default)]
 struct AppliedCommands {
     needs_frame: bool,
-    resizes: u32,
 }
 
 fn apply_terminal_commands(
+    terminal_id: TerminalId,
     receiver: &Receiver<TerminalRuntimeCommand>,
     terminal: &mut GhosttyTerminalState<'_, '_>,
     viewport_state: &mut TerminalViewportState,
+    generation: &mut u32,
 ) -> Result<AppliedCommands> {
     let mut applied = AppliedCommands::default();
 
@@ -927,31 +950,48 @@ fn apply_terminal_commands(
         match command {
             TerminalRuntimeCommand::Resize { cols, rows } => {
                 terminal.resize(cols, rows)?;
-                if viewport_state.follow_tail {
-                    terminal.scroll_bottom();
-                }
-                applied.needs_frame = true;
-                applied.resizes += 1;
-            }
-            TerminalRuntimeCommand::ScrollDelta(rows) => {
-                terminal.scroll_delta(rows);
-                viewport_state.follow_tail = terminal.is_viewport_at_bottom()?;
+                // Reflow renumbers rows, so bump the generation immediately; the
+                // forced Full frame that follows carries the new generation, and
+                // a history-range request drained after this resize is served at
+                // (and tagged with) the post-resize generation.
+                *generation = generation.saturating_add(1);
                 applied.needs_frame = true;
             }
-            TerminalRuntimeCommand::ScrollTop => {
-                terminal.scroll_top();
-                viewport_state.follow_tail = false;
-                applied.needs_frame = true;
-            }
-            TerminalRuntimeCommand::ScrollBottom => {
-                terminal.scroll_bottom();
-                viewport_state.follow_tail = true;
-                applied.needs_frame = true;
-            }
-            TerminalRuntimeCommand::ScrollToRow(row) => {
-                terminal.scroll_to_row(row)?;
-                viewport_state.follow_tail = false;
-                applied.needs_frame = true;
+            TerminalRuntimeCommand::ReadRows {
+                start,
+                count,
+                generation: requested_generation,
+                reply,
+            } => {
+                // Serve the band only if the frontend's generation still matches
+                // the live one; a resize the frontend has not seen yet renumbers
+                // rows, so an old-generation request is answered with an empty
+                // band (the frontend re-seeds and re-requests against the new
+                // generation). The reply is always stamped with the live
+                // generation so the frontend can re-check on receipt.
+                let rows = if requested_generation == *generation {
+                    // A read error must NOT kill the worker (that would take the
+                    // whole session down over a transient scroll-back read). Log
+                    // it and serve an empty band, which the `read_terminal_rows`
+                    // caller receives normally and the frontend re-requests.
+                    // `read_rows` already restores the viewport pin even on error.
+                    match terminal.read_rows(start, count) {
+                        Ok(rows) => rows,
+                        Err(error) => {
+                            eprintln!(
+                                "[reverie-terminal] read_rows failed for terminal {terminal_id} \
+                                 (start={start}, count={count}): {error}"
+                            );
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                let band = encode_row_band(&rows, *generation, start as u32);
+                // The requester may have given up (dropped the receiver); ignore
+                // a send error rather than failing the worker.
+                let _ = reply.send(band);
             }
             TerminalRuntimeCommand::SetDefaultColors {
                 foreground,
@@ -1386,7 +1426,6 @@ mod tests {
                 rows: 24,
                 title: Some("Test terminal".to_owned()),
             },
-            max_scrollback: 100,
             target_frames: Some(1),
             agent_kind: None,
             folder_name: None,
@@ -1410,7 +1449,9 @@ mod tests {
 
         let input_error = runtime.write_input(terminal_id, b"hello").unwrap_err();
         let resize_error = runtime.resize_terminal(terminal_id, 120, 32).unwrap_err();
-        let scroll_error = runtime.scroll_terminal(terminal_id, -3).unwrap_err();
+        let read_rows_error = runtime
+            .read_terminal_rows(terminal_id, 0, 10, 1)
+            .unwrap_err();
         let terminate_error = runtime.terminate_session(terminal_id).unwrap_err();
 
         assert!(
@@ -1428,8 +1469,10 @@ mod tests {
                 .to_string()
                 .contains("has no live PTY controller")
         );
+        // A history-range request for an unknown terminal fails at the command
+        // channel lookup (there is no worker to serve it).
         assert!(
-            scroll_error
+            read_rows_error
                 .to_string()
                 .contains("has no live terminal command channel")
         );
@@ -1446,52 +1489,169 @@ mod tests {
     }
 
     #[test]
-    fn terminal_commands_scroll_ghostty_viewport() {
+    fn read_rows_command_serves_a_decodable_band_at_the_current_generation() {
+        use crate::terminal::wire::decode_row_band;
+
         let (sender, receiver) = mpsc::channel();
-        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
-            follow_tail: true,
             frontend_active: true,
         };
+        let mut generation: u32 = 1;
 
-        for index in 1..=10 {
+        for index in 1..=20 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        sender
+            .send(TerminalRuntimeCommand::ReadRows {
+                start: 0,
+                count: 4,
+                generation: 1,
+                reply: reply_tx,
+            })
+            .unwrap();
+        let applied = apply_terminal_commands(
+            TerminalId::new_v4(),
+            &receiver,
+            &mut terminal,
+            &mut viewport_state,
+            &mut generation,
+        )
+        .unwrap();
+        // Serving a band is not a paint-triggering command.
+        assert!(!applied.needs_frame);
+
+        let band_bytes = reply_rx.recv().unwrap();
+        let band = decode_row_band(&band_bytes).unwrap();
+        assert_eq!(band.generation, 1);
+        assert_eq!(band.start_row, 0);
+        let text = band
+            .rows
+            .iter()
+            .map(|row| row.plain_text().trim_end().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(text, vec!["L01", "L02", "L03", "L04"]);
+
+        // After the serve the next live extract still shows the tail (the worker
+        // re-pins, and read_rows restores the pin too).
+        let after = terminal.frame().unwrap();
+        assert!(after.scrollback.at_bottom);
+    }
+
+    #[test]
+    fn read_rows_command_returns_an_empty_band_for_a_stale_generation() {
+        use crate::terminal::wire::decode_row_band;
+
+        let (sender, receiver) = mpsc::channel();
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        let mut viewport_state = TerminalViewportState {
+            frontend_active: true,
+        };
+        // The live generation is 2, but the request carries the stale 1.
+        let mut generation: u32 = 2;
+
+        for index in 1..=20 {
             terminal.write(format!("L{index:02}\r\n").as_bytes());
         }
         terminal.scroll_bottom();
 
-        sender.send(TerminalRuntimeCommand::ScrollTop).unwrap();
-        assert!(
-            apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
-                .unwrap()
-                .needs_frame
-        );
-        let top = terminal.frame().unwrap();
-        assert!(!viewport_state.follow_tail);
-        assert!(!top.scrollback.at_bottom);
-        assert_eq!(top.rows[0].plain_text().trim_end(), "L01");
+        let (reply_tx, reply_rx) = mpsc::channel();
+        sender
+            .send(TerminalRuntimeCommand::ReadRows {
+                start: 0,
+                count: 4,
+                generation: 1,
+                reply: reply_tx,
+            })
+            .unwrap();
+        apply_terminal_commands(
+            TerminalId::new_v4(),
+            &receiver,
+            &mut terminal,
+            &mut viewport_state,
+            &mut generation,
+        )
+        .unwrap();
 
-        sender.send(TerminalRuntimeCommand::ScrollBottom).unwrap();
-        assert!(
-            apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
-                .unwrap()
-                .needs_frame
-        );
-        let bottom = terminal.frame().unwrap();
-        assert!(viewport_state.follow_tail);
-        assert!(bottom.scrollback.at_bottom);
+        let band = decode_row_band(&reply_rx.recv().unwrap()).unwrap();
+        // Stamped with the live generation, with no rows: the frontend drops it
+        // and re-requests against the new generation.
+        assert_eq!(band.generation, 2);
+        assert!(band.rows.is_empty());
     }
 
     #[test]
-    fn resize_command_reports_a_generation_bump_and_forces_a_full_frame() {
-        // The worker bumps the per-session generation by `applied.resizes` and
-        // the post-resize frame is Full, which the frontend adopts as the new
-        // generation. This pins both halves of that contract.
+    fn read_rows_command_replies_and_the_worker_keeps_draining_after_it() {
+        // A ReadRows must always reply (so the `read_terminal_rows` caller never
+        // hangs) and must never break the command drain: a command queued after
+        // it in the same batch is still applied. This guards the worker against
+        // dying on a serve (an internal read error replies an empty band instead
+        // of propagating).
+        use crate::terminal::wire::decode_row_band;
+
         let (sender, receiver) = mpsc::channel();
-        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
-            follow_tail: true,
             frontend_active: true,
         };
+        let mut generation: u32 = 1;
+
+        for index in 1..=20 {
+            terminal.write(format!("L{index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+
+        // A ReadRows followed by a SetFrontendActive in the same drain.
+        let (reply_tx, reply_rx) = mpsc::channel();
+        sender
+            .send(TerminalRuntimeCommand::ReadRows {
+                start: 0,
+                count: 4,
+                generation: 1,
+                reply: reply_tx,
+            })
+            .unwrap();
+        sender
+            .send(TerminalRuntimeCommand::SetFrontendActive(false))
+            .unwrap();
+
+        apply_terminal_commands(
+            TerminalId::new_v4(),
+            &receiver,
+            &mut terminal,
+            &mut viewport_state,
+            &mut generation,
+        )
+        .unwrap();
+
+        // The reply was sent (caller never hangs)...
+        let band = decode_row_band(&reply_rx.recv().unwrap()).unwrap();
+        assert_eq!(band.rows.len(), 4);
+        // ...and the command queued after ReadRows was still applied, proving the
+        // drain (and thus the worker loop) survived the serve.
+        assert!(!viewport_state.frontend_active);
+
+        // The serve restored the pin, so the next live extract still shows the tail.
+        let after = terminal.frame().unwrap();
+        assert!(after.scrollback.at_bottom);
+    }
+
+    #[test]
+    fn resize_command_bumps_the_generation_and_forces_a_full_frame() {
+        // A resize bumps the per-session generation in place and the post-resize
+        // frame is Full, which the frontend adopts as the new generation. This
+        // pins both halves of that contract.
+        let (sender, receiver) = mpsc::channel();
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        let mut viewport_state = TerminalViewportState {
+            frontend_active: true,
+        };
+        let mut generation: u32 = 1;
 
         // Drain the initial forced-full frame so the next frame reflects only
         // the resize.
@@ -1503,10 +1663,16 @@ mod tests {
         sender
             .send(TerminalRuntimeCommand::Resize { cols: 24, rows: 6 })
             .unwrap();
-        let applied =
-            apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap();
+        let applied = apply_terminal_commands(
+            TerminalId::new_v4(),
+            &receiver,
+            &mut terminal,
+            &mut viewport_state,
+            &mut generation,
+        )
+        .unwrap();
         assert!(applied.needs_frame);
-        assert_eq!(applied.resizes, 2);
+        assert_eq!(generation, 3);
 
         let frame = terminal.frame().unwrap();
         assert_eq!(
@@ -1519,11 +1685,11 @@ mod tests {
     #[test]
     fn terminal_commands_lower_frame_cadence_when_frontend_backgrounds_terminal() {
         let (sender, receiver) = mpsc::channel();
-        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
-            follow_tail: true,
             frontend_active: true,
         };
+        let mut generation: u32 = 1;
 
         assert_eq!(
             terminal_frame_interval(&viewport_state),
@@ -1534,9 +1700,15 @@ mod tests {
             .send(TerminalRuntimeCommand::SetFrontendActive(false))
             .unwrap();
         assert!(
-            !apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
-                .unwrap()
-                .needs_frame
+            !apply_terminal_commands(
+                TerminalId::new_v4(),
+                &receiver,
+                &mut terminal,
+                &mut viewport_state,
+                &mut generation,
+            )
+            .unwrap()
+            .needs_frame
         );
         assert!(!viewport_state.frontend_active);
         assert_eq!(
@@ -1548,9 +1720,15 @@ mod tests {
             .send(TerminalRuntimeCommand::SetFrontendActive(true))
             .unwrap();
         assert!(
-            !apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
-                .unwrap()
-                .needs_frame
+            !apply_terminal_commands(
+                TerminalId::new_v4(),
+                &receiver,
+                &mut terminal,
+                &mut viewport_state,
+                &mut generation,
+            )
+            .unwrap()
+            .needs_frame
         );
         assert!(viewport_state.frontend_active);
         assert_eq!(
@@ -1615,7 +1793,6 @@ mod tests {
         let start = Instant::now();
         let last_frame_emit = start;
         let mut viewport_state = TerminalViewportState {
-            follow_tail: true,
             frontend_active: false,
         };
         let pending_frame = true;
@@ -1640,9 +1817,8 @@ mod tests {
 
     #[test]
     fn terminal_frame_ready_buffers_synchronized_output_until_timeout() {
-        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let viewport_state = TerminalViewportState {
-            follow_tail: true,
             frontend_active: true,
         };
         let now = Instant::now();
@@ -1695,7 +1871,6 @@ mod tests {
         let start = Instant::now();
         let mut last_frame_emit = start.checked_sub(TERMINAL_FRAME_INTERVAL).unwrap_or(start);
         let viewport_state = TerminalViewportState {
-            follow_tail: true,
             frontend_active: active,
         };
         let mut frames = 0_usize;
