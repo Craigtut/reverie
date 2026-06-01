@@ -87,3 +87,21 @@ A log of pivotal, hard-to-reverse terminal decisions: the choice, why, the alter
 - Reading deep rows from `libghostty` is comparatively expensive (it walks the page list), but only relative to the live viewport, and only a real problem if done in the render loop. As an occasional band prefetch that the frontend then caches, it is cheap. So we minimize reads by caching, not by bulk-dumping the buffer to the frontend, which would not scale to dozens of sessions and would double memory.
 
 **Consequence.** In-session scroll-back, including to the start of most sessions, is handled by setting the dial generously; it adds no new system and persists nothing. There is no durable-history milestone behind this, because a restart uses the CLI's resume (D5).
+
+## D8: Rows carry a backend-computed stable id (StableRowIndex), not a buffer position
+
+**Status:** Accepted, 2026-06-01. Sharpens D6/D7 on *how* the frontend identifies a row across trim, after research into how decoupled renderers (WezTerm, xterm.js, Warp) and Ghostty itself solve it. Full design in [`scrollback-coverage-design.md`](scrollback-coverage-design.md).
+
+**Context.** D6/D7 keep `libghostty` the sole source of truth and have the frontend mirror rows near the viewport. But `libghostty`'s row positions are buffer-relative: when the byte cap is hit and the oldest rows are evicted, every position shifts. A mirror keyed by position therefore desyncs the instant the backend trims, which for Reverie's long agent sessions is normal, not an edge.
+
+- **Option A (chosen): a stable, monotonic per-line id, computed in our backend.** Each row gets `id = buffer_position + lines_evicted`; the backend reports the retained range `[oldest_id, newest_id]`; trim advances `oldest_id` and survivors keep their id (no re-seed); the frontend keys its cache and viewport anchor by id. This is the WezTerm `StableRowIndex` pattern, the canonical answer for a renderer decoupled from the buffer.
+- **Option B: hold `libghostty`'s tracked pins across the boundary.** This is what Ghostty's own renderer uses, but it is in-process only (a live pointer into the core's heap); an IPC consumer cannot hold one. The pin/serial machinery is not on the released C ABI, and the forming upstream surface is unreleased and would require pinning a post-release Ghostty commit, i.e. a fork.
+- **Option C: keep position keying, re-seed on every trim.** Re-seed churn for an actively-trimming session, and it still cannot keep a scrolled-back view anchored.
+
+**Decision.** Compute a StableRowIndex in the backend (we own the terminal, like WezTerm). Below the cap `lines_evicted == 0`, so `id == position` and the machinery is inert. Trim advances `oldest_id` without a re-seed; only reflow/clear/alt re-seed (a generation bump). We stay on the official `libghostty-vt` release and do not fork.
+
+**Why.** It is the only model that keeps a decoupled frontend coherent across trim *and* append, it makes the coverage fix (provenance, the Ink bug) fall out keyed by id, and it confines the one thing the released library cannot give us to a graceful corner.
+
+**Consequence (the one residual).** Keeping `lines_evicted` exact needs an eviction count the released ABI does not emit, so at the cap while actively flooding *and* scrolled back, the anchor can drift (content stays correct, it self-re-anchors). Never wrong content, never a livelock. It is exact for free, with no architecture change, once `libghostty` ships an eviction/pin signal in a release.
+
+**Revisit when** `libghostty-vt` publishes a release exposing tracked pins, a page serial, or an eviction/line counter: adopt it to make `lines_evicted` exact and retire the residual.

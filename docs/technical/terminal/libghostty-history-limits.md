@@ -39,11 +39,14 @@ So the two read paths are different by design: **render-state for the live viewp
 
 Total-row and scrollback-row counts (for a scrollbar) are available but are also flagged expensive at arbitrary positions, so cache them and re-query only on writes or resize, not per scroll tick.
 
-## Reflow on resize invalidates row indices (re-seed, always)
+## Row identity: trim shifts positions, reflow renumbers them
 
-A width change rewraps soft-wrapped lines, which changes how many rows the content occupies and therefore renumbers rows. `libghostty` itself just invalidates its cached row offset on reflow. The consequence for us: **any absolute-row-index cache is invalid after a width change.** This is why the wire protocol carries a generation marker (see [`wire-protocol.md`](wire-protocol.md)): on resize, bump the generation, re-seed from a fresh snapshot, and re-issue history-range requests against the new geometry. Row-only resizes do not reflow, but they still shift the active-area and scrollback split, so the safe rule is to re-seed on any resize.
+`libghostty`'s row positions are buffer-relative. **Trim** (eviction at the byte cap) drops the oldest rows, so every position shifts down. **Reflow** (a width change) rewraps soft-wrapped lines, changing how many rows the content occupies and renumbering them; `libghostty` just invalidates its cached row offset. Either way, an absolute-position cache is wrong afterward.
 
-What `libghostty` keeps stable across reflow is its internal tracked pins (handles into pages); what it does not keep stable is any absolute row index. We key our mirror by index, so we re-seed.
+We handle the two differently (see [`decisions.md`](decisions.md) D8 and [`scrollback-coverage-design.md`](scrollback-coverage-design.md)):
+
+- **Trim:** the backend gives each row a stable id (`id = position + lines_evicted`, the WezTerm StableRowIndex pattern). Survivors keep their id, so the frontend's cache stays coherent across eviction with **no re-seed**; it only learns the oldest id advanced. `libghostty`'s only stable handle is its internal tracked pin, which is in-process only and not on the C ABI (an IPC consumer cannot hold a live pin), so we compute this id ourselves. The catch: the ABI emits no eviction count, so `lines_evicted` is exact below the cap and best-effort at it (the graceful residual in D8).
+- **Reflow:** rewrap genuinely changes the rows, so the id space stays monotonic but what each id resolves to changes. Here we **re-seed**: the wire protocol carries a generation marker (see [`wire-protocol.md`](wire-protocol.md)); on resize, bump the generation, re-seed from a fresh snapshot, re-issue range requests against the new geometry, and re-anchor the viewport. Row-only resizes do not reflow but still shift the active-area/scrollback split, so the safe rule is re-seed on any resize.
 
 ## Memory cost, and what it means for dozens of sessions
 
@@ -60,7 +63,7 @@ This is what makes D3 (dozens, no hard cap, shed under pressure) affordable, and
 - **Graphemes are out-of-line.** A cell with combining marks stores only its first codepoint inline; the rest live in a per-page pool and are read separately. One cell is not one character.
 - **Soft-wrap is a row flag, not a character.** To rebuild logical lines (for copy, search, or a title), follow the wrap flags; they are also what reflow rewraps.
 - **Dirty tracking is two-layer and caller-managed.** The render-state API tracks a global dirty flag and per-row dirty bits independently, and only sets them; the caller must reset both after drawing. Easy to over-draw or drop updates if mishandled.
-- **Pages are pooled and recycled, so page pointers are not stable.** Each page carries a monotonic serial to detect reuse. Do not hold raw references across terminal mutations.
+- **Pages are pooled and recycled, so page pointers are not stable.** Each page carries a monotonic serial to detect reuse, and the core tracks pins it rewrites on every mutation, but neither the serial nor the pins are exposed on the C ABI (they are in-process). That is why we compute our own stable row id rather than relying on the library (see [`decisions.md`](decisions.md) D8). Do not hold raw references across terminal mutations.
 
 ## Implications for our design (the short version)
 
