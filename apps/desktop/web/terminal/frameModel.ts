@@ -11,6 +11,17 @@ import type { TerminalFrame } from '../terminalTypes';
 // flash blank rows before the next paint catches up.
 export const OVERSCAN_ROWS = 3;
 
+// History prefetch sizing. When the view is scrolled back, the frontend keeps an
+// aligned band of older rows resident AHEAD of the viewport (mostly above it, the
+// scroll-up direction) so scrolling into history hits warm cache instead of
+// stalling on a per-screen fetch. The whole band is pulled in one round-trip and
+// cached; snapping the band bounds to a fixed grid keeps the request key stable
+// across small scrolls so it dedupes instead of refetching. This mirrors how
+// remote terminal clients (WezTerm's mux client) keep scroll smooth over an IPC
+// boundary: a large warm cache + fetch-ahead, not a thin reactive overscan.
+export const HISTORY_PREFETCH_LEAD_ROWS = 128;
+export const HISTORY_PREFETCH_ALIGN_ROWS = 128;
+
 export function blankTerminalFrame(surface: TerminalSurface): TerminalFrame {
   return {
     dirty: 'full',

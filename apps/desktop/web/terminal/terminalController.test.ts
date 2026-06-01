@@ -2441,9 +2441,12 @@ describe('createTerminalController', () => {
     };
     controller.applyView(view, surface, buffer);
 
+    // A scrolled-back miss now fetches the aligned prefetch band (paint window +
+    // lead above, snapped to HISTORY_PREFETCH_ALIGN_ROWS), not just the window,
+    // so one round-trip warms the next stretch of scroll-up.
     expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 117,
-      rowCount: 10,
+      startRow: 0,
+      rowCount: 128,
       totalRows: 250,
       generation: 0,
     });
@@ -2957,10 +2960,11 @@ describe('createTerminalController', () => {
 
     // Generation is the un-synced default 0: a column-change resize no longer
     // bumps a frontend-only generation (see the boundary test for why the live
-    // generation is backend-synced instead).
+    // generation is backend-synced instead). The uncached miss fetches the
+    // aligned prefetch band, which on this 80-row buffer spans the whole history.
     expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 63,
-      rowCount: 14,
+      startRow: 0,
+      rowCount: 80,
       totalRows: 80,
       generation: 0,
     });

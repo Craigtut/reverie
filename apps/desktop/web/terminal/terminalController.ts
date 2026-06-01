@@ -20,6 +20,8 @@ import type {
   TerminalRow,
 } from '../terminalTypes';
 import {
+  HISTORY_PREFETCH_ALIGN_ROWS,
+  HISTORY_PREFETCH_LEAD_ROWS,
   OVERSCAN_ROWS,
   buildSessionTerminalView,
   computePaintWindow,
@@ -824,6 +826,31 @@ export function createTerminalController(options: TerminalControllerOptions) {
     return inset;
   }
 
+  // The aligned band of history rows to keep resident around the paint window.
+  // Scrolled back, it reaches HISTORY_PREFETCH_LEAD_ROWS above the window (the
+  // scroll-up direction) so one round-trip warms several screens of history and
+  // the view hits cache instead of stalling per screen; bounds snap to
+  // HISTORY_PREFETCH_ALIGN_ROWS so the request key stays stable across small
+  // scrolls and dedupes. At the live tail (no lead) it is just the paint window,
+  // so following output never pulls history (decisions.md D6/D7).
+  function historyPrefetchBand(
+    buffer: TerminalBufferState,
+    startRow: number,
+    rowCount: number,
+    withLead: boolean,
+  ): { startRow: number; rowCount: number } {
+    if (!withLead) return { startRow, rowCount };
+    const align = Math.max(1, HISTORY_PREFETCH_ALIGN_ROWS);
+    const desiredStart = Math.max(0, startRow - HISTORY_PREFETCH_LEAD_ROWS);
+    const desiredEnd = Math.min(buffer.totalRows, startRow + rowCount);
+    const bandStart = Math.floor(desiredStart / align) * align;
+    const bandEnd = Math.min(
+      buffer.totalRows,
+      Math.max(bandStart + align, Math.ceil(desiredEnd / align) * align),
+    );
+    return { startRow: bandStart, rowCount: Math.max(1, bandEnd - bandStart) };
+  }
+
   function requestLiveRowsForPaintWindow(
     buffer: TerminalBufferState,
     startRow: number,
@@ -852,20 +879,24 @@ export function createTerminalController(options: TerminalControllerOptions) {
       };
     }
     if (!cachedRange || shapeStale) {
+      // Pull a big aligned band (paint window + lead above), not just the window,
+      // so one round-trip warms the next stretch of scroll-up instead of stalling
+      // per screen. The band reduces to the paint window at the live tail.
+      const band = historyPrefetchBand(buffer, startRow, rowCount, !liveFollow);
       const request = {
-        startRow,
-        rowCount,
+        startRow: band.startRow,
+        rowCount: band.rowCount,
         totalRows: buffer.totalRows,
         generation: liveGeneration,
       };
-      const missTraceKey = `live:${liveGeneration}:${startRow}:${rowCount}:${buffer.totalRows}:${displayRows}`;
+      const missTraceKey = `live:${liveGeneration}:${band.startRow}:${band.rowCount}:${buffer.totalRows}:${displayRows}`;
       if (missTraceKey !== lastBufferCacheMissTraceKey) {
         lastBufferCacheMissTraceKey = missTraceKey;
         trace({
           kind: 'buffer_cache_miss',
           mode: 'live',
-          startRow,
-          rowCount,
+          startRow: band.startRow,
+          rowCount: band.rowCount,
           displayRows,
           totalRows: buffer.totalRows,
           generation: liveGeneration,
@@ -874,14 +905,14 @@ export function createTerminalController(options: TerminalControllerOptions) {
       }
       const requested = requestMissingLiveRows(buffer, request);
       if (requested) {
-        const requestTraceKey = `miss:${liveGeneration}:${startRow}:${rowCount}:${buffer.totalRows}`;
+        const requestTraceKey = `miss:${liveGeneration}:${band.startRow}:${band.rowCount}:${buffer.totalRows}`;
         if (requestTraceKey !== lastHistoryRowsRequestTraceKey) {
           lastHistoryRowsRequestTraceKey = requestTraceKey;
           trace({
             kind: 'history_rows_request',
             source: 'miss',
-            startRow,
-            rowCount,
+            startRow: band.startRow,
+            rowCount: band.rowCount,
             totalRows: buffer.totalRows,
             generation: liveGeneration,
           });
