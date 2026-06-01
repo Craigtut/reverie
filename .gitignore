@@ -61,6 +61,9 @@ recordings/
 *.webm
 .playwright-mcp/
 
+# Local agent state (Claude Code project dir: logs, todos, settings)
+.claude/
+
 # Temporary files
 .tmp/
 tmp/
