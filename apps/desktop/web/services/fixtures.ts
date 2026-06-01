@@ -2,7 +2,12 @@ import { makeSyntheticFrame } from '../terminal-canvas-renderer';
 import { findMatchesInFrame } from '../terminal/findModel';
 import { planHistoryWindowForTargetRow } from '../terminal/historyWindowing';
 import type { TerminalFrame } from '../terminalTypes';
-import type { AgentCliDetection, AgentKind, WorkspaceShellSnapshot } from '../domain';
+import type {
+  AgentCliDetection,
+  AgentKind,
+  RenderMetrics,
+  WorkspaceShellSnapshot,
+} from '../domain';
 import type { EventHandler, UnlistenFn } from './types';
 
 // The most recent frame per terminal. The history fixtures serve it as the whole
@@ -21,12 +26,20 @@ const lastFixtureFrames = new Map<string, TerminalFrame>();
 const browserListeners = new Map<string, Set<EventHandler<unknown>>>();
 const runningTerminals = new Map<
   string,
-  { sessionId: string; cancelled: boolean; startedAt: number; framesEmitted: number }
+  {
+    sessionId: string;
+    cancelled: boolean;
+    frontendActive: boolean;
+    startedAt: number;
+    framesEmitted: number;
+  }
 >();
 const fixtureStorageKey = makeFixtureStorageKey();
 // Test-only record of terminal input writes, surfaced on the window hook so the
 // harness can assert "send to input" / "ask an agent" seeded the right text.
 const recordedTerminalInputs: Array<{ terminalId: string; input: string }> = [];
+const frontendActivityEvents: Array<{ terminalId: string; active: boolean }> = [];
+const recordedRenderMetrics: RenderMetrics[] = [];
 let fixtureShell: WorkspaceShellSnapshot = loadFixtureShellSnapshot();
 // CLIs the user has switched off in the harness. Drives the same enabled/
 // disabled behavior as the real workspace pref so the settings toggle and the
@@ -92,6 +105,14 @@ export async function invokeBrowserFixture<T>(
       return undefined as T;
     case 'scroll_terminal_viewport_to_bottom':
       return undefined as T;
+    case 'set_terminal_frontend_active': {
+      const terminalId = readDirectArg<string>(args, 'terminalId');
+      const active = readDirectArg<boolean>(args, 'active');
+      frontendActivityEvents.push({ terminalId, active });
+      const terminal = runningTerminals.get(terminalId);
+      if (terminal) terminal.frontendActive = active;
+      return undefined as T;
+    }
     case 'set_terminal_theme':
       // No backend terminal in the browser harness; the Canvas renderer applies
       // theme colors directly via the controller, so this is a no-op here.
@@ -105,6 +126,9 @@ export async function invokeBrowserFixture<T>(
     case 'terminal_history_window':
       return historyWindowFixture(args) as T;
     case 'record_render_metrics':
+      recordedRenderMetrics.push(clone(args?.metrics as RenderMetrics));
+      return undefined as T;
+    case 'record_terminal_diagnostics':
       return undefined as T;
     case 'set_workspace_nav_state':
       // The desktop backend persists the last view so a reload/relaunch reopens
@@ -424,6 +448,7 @@ function startFixtureSession(args?: Record<string, unknown>) {
   const terminal = {
     sessionId: request.sessionId,
     cancelled: false,
+    frontendActive: true,
     startedAt: performance.now(),
     framesEmitted: 0,
   };
@@ -468,8 +493,9 @@ function historyInfoFixture(_args?: Record<string, unknown>) {
 
 function historyWindowFixture(args?: Record<string, unknown>) {
   const startRow = Number(args?.startRow ?? 0);
+  const rowCount = Number(args?.rowCount ?? args?.rows ?? 0);
   const frame = fixtureSessionFrame() ?? { dirty: 'full', rows: [] };
-  return { startRow, frame };
+  return historyWindowFromFixtureFrame(frame, startRow, rowCount);
 }
 
 function historySearchFixture(args?: Record<string, unknown>) {
@@ -493,12 +519,52 @@ function historySearchWindowFixture(args?: Record<string, unknown>) {
   const surfaceRows = Number(args?.rows ?? frame.rows.length);
   const targetRow = search.matches[0]?.row ?? 0;
   const plan = planHistoryWindowForTargetRow(targetRow, surfaceRows, search.totalRows);
+  const window = historyWindowFromFixtureFrame(frame, plan.startRow, plan.rowCount);
   return {
     search,
-    // The fixture history backend only holds one frame, so it serves that frame
-    // as the cached window while preserving the same command shape as desktop.
-    startRow: Math.min(plan.startRow, frame.scrollback?.viewportOffset ?? 0),
-    frame,
+    startRow: window.startRow,
+    frame: window.frame,
+  };
+}
+
+function historyWindowFromFixtureFrame(frame: TerminalFrame, startRow: number, rowCount: number) {
+  const sortedRows = [...frame.rows].sort((left, right) => left.index - right.index);
+  const totalRows = Math.max(sortedRows.at(-1)?.index ?? 0, sortedRows.length - 1) + 1;
+  const requestedCount = Math.max(1, Math.min(totalRows, Math.floor(rowCount || totalRows)));
+  const clampedStart = Math.max(
+    0,
+    Math.min(Math.floor(startRow || 0), Math.max(0, totalRows - requestedCount)),
+  );
+  const endRow = clampedStart + requestedCount;
+  const sourceRows = new Map(sortedRows.map(row => [row.index, row]));
+  const rows = Array.from({ length: requestedCount }, (_, index) => {
+    const absoluteRow = clampedStart + index;
+    const source = sourceRows.get(absoluteRow);
+    return source
+      ? {
+          ...source,
+          index,
+          dirty: true,
+          cells: source.cells.map(cell => ({ ...cell })),
+        }
+      : { index, dirty: true, cells: [] };
+  });
+
+  return {
+    startRow: clampedStart,
+    frame: {
+      ...frame,
+      dirty: 'full' as const,
+      rows,
+      scrollback: {
+        ...frame.scrollback,
+        totalRows,
+        scrollbackRows: Math.max(0, totalRows - requestedCount),
+        viewportOffset: clampedStart,
+        viewportRows: requestedCount,
+        atBottom: endRow >= totalRows,
+      },
+    },
   };
 }
 
@@ -524,7 +590,10 @@ function emitFixtureFrames(terminalId: string, cols: number, rows: number) {
     return;
   }
 
-  window.setTimeout(() => emitFixtureFrames(terminalId, cols, rows), 16);
+  window.setTimeout(
+    () => emitFixtureFrames(terminalId, cols, rows),
+    terminal.frontendActive ? 16 : 100,
+  );
 }
 
 function finishFixtureTerminal(terminalId: string, childSuccess: boolean) {
@@ -626,8 +695,28 @@ if (typeof window !== 'undefined') {
         frame,
       });
     },
+    emitRawTerminalFrame(terminalId: string, frame: TerminalFrame, seq = 9999) {
+      lastFixtureFrames.set(terminalId, frame);
+      emit('terminal_frame', {
+        terminalId,
+        seq,
+        bytesRead: 0,
+        chunkBytes: frame.rows.reduce((sum, row) => sum + row.cells.length, 0),
+        rustElapsedMs: 0,
+        frame,
+      });
+    },
+    finishTerminal(terminalId: string, childSuccess = true) {
+      finishFixtureTerminal(terminalId, childSuccess);
+    },
+    frontendActivityEvents() {
+      return frontendActivityEvents.slice();
+    },
     recordedInputs() {
       return recordedTerminalInputs.slice();
+    },
+    recordedRenderMetrics() {
+      return recordedRenderMetrics.slice();
     },
   };
 }

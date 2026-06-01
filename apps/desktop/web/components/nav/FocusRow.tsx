@@ -122,6 +122,9 @@ export function FocusRow({
 
 const focusGroupClass = css({
   display: 'grid',
+  // See ProjectGroup: a shrinkable single column so long titles truncate inside
+  // the row rather than widening the track past the rail.
+  gridTemplateColumns: 'minmax(0, 1fr)',
   gap: '1px',
 });
 
@@ -151,5 +154,6 @@ const focusChildrenClass = css({
   paddingLeft: '8px',
   borderLeft: '1px solid var(--line-faint)',
   display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr)',
   gap: '1px',
 });

@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Plus, ShieldWarning } from '@phosphor-icons/react';
 import { css } from '../../styled-system/css';
 import { agentTabLabel, cellStateFor } from '../../domain';
@@ -33,8 +34,28 @@ export interface SessionTabsBarProps {
   onViewFullHistory: () => void;
 }
 
+// Roughly how wide a comfortable labeled inactive tab and the active tab want to
+// be, plus the fixed chrome (new-session button, divider, pill padding). When the
+// available width can't seat every tab at these widths the strip switches to the
+// compact layout (active labeled, the rest glyph squares) instead of scrolling.
+const COMFORTABLE_INACTIVE_TAB = 116;
+const COMFORTABLE_ACTIVE_TAB = 150;
+const STRIP_CHROME = 78;
+
+function wantsCompact(available: number, count: number): boolean {
+  if (count <= 1 || available <= 0) return false;
+  const needed = COMFORTABLE_ACTIVE_TAB + (count - 1) * COMFORTABLE_INACTIVE_TAB + STRIP_CHROME;
+  return available < needed;
+}
+
 // The band above the terminal: the session tabs for the active focus plus the
 // auto-approve toggle. Presentational; the shell owns selection and lifecycle.
+//
+// Tabs compress to fit rather than scroll. A ResizeObserver compares the room the
+// strip has against the tab count: with space, tabs are content-width and the
+// pill floats and hugs them (comfortable); when crowded the active tab keeps its
+// label while the rest collapse to glyph + state squares (compact). The new-tab
+// button and the right-side controls never scroll out of reach.
 export function SessionTabsBar({
   visibleSessions,
   selectedSessionId,
@@ -54,80 +75,112 @@ export function SessionTabsBar({
   onToggleDangerousMode,
   onViewFullHistory,
 }: SessionTabsBarProps) {
+  // The invisible flex slot the pill lives in; its width is the room the strip
+  // actually has (the band minus the right-side controls), independent of how the
+  // tabs lay out, so measuring it can't oscillate the density it decides.
+  const regionRef = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+
+  useLayoutEffect(() => {
+    const node = regionRef.current;
+    if (!node) return;
+    const recompute = () => setCompact(wantsCompact(node.clientWidth, visibleSessions.length));
+    recompute();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(recompute);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [visibleSessions.length]);
+
   return (
     <div className={topBandClass}>
-      <div className={tabsClass} data-testid="session-tabs">
-        {visibleSessions.map(session => (
-          <button
-            key={session.id}
-            className={tabClass({ active: session.id === selectedSessionId })}
-            type="button"
-            data-testid="session-tab"
-            data-drop-zone={TERMINAL_TAB_DROP_ZONE}
-            data-drop-id={session.id}
-            data-session-id={session.id}
-            data-active={session.id === selectedSessionId ? 'true' : 'false'}
-            data-drop-armed={session.id === dropTargetSessionId ? 'true' : 'false'}
-            onClick={() => onSelectSession(session)}
-          >
-            <AgentGlyph kind={session.agentKind} />
-            <Typography as="span" variant="caption" tone="inherit">
-              {agentTabLabel(session)}
-            </Typography>
-            {/* Trailing slot: the live state dot at rest crossfades to a large
-                square close target on hover (mirrors the left-nav row pattern),
-                so the tab never shows both a status and a persistent X. */}
-            <span className={tabTrailingClass}>
-              <span className={tabCellWrapClass} data-tab-meta="true" aria-hidden="true">
-                <StateCell
-                  state={cellStateFor(
-                    session,
-                    session.status === 'running' || session.id === runningSessionId,
-                    null,
-                  )}
-                  size={12}
-                />
-              </span>
-              <span
-                className={tabCloseClass}
-                role="button"
-                tabIndex={0}
-                data-testid="close-session-tab-button"
-                data-tab-action="true"
-                aria-label={`Close ${session.title} tab`}
-                onClick={event => void onCloseSession(event, session)}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' || event.key === ' ')
-                    void onCloseSession(event, session);
-                }}
+      <div ref={regionRef} className={tabsRegionClass}>
+        <div className={tabsClass({ compact })} data-testid="session-tabs">
+          {visibleSessions.map(session => {
+            const active = session.id === selectedSessionId;
+            // Inactive tabs shed their label in compact mode; the active tab and
+            // every tab in comfortable mode keep theirs.
+            const iconOnly = compact && !active;
+            const label = agentTabLabel(session);
+            return (
+              <button
+                key={session.id}
+                className={tabClass({ active, iconOnly })}
+                type="button"
+                data-testid="session-tab"
+                data-drop-zone={TERMINAL_TAB_DROP_ZONE}
+                data-drop-id={session.id}
+                data-session-id={session.id}
+                data-active={active ? 'true' : 'false'}
+                data-drop-armed={session.id === dropTargetSessionId ? 'true' : 'false'}
+                // Hover-peek: when the label is hidden (or truncated) the native
+                // tooltip still names the session.
+                title={label}
+                onClick={() => onSelectSession(session)}
               >
-                <CloseGlyph size={12} />
-              </span>
-            </span>
-          </button>
-        ))}
-        {visibleSessions.length === 0 ? (
-          <Typography
-            as="div"
-            variant="caption"
-            tone="faint"
-            className={emptyTabsHintClass}
-            data-testid="empty-session-tabs"
+                <AgentGlyph kind={session.agentKind} />
+                {iconOnly ? null : (
+                  <Typography as="span" variant="caption" tone="inherit" className={tabLabelClass}>
+                    {label}
+                  </Typography>
+                )}
+                {/* Trailing slot: the live state dot at rest crossfades to a large
+                    square close target on hover (mirrors the left-nav row pattern),
+                    so the tab never shows both a status and a persistent X. At the
+                    tightest compact widths it drops out, leaving just the glyph. */}
+                <span className={tabTrailingClass}>
+                  <span className={tabCellWrapClass} data-tab-meta="true" aria-hidden="true">
+                    <StateCell
+                      state={cellStateFor(
+                        session,
+                        session.status === 'running' || session.id === runningSessionId,
+                        null,
+                      )}
+                      size={12}
+                    />
+                  </span>
+                  <span
+                    className={tabCloseClass}
+                    role="button"
+                    tabIndex={0}
+                    data-testid="close-session-tab-button"
+                    data-tab-action="true"
+                    aria-label={`Close ${session.title} tab`}
+                    onClick={event => void onCloseSession(event, session)}
+                    onKeyDown={event => {
+                      if (event.key === 'Enter' || event.key === ' ')
+                        void onCloseSession(event, session);
+                    }}
+                  >
+                    <CloseGlyph size={12} />
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+          {visibleSessions.length === 0 ? (
+            <Typography
+              as="div"
+              variant="caption"
+              tone="faint"
+              className={emptyTabsHintClass}
+              data-testid="empty-session-tabs"
+            >
+              No sessions in this focus
+            </Typography>
+          ) : null}
+          <span className={tabDividerClass} />
+          <button
+            className={newTabClass}
+            type="button"
+            data-testid="create-session-button"
+            disabled={busy || !canUseAppServices || !canCreateSession}
+            onClick={onCreateSession}
+            title="New session"
           >
-            No sessions in this focus
-          </Typography>
-        ) : null}
-        <span className={tabDividerClass} />
-        <button
-          className={newTabClass}
-          type="button"
-          data-testid="create-session-button"
-          disabled={busy || !canUseAppServices || !canCreateSession}
-          onClick={onCreateSession}
-          title="New session"
-        >
-          <Plus size={14} />
-        </button>
+            <Plus size={14} />
+          </button>
+        </div>
       </div>
 
       <div className={topControlsClass} data-testid="terminal-controls">
@@ -159,9 +212,11 @@ export function SessionTabsBar({
           }
           onClick={onToggleDangerousMode}
         >
-          <ShieldWarning size={14} />
+          <ShieldWarning size={14} weight={effectiveDangerousMode ? 'fill' : 'regular'} />
+          {/* State is carried by the pill's fill and color, not a word: an outline
+              chip reads "off", the warn-filled chip reads "on". */}
           <Typography as="span" variant="caption" tone="inherit">
-            {effectiveDangerousMode ? 'Auto-approve · on' : 'Auto-approve · off'}
+            Auto-approve
           </Typography>
         </button>
       </div>
@@ -182,28 +237,43 @@ const topBandClass = css({
   flexShrink: 0,
 });
 
-const tabsClass = css({
+// The slot the pill floats in. Always takes the band's free width (the band minus
+// the controls), so its measured width is the room the strip has regardless of
+// how the tabs inside choose to lay out.
+const tabsRegionClass = css({
+  flex: '1 1 auto',
   minWidth: 0,
   display: 'flex',
-  alignItems: 'center',
-  gap: '0',
-  overflowX: 'auto',
-  padding: '4px',
-  borderRadius: '12px',
-  border: '1px solid var(--line)',
-  background: 'var(--surface-1)',
-  boxShadow: 'var(--shadow)',
 });
 
-function tabClass({ active }: { active: boolean }) {
+function tabsClass({ compact }: { compact: boolean }) {
   return css({
+    // Comfortable: hug the tabs and float (a pill the width of its content).
+    // Compact: fill the region so the inactive squares can share it evenly.
+    flex: compact ? '1 1 auto' : '0 1 auto',
+    minWidth: 0,
+    maxWidth: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0',
+    overflow: 'hidden',
+    padding: '4px',
+    borderRadius: '12px',
+    border: '1px solid var(--line)',
+    background: 'var(--surface-1)',
+    boxShadow: 'var(--shadow)',
+  });
+}
+
+function tabClass({ active, iconOnly }: { active: boolean; iconOnly: boolean }) {
+  return css({
+    position: 'relative',
     height: '28px',
-    minWidth: 'auto',
-    maxWidth: '174px',
     display: 'inline-flex',
     alignItems: 'center',
-    gap: '7px',
-    padding: '0 11px',
+    justifyContent: iconOnly ? 'center' : 'flex-start',
+    gap: iconOnly ? '0' : '7px',
+    padding: iconOnly ? '0 5px' : '0 11px',
     borderRadius: '8px',
     color: active ? 'var(--text)' : 'var(--text-2)',
     background: active ? 'var(--surface-3)' : 'transparent',
@@ -211,6 +281,14 @@ function tabClass({ active }: { active: boolean }) {
     boxShadow: active ? 'inset 0 1px 0 rgba(255,255,255,0.035)' : 'none',
     cursor: 'pointer',
     whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    // Comfortable tabs and the active tab are content-width (capped). Compact
+    // inactive tabs share the leftover room equally and become squares; the
+    // container query on each one trims its trailing slot at the tightest widths.
+    flex: iconOnly ? '1 1 0' : '0 1 auto',
+    minWidth: active ? '120px' : '0',
+    maxWidth: active ? '200px' : iconOnly ? '46px' : '174px',
+    containerType: iconOnly ? 'inline-size' : 'normal',
     transition: 'background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease',
     // Hover (or keyboard focus within) crossfades the trailing slot: the state
     // dot fades out, the square close target fades in, in place.
@@ -239,14 +317,22 @@ function tabClass({ active }: { active: boolean }) {
       boxShadow:
         '0 0 0 1px color-mix(in srgb, var(--good) 60%, transparent), 0 4px 14px rgba(0,0,0,0.35)',
     },
-    '& > span:nth-child(2)': { overflow: 'hidden', textOverflow: 'ellipsis' },
   });
 }
+
+// The label flexes into whatever room the tab has and ellipsizes; the tooltip
+// names the full session when it truncates.
+const tabLabelClass = css({
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+});
 
 // The trailing slot: a fixed square that holds the resting state dot and the
 // hover close target stacked on the same center, so they crossfade without
 // shifting layout. Square + ~most of the tab height (28px) for a generous,
-// easy-to-hit close target.
+// easy-to-hit close target. At the tightest compact widths (the container query
+// resolves against the icon tab) it drops out so the glyph stands alone.
 const tabTrailingClass = css({
   position: 'relative',
   flexShrink: 0,
@@ -255,6 +341,7 @@ const tabTrailingClass = css({
   marginLeft: '1px',
   display: 'grid',
   placeItems: 'center',
+  '@container (max-width: 38px)': { display: 'none' },
 });
 
 const tabCellWrapClass = css({
@@ -291,6 +378,7 @@ const tabDividerClass = css({
 });
 
 const newTabClass = css({
+  flexShrink: 0,
   width: '26px',
   height: '26px',
   display: 'grid',
@@ -330,12 +418,16 @@ function autoApproveChipClass({ warn }: { warn: boolean }) {
     display: 'inline-flex',
     alignItems: 'center',
     gap: '6px',
-    padding: '0 10px 0 8px',
+    padding: '0 11px 0 9px',
     borderRadius: '999px',
-    border: `1px solid ${warn ? 'color-mix(in srgb, var(--warn) 38%, transparent)' : 'var(--line)'}`,
+    // The fill and color are the state: an outline chip reads "off", the
+    // warn-tinted fill reads "on" (and stays unmistakable, per the YOLO guardrail).
+    border: `1px solid ${warn ? 'color-mix(in srgb, var(--warn) 45%, transparent)' : 'var(--line)'}`,
     color: warn ? 'var(--warn)' : 'var(--text-2)',
-    background: 'var(--surface-1)',
+    background: warn ? 'color-mix(in srgb, var(--warn) 14%, var(--surface-1))' : 'var(--surface-1)',
     boxShadow: 'var(--shadow)',
     whiteSpace: 'nowrap',
+    transition: 'background 140ms ease, border-color 140ms ease, color 140ms ease',
+    _disabled: { opacity: 0.55, cursor: 'not-allowed' },
   });
 }

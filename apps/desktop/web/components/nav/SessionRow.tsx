@@ -34,7 +34,10 @@ export function SessionRow({
 }) {
   const label = agentTabLabel(session);
   return (
-    <div className={rowShellClass} data-active={active ? 'true' : 'false'}>
+    <div
+      className={cx(rowShellClass, active && sessionShellRevealedClass)}
+      data-active={active ? 'true' : 'false'}
+    >
       {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
       <button
         className={cx(rowPrimaryClass, sessionPrimaryClass)}
@@ -45,7 +48,12 @@ export function SessionRow({
         data-session-state={cellState}
       >
         <AgentGlyph kind={session.agentKind} />
-        <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
+        <Typography
+          as="span"
+          variant="smallBody"
+          tone="inherit"
+          className={active ? sessionLabelRevealedClass : rowLabelClass}
+        >
           {label}
         </Typography>
       </button>
@@ -74,6 +82,22 @@ export function SessionRow({
 // under the parent focus label.
 const sessionPrimaryClass = css({
   paddingLeft: '6px',
+});
+
+// The session on stage reveals its full title in the rail: instead of a single
+// truncated line it wraps and clamps to two lines, so a long name is legible in
+// place without a hover tooltip. Every other row stays single-line (rowLabelClass).
+const sessionLabelRevealedClass = css({
+  flex: 1,
+  minWidth: 0,
+  lineClamp: 2,
+});
+
+// The revealed row is taller (two lines); a little vertical padding keeps the
+// title off the active background's rounded edges.
+const sessionShellRevealedClass = css({
+  paddingTop: '4px',
+  paddingBottom: '4px',
 });
 
 // The live cell shares the trailing slot with the close action and crossfades

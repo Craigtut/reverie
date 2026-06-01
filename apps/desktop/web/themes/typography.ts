@@ -41,7 +41,12 @@ export const typeScale: Record<TypographyVariant, TypeStyle> = {
   body: { fontSize: '16px', lineHeight: '24px', fontWeight: 400, letterSpacing: '-0.005em' },
   bodyAlt: { fontSize: '16px', lineHeight: '24px', fontWeight: 600, letterSpacing: '-0.005em' },
   smallBody: { fontSize: '14px', lineHeight: '20px', fontWeight: 400, letterSpacing: '-0.003em' },
-  smallBodyAlt: { fontSize: '14px', lineHeight: '20px', fontWeight: 600, letterSpacing: '-0.003em' },
+  smallBodyAlt: {
+    fontSize: '14px',
+    lineHeight: '20px',
+    fontWeight: 600,
+    letterSpacing: '-0.003em',
+  },
   caption: { fontSize: '12px', lineHeight: '16px', fontWeight: 400, letterSpacing: '0' },
   tiny: { fontSize: '10px', lineHeight: '12px', fontWeight: 400, letterSpacing: '0.005em' },
 };

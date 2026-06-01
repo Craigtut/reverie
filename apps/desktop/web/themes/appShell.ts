@@ -45,6 +45,7 @@ export const appShellClass = css({
   inset: 0,
   display: 'grid',
   gridTemplateColumns: '288px minmax(0, 1fr)',
+  gridTemplateRows: 'minmax(0, 1fr)',
   gap: '18px',
   padding: '22px',
   overflow: 'hidden',
@@ -68,6 +69,15 @@ export const appShellClass = css({
   // frame.
   '&[data-terminal-view="true"]': {
     backgroundImage: 'none',
+    mdDown: {
+      position: 'fixed',
+      inset: 0,
+      minHeight: 'auto',
+      gridTemplateColumns: '260px minmax(0, 1fr)',
+      gridTemplateRows: 'minmax(0, 1fr)',
+      overflow: 'hidden',
+      borderRadius: 0,
+    },
   },
   fontSize: '13px',
   lineHeight: '1.45',
@@ -96,7 +106,7 @@ export const appShellClass = css({
     '--good': '#4A8F58',
     '--warn': '#B07A1E',
     '--bad': '#B14738',
-    '--terminal-bg': '#11100e',
+    '--terminal-bg': '#F4F1EB',
     '--shadow':
       '0 30px 60px -22px rgba(60, 40, 20, 0.18), 0 12px 28px -14px rgba(60, 40, 20, 0.18)',
   },

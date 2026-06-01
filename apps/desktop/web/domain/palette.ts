@@ -10,7 +10,9 @@ export function buildPaletteEntries(
   const entries: PaletteEntry[] = [];
   for (const focus of shell.focuses) {
     if (focus.archived) continue;
-    const project = focus.projectId ? shell.projects.find(p => p.id === focus.projectId) ?? null : null;
+    const project = focus.projectId
+      ? (shell.projects.find(p => p.id === focus.projectId) ?? null)
+      : null;
     if (project?.archived) continue;
     entries.push({
       kind: 'focus',
@@ -18,17 +20,20 @@ export function buildPaletteEntries(
       title: focus.title,
       projectId: focus.projectId ?? null,
       projectName: project?.name ?? null,
-      sessionCount: shell.sessions.filter(s => s.focusId === focus.id && s.tabVisible !== false).length,
+      sessionCount: shell.sessions.filter(s => s.focusId === focus.id && s.tabVisible !== false)
+        .length,
     });
   }
   for (const session of shell.sessions) {
     if (session.tabVisible === false) continue;
     const focus = shell.focuses.find(f => f.id === session.focusId);
     if (!focus) continue;
-    const project = focus.projectId ? shell.projects.find(p => p.id === focus.projectId) ?? null : null;
+    const project = focus.projectId
+      ? (shell.projects.find(p => p.id === focus.projectId) ?? null)
+      : null;
     const breadcrumb = project ? `${project.name} · ${focus.title}` : focus.title;
     const cortexId = session.nativeSessionRef?.sessionId;
-    const activity = cortexId ? cortexActivity[cortexId] ?? null : null;
+    const activity = cortexId ? (cortexActivity[cortexId] ?? null) : null;
     entries.push({ kind: 'session', session, breadcrumb, activity });
   }
   return entries;

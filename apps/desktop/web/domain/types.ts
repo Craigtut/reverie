@@ -67,6 +67,19 @@ export interface RenderMetrics {
   glyphAtlasResets?: number;
   maxRowsPerPaint?: number;
   maxCellsPerPaint?: number;
+  terminalTraceEvents?: number;
+  rendererMounts?: number;
+  rendererMountStarts?: number;
+  rendererDisposes?: number;
+  terminalSurfaceChanges?: number;
+  terminalHistoryRowRequests?: number;
+  terminalHistoryWindowMerges?: number;
+  terminalBufferCacheMisses?: number;
+  terminalLiveBufferCacheMisses?: number;
+  terminalHistoryBufferCacheMisses?: number;
+  terminalFullPaints?: number;
+  terminalPartialPaints?: number;
+  maxRendererRows?: number;
 }
 
 export interface GhosttyFrameSequencePayload {

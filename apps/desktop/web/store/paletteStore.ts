@@ -11,9 +11,11 @@ interface PaletteState {
   setPaletteQuery: (action: SetStateAction<string>) => void;
 }
 
-export const usePaletteStore = create<PaletteState>((set) => ({
+export const usePaletteStore = create<PaletteState>(set => ({
   paletteOpen: false,
   paletteQuery: '',
-  setPaletteOpen: (action) => set((s) => ({ paletteOpen: resolveSetStateAction(action, s.paletteOpen) })),
-  setPaletteQuery: (action) => set((s) => ({ paletteQuery: resolveSetStateAction(action, s.paletteQuery) })),
+  setPaletteOpen: action =>
+    set(s => ({ paletteOpen: resolveSetStateAction(action, s.paletteOpen) })),
+  setPaletteQuery: action =>
+    set(s => ({ paletteQuery: resolveSetStateAction(action, s.paletteQuery) })),
 }));

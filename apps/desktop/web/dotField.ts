@@ -80,7 +80,7 @@ const TUNING: Record<DotFieldVariant, VariantTuning> = {
     dotSize: 2.0,
     accentChance: 0,
     baseAlphaMin: 0.18,
-    baseAlphaRange: 0.10,
+    baseAlphaRange: 0.1,
     accentAlphaMin: 0,
     accentAlphaRange: 0,
     dashesPerSecond: 0,
@@ -124,7 +124,11 @@ export function createDotField(
   function parseHex(value: string): { r: number; g: number; b: number } | null {
     if (!value.startsWith('#')) return null;
     let hex = value.slice(1);
-    if (hex.length === 3) hex = hex.split('').map(c => c + c).join('');
+    if (hex.length === 3)
+      hex = hex
+        .split('')
+        .map(c => c + c)
+        .join('');
     if (hex.length !== 6) return null;
     const n = parseInt(hex, 16);
     if (Number.isNaN(n)) return null;
@@ -187,8 +191,14 @@ export function createDotField(
     if (staticLayer) {
       ctx.drawImage(
         staticLayer,
-        0, band.y0 * dpr, cssWidth * dpr, band.h * dpr,
-        0, band.y0, cssWidth, band.h,
+        0,
+        band.y0 * dpr,
+        cssWidth * dpr,
+        band.h * dpr,
+        0,
+        band.y0,
+        cssWidth,
+        band.h,
       );
     }
   }

@@ -5,13 +5,17 @@ import { css } from '../../styled-system/css';
 export function AgentGlyph({ kind }: { kind: string }) {
   return (
     <span className={agentGlyphClass({ kind })} aria-hidden="true">
-      <span /><span /><span /><span />
+      <span />
+      <span />
+      <span />
+      <span />
     </span>
   );
 }
 
 function agentGlyphClass({ kind }: { kind: string }) {
-  const color = kind === 'claude_code' ? '#D97757' : kind === 'codex_cli' ? '#8FA5FF' : 'var(--good)';
+  const color =
+    kind === 'claude_code' ? '#D97757' : kind === 'codex_cli' ? '#8FA5FF' : 'var(--good)';
   return css({
     width: '14px',
     height: '14px',

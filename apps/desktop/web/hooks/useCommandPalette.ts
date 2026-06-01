@@ -12,7 +12,10 @@ export function useCommandPalette() {
   useEffect(() => {
     function handleKey(event: globalThis.KeyboardEvent) {
       const isPaletteShortcut =
-        event.key.toLowerCase() === 'k' && (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+        event.key.toLowerCase() === 'k' &&
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey;
       if (isPaletteShortcut) {
         event.preventDefault();
         setPaletteOpen(open => !open);

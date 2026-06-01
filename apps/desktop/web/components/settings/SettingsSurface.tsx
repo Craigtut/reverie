@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { CaretRight, Moon, Sun } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
@@ -6,9 +7,18 @@ import type { CreateSessionRecordRequest } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
 import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
 import { useShellStore } from '../../store';
+import { SegmentedTabs, type SegmentedTabItem } from '../primitives/SegmentedTabs';
 import { Typography } from '../primitives/Typography';
 import { AgentsSection } from './AgentsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
+import { ShortcutsPanel } from './ShortcutsPanel';
+
+type SettingsTab = 'general' | 'shortcuts';
+
+const SETTINGS_TABS: SegmentedTabItem<SettingsTab>[] = [
+  { id: 'general', label: 'General' },
+  { id: 'shortcuts', label: 'Shortcuts' },
+];
 
 // The settings surface: appearance (theme) + default new-session preferences.
 // Theme and the new-session defaults are all persisted workspace settings now:
@@ -41,6 +51,8 @@ export function SettingsSurface({
   const bridge = useBridgeInstallationStatus();
   const enablement = useAgentCliEnablement(() => void bridge.refresh());
 
+  const [tab, setTab] = useState<SettingsTab>('general');
+
   return (
     <div className={settingsSurfaceClass} data-testid="settings-surface">
       <div className={settingsScrollClass}>
@@ -57,162 +69,208 @@ export function SettingsSurface({
           <Typography as="h1" variant="title" tone="default" style={{ letterSpacing: '-0.035em' }}>
             Settings
           </Typography>
+          <SegmentedTabs
+            tabs={SETTINGS_TABS}
+            value={tab}
+            onChange={setTab}
+            ariaLabel="Settings sections"
+            idBase="settings"
+            className={settingsTabsClass}
+          />
         </header>
 
-        <section className={settingsGroupClass} aria-labelledby="settings-appearance-label">
-          <Typography
-            as="h2"
-            id="settings-appearance-label"
-            variant="tiny"
-            tone="faint"
-            uppercase
-            style={{ letterSpacing: '0.12em' }}
+        {tab === 'shortcuts' ? (
+          <div
+            role="tabpanel"
+            id="settings-panel-shortcuts"
+            aria-labelledby="settings-tab-shortcuts"
           >
-            Appearance
-          </Typography>
-          <ul className={settingsListClass}>
-            <li className={settingsRowClass}>
-              <div className={settingsRowTextClass}>
-                <Typography
-                  as="span"
-                  variant="smallBody"
-                  tone="default"
-                  style={{ letterSpacing: '-0.005em' }}
-                >
-                  Theme
-                </Typography>
-                <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
-                  The same warm-neutral palette in either mode.
-                </Typography>
-              </div>
-              <div className={themeSegmentedClass} role="radiogroup" aria-label="Theme">
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === 'light'}
-                  aria-label="Light theme"
-                  data-active={theme === 'light'}
-                  data-testid="settings-theme-light"
-                  onClick={() => onSetTheme('light')}
-                >
-                  <Sun size={15} />
-                </button>
-                <button
-                  type="button"
-                  role="radio"
-                  aria-checked={theme === 'dark'}
-                  aria-label="Dark theme"
-                  data-active={theme === 'dark'}
-                  data-testid="settings-theme-dark"
-                  onClick={() => onSetTheme('dark')}
-                >
-                  <Moon size={15} />
-                </button>
-              </div>
-            </li>
-          </ul>
-        </section>
-
-        <section className={settingsGroupClass} aria-labelledby="settings-sessions-label">
-          <Typography
-            as="h2"
-            id="settings-sessions-label"
-            variant="tiny"
-            tone="faint"
-            uppercase
-            style={{ letterSpacing: '0.12em' }}
+            <ShortcutsPanel />
+          </div>
+        ) : (
+          <div
+            role="tabpanel"
+            id="settings-panel-general"
+            aria-labelledby="settings-tab-general"
+            className={settingsPanelClass}
           >
-            Sessions
-          </Typography>
-          <ul className={settingsListClass}>
-            <li className={settingsRowClass}>
-              <div className={settingsRowTextClass}>
-                <Typography
-                  as="span"
-                  variant="smallBody"
-                  tone="default"
-                  style={{ letterSpacing: '-0.005em' }}
-                >
-                  Default agent
-                </Typography>
-                <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
-                  The CLI new sessions start with.
-                </Typography>
-              </div>
-              <div className={settingsSelectWrapClass}>
-                <select
-                  className={settingsSelectClass}
-                  value={defaultAgentKind}
-                  data-testid="settings-default-agent"
-                  onChange={event =>
-                    onSetDefaultAgentKind(
-                      event.currentTarget.value as CreateSessionRecordRequest['agentKind'],
-                    )
-                  }
-                >
-                  {detections.map(detection => {
-                    const usable = detection.available && detection.enabled;
-                    const suffix = usable ? '' : detection.available ? ' (off)' : ' (not detected)';
-                    return (
-                      <option key={detection.kind} value={detection.kind} disabled={!usable}>
-                        {detection.displayName}
-                        {suffix}
-                      </option>
-                    );
-                  })}
-                </select>
-                <CaretRight size={12} weight="bold" />
-              </div>
-            </li>
-            <li className={settingsRowClass}>
-              <div className={settingsRowTextClass}>
-                <Typography
-                  as="span"
-                  variant="smallBody"
-                  tone="default"
-                  style={{ letterSpacing: '-0.005em' }}
-                >
-                  Enable YOLO for new sessions
-                </Typography>
-                <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
-                  Skip per-tool approvals when launching a new session.
-                </Typography>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={defaultNewSessionDangerous}
-                aria-label="Enable YOLO for new sessions"
-                data-state={defaultNewSessionDangerous ? 'on' : 'off'}
-                data-testid="settings-yolo-toggle"
-                className={settingsSwitchClass}
-                onClick={() => onSetDefaultNewSessionDangerous(!defaultNewSessionDangerous)}
+            <section className={settingsGroupClass} aria-labelledby="settings-appearance-label">
+              <Typography
+                as="h2"
+                id="settings-appearance-label"
+                variant="tiny"
+                tone="faint"
+                uppercase
+                style={{ letterSpacing: '0.12em' }}
               >
-                <span className={settingsSwitchKnobClass} />
-              </button>
-            </li>
-          </ul>
-        </section>
+                Appearance
+              </Typography>
+              <ul className={settingsListClass}>
+                <li className={settingsRowClass}>
+                  <div className={settingsRowTextClass}>
+                    <Typography
+                      as="span"
+                      variant="smallBody"
+                      tone="default"
+                      style={{ letterSpacing: '-0.005em' }}
+                    >
+                      Theme
+                    </Typography>
+                    <Typography
+                      as="span"
+                      variant="caption"
+                      tone="faint"
+                      style={{ lineHeight: 1.5 }}
+                    >
+                      The same warm-neutral palette in either mode.
+                    </Typography>
+                  </div>
+                  <div className={themeSegmentedClass} role="radiogroup" aria-label="Theme">
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={theme === 'light'}
+                      aria-label="Light theme"
+                      data-active={theme === 'light'}
+                      data-testid="settings-theme-light"
+                      onClick={() => onSetTheme('light')}
+                    >
+                      <Sun size={15} />
+                    </button>
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={theme === 'dark'}
+                      aria-label="Dark theme"
+                      data-active={theme === 'dark'}
+                      data-testid="settings-theme-dark"
+                      onClick={() => onSetTheme('dark')}
+                    >
+                      <Moon size={15} />
+                    </button>
+                  </div>
+                </li>
+              </ul>
+            </section>
 
-        <AgentsSection
-          detections={detections}
-          pending={enablement.pending}
-          error={enablement.error}
-          bridgeStatus={bridge.status}
-          bridgeBusy={
-            bridge.busyCli
-              ? (detections.find(
-                  detection => AGENT_KIND_TO_BRIDGE_CLI[detection.kind] === bridge.busyCli,
-                )?.kind ?? null)
-              : null
-          }
-          onToggle={(kind, enabled) => void enablement.toggle(kind, enabled)}
-          onRetryInstall={kind => {
-            const cli = AGENT_KIND_TO_BRIDGE_CLI[kind];
-            if (cli) void bridge.install(cli);
-          }}
-        />
-        {anyReverieToolsInstalled(detections, bridge.status) ? <ConnectionPolicySection /> : null}
+            <section className={settingsGroupClass} aria-labelledby="settings-sessions-label">
+              <Typography
+                as="h2"
+                id="settings-sessions-label"
+                variant="tiny"
+                tone="faint"
+                uppercase
+                style={{ letterSpacing: '0.12em' }}
+              >
+                Sessions
+              </Typography>
+              <ul className={settingsListClass}>
+                <li className={settingsRowClass}>
+                  <div className={settingsRowTextClass}>
+                    <Typography
+                      as="span"
+                      variant="smallBody"
+                      tone="default"
+                      style={{ letterSpacing: '-0.005em' }}
+                    >
+                      Default agent
+                    </Typography>
+                    <Typography
+                      as="span"
+                      variant="caption"
+                      tone="faint"
+                      style={{ lineHeight: 1.5 }}
+                    >
+                      The CLI new sessions start with.
+                    </Typography>
+                  </div>
+                  <div className={settingsSelectWrapClass}>
+                    <select
+                      className={settingsSelectClass}
+                      value={defaultAgentKind}
+                      data-testid="settings-default-agent"
+                      onChange={event =>
+                        onSetDefaultAgentKind(
+                          event.currentTarget.value as CreateSessionRecordRequest['agentKind'],
+                        )
+                      }
+                    >
+                      {detections.map(detection => {
+                        const usable = detection.available && detection.enabled;
+                        const suffix = usable
+                          ? ''
+                          : detection.available
+                            ? ' (off)'
+                            : ' (not detected)';
+                        return (
+                          <option key={detection.kind} value={detection.kind} disabled={!usable}>
+                            {detection.displayName}
+                            {suffix}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <CaretRight size={12} weight="bold" />
+                  </div>
+                </li>
+                <li className={settingsRowClass}>
+                  <div className={settingsRowTextClass}>
+                    <Typography
+                      as="span"
+                      variant="smallBody"
+                      tone="default"
+                      style={{ letterSpacing: '-0.005em' }}
+                    >
+                      Enable YOLO for new sessions
+                    </Typography>
+                    <Typography
+                      as="span"
+                      variant="caption"
+                      tone="faint"
+                      style={{ lineHeight: 1.5 }}
+                    >
+                      Skip per-tool approvals when launching a new session.
+                    </Typography>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={defaultNewSessionDangerous}
+                    aria-label="Enable YOLO for new sessions"
+                    data-state={defaultNewSessionDangerous ? 'on' : 'off'}
+                    data-testid="settings-yolo-toggle"
+                    className={settingsSwitchClass}
+                    onClick={() => onSetDefaultNewSessionDangerous(!defaultNewSessionDangerous)}
+                  >
+                    <span className={settingsSwitchKnobClass} />
+                  </button>
+                </li>
+              </ul>
+            </section>
+
+            <AgentsSection
+              detections={detections}
+              pending={enablement.pending}
+              error={enablement.error}
+              bridgeStatus={bridge.status}
+              bridgeBusy={
+                bridge.busyCli
+                  ? (detections.find(
+                      detection => AGENT_KIND_TO_BRIDGE_CLI[detection.kind] === bridge.busyCli,
+                    )?.kind ?? null)
+                  : null
+              }
+              onToggle={(kind, enabled) => void enablement.toggle(kind, enabled)}
+              onRetryInstall={kind => {
+                const cli = AGENT_KIND_TO_BRIDGE_CLI[kind];
+                if (cli) void bridge.install(cli);
+              }}
+            />
+            {anyReverieToolsInstalled(detections, bridge.status) ? (
+              <ConnectionPolicySection />
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -240,6 +298,20 @@ const settingsHeaderClass = css({
   display: 'grid',
   gap: '6px',
   marginBottom: '4px',
+});
+
+// The segmented control sits just below the title; justifySelf keeps the pill
+// hugging its content instead of stretching across the settings column.
+const settingsTabsClass = css({
+  justifySelf: 'start',
+  marginTop: '14px',
+});
+
+// Holds the General tab's sections with the same rhythm they had as direct
+// children of the settings column.
+const settingsPanelClass = css({
+  display: 'grid',
+  gap: '36px',
 });
 
 const settingsGroupClass = css({

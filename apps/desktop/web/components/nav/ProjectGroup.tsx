@@ -121,6 +121,10 @@ export function ProjectGroup({
 
 const projectGroupClass = css({
   display: 'grid',
+  // One column that fills the rail but may shrink below its content, so a long
+  // row truncates instead of pushing its trailing slot off the edge (grid items
+  // default to min-width: auto, which otherwise sizes the track to max-content).
+  gridTemplateColumns: 'minmax(0, 1fr)',
   gap: '2px',
 });
 
@@ -129,5 +133,6 @@ const childrenClass = css({
   paddingLeft: '8px',
   borderLeft: '1px solid var(--line-faint)',
   display: 'grid',
+  gridTemplateColumns: 'minmax(0, 1fr)',
   gap: '1px',
 });

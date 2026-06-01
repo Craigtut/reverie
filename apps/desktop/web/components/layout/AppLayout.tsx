@@ -430,6 +430,8 @@ const canvasStageClass = css({
   zIndex: 2,
   minWidth: 0,
   minHeight: 0,
+  height: '100%',
+  overflow: 'hidden',
   position: 'relative',
 });
 

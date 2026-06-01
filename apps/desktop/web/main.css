@@ -14,7 +14,7 @@ body,
   width: 1080px;
   max-width: none;
   transform-origin: 0 0;
-  background: transparent;
+  background: var(--terminal-bg, #0b0a09);
   outline: none;
   /* The terminal is selectable: show the text cursor and stop drags from
    * selecting surrounding DOM. Link hover swaps this to a pointer inline. */

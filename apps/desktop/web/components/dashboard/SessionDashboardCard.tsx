@@ -1,19 +1,23 @@
 import { css } from '../../styled-system/css';
-import { agentTabLabel, glyphStateFor, plainLanguageStatus, sessionBreadcrumb } from '../../domain';
+import { agentTabLabel, cellStateFor, plainLanguageStatus, sessionContext } from '../../domain';
 import type {
   ActivityState,
   DashboardStatus,
   ShellSession,
   WorkspaceShellSnapshot,
 } from '../../domain';
-import { AgentGlyph, SessionStatusGlyph } from '../glyphs';
+import { AgentGlyph, StateCell } from '../glyphs';
 import { ConnectionChip } from '../connections';
 import { Typography } from '../primitives/Typography';
 import { useConnectionPanelStore } from '../../store';
 
-// A single session card on the dashboard: agent glyph + live status glyph,
-// title, breadcrumb, plain-language status, and an awaiting-permission summary
-// when present.
+// A single session card on the dashboard. The session reads first: its title
+// leads (with the agent glyph inline, so the wrapping title forms a clean column
+// beside it) and the live StateCell anchors the top-right corner. Project · topic
+// sits right beneath as the cross-project key. The card lives inside a status
+// rail (attention / live / fresh), so the only status text we add is the live
+// activity of a *working* session — what the agent is actually doing, which the
+// rail and the cell can't say. Idle/fresh cards would just echo their rail.
 export function SessionDashboardCard({
   session,
   shell,
@@ -29,9 +33,10 @@ export function SessionDashboardCard({
   tone: DashboardStatus;
   onOpen: () => void;
 }) {
-  const breadcrumb = sessionBreadcrumb(session, shell);
-  const statusLabel = plainLanguageStatus(session, isBound, activity);
+  const { project, topic } = sessionContext(session, shell);
   const permission = activity?.awaitingPermission ?? null;
+  const liveActivity =
+    activity?.status === 'working' ? plainLanguageStatus(session, isBound, activity) : null;
   const openConnectionPanel = useConnectionPanelStore(s => s.openForSession);
 
   // The card is a `role="button"` div rather than a native `<button>` so the
@@ -54,28 +59,42 @@ export function SessionDashboardCard({
         }
       }}
     >
-      <div className={dashboardCardTopClass}>
-        <AgentGlyph kind={session.agentKind} />
-        <SessionStatusGlyph state={glyphStateFor(activity, tone)} />
-        <span className={chipSlotClass}>
-          <ConnectionChip sessionId={session.id} onOpenPanel={openConnectionPanel} />
-        </span>
+      <div className={cardTopClass}>
+        <div className={cardMainClass}>
+          <div className={cardEyebrowClass} data-testid="dashboard-card-context">
+            <span className={eyebrowGlyphClass}>
+              <AgentGlyph kind={session.agentKind} />
+            </span>
+            <span className={metaContextClass}>
+              <Typography as="span" variant="caption" tone="muted">
+                {project ?? topic}
+              </Typography>
+              {project ? (
+                <Typography as="span" variant="caption" tone="faint">
+                  {` · ${topic}`}
+                </Typography>
+              ) : null}
+            </span>
+            <ConnectionChip sessionId={session.id} onOpenPanel={openConnectionPanel} />
+          </div>
+          <Typography
+            as="div"
+            variant="smallBody"
+            tone="default"
+            className={dashboardCardTitleClass}
+          >
+            {agentTabLabel(session)}
+          </Typography>
+        </div>
+        <StateCell state={cellStateFor(session, isBound, activity)} size={32} />
       </div>
-      <Typography as="div" variant="smallBody" tone="default" className={dashboardCardTitleClass}>
-        {agentTabLabel(session)}
-      </Typography>
-      <Typography as="div" variant="caption" tone="faint" className={dashboardCardBreadcrumbClass}>
-        {breadcrumb}
-      </Typography>
-      <Typography
-        as="div"
-        variant="tiny"
-        tone="faint"
-        uppercase
-        style={{ letterSpacing: '0.06em' }}
-      >
-        {statusLabel}
-      </Typography>
+
+      {liveActivity ? (
+        <Typography as="div" variant="caption" tone="faint" className={dashboardCardStatusClass}>
+          {liveActivity}
+        </Typography>
+      ) : null}
+
       {permission ? (
         <Typography
           as="div"
@@ -98,9 +117,8 @@ const dashboardCardClass = css({
   position: 'relative',
   display: 'flex',
   flexDirection: 'column',
-  alignItems: 'flex-start',
-  gap: '8px',
-  padding: '14px 14px 13px',
+  gap: '10px',
+  padding: '13px 14px',
   borderRadius: '14px',
   border: '1px solid var(--line)',
   background: 'color-mix(in srgb, var(--surface-1) 78%, transparent)',
@@ -121,28 +139,56 @@ const dashboardCardClass = css({
   },
 });
 
-const dashboardCardTopClass = css({
+// The content stacks in a left column (context eyebrow, then the session title);
+// the status cell anchors its own column on the far right, top-aligned with the
+// eyebrow so it never crowds the text.
+const cardTopClass = css({
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: '10px',
+});
+
+const cardMainClass = css({
+  flex: 1,
+  minWidth: 0,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '5px',
+});
+
+// The eyebrow row: the CLI glyph leads, then project · focus, then the (usually
+// absent) connection chip. The glyph centers on the caption line.
+const cardEyebrowClass = css({
   display: 'flex',
   alignItems: 'center',
-  gap: '8px',
-  justifyContent: 'space-between',
-  width: '100%',
-  color: 'var(--text-3)',
+  gap: '7px',
 });
 
-const chipSlotClass = css({
-  marginLeft: 'auto',
+const eyebrowGlyphClass = css({
+  flexShrink: 0,
+  display: 'inline-flex',
 });
 
-// Layout only; size/weight/color come from the Typography variant + tone.
+// Layout only; size/weight/color come from the Typography variant + tone. The
+// card is the full title's home: it wraps to as many lines as the title needs
+// (the rail only ever truncates). overflowWrap keeps a pathologically long
+// unbroken token from spilling the card.
 const dashboardCardTitleClass = css({
   width: '100%',
+  overflowWrap: 'anywhere',
+});
+
+// Project leads (muted); the topic trails in a fainter tone. One nowrap line that
+// ellipsizes from the end so the project survives.
+const metaContextClass = css({
+  flex: 1,
+  minWidth: 0,
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
 });
 
-const dashboardCardBreadcrumbClass = css({
+const dashboardCardStatusClass = css({
   width: '100%',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
@@ -150,7 +196,6 @@ const dashboardCardBreadcrumbClass = css({
 });
 
 const dashboardCardPermissionClass = css({
-  marginTop: '2px',
   width: '100%',
   padding: '6px 8px',
   background: 'color-mix(in srgb, var(--warn) 10%, transparent)',

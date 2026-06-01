@@ -23,6 +23,7 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
   const setSelectedSessionId = useNavigationStore(s => s.setSelectedSessionId);
   const setCreationMode = useNavigationStore(s => s.setCreationMode);
   const setSurfaceMode = useNavigationStore(s => s.setSurfaceMode);
+  const revealFocus = useNavigationStore(s => s.revealFocus);
   const appendLog = useUiStore(s => s.appendLog);
 
   // The session id we've already auto-launched for the current selection.
@@ -57,31 +58,29 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
     setSelectedSessionId(session.id);
     setCreationMode(null);
     setSurfaceMode('terminal');
+    revealFocus(focus.projectId ?? null, session.focusId);
     selectSessionTab(session);
   }
 
+  // Opening a focus shows its dashboard (active sessions grouped by state, plus
+  // the archived list), parallel to Home. The terminal is one click away via a
+  // session card or the tree's session rows; we deliberately don't auto-launch
+  // here so a focus stays a calm overview rather than jumping straight into a
+  // process.
   function openFocus(projectId: string | null, focusId: string) {
-    const shell = useShellStore.getState().shell;
-    setSelectedProjectId(projectId);
-    setSelectedFocusId(focusId);
-    const firstSession = shell.sessions.find(session => session.focusId === focusId && session.tabVisible !== false) ?? null;
-    if (firstSession) {
-      selectSessionTab(firstSession);
-    } else {
-      setSelectedSessionId(null);
-      terminal.clearSurface();
-    }
-    setCreationMode(null);
-    setSurfaceMode('terminal');
-  }
-
-  function openSessionHistory(projectId: string | null, focusId: string) {
     setSelectedProjectId(projectId);
     setSelectedFocusId(focusId);
     setSelectedSessionId(null);
+    revealFocus(projectId, focusId);
     setCreationMode(null);
     setSurfaceMode('session-history');
     terminal.clearSurface();
+  }
+
+  // Same destination as openFocus; kept as a distinct intent for callers that
+  // mean "show this focus's history" explicitly.
+  function openSessionHistory(projectId: string | null, focusId: string) {
+    openFocus(projectId, focusId);
   }
 
   // A terminal session you're looking at should be running, not parked behind a
@@ -101,9 +100,22 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
     if (autoLaunchedSessionIdRef.current === selectedSession.id) return;
     terminal.autostartSession(selectedSession);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mirrors the original effect deps.
-  }, [surfaceMode, creationMode, selectedSession?.id, selectedSession?.status, selectedTerminalBinding, isLaunchingSelectedSession]);
+  }, [
+    surfaceMode,
+    creationMode,
+    selectedSession?.id,
+    selectedSession?.status,
+    selectedTerminalBinding,
+    isLaunchingSelectedSession,
+  ]);
 
-  return { selectSessionTab, goToDashboard, openSessionFromDashboard, openFocus, openSessionHistory };
+  return {
+    selectSessionTab,
+    goToDashboard,
+    openSessionFromDashboard,
+    openFocus,
+    openSessionHistory,
+  };
 }
 
 export type ShellNavigation = ReturnType<typeof useShellNavigation>;
