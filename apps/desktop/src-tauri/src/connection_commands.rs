@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use reverie_core::connection::{Connection, ConnectionMessage, ConnectionPolicy, RequestId};
 use reverie_core::connection_service::DecisionBy;
 use reverie_core::domain::{AgentKind, SessionId};
@@ -327,25 +327,48 @@ fn emit_request_change(app: &AppHandle) {
 use tauri::Emitter;
 
 pub(crate) fn resolve_bridge_binaries(app: &AppHandle) -> Result<BridgeBinaries> {
-    // Resource path lookup for production builds. In dev (tauri:dev), the
-    // sidecar layout colocates the binaries next to the desktop exe.
-    let exe = std::env::current_exe().map_err(|err| anyhow!("locating current exe: {err}"))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| anyhow!("current exe has no parent dir"))?;
-    let reverie_bridge =
-        pick_first_existing(&[dir.join("reverie-bridge"), dir.join("reverie-bridge.exe")])
-            .unwrap_or_else(|| dir.join("reverie-bridge"));
-    let preturn_hook = pick_first_existing(&[
-        dir.join("reverie-bridge-preturn-hook"),
-        dir.join("reverie-bridge-preturn-hook.exe"),
-    ])
-    .unwrap_or_else(|| dir.join("reverie-bridge-preturn-hook"));
     let _ = app;
     Ok(BridgeBinaries {
-        reverie_bridge,
-        preturn_hook,
+        reverie_bridge: locate_helper("reverie-bridge"),
+        preturn_hook: locate_helper("reverie-bridge-preturn-hook"),
     })
+}
+
+/// Resolve a helper binary that ships next to the desktop executable.
+///
+/// The load-bearing invariant is "the helper lives beside the desktop binary":
+/// in a bundled app Tauri's `externalBin` sidecar lands in `Contents/MacOS/`
+/// next to the main binary, and in dev `scripts/stage-bridge.mjs` copies it
+/// next to the desktop dev binary. Either way `current_exe().parent()` finds
+/// it. As a dev-only fallback we also look in the root workspace target dir
+/// (where `cargo build -p reverie-bridge` puts it), so a bare `cargo run`
+/// without staging still resolves. If nothing exists yet we return the
+/// next-to-exe path so callers can report it; `BridgeBinaries::ensure_present`
+/// is what stops a missing path from ever reaching a CLI config.
+fn locate_helper(name: &str) -> PathBuf {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(name));
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        // CARGO_MANIFEST_DIR is <root>/apps/desktop/src-tauri on the machine
+        // that compiled this dev binary; the helper crate builds into
+        // <root>/target/<profile>/.
+        if let Some(workspace_root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+        {
+            for profile in ["debug", "release"] {
+                candidates.push(workspace_root.join("target").join(profile).join(name));
+            }
+        }
+    }
+    pick_first_existing(&candidates)
+        .or_else(|| candidates.into_iter().next())
+        .unwrap_or_else(|| PathBuf::from(name))
 }
 
 fn pick_first_existing(candidates: &[PathBuf]) -> Option<PathBuf> {

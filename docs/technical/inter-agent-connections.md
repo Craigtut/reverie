@@ -662,7 +662,7 @@ Gate:
 | Codex CLI MCP hook semantics drift across versions. | Pin behavior to verified Codex versions in `cortex-mono`-style fashion; document the verified versions in this file as Codex changes land. |
 | Cortex pre-turn hook surface is generic infrastructure; scope creep could enlarge it past v1's needs. | Ship only `pre_turn` in Phase 1. Other event names can come in follow-up work without breaking this design. |
 | Registration writes user config files. | Onboarding shows the exact file and entry to be written. Uninstall affordance removes the entry. Bridge entries are namespaced (`reverie_bridge`) so they cannot collide with user-defined servers. |
-| Bridge helper binary distribution. | Ship as a sidecar binary in the Tauri app bundle, like Tauri-managed sidecars. macOS code-signed with the app. |
+| Bridge helper binary distribution. | Shipped as a Tauri `externalBin` sidecar next to the main binary in `Contents/MacOS/`, code-signed with the app. The load-bearing invariant is "the helper lives beside the desktop binary", so registration just writes `current_exe().parent()/reverie-bridge`. `scripts/stage-bridge.mjs` builds the two helpers and stages them for both the bundle (`binaries/<name>-<triple>`) and dev (next to the dev exe). See [packaging-and-distribution.md](packaging-and-distribution.md). |
 | A long-running MCP tool ties up an agent's turn in a way the user did not expect. | Heartbeat progress notifications keep the user informed when the CLI supports them. Pending-receipt fallback is the safety valve when wall-clock expires. |
 | Cortex Code's `pi-agent-core` snapshots tool state at `prompt()` entry, so a mid-turn hot-add is invisible until the next turn. | Always apply hot-reload between turns (at `loop_end`). Documented in the Cortex changes section above. |
 
@@ -681,7 +681,7 @@ In addition to the global Reverie guardrails:
 
 These are not blockers; they should be revisited as the relevant phases land.
 
-1. **Bridge helper distribution shape**. Sidecar binary in the Tauri bundle is the leading choice; the alternative is an embedded MCP stdio server inside the Tauri process started via stdio file descriptors. The sidecar is cleaner; verify before Phase 0 closes.
+1. **Bridge helper distribution shape**. *Resolved.* The helper ships as a Tauri `externalBin` sidecar next to the main binary, built and staged by `scripts/stage-bridge.mjs`. `resolve_bridge_binaries` finds it via `current_exe().parent()` (with a dev-only fallback to the workspace target dir), and install refuses to write a path that does not exist on disk. See [packaging-and-distribution.md](packaging-and-distribution.md).
 2. **Reason field at disconnect**. Optional vs required for agent-initiated close. Leaning optional with a "did you mean to say..." prompt to the agent if it omits one. Decide before Phase 2 closes.
 3. **Topic derivation**. v1 derives topic from the opening reason. A future enhancement could ask one of the agents to propose a tighter topic after the first few messages.
 4. **Multiple sessions of same kind in same focus**. The `#<short_id>` disambiguator works, but the address gets noisier. Consider letting users rename sessions so the disambiguation is human-meaningful.
