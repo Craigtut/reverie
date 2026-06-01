@@ -38,6 +38,8 @@ pub struct TerminalSnapshot {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalFrame {
     pub dirty: TerminalDirtyState,
+    #[serde(default)]
+    pub cols: u16,
     pub colors: TerminalColors,
     pub cursor: TerminalCursor,
     #[serde(default)]
@@ -70,6 +72,7 @@ pub struct TerminalModes {
     pub bracketed_paste: bool,
     pub sync_output: bool,
     pub mouse_tracking: bool,
+    pub alternate_screen: bool,
     pub kitty_keyboard_flags: u8,
 }
 
@@ -122,25 +125,53 @@ pub struct TerminalRow {
 
 impl TerminalRow {
     pub fn plain_text(&self) -> String {
-        self.cells.iter().map(|cell| cell.text.as_str()).collect()
+        let mut cells = self.cells.iter().collect::<Vec<_>>();
+        cells.sort_by_key(|cell| cell.col);
+        let mut out = String::new();
+        let mut col = 0_u16;
+        for cell in cells {
+            while col < cell.col {
+                out.push(' ');
+                col = col.saturating_add(1);
+            }
+            out.push_str(&cell.text);
+            col = cell.col.saturating_add(cell.width.max(1));
+        }
+        out
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TerminalCell {
     pub col: u16,
+    #[serde(default = "default_cell_width")]
+    pub width: u16,
     pub text: String,
     pub fg: Option<TerminalColor>,
     pub bg: Option<TerminalColor>,
     pub style: TerminalCellStyle,
 }
 
+fn default_cell_width() -> u16 {
+    1
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TerminalCellStyle {
     pub bold: bool,
     pub italic: bool,
+    #[serde(default)]
+    pub faint: bool,
+    #[serde(default)]
+    pub blink: bool,
+    #[serde(default)]
+    pub invisible: bool,
     pub underline: TerminalUnderline,
     pub inverse: bool,
+    #[serde(default)]
+    pub strikethrough: bool,
+    #[serde(default)]
+    pub overline: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -209,6 +240,7 @@ mod tests {
             cells: vec![
                 TerminalCell {
                     col: 0,
+                    width: 7,
                     text: "Reverie".to_string(),
                     fg: Some(TerminalColor {
                         r: 0xff,
@@ -219,37 +251,54 @@ mod tests {
                     style: TerminalCellStyle {
                         bold: true,
                         italic: false,
+                        faint: false,
+                        blink: false,
+                        invisible: false,
                         underline: TerminalUnderline::None,
                         inverse: false,
+                        strikethrough: false,
+                        overline: false,
                     },
                 },
                 TerminalCell {
                     col: 7,
+                    width: 1,
                     text: " ".to_string(),
                     fg: None,
                     bg: None,
                     style: TerminalCellStyle {
                         bold: false,
                         italic: false,
+                        faint: false,
+                        blink: false,
+                        invisible: false,
                         underline: TerminalUnderline::None,
                         inverse: false,
+                        strikethrough: false,
+                        overline: false,
                     },
                 },
                 TerminalCell {
                     col: 8,
-                    text: "—".to_string(),
+                    width: 1,
+                    text: "-".to_string(),
                     fg: None,
                     bg: None,
                     style: TerminalCellStyle {
                         bold: false,
                         italic: false,
+                        faint: false,
+                        blink: false,
+                        invisible: false,
                         underline: TerminalUnderline::Single,
                         inverse: false,
+                        strikethrough: false,
+                        overline: false,
                     },
                 },
             ],
         };
 
-        assert_eq!(row.plain_text(), "Reverie —");
+        assert_eq!(row.plain_text(), "Reverie -");
     }
 }
