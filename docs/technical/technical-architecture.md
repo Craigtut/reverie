@@ -289,6 +289,8 @@ This is the current consolidation point for v1 adapter behavior. The common prod
 
 The terminal service is responsible for terminal lifecycle, not product semantics.
 
+> The canonical terminal design (the built v0 model: `libghostty-vt` native in the backend, a WebGL2 renderer in the WebView, a binary Tauri Channel carrying seed snapshots plus dirty-row diffs, and frontend-driven scrolling that fetches history ranges from `libghostty`'s in-memory buffer) lives in [`terminal/`](terminal/README.md). The `TerminalBackend` trait below and the `terminal_output` / `terminal_snapshot_changed` names in the command/event candidate lists predate that rebuild and are kept as the early product-boundary sketch; for the actual wire shape and frame model, defer to `terminal/`. Reverie persists no terminal history: a restart resumes the CLI (see the adapter resume mechanics), it does not restore terminal state.
+
 Trait sketch:
 
 ```rust

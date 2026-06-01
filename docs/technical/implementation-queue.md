@@ -1,55 +1,39 @@
 # Reverie Implementation Queue
 
-This is the immediate build queue after the terminal-quality spike. It exists so the next work session starts from evidence instead of rediscovering the map.
+This is the immediate build queue. It exists so the next work session starts from evidence instead of rediscovering the map. The terminal section below is current as of the v0 rebuild; the non-terminal sections predate that rebuild and carry a dated caveat where they sit.
 
-## Current evidence baseline
+## Terminal (v0 rebuild): current state
 
-The Ghostty-backed terminal path is credible enough to continue as the preferred v1 path:
+> The canonical, durable terminal design is [`terminal/`](terminal/README.md) (README, architecture, backend, wire-protocol, frontend, scrollback-coverage-design, libghostty-history-limits, decisions D1-D8, performance-and-acceptance). That folder is the source of truth for the model; this section is just the build-status summary. Read `terminal/` before doing terminal work.
 
-- `libghostty-vt` builds in the Reverie workspace with Zig `0.15.2` on `PATH`.
-- Static VT bytes render into Reverie's `TerminalFrame` model.
-- Live PTY output feeds Ghostty state and renders through the same frame model.
-- Interactive PTY input/write works.
-- Resize/reflow works.
-- Long-lived process lifecycle works.
-- Sustained output/backpressure proof handled a 2,000-line PTY flood without deadlock.
-- Tauri WebView Canvas renders Ghostty-derived frames at credible paint times.
-- Live PTY → Ghostty → Tauri event streaming passes with no dropped frames in the controlled proof.
-- WebGL2 is now the default frontend terminal renderer, with Canvas 2D as fallback and a WebGPU-ready backend interface.
-- The frontend owns a sparse terminal row cache for live scroll, deep-history windows, selection text, link overlays, and find highlights.
-- Deep history no longer requires loading the full replayed transcript into the frontend. Rust provides bounded replay windows and combined search-plus-window responses.
-- Deep-history replay preserves the real visible terminal height and stitches larger frontend cache windows from multiple viewport snapshots, which keeps Ink-style TUI redraws from seeing a different terminal geometry on resume.
-- Deep-history replay also preserves fresh PTY launch boundaries. Transcript chunks carry a run index, resumed launches replay in clean Ghostty states, and Rust stitches rows and search matches across runs so old TUI state cannot leak into Claude/Ink resume output.
-- Legacy Claude transcripts captured before run indexes existed are split at Claude's fresh-launch terminal initialization marker during replay, limited to the first transcript run segment so newer explicit resumed runs are not split a second time by ordinary Claude startup bytes.
-- Live-buffer search and deep-history Tauri commands now offload terminal-worker waits, transcript reads, and Ghostty replay/search work to the blocking runtime, keeping expensive or waiting terminal work out of the synchronous command handler path.
-- The renderer path now emits paint-loop metrics for backend choice, frame and scroll paint timing, rows/cells painted, WebGL draw calls, GPU upload bytes, and glyph-atlas churn.
-- Renderer backend identity now flows through a typed capabilities contract instead of ad hoc backend checks or renderer-local duplicate fields. WebGL2 declares GPU acceleration and explicit resource ownership; Canvas declares fallback behavior. This keeps the future WebGPU backend a peer of the current renderers.
-- The renderer boundary now has explicit lifecycle disposal. WebGL2 releases buffers, shader programs, and glyph atlas textures on remount, canvas replacement, reset, and context loss; Canvas implements the same contract as a no-op. This keeps the imperative island ready for a future WebGPU backend with explicit resource ownership.
-- The terminal controller renderer factory can now resolve synchronously or asynchronously. The production renderer factory remains synchronous for the current WebGL2/Canvas path, while `createTerminalGpuRendererAsync` uses an explicit WebGPU-first probe plan with WebGL2 and Canvas fallback for adapter/device acquisition.
-- The async WebGPU probe is now real rather than a hard-coded placeholder: it checks `navigator.gpu`, asks the canvas for a `webgpu` context, requests an adapter/device, releases the device, and then falls back to WebGL2 because the WebGPU paint backend has not landed yet. Backend planning keeps WebGPU out of the synchronous factory, so Tauri's current WebView limitations do not add a failed WebGPU attempt to the production mount path.
-- Renderer remounts are keyed on full backing geometry: columns, display rows, cell width, cell height, and device pixel ratio. That keeps WebGL2 backing stores and glyph atlases correct when font metrics or display scale change without changing terminal row/column counts.
-- Pending asynchronous renderer mounts are invalidated when surface geometry or device pixel ratio changes, so a future WebGPU renderer cannot resolve late into a stale backing size.
-- Renderer capabilities now carry partial-paint retention semantics. The controller no longer infers paint behavior from backend names: Canvas declares retained partial paints, WebGL2 owns a retained GPU backbuffer and declares retained dirty-row paints, and a future WebGPU renderer can choose its own semantics behind the same contract.
-- Frontend frame ingestion now exposes coalescing metrics: backend frames received, frontend frame batches, coalesced frames, frames per batch, and batch paint timing. This keeps the Rust event stream and the browser paint loop measurable as separate pressure points. Terminal timing aggregation is bounded for long-running sessions: exact count, average, and max are retained, while p95 is computed from a capped sample window instead of an ever-growing array.
-- Backend partial frames now extract and serialize only dirty rows. Full frames remain complete viewport snapshots, while partial frames send row diffs that the frontend sparse buffer merges into its local cache, reducing Rust extraction work and Tauri payload size for character animations and Ink-style redraws.
-- The live primary-buffer viewport is now rebuilt from the frontend row cache after ingestion, so the controller's current frame never treats a sparse partial payload as a complete viewport snapshot.
-- The first WebGL2 tuning pass removed per-paint JavaScript vertex-array copies by reusing typed vertex batches and reduced the common full-row paint from separate background/block-glyph uploads to one underlay upload.
-- Overlay changes now repaint only rows where selection, hover links, or find highlights were or are visible, instead of forcing a full visible-window repaint.
-- Partial primary-buffer and alternate-screen paints now include the previous and current cursor rows. Canvas 2D and WebGL2 also skip cursor drawing outside the invalidated row set, so cursor movement does not leave stale blocks while the renderer paints fewer rows per frame.
-- WebGL2 partial paints scissor-clear rows before translucent background repainting, so transparent terminal themes keep Canvas-compatible replace-row semantics without alpha accumulation.
-- The terminal controller now treats WebGL context loss as a renderer remount event: it preserves the frontend row cache and repaints the current composite after `webglcontextrestored`. Unit coverage now includes buffer-backed restore, proving a live sparse scroll window repaints from cached rows after GPU resource loss.
-- The browser WebGL2 performance smoke now guards that dirty-row animation paints preserve untouched rows, so a full-canvas clear or renderer remount cannot silently blank stable terminal content during small updates. Fixture-backed terminal smokes verify the same invariant through the real event-ingestion, sparse-buffer, controller, and canvas path for both primary-buffer partial frames and Ink-style alternate-screen partial frames.
-- The browser WebGL2 performance smoke also drives the production app-shell terminal controller with fixture partial frames and records render metrics from the real controller path. This guards that WebGL2 partial input stays on the retained dirty-row path backed by the renderer-owned GPU backbuffer, avoiding default-framebuffer assumptions that can show up as black flashes during typing or Ink-style redraws.
-- Ghostty wide-cell metadata now crosses the frame boundary. Backend deep-history search maps matches back through Ghostty-rendered cells, the frontend cache preserves cell widths, selection/copy/find/link hit-testing map text offsets back to cell columns, and both WebGL2 and Canvas 2D paint wide glyph backgrounds, cursor blocks, and underline spans across the correct cell span. The browser fixture interaction smoke now verifies that dragging from either half of a wide glyph and sending the selection to terminal input copies the glyph once, not a spacer or duplicate.
-- The frontend row cache now treats explicit live-frame or replay-window total-row shrink as a timeline reset, so clear-scrollback/reset sequences cannot leave stale rows visible to search, selection, or history scroll.
-- Full viewport frames without scrollback metadata now also reset the frontend row cache to the visible viewport, while partial frames without metadata still preserve known rows for character animations.
-- Full-history, history-jump, find-window, and lazy missing-row requests now carry frontend staleness guards keyed by session, surface geometry, and request sequence. Same-query find replays preserve the current active match instead of snapping navigation back to the first result, find navigation uses the frontend buffer's virtual history height rather than stale DOM `scrollHeight`, and matches outside the current sparse cache request missing replay windows through the normal history path. The browser fixture history backend now returns real window slices, with smoke and controller coverage for find navigation into replay rows outside the initial sparse cache. The history-find smoke also covers a match after a width-2 glyph and verifies the active highlight starts after the wide cell, through the replay window and canvas overlay path.
-- Live-scroll jumps into uncached history now use a latest-only frontend queue. Rapid wheel or scrollbar input no longer starts one expensive replay per intermediate target row; the controller keeps the active replay and the newest target only.
-- Backend history-window responses now prefetch a larger row band and cache rendered windows by transcript shape, surface geometry, and theme defaults. Nearby scroll misses can reuse the cached replay window instead of replaying a long Claude/Ink transcript for every small movement.
-- Height-only terminal resizes now preserve the frontend row cache and session buffers. Column changes still reset because they reflow terminal rows.
-- Alternate-screen frames now compose through coalesced partial batches and survive height-only surface resizes, with browser smoke coverage for current alternate-screen canvas rows and selection text.
+The terminal was **rebuilt from scratch** on branch `refactor/terminal-overhaul`. The rebuild is **done, dual-reviewed, and `npm run check` is green**, but the branch is **not merged** (the open queue below gates the merge). The commit history is the rebuild record (`git log --oneline --reverse main..HEAD`), in order: P0 removed in-terminal find/search; P1 removed transcript capture and deep-history replay; P2 moved frames onto a binary Tauri Channel with a generation marker; P3 made scrolling frontend-driven with backend-served history ranges; P4 cleaned up dead code; then the stable-id scroll-back coverage work (backend-computed `StableRowIndex`, D8).
 
-WebGL2 is the near-term terminal surface. WebGPU stays behind the renderer interface until Tauri's WebView runtime supports it reliably.
+### The model now
+
+- `libghostty-vt` runs **native in the Rust backend** as the single source of terminal truth: VT parsing, the authoritative grid, the in-memory scrollback, wrap/reflow, and dirty-row tracking (D1).
+- A **WebGL2 canvas** (Canvas 2D fallback, WebGPU-ready behind the same contract) renders dirty-row frames in the WebView. It holds a bounded mirror of rows near the viewport, not the whole buffer.
+- Frames cross a **binary Tauri Channel** as seed snapshots plus dirty-row diffs, carrying a **generation marker** so a stale post-reflow/reseed frame cannot merge (wire-protocol, P2).
+- The **frontend owns the viewport and drives scrolling.** It scrolls over its local row mirror (instant, local) and, as the view nears the top of the mirror, prefetches more rows by asking the backend for a history **range**. The backend reads that range from `libghostty`'s buffer and returns it; it never moves `libghostty`'s viewport in response to a scroll (D6, P3).
+- Scroll-back is served **only from `libghostty`'s in-memory buffer**, sized by a byte dial `SCROLLBACK_LIMIT_BYTES` (currently **100 MB** per session, lazily allocated; `ghostty.rs`). Rows are addressed by a **backend-computed stable row id** (`id = buffer_position + lines_evicted`), so the frontend cache and view anchor stay coherent across trim/eviction without a re-seed (D7, D8, scrollback-coverage-design).
+- **Resume is the CLI's job, not Reverie's.** A resume relaunches the agent CLI with its own resume flag (for example `claude --resume <id>`) using the stored CLI-native session id; the CLI repaints its own output into a fresh terminal. Reverie persists no terminal state (architecture: How resume works, D5).
+
+### Removed by the rebuild (do not reintroduce)
+
+These are not deferred milestones; they are no longer how Reverie's terminal works:
+
+- **In-terminal search** and any in-terminal content index (P0). Cross-session recall, if built, is a separate product feature that sources from the CLIs' own session files, not from terminal state. See [`../product/search-and-recall.md`](../product/search-and-recall.md).
+- **Transcript capture** (the durable raw-PTY transcript) and **deep-history replay** (replaying saved bytes through a fresh Ghostty state to reconstruct old scrollback), along with the old frontend replayed-transcript cache and its `terminal_history_window` replay path (P1). Scroll-back reach is now exactly the in-memory buffer.
+- All the run-index / fresh-launch-boundary / legacy-Claude-split machinery that existed only to make replayed transcripts coherent (P1). With no replay, there is nothing to stitch.
+
+### Open terminal queue (top priority, gates the merge)
+
+In rough priority order:
+
+1. **Scroll performance is bad and is the blocker.** Scrolling stalls: a little moves, then it hangs while a band loads. The likely causes are under-aggressive prefetch (the frontend asks too late, so the view outruns the mirror) and/or an expensive-or-serialized backend serve (reading a deep range from `libghostty` walks the page list, and serving it on the wrong path stalls the stream). Under active investigation; treat as the thing to fix before merge.
+2. **Claude Code (Ink) content jumbles on window resize** instead of reflowing cleanly. Live Ink redraw and reflow are ordinary VT behavior the core should handle, so this is a real bug, not a scope gap. Under investigation.
+3. **Interactive in-app manual pass + the branch merge decision.** macOS WKWebView cannot be WebDriver-automated, so the visual/interaction pass (scroll feel, Ink resize, input latency, many concurrent sessions) must be done by hand in the running desktop app. The merge of `refactor/terminal-overhaul` into `main` waits on that pass plus items 1 and 2.
+
+The yardstick for "faithful to the design" is [`terminal/performance-and-acceptance.md`](terminal/performance-and-acceptance.md).
 
 ## Stack decisions now treated as settled
 
@@ -63,6 +47,8 @@ WebGL2 is the near-term terminal surface. WebGPU stays behind the renderer inter
 - Ghostty/libghostty-backed terminal state behind Reverie's terminal boundary.
 
 ## Immediate implementation order
+
+> **Dated caveat (2026-06-01): everything from here down predates the terminal v0 rebuild.** The sections below (PTY runtime, Ghostty frame extraction, session lifecycle, persistence, the initial Tauri command/event surface, the React/Panda scaffold, adapter hardening, and the per-CLI lifecycle state) describe the build status *before* `refactor/terminal-overhaul`. They are kept because the non-terminal work (lifecycle, persistence, commands, adapters, activity ingestion) is still broadly valid and was not the target of the rebuild. But the rebuild touched the terminal runtime, the frame model, the wire transport, and the frontend renderer/cache directly, so any terminal-adjacent claim here may be stale. **Re-verify against the code and against [`terminal/`](terminal/README.md) before relying on these.** Where a claim here contradicts the terminal section above or `terminal/`, the terminal section wins.
 
 ### 1. Promote PTY runtime from proof code into core/app services
 
@@ -364,20 +350,24 @@ as the backstop.
 
 ## Checks to keep green
 
+`npm run check` is the gate. It runs the frontend checks (`lint` + `typecheck` + `build:web`) and then the Rust checks (the workspace `cargo test`, the Zig-wrapped desktop `cargo test`, and the Zig-wrapped desktop `cargo check`). The desktop crate links `libghostty-vt`, so its `cargo` invocations must go through `scripts/run-with-zig.mjs`, which resolves a Zig `0.15.x` toolchain; a raw `cargo` against that manifest can mis-link.
+
 ```bash
-npm run typecheck
-npm run build:web
-npx vitest run apps/desktop/web/terminal apps/desktop/web/domain/terminalInput.test.ts
-cargo test
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
-git diff --check
+npm run check
 ```
 
-Manual terminal-pipeline stress check:
+Useful subsets while iterating (all are covered by `npm run check`):
+
+```bash
+npm run test:unit                                                              # Vitest (frontend unit/smoke)
+node scripts/run-with-zig.mjs cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml   # Zig-wrapped desktop Rust tests
+cargo test                                                                     # core (reverie-core) tests
+```
+
+Manual terminal stress route (a hidden multi-terminal route, not part of `npm run check`):
 
 ```bash
 npm run dev:terminal-stress
 ```
 
-This launches the desktop app into the hidden multi-terminal stress route and should report a passing metrics payload in the window after the spawned PTY sessions exit.
+This launches the desktop app into the hidden multi-terminal stress route (`REVERIE_TERMINAL_STRESS=1` → the `tauriTerminalStress=1` window). Note this route is a pre-rebuild proof surface; treat its results as indicative, and confirm real behavior in the running app (WKWebView cannot be automated). The Rust/Tauri tests above remain the source of truth for persistence, commands, CLI detection, and native session launch.

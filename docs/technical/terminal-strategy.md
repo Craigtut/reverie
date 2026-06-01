@@ -1,5 +1,7 @@
 # Reverie Terminal Strategy Spike
 
+> **Historical, superseded.** This is the original Ghostty/`libghostty` research and strategy spike. The terminal was rebuilt from scratch since; the canonical, current design is [`terminal/`](terminal/README.md). Parts of this doc (transcript capture, deep-history replay, in-terminal find, benchmark proofs) describe a model the rebuild removed. Kept for history only; do not build from it.
+
 ## Decision summary
 
 For v1, Reverie should treat a Ghostty-quality terminal experience as a core product requirement. The product exists in large part because existing agent-session organizers make the terminal feel slow, brittle, or unpleasant; we cannot ship a v1 that repeats that failure.

@@ -1,5 +1,7 @@
 # Terminal Overhaul Handoff
 
+> **Historical, superseded.** This handoff predates the from-scratch terminal v0 rebuild. Its "Current State" still describes durable transcript capture, run-index segmentation, deep-history replay, and in-terminal find, all of which the rebuild removed. The canonical, current design and build status are [`terminal/`](terminal/README.md) and the terminal section of [`implementation-queue.md`](implementation-queue.md). Kept for history only; do not build from it.
+
 This is the focused handoff for the terminal renderer overhaul. It exists to stop the broad iteration loop and give the next session a clear target list.
 
 ## Original Direction
