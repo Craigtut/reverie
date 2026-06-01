@@ -193,6 +193,97 @@ describe('terminal buffer model', () => {
     expect(terminalBufferHasRows(state, 8, 1)).toBe(false);
   });
 
+  it('realigns the mirror when the backend evicts rows (oldest_id advances)', () => {
+    let state = createTerminalBuffer(surface);
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'aaa'), row(1, 'bbb'), row(2, 'ccc')], {
+        scrollback: {
+          totalRows: 3,
+          viewportOffset: 0,
+          viewportRows: 3,
+          atBottom: true,
+          oldestId: 0,
+        },
+      }),
+      surface,
+    );
+    expect(state.oldestId).toBe(0);
+    expect(terminalBufferRowText(state, 0, true)).toBe('aaa');
+
+    // The backend evicted 2 rows (oldest_id 0 -> 2): 'ccc' (was position 2) is now
+    // position 0, with two new rows appended at the tail.
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'ccc'), row(1, 'ddd'), row(2, 'eee')], {
+        scrollback: {
+          totalRows: 3,
+          viewportOffset: 0,
+          viewportRows: 3,
+          atBottom: true,
+          oldestId: 2,
+        },
+      }),
+      surface,
+    );
+
+    expect(state.oldestId).toBe(2);
+    // 'aaa'/'bbb' shifted below 0 and were dropped (evicted); the mirror realigned.
+    expect([...state.rowsById.keys()]).toEqual([0, 1, 2]);
+    expect(terminalBufferRowText(state, 0, true)).toBe('ccc');
+    expect(terminalBufferRowText(state, 2, true)).toBe('eee');
+  });
+
+  it('preserves fetched scrollback coverage across eviction by realigning it', () => {
+    let state = createTerminalBuffer(surface);
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'tail')], {
+        dirty: 'partial',
+        scrollback: {
+          totalRows: 20,
+          viewportOffset: 17,
+          viewportRows: 3,
+          atBottom: true,
+          oldestId: 0,
+        },
+      }),
+      surface,
+    );
+    // A fetched band at positions 5-7 (no eviction yet).
+    state = mergeHistoryWindowIntoBuffer(
+      state,
+      frame([row(0, 'h5'), row(1, 'h6'), row(2, 'h7')]),
+      surface,
+      5,
+      20,
+    );
+    expect(terminalBufferHasRows(state, 5, 3)).toBe(true);
+
+    // The backend evicts 3 (oldest_id -> 3); the fetched band must realign from
+    // positions 5-7 to 2-4 and stay covered there, not vanish or misalign.
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'newtail')], {
+        dirty: 'partial',
+        scrollback: {
+          totalRows: 20,
+          viewportOffset: 17,
+          viewportRows: 3,
+          atBottom: true,
+          oldestId: 3,
+        },
+      }),
+      surface,
+    );
+
+    expect(state.oldestId).toBe(3);
+    expect(terminalBufferHasRows(state, 2, 3)).toBe(true);
+    expect(terminalBufferRowText(state, 2, true)).toBe('h5');
+    // The pre-eviction positions are no longer covered (the rows moved down).
+    expect(terminalBufferHasRows(state, 5, 3)).toBe(false);
+  });
+
   it('drops stale cached rows when the backend reports a shorter timeline', () => {
     let state = createTerminalBuffer(surface);
     state = applyViewportFrameToBuffer(

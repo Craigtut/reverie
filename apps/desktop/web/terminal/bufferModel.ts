@@ -24,6 +24,14 @@ export interface TerminalBufferState {
   atBottom: boolean;
   rowLimit: number;
   generation: number;
+  // The backend's stable-id floor: rows evicted off the top so far (the frame's
+  // scrollback.oldestId; see decisions.md D8). A buffered row's stable id is
+  // `oldestId + position`. The mirror is keyed by current buffer POSITION, not by
+  // id; when `oldestId` advances (the backend evicted rows), the carried-over
+  // rows + coverage are realigned by the delta so each line keeps its place, and
+  // history fetches convert position <-> id through this value. 0 until the
+  // scrollback budget first evicts.
+  oldestId: number;
   rowsById: ReadonlyMap<number, TerminalRow>;
   cachedRanges: readonly TerminalBufferRowRange[];
   cursor?: TerminalCursor;
@@ -53,8 +61,41 @@ export function createTerminalBuffer(
     atBottom: true,
     rowLimit: options.rowLimit ?? DEFAULT_TERMINAL_BUFFER_ROW_LIMIT,
     generation: 0,
+    oldestId: 0,
     rowsById: new Map(),
     cachedRanges: [],
+  };
+}
+
+// Realign a carried-over buffer when the backend evicts rows off the top
+// (`oldestId` advances by `shift`). Every retained line's position dropped by
+// `shift`, so shift the mirror keys + coverage down and drop anything that fell
+// below 0 (evicted). This keeps the position-keyed mirror aligned with the
+// backend's current buffer across trim, without re-fetching (decisions.md D8).
+// Folded into `applyViewportFrameToBuffer`'s per-frame rebuild, so it is not an
+// extra pass; it only runs on the rare frame where eviction actually advanced.
+function realignBufferForEviction(
+  previous: TerminalBufferState,
+  shift: number,
+  newOldestId: number,
+): TerminalBufferState {
+  const rowsById = new Map<number, TerminalRow>();
+  for (const [rowId, row] of previous.rowsById) {
+    const shifted = rowId - shift;
+    if (shifted >= 0) rowsById.set(shifted, row);
+  }
+  const cachedRanges: TerminalBufferRowRange[] = [];
+  for (const range of previous.cachedRanges) {
+    const start = Math.max(0, range.start - shift);
+    const end = range.end - shift;
+    if (end > start) cachedRanges.push({ start, end });
+  }
+  return {
+    ...previous,
+    oldestId: newOldestId,
+    viewportOffset: Math.max(0, previous.viewportOffset - shift),
+    rowsById,
+    cachedRanges,
   };
 }
 
@@ -73,6 +114,15 @@ export function applyViewportFrameToBuffer(
   const hasScrollbackMetadata = frame.scrollback !== undefined;
   const viewportOffset = finiteNumber(scrollback.viewportOffset) ?? 0;
   const viewportRows = finiteNumber(scrollback.viewportRows) ?? surface.rows;
+  // If the backend evicted rows off the top since the last frame (the stable-id
+  // floor advanced), realign the carried-over mirror + coverage by that many
+  // rows before merging this frame, so each retained line keeps its position
+  // (the trim-survival fix, decisions.md D8). A no-op until the buffer evicts.
+  const oldestId = finiteNumber(scrollback.oldestId) ?? previous.oldestId;
+  const evictionShift = Math.max(0, oldestId - previous.oldestId);
+  if (evictionShift > 0) {
+    previous = realignBufferForEviction(previous, evictionShift, oldestId);
+  }
   const fallbackTotalRows =
     hasScrollbackMetadata || frame.dirty === 'partial'
       ? Math.max(previous.totalRows, viewportOffset + viewportRows, surface.rows)
@@ -156,6 +206,7 @@ export function applyViewportFrameToBuffer(
     atBottom: scrollback.atBottom ?? viewportOffset + viewportRows >= totalRows,
     rowLimit: previous.rowLimit,
     generation: previous.generation + 1,
+    oldestId,
     rowsById,
     cachedRanges,
     cursor: cursorWithAbsoluteRow(frame.cursor, viewportOffset),
@@ -203,6 +254,7 @@ export function mergeHistoryWindowIntoBuffer(
     atBottom: frame.scrollback?.atBottom ?? false,
     rowLimit: previous.rowLimit,
     generation: previous.generation + 1,
+    oldestId: previous.oldestId,
     rowsById,
     cachedRanges,
     cursor: cursorWithAbsoluteRow(frame.cursor, startRow),
@@ -553,6 +605,7 @@ function scrollbackForState(state: TerminalBufferState): TerminalScrollback {
     viewportOffset: state.viewportOffset,
     viewportRows: state.viewportRows,
     atBottom: state.atBottom,
+    oldestId: state.oldestId,
   };
 }
 
