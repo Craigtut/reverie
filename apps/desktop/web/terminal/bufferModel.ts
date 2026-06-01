@@ -308,7 +308,7 @@ export function terminalBufferCachedRangeForRows(
   const end = Math.min(state.totalRows, requestedEnd);
   if (end <= start) return { start, end };
 
-  for (const range of rowRanges(state)) {
+  for (const range of coverageRanges(state)) {
     if (range.end <= start) continue;
     if (range.start > start) return null;
     if (range.end >= end) return range;
@@ -578,10 +578,26 @@ function pruneRows(
   return pruned;
 }
 
-function rowRanges(state: TerminalBufferState): readonly TerminalBufferRowRange[] {
-  return state.cachedRanges.length > 0
-    ? state.cachedRanges
-    : rangesFromRowIds(state.rowsById.keys());
+// The rows the buffer can render without a fetch: coverage by provenance, never
+// by content (scrollback-coverage-design.md sec 1/4). It is the settled cached
+// ranges (rows-with-cells from live frames, plus fetched bands) UNION the rows
+// currently present in the live viewport. A row in the current viewport is
+// covered whether or not it has characters: a blank row in the live screen is
+// real content, not a miss (this is the Ink-tail fix). A blank row that has
+// DRIFTED out of the viewport is in neither set, so a scroll-back to it
+// re-fetches and gets the real content (the stale-blank guard). Fetched blank
+// rows are covered because they are recorded in `cachedRanges`.
+function coverageRanges(state: TerminalBufferState): TerminalBufferRowRange[] {
+  let ranges: TerminalBufferRowRange[] = [...state.cachedRanges];
+  const viewportEnd = state.viewportOffset + state.viewportRows;
+  const present: number[] = [];
+  for (let rowId = state.viewportOffset; rowId < viewportEnd; rowId += 1) {
+    if (state.rowsById.has(rowId)) present.push(rowId);
+  }
+  for (const range of rangesFromRowIds(present)) {
+    ranges = addCachedRange(ranges, range.start, range.end);
+  }
+  return ranges;
 }
 
 function addCachedRange(

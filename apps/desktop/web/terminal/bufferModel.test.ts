@@ -144,7 +144,7 @@ describe('terminal buffer model', () => {
     expect(terminalBufferRowText(state, 4, true)).toBe('five');
   });
 
-  it('does not let empty live viewport rows satisfy later scrollback cache misses', () => {
+  it('does not let DRIFTED blank rows satisfy scrollback misses, but covers the live tail', () => {
     let state = createTerminalBuffer(surface);
     state = applyViewportFrameToBuffer(state, frame([row(0, ''), row(1, ''), row(2, '')]), surface);
 
@@ -158,10 +158,39 @@ describe('terminal buffer model', () => {
 
     expect(terminalBufferRowText(state, 0, true)).toBe('');
     expect(terminalBufferRowText(state, 3, true)).toBe('three');
+    // Settled coverage is the rows-with-cells (3, 4); the blanks are not settled.
     expect(state.cachedRanges).toEqual([{ start: 3, end: 5 }]);
+    // The blanks 0-2 DRIFTED out of the viewport (they were the live screen in the
+    // first frame); they are not covered, so a scroll-back there re-fetches the
+    // real content (the stale-blank guard).
     expect(terminalBufferHasRows(state, 0, 3)).toBe(false);
+    // Rows 3, 4 are covered (settled, they have cells).
     expect(terminalBufferHasRows(state, 3, 2)).toBe(true);
-    expect(terminalBufferHasRows(state, 3, 3)).toBe(false);
+    // Row 5 is blank but it is in the CURRENT live viewport ([3, 6)), so it is
+    // covered: a blank row in the live screen is real content, not a miss. This
+    // is the Ink-tail fix; previously this blank made the tail a perpetual miss
+    // and livelocked the prefetch.
+    expect(terminalBufferHasRows(state, 3, 3)).toBe(true);
+  });
+
+  it('covers a blank-padded live tail so the prefetch does not livelock (Ink)', () => {
+    // Ink/TUIs pad the bottom of the screen with blank rows. The whole current
+    // viewport, blanks included, must be covered or the prefetch re-requests the
+    // blank tail forever (the reported scroll-back-stops-short bug).
+    let state = createTerminalBuffer(surface);
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'prompt >'), row(1, ''), row(2, '')], {
+        scrollback: { totalRows: 12, viewportOffset: 9, viewportRows: 3, atBottom: true },
+      }),
+      surface,
+    );
+
+    // The full live viewport [9, 12) is covered even though rows 10 and 11 are blank.
+    expect(terminalBufferHasRows(state, 9, 3)).toBe(true);
+    expect(terminalBufferHasRows(state, 11, 1)).toBe(true);
+    // A row just above the live viewport that nothing has provided is still a miss.
+    expect(terminalBufferHasRows(state, 8, 1)).toBe(false);
   });
 
   it('drops stale cached rows when the backend reports a shorter timeline', () => {
