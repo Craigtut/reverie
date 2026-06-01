@@ -93,19 +93,19 @@ Do not use the JSON event system for frames or rows. Tauri documents events as J
 
 When the user scrolls up and the frontend's mirror runs low on older rows, the frontend pulls a band of rows from the backend. This is a request/reply (the `read_terminal_rows` Tauri command, which returns binary), not part of the frame Channel.
 
-The request (frontend to backend) is tiny and infrequent, so it travels as ordinary command arguments: the terminal id, the absolute `start_row`, the `count` of rows wanted, and the `generation` the frontend currently holds. The backend serves the rows from `libghostty`'s live buffer (see [`backend.md`](backend.md) for the mechanism) and replies with a binary row band:
+The request (frontend to backend) is tiny and infrequent, so it travels as ordinary command arguments: the terminal id, the `start_id` (a stable row id, not a buffer position; see decisions.md D8), the `count` of rows wanted, and the `generation` the frontend currently holds. The backend maps `start_id` to a buffer position with the live floor (`pos = start_id - oldest_id`, clamped), serves the rows from `libghostty`'s live buffer (see [`backend.md`](backend.md) for the mechanism), and replies with a binary row band stamped with the id it actually served from:
 
 ```
 Row band reply (little-endian)
 u8   kind            // 2 = row band
 u32  generation      // the generation the rows were read at
-u32  start_row       // absolute index of the first row in the band
+u64  start_id        // stable id of the first row in the band (served floor)
 u32  row_count
 BandRow[] rows
 BandRow = u16 cell_count, Cell[] cells   // Cell encoded exactly as in a frame
 ```
 
-Band rows are contiguous from `start_row`, so they carry no per-row index or dirty flag; the `Cell` encoding is identical to the frame encoding, shared by one encoder and one decoder. The frontend merges the rows at `start_row .. start_row + row_count` into its mirror only if `generation` still matches the latest it holds; a band a resize has invalidated is dropped and re-requested against the new generation. Reach is `libghostty`'s scrollback budget; a request past the oldest row it holds returns an empty band.
+Band rows are contiguous from stable id `start_id`, so they carry no per-row index or dirty flag; the `Cell` encoding is identical to the frame encoding, shared by one encoder and one decoder. The frontend converts `start_id` back to a current buffer position (`start_id - oldest_id`) and merges the rows there, only if `generation` still matches the latest it holds; a band a resize has invalidated is dropped and re-requested against the new generation. Reach is `libghostty`'s scrollback budget; a request past the oldest row it holds returns an empty band.
 
 ## Why this shape
 

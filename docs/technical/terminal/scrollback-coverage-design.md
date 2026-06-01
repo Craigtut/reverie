@@ -37,42 +37,42 @@ Definition and rules:
 
 **The one honest residual.** Keeping `lines_evicted` exact requires knowing how many rows libghostty evicted, and 0.1.1 emits no eviction signal; eviction happens silently inside the core, and coalesced append+prune within one write batch can mask the count in `total_rows` deltas. So `lines_evicted` is **exact below the cap (zero)** and **best-effort at the cap**. The only user-visible effect is in one corner: scrolled back *while* output is actively flooding past the dial, the anchor can **drift** (content stays correct; the scroll position slides) until it re-anchors. This is graceful, never wrong content and never a livelock, far smaller than position-keying's desync-on-every-trim, the same case WezTerm re-anchors for, and it becomes **exact for free, with no architecture change**, the moment libghostty ships an eviction/pin signal in a release (we swap our estimate for its exact value). Accepted as the price of staying on the official library with no fork (D8).
 
-## 4. The coverage model (keyed by stable id)
+## 4. The coverage model (stateless provenance; position-keyed with an oldest_id anchor)
 
-Each mirrored row carries a **state**, set by its source, never by its content:
+Coverage is decided by a row's **source, never its content**, and is computed **statelessly** per query: there is no per-row Confirmed/Provisional state machine that flips as the view scrolls. A row is renderable without a fetch iff it is either:
 
-- **Confirmed(generation):** read from an authoritative source in the current generation, the live viewport (the tail the backend just sent) or an explicit history fetch. This is coverage; render it, blank or not.
-- **Provisional:** live-captured earlier, then drifted out of the coverage band. Render for instant repaint, but not coverage; scrolling to it re-fetches; reconciled (replaced + Confirmed, or discarded) when a fetch or live frame next covers it.
-- **Absent:** not held. Render a placeholder; fetch.
+- in the **settled cached ranges** (rows that arrived with cells on a live frame, plus every fetched history band). These persist, so a non-blank row that has drifted out of the viewport stays covered: its scrollback content is immutable. *(implementation: `cachedRanges`)*
+- **present in the current live viewport** (`[viewportOffset, viewportOffset + viewportRows)`). Covered whether or not it has characters, because a blank row in the live screen is real content, not a miss. *(this is the Ink-tail fix)*
 
-Rows are keyed by **stable id**; coverage is evaluated within the current **generation** (the reflow/clear/alt marker). Derived rules:
+A blank row that has **drifted** out of the viewport is in neither set, so a scroll-back to it re-fetches and gets the real content (the stale-blank guard). Fetched blank rows are covered (recorded in the settled ranges). *(implementation: `coverageRanges` = settled ranges UNION present viewport rows.)*
 
-1. **Coverage = the Confirmed rows (by id) in the current generation.** A paint window is renderable without a fetch iff every id in it is Confirmed. The viewport is where we render and prefetch, not itself a coverage primitive.
-2. **Live-wins-in-overlap.** Where a fetched band overlaps the live tail, the live frame's rows win (newer).
-3. **Hysteresis band.** Confirmed -> Provisional happens only when an id exits the coverage band (viewport +/- overscan), not on a one-row scroll; the prefetch refills the leading edge ahead of need. Defuses thrash at the just-scrolled-out boundary and the Ink pad/unpad oscillation.
-4. **Reconciliation.** A fetch (or live frame) covering a Provisional id replaces it and marks it Confirmed; if the authoritative value differs, the provisional repaint was wrong and is corrected. This is also what makes the at-cap id drift self-heal: a re-fetch reconciles whatever the ids now resolve to.
-5. **Trim is not a generation bump.** `oldest_id` advances, evicted ids are dropped, survivors stay Confirmed. The cache is untouched above `oldest_id`.
-6. **Generation invalidation (reflow/clear/alt only).** On a generation bump, Confirmed rows are stale, coverage empties, re-seed; in-flight fetches carry their generation and stale-generation responses are dropped.
-7. **Eviction (frontend cache bound).** The mirror is bounded; evict ids farthest from the coverage band (LRU by distance), never within the band or an in-flight prefetch range.
+**Identity across trim.** The mirror is keyed by current buffer **position**, and the backend's `oldest_id` (rows evicted so far) is the stable anchor. When `oldest_id` advances, the carried-over mirror + settled ranges are **realigned** down by the delta and anything below 0 is dropped (`realignBufferForEviction`); the history-fetch id<->position conversion uses `oldest_id` at both ends. This is observably equivalent to keying by a permanent id (a survivor is never renumbered relative to the floor), at lower risk to the renderer's position-based paint loop, and it folds into the per-frame mirror rebuild so it is not an extra pass. Below the first eviction `oldest_id` is 0, so all of this is a no-op.
 
-Per-row content versions are unnecessary: within a generation scrollback is immutable and active-area rows always arrive at their latest value on the live frames, so generation + id + provenance subsumes versioning.
+Derived rules:
+
+1. **Trim is not a generation bump.** `oldest_id` advances, the mirror + settled ranges realign, evicted rows drop; survivors keep their place. No re-seed.
+2. **Live-wins-in-overlap.** A live frame overwrites a row's mirror entry at its position, so the live tail wins over an older fetched value wherever they overlap.
+3. **Reflow re-seeds; clear and alt do not.** Only a reflow (resize) bumps the generation and re-seeds. Clear and alt-screen need no bump (see scenarios A and C in section 6 for why).
+4. **Drift self-heals.** At the cap `oldest_id` is best-effort (D8). A stale anchor is corrected the moment the affected window is re-fetched, because the fetch round-trips through the *live* `oldest_id` (the merge converts `start_id - oldest_id` and drops a band whose rows have since evicted).
+5. **Prefetch lead, not a hysteresis state machine.** Smooth scroll-up comes from prefetching a band ahead of the viewport edge (the controller's overscan) plus in-flight dedup. There is no Confirmed/Provisional state to flip, so there is nothing to thrash.
+6. **Cache bound.** The mirror is bounded by a row limit; rows farthest from the viewport are pruned.
 
 ## 5. Data flow and per-component changes
 
 **Backend (`ghostty.rs`, `runtime.rs`):**
 - Track `lines_evicted: u64` per session (0 until the first eviction; advanced best-effort from `total_rows` deltas at the cap, within a generation). Derive `oldest_id`/`newest_id`.
 - Keep the pin-step `read_rows` serve (it moves the viewport pin once per window and reads via the fast `RenderState` path, far cheaper than per-cell `grid_ref`; see section 2). In Phase B it takes an **id range** and maps it to a buffer position at the request boundary (`pos = id - lines_evicted`, clamped to the live range), echoing the served start id.
-- Keep the per-session **generation**. Phase A bumps it on resize (the existing behavior); Phase B adds full-clear and alt-screen-toggle bumps alongside the frontend's re-seed handling. Trim does **not** bump it. Stamp the generation + `oldest_id` on every frame (`newest_id` derives from `oldest_id + total_rows`); Phase B stamps the served id on each band.
+- Keep the per-session **generation**, bumped **only on resize** (reflow). Clear and alt-screen do **not** bump it (scenarios A and C explain why), and trim does **not**. Stamp the generation + `oldest_id` on every frame (`newest_id` derives from `oldest_id + total_rows`); stamp the served start id on each band.
 
 **Wire (`wire-protocol.md`):**
-- Frames carry `generation` + `oldest_id` (a single new u64; `newest_id` derives from the existing `total_rows`) alongside the viewport offset + rows. In Phase B the history request and the band reply carry the start **id**. This is a small additive tightening (the existing generation marker generalizes), not a new protocol shape.
+- Frames carry `generation` + `oldest_id` (a single new u64; `newest_id` derives from the existing `total_rows`) alongside the viewport offset + rows. The history request and the band reply carry the start **id** (u64). This is a small additive tightening (the existing generation marker generalizes), not a new protocol shape.
 
 **Frontend (`bufferModel.ts`, `terminalController.ts`, `useTerminalSession.ts`):**
-- Key the mirror and cache by **stable id**; coverage queries and the prefetch miss test read per-id state, not content.
-- Live ingest marks current-viewport ids Confirmed(generation); ids that leave the coverage band become Provisional; live wins in overlap.
-- Fetch merge marks the band Confirmed(generation), reconciles provisional ids, and drops a band whose generation != current.
-- Anchor the viewport to a stable id. On trim (the frame's `oldest_id` advanced), drop ids below `oldest_id`, keep the rest. On a generation bump, re-seed and re-anchor to the top-of-view id.
-- Prefetch on the hysteresis band; evict by id-distance.
+- Coverage is stateless (section 4): `coverageRanges` = the settled cached ranges UNION the rows present in the current live viewport. No per-row Confirmed/Provisional state.
+- The mirror is **position-keyed** and realigned by `oldest_id` on eviction (`realignBufferForEviction`); a live frame overwrites the tail rows in place, so live wins in overlap.
+- History fetch addresses by **stable id**: the hook sends `position + getOldestId()`; `mergeLiveRows` converts the band's `start_id` back to a position (`start_id - oldest_id`) and drops a band whose rows have since evicted (negative position).
+- On eviction (`oldest_id` advanced this frame), the controller re-anchors `scrollTop` by `-delta * cellHeight` when scrolled up, so the view tracks its content; the follow path keeps the tail pinned otherwise.
+- On a generation bump (resize), re-seed; prune the mirror by distance from the viewport.
 
 ## 6. Scenario analysis
 
@@ -80,28 +80,28 @@ Per-row content versions are unnecessary: within a generation scrollback is immu
 
 - **N. Normal output, small session.** `lines_evicted == 0`, `id == position`. Live frames mark ids Confirmed; scrolling is local. No fetch until past the mirror.
 - **B1. Ink/TUI blank-padded tail.** The tail window's top row is blank but in the current viewport -> Confirmed -> covered -> no perpetual miss. **Fixes the reported bug.**
-- **B2. Fast initial output (coalesced).** Initial blank rows scroll past within a coalesce window; never captured. Those ids left the viewport and were never fetched -> Provisional -> scroll-up there re-fetches the real content. **No stale blank shown.**
+- **B2. Fast initial output (coalesced).** Initial blank rows scroll past within a coalesce window; never captured. Those rows drifted out of the viewport and were never fetched (not settled, not present in the viewport) -> a scroll-up there re-fetches the real content. **No stale blank shown.**
 - **S1. Scroll up beyond the mirror.** Window nears the band edge -> prefetch a band by id range, served by the pin-step `read_rows` -> merge as Confirmed -> persists.
 - **S2. Scroll up then back to the tail (overlap).** A fetched band overlaps the live tail; live frames win in the overlap by recency.
 - **T. Trim (output exceeds the dial).** `oldest_id` advances; the frontend drops ids below it and keeps survivors at their ids; **no re-seed, no desync.** Residual: at the cap while flooding *and* scrolled back, `lines_evicted` is best-effort, so the anchor can drift (content correct, self-re-anchors via reconciliation). Becomes exact when libghostty ships an eviction signal.
 - **R. Resize / reflow.** Generation bumps -> coverage empties -> re-seed from the fresh Full frame -> re-fetch by id; the viewport re-anchors to the top-of-view content (best-effort). Old-generation in-flight fetches are dropped.
-- **A. Alternate screen.** No scrollback on alt (libghostty forces it off); suppress scroll-back; generation bumps on enter/leave; primary re-seeds on return.
-- **C. Full clear (ED 2/3).** Content rewritten; generation bumps; re-seed.
+- **A. Alternate screen.** Handled by the renderer's separate alternate-screen view; the primary buffer is preserved untouched during the alt excursion (its `oldest_id`/positions do not change) and repaints on return, so no generation bump or re-seed is needed.
+- **C. Full clear (ED 2/3).** ED 2 (clear screen) grows `total_rows`, so the eviction observer is a no-op. ED 3 (clear scrollback) drops `total_rows`, so the observer over-counts it as eviction and inflates `oldest_id`; but the frontend realigns by that same inflated delta consistently and the cleared rows shift out of the mirror, so content stays correct without a generation bump (the scroll anchor may jump, the accepted at-cap drift).
 - **RR. Rapid resizes / races.** Each fetch carries its generation; a response landing after the generation advanced is dropped.
-- **TH. Prefetch thrash at the edge.** The hysteresis band means an id does not flip Confirmed<->Provisional on a 1-row scroll or Ink pad/unpad; it must exit the band.
+- **TH. Prefetch thrash at the edge.** Coverage is stateless -- there is no Confirmed/Provisional state to flip -- so a 1-row scroll or Ink pad/unpad cannot thrash it; the prefetch overscan + in-flight dedup keep the leading edge filled ahead of the scroll.
 - **E. Cache eviction.** Frontend mirror is bounded; ids farthest from the band are evicted; never the band or an in-flight prefetch. Re-scroll re-fetches.
 - **BG. Background session.** Not painted/prefetched; live frames still update its tail (throttled). On focus, re-seed and resume.
 - **P. Genuinely blank scrollback (padding / blank lines).** A fetched band including blank rows marks those ids Confirmed; they render blank, no re-fetch.
 - **D. Active-area multi-row churn (TUI dashboard).** On-screen rows that rewrite arrive at their latest value on live frames (coalescing sends the latest over a reliable ordered Channel) -> Confirmed -> correct.
 - **F. Follow-tail + jump-to-bottom.** Pinned at bottom: the viewport (tail) is Confirmed and followed. Scrolled up: unpinned; jump-to-bottom returns to the tail and re-pins.
 - **NS. No scrollback (fits the viewport).** Everything is the current viewport -> all Confirmed.
-- **RC. Fetch returns content differing from a Provisional id.** Reconcile: replace + Confirm; corrected content paints.
+- **RC. Fetch returns content differing from a stale mirror row.** The merge overwrites the row at its position with the authoritative value; corrected content paints. The merge *is* the reconciliation -- there is no separate provisional step.
 
 ## 7. Implementation plan (phased, each gated by build-green + both reviewers)
 
 - **Phase A (backend stable-id foundation) [done]:** track `lines_evicted` and report `oldest_id` (the floor; `newest_id` derives from `oldest_id + total_rows`) on every frame, carried as a u64 through the binary wire + the TS decoder (golden vectors updated in lockstep). `read_rows` stays the pin-step serve. Tests: `id == position` below the cap; `oldest_id` advances on eviction; reflow is not miscounted as eviction.
-- **Phase B (the id cutover + frontend coverage):** the coordinated switch to id addressing. Backend: `read_rows` / the `ReadRows` command / the band take a start **id** (the worker maps id -> position via `lines_evicted` and echoes the served id); generation also bumps on full clear / alt-screen toggle. Frontend: key the cache/coverage by stable id with per-id state (Confirmed(generation)/Provisional/Absent); live ingest + fetch merge + reconciliation + live-wins-overlap; trim drops below `oldest_id` without re-seed; a generation bump re-seeds + re-anchors; hysteresis; id-distance eviction. Tests: every scenario in section 6, including batched/coalesced-write drift (the at-cap residual the reconciliation must heal).
-- **Phase D (verification):** the scenario tests as the regression suite (the existing "stale blank" guard is scenario B2); a harness pass against Ink-like fixtures.
+- **Phase B (the id cutover + frontend coverage) [done]:** the coordinated switch to id addressing. Backend: `read_rows` / the `ReadRows` command / the band take a start **id** (the worker maps id -> position via `lines_evicted` and echoes the served id). Frontend: coverage is **stateless** (settled ranges UNION present-viewport rows, section 4) -- this is the Ink fix; the **position-keyed mirror is realigned by `oldest_id` on eviction** (`realignBufferForEviction`) so scroll-back survives trim; the history fetch addresses by stable id (`mergeLiveRows` converts back, dropping evicted bands); the view re-anchors on eviction. Generation bumps only on resize -- clear and alt-screen are handled without a bump (scenarios A, C). The Confirmed/Provisional/hysteresis state machine in the original plan was collapsed to the simpler stateless model (no state to flip). Tests: coverage by provenance (Ink + drifted-blank guard) and the eviction realignment in `bufferModel.test.ts`.
+- **Phase D (verification):** the remaining scenario coverage as a regression suite -- the controller's eviction re-anchor + the band-evicted-during-fetch drop (scenarios T/RC), and an ED-3 backend invariant test (scenario C) -- plus a full `npm run check` and a harness pass against Ink-like fixtures.
 
 ## 8. Risks and deferred work
 
