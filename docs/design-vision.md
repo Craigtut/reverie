@@ -21,7 +21,7 @@ Reverie should feel **calm, monochromatic, and quietly alive**. It is a home for
 5. **Floating, rim-lit panels.** Surfaces are rounded (≈22px), shadowed, and edged with a 1.2px conic-gradient "rim light" that is brightest at the top-left and fades around — giving panels a soft physical presence against the dot field.
 6. **No terminal chrome.** The terminal is the product. Session tabs and controls float *on* the terminal surface rather than being boxed in heavy chrome. Text sits on the body background.
 7. **Restraint in motion.** Animation is reserved for shell-level moments — entrance/rise, view transitions, the dot swaps, the three-dot loader, the blinking caret. **Animation must never run inside the terminal paint loop.**
-8. **Calm density.** Small type (13px UI base), tight letter-spacing (-0.005em), generous radii, and muted text ramps keep the interface dense but unhurried.
+8. **Calm density.** Small type (14px UI base), tight letter-spacing (-0.005em), generous radii, and muted text ramps keep the interface dense but unhurried.
 
 ## Palette (warm-neutral monochrome)
 

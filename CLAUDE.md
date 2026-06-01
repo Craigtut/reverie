@@ -56,6 +56,16 @@ Keep the checks in [`docs/technical/implementation-queue.md`](docs/technical/imp
 - The terminal core links `libghostty-vt.dylib`, but **nothing needs `DYLD_LIBRARY_PATH` at runtime**. For development, `npm run dev` / `dev:desktop` / `run:release` go through `cargo run`, which injects the library search path automatically. For distribution, `npm run bundle` ships the dylib inside the app (`Contents/Frameworks`) resolved by a baked rpath. Prefer those scripts over launching the raw built binary directly. See [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md).
 - macOS desktop WebDriver can't drive WKWebView, so **use `npm run dev:harness` for UI iteration and screenshots**. Rust/Tauri tests remain the source of truth for persistence, commands, CLI detection, and native session launch.
 
+### Runtime diagnostics
+
+The desktop app appends terminal renderer diagnostics to:
+
+```bash
+~/Library/Application Support/com.animus.reverie/terminal-diagnostics.jsonl
+```
+
+Use this log when investigating real Tauri terminal behavior that the browser harness cannot fully show: resize flicker, blank or repeated history rows, scrollback cache misses, renderer remounts, slow paints, input focus stalls, or a running terminal that appears stuck. Each JSONL entry includes the selected session id, active terminal id, timestamp, and a payload such as `buffer_cache_miss`, `history_rows_request`, `history_jump_*`, renderer lifecycle traces, or slow paint samples. Check this file before guessing from screenshots when the running desktop app diverges from harness behavior.
+
 ### Releases
 
 Releases are cut by pushing a `vX.Y.Z` tag, which triggers `.github/workflows/release.yml` (macOS, Apple Silicon: Reverie's only target). Read [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md) before cutting one. Before tagging:

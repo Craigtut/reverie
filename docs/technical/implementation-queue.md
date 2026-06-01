@@ -15,8 +15,41 @@ The Ghostty-backed terminal path is credible enough to continue as the preferred
 - Sustained output/backpressure proof handled a 2,000-line PTY flood without deadlock.
 - Tauri WebView Canvas renders Ghostty-derived frames at credible paint times.
 - Live PTY → Ghostty → Tauri event streaming passes with no dropped frames in the controlled proof.
+- WebGL2 is now the default frontend terminal renderer, with Canvas 2D as fallback and a WebGPU-ready backend interface.
+- The frontend owns a sparse terminal row cache for live scroll, deep-history windows, selection text, link overlays, and find highlights.
+- Deep history no longer requires loading the full replayed transcript into the frontend. Rust provides bounded replay windows and combined search-plus-window responses.
+- Deep-history replay preserves the real visible terminal height and stitches larger frontend cache windows from multiple viewport snapshots, which keeps Ink-style TUI redraws from seeing a different terminal geometry on resume.
+- Deep-history replay also preserves fresh PTY launch boundaries. Transcript chunks carry a run index, resumed launches replay in clean Ghostty states, and Rust stitches rows and search matches across runs so old TUI state cannot leak into Claude/Ink resume output.
+- Legacy Claude transcripts captured before run indexes existed are split at Claude's fresh-launch terminal initialization marker during replay, limited to the first transcript run segment so newer explicit resumed runs are not split a second time by ordinary Claude startup bytes.
+- Live-buffer search and deep-history Tauri commands now offload terminal-worker waits, transcript reads, and Ghostty replay/search work to the blocking runtime, keeping expensive or waiting terminal work out of the synchronous command handler path.
+- The renderer path now emits paint-loop metrics for backend choice, frame and scroll paint timing, rows/cells painted, WebGL draw calls, GPU upload bytes, and glyph-atlas churn.
+- Renderer backend identity now flows through a typed capabilities contract instead of ad hoc backend checks or renderer-local duplicate fields. WebGL2 declares GPU acceleration and explicit resource ownership; Canvas declares fallback behavior. This keeps the future WebGPU backend a peer of the current renderers.
+- The renderer boundary now has explicit lifecycle disposal. WebGL2 releases buffers, shader programs, and glyph atlas textures on remount, canvas replacement, reset, and context loss; Canvas implements the same contract as a no-op. This keeps the imperative island ready for a future WebGPU backend with explicit resource ownership.
+- The terminal controller renderer factory can now resolve synchronously or asynchronously. The production renderer factory remains synchronous for the current WebGL2/Canvas path, while `createTerminalGpuRendererAsync` uses an explicit WebGPU-first probe plan with WebGL2 and Canvas fallback for adapter/device acquisition.
+- The async WebGPU probe is now real rather than a hard-coded placeholder: it checks `navigator.gpu`, asks the canvas for a `webgpu` context, requests an adapter/device, releases the device, and then falls back to WebGL2 because the WebGPU paint backend has not landed yet. Backend planning keeps WebGPU out of the synchronous factory, so Tauri's current WebView limitations do not add a failed WebGPU attempt to the production mount path.
+- Renderer remounts are keyed on full backing geometry: columns, display rows, cell width, cell height, and device pixel ratio. That keeps WebGL2 backing stores and glyph atlases correct when font metrics or display scale change without changing terminal row/column counts.
+- Pending asynchronous renderer mounts are invalidated when surface geometry or device pixel ratio changes, so a future WebGPU renderer cannot resolve late into a stale backing size.
+- Renderer capabilities now carry partial-paint retention semantics. The controller no longer infers paint behavior from backend names: Canvas declares retained partial paints, WebGL2 owns a retained GPU backbuffer and declares retained dirty-row paints, and a future WebGPU renderer can choose its own semantics behind the same contract.
+- Frontend frame ingestion now exposes coalescing metrics: backend frames received, frontend frame batches, coalesced frames, frames per batch, and batch paint timing. This keeps the Rust event stream and the browser paint loop measurable as separate pressure points. Terminal timing aggregation is bounded for long-running sessions: exact count, average, and max are retained, while p95 is computed from a capped sample window instead of an ever-growing array.
+- Backend partial frames now extract and serialize only dirty rows. Full frames remain complete viewport snapshots, while partial frames send row diffs that the frontend sparse buffer merges into its local cache, reducing Rust extraction work and Tauri payload size for character animations and Ink-style redraws.
+- The live primary-buffer viewport is now rebuilt from the frontend row cache after ingestion, so the controller's current frame never treats a sparse partial payload as a complete viewport snapshot.
+- The first WebGL2 tuning pass removed per-paint JavaScript vertex-array copies by reusing typed vertex batches and reduced the common full-row paint from separate background/block-glyph uploads to one underlay upload.
+- Overlay changes now repaint only rows where selection, hover links, or find highlights were or are visible, instead of forcing a full visible-window repaint.
+- Partial primary-buffer and alternate-screen paints now include the previous and current cursor rows. Canvas 2D and WebGL2 also skip cursor drawing outside the invalidated row set, so cursor movement does not leave stale blocks while the renderer paints fewer rows per frame.
+- WebGL2 partial paints scissor-clear rows before translucent background repainting, so transparent terminal themes keep Canvas-compatible replace-row semantics without alpha accumulation.
+- The terminal controller now treats WebGL context loss as a renderer remount event: it preserves the frontend row cache and repaints the current composite after `webglcontextrestored`. Unit coverage now includes buffer-backed restore, proving a live sparse scroll window repaints from cached rows after GPU resource loss.
+- The browser WebGL2 performance smoke now guards that dirty-row animation paints preserve untouched rows, so a full-canvas clear or renderer remount cannot silently blank stable terminal content during small updates. Fixture-backed terminal smokes verify the same invariant through the real event-ingestion, sparse-buffer, controller, and canvas path for both primary-buffer partial frames and Ink-style alternate-screen partial frames.
+- The browser WebGL2 performance smoke also drives the production app-shell terminal controller with fixture partial frames and records render metrics from the real controller path. This guards that WebGL2 partial input stays on the retained dirty-row path backed by the renderer-owned GPU backbuffer, avoiding default-framebuffer assumptions that can show up as black flashes during typing or Ink-style redraws.
+- Ghostty wide-cell metadata now crosses the frame boundary. Backend deep-history search maps matches back through Ghostty-rendered cells, the frontend cache preserves cell widths, selection/copy/find/link hit-testing map text offsets back to cell columns, and both WebGL2 and Canvas 2D paint wide glyph backgrounds, cursor blocks, and underline spans across the correct cell span. The browser fixture interaction smoke now verifies that dragging from either half of a wide glyph and sending the selection to terminal input copies the glyph once, not a spacer or duplicate.
+- The frontend row cache now treats explicit live-frame or replay-window total-row shrink as a timeline reset, so clear-scrollback/reset sequences cannot leave stale rows visible to search, selection, or history scroll.
+- Full viewport frames without scrollback metadata now also reset the frontend row cache to the visible viewport, while partial frames without metadata still preserve known rows for character animations.
+- Full-history, history-jump, find-window, and lazy missing-row requests now carry frontend staleness guards keyed by session, surface geometry, and request sequence. Same-query find replays preserve the current active match instead of snapping navigation back to the first result, find navigation uses the frontend buffer's virtual history height rather than stale DOM `scrollHeight`, and matches outside the current sparse cache request missing replay windows through the normal history path. The browser fixture history backend now returns real window slices, with smoke and controller coverage for find navigation into replay rows outside the initial sparse cache. The history-find smoke also covers a match after a width-2 glyph and verifies the active highlight starts after the wide cell, through the replay window and canvas overlay path.
+- Live-scroll jumps into uncached history now use a latest-only frontend queue. Rapid wheel or scrollbar input no longer starts one expensive replay per intermediate target row; the controller keeps the active replay and the newest target only.
+- Backend history-window responses now prefetch a larger row band and cache rendered windows by transcript shape, surface geometry, and theme defaults. Nearby scroll misses can reuse the cached replay window instead of replaying a long Claude/Ink transcript for every small movement.
+- Height-only terminal resizes now preserve the frontend row cache and session buffers. Column changes still reset because they reflow terminal rows.
+- Alternate-screen frames now compose through coalesced partial batches and survive height-only surface resizes, with browser smoke coverage for current alternate-screen canvas rows and selection text.
 
-Canvas 2D remains the near-term terminal surface. WebGPU/WebGL2 is reserved for evidence-driven escalation, not taste.
+WebGL2 is the near-term terminal surface. WebGPU stays behind the renderer interface until Tauri's WebView runtime supports it reliably.
 
 ## Stack decisions now treated as settled
 
@@ -26,7 +59,7 @@ Canvas 2D remains the near-term terminal surface. WebGPU/WebGL2 is reserved for 
 - Panda CSS for tokens, recipes, and layout discipline.
 - Motion for restrained shell animation outside the terminal hot path.
 - Phosphor Icons for app-shell iconography.
-- Imperative Canvas/WebGPU terminal renderer island.
+- Imperative WebGL2 terminal renderer island, Canvas fallback, and WebGPU-ready backend boundary.
 - Ghostty/libghostty-backed terminal state behind Reverie's terminal boundary.
 
 ## Immediate implementation order
@@ -133,7 +166,7 @@ Completed:
 - React 19 app shell wraps the terminal surface.
 - Panda CSS codegen and CSS extraction are wired into `npm run build`.
 - Motion and Phosphor Icons are present in the shell.
-- The terminal renderer is mounted imperatively through Canvas, not React DOM cells.
+- The terminal renderer is mounted imperatively through a canvas-backed WebGL2 renderer, not React DOM cells.
 - `workspace_shell` provides local persistence-backed workspace/project/focus/session navigation data from Tauri.
 - `create_focus` and `create_session` command flows are wired from the React shell and keep Project selection optional.
 - The visible shell now has General workspace navigation, optional Project navigation, Focus lanes, Session selection, and selected-session launch through the stable `start_session` runtime path.
@@ -151,12 +184,13 @@ Completed:
 
 Next frontend milestones:
 
-- Move scrollback ownership toward the backend/Ghostty snapshot boundary once the initial product feel is verified, so alternate-screen/full-clear behavior is modeled deliberately instead of inferred from viewport overlap.
+- Continue hardening the frontend-owned terminal cache plus backend replay-window contract, especially around alternate screen, full clears, resize reflow, and very long sessions.
 - Replace generated-name create buttons with proper create-focus and create-session forms.
 - First UX-shape pass hardened: the shell now has an actionable first-run intent panel for General work, preserved native resumes, optional Project context, and explicit YOLO safety. Session rows also show compact status chips so resumable/running/ended states read as product state instead of raw adapter residue.
 - Private product-texture pass added clearer empty states, focus descriptions, session cwd context, and explicit safety/input affordance copy so the shell reads less like a proof harness while keeping the create flows intentionally narrow.
 - Evening product-form pass added a selected-session runway above the terminal: intent, cwd context, native resume state, YOLO posture, and terminal readiness are visible before launch, making the create/resume/status path read as application state instead of hidden runtime mechanics.
 - Add fuller onboarding/create surfaces next: project/focus/session creation should move from compact forms into a more deliberate flow, then terminal interaction should gain visible focus state, copy semantics, and clearer active-session controls.
+- Continue using render/scroll instrumentation from real sessions to tune WebGL2 glyph batching, overlay invalidation, and history-window sizes.
 - Keep the terminal renderer boundary narrow while backend session services solidify.
 
 ### 7. Adapter hardening
@@ -184,7 +218,7 @@ Next steps:
 - Claude Code resume semantics are now narrowed from docs + local transcript shape: launch is `claude`, resume is `claude --resume <session-id>`, continue is `claude --continue`, dangerous mode is `--dangerously-skip-permissions`, and persisted transcripts live at `~/.claude/projects/{escaped-cwd}/{session-id}.jsonl` with envelope fields including `sessionId`, `cwd`, `timestamp`, `version`, and `permissionMode`. No local `claude` executable was present on today's PATH, so the next Claude step is installed-CLI click-through and a metadata-only JSONL capture scanner, not more architecture.
 - Adapter research is now consolidated in `docs/technical-architecture.md` as a resume/capture matrix covering Cortex, Claude Code, and Codex CLI mechanics, local evidence, current implementation state, risks, and the next proof gate. The adapter layer is no longer a broad unknown; the next build work should be proof-gated scanners/click-throughs rather than more architecture expansion.
 
-## Afternoon stabilization note — 2026-05-26
+## Afternoon stabilization note: 2026-05-26
 
 Stable stopping point:
 
@@ -211,15 +245,112 @@ Keep these as local builder notes unless they become a decision, blocker, or mea
   - Keep the next build seam focused on Cortex hardening before opening Claude/Codex adapter research, so one real adapter path becomes boring before the product widens.
 - Keep Slack quiet: share only decisions, blockers, meaningful milestones, or direct questions for Craig.
 
-## Claude / Codex hook integration — landed
+## Per-CLI lifecycle state: asymmetric by necessity
 
-All three pieces shipped:
+The original design assumed all three CLIs could be driven through one HTTP hook
+server with `CLAUDE_CONFIG_DIR` / `CODEX_HOME` redirection. Ground truth says that
+is wrong, and it is why the earlier attempt stalled: redirecting those env vars
+relocates the CLI's credential home and forces a fresh sign-in. The correct shape
+is one mechanism per CLI, converging on the shared `ActivityState` model:
 
-1. **Per-session config writers** in `reverie-core/src/hook_config.rs` — `write_claude_settings` produces a `settings.json` with HTTP hooks for the lifecycle events; `write_codex_config` produces `config.toml` with `[[hooks.<event>]]` entries. Each session's files live under a private `<cache>/sessions/<id>/{claude|codex}/` dir with `0700`/`0600` perms on Unix. Unit tests cover both formats + the permission bits.
-2. **Launch-time wiring** in `start_session`: mints a token, calls `HookServerControl::register_session(source, token, reverie_session_id)`, writes the config, and injects `CLAUDE_CONFIG_DIR` / `CODEX_HOME` into the spawn env. A `HookTokenRegistry` (managed Tauri state) tracks the live token per session so a relaunch revokes the previous one and `remove_session` cleans up.
-3. **Native-session capture by Reverie session id**: hook updates now carry the Reverie session id alongside the CLI's native id. `record_session_activity_by_id` on the store writes activity AND captures the CLI's `session_id` into `nativeSessionRef` the first time it's seen, so subsequent launches use `--resume <id>` just like Cortex does.
+- **Claude Code** supports `type:"http"` hooks AND a per-session `--settings <file>`
+  flag that merges additively and leaves `~/.claude` (credentials) untouched.
+- **Codex** has no HTTP hook type (command-only) and its command hooks are
+  trust-gated by hash, but its append-only rollout JSONL is a Cortex-shaped local
+  state stream. So Codex uses a rollout-file watcher (baseline) plus a trusted
+  `PermissionRequest` command hook (the definitive `awaiting_permission` signal).
+- **Cortex** writes a small `state.json` snapshot per transition; it now folds
+  through the shared `session_log` engine (the `Snapshot` read mode), not its own
+  bespoke watcher (which was deleted).
 
-End-to-end flow now works the day a user installs `claude` or `codex` on `PATH`: launching a session writes the config + env var, the CLI POSTs its hooks to Reverie's local server, the server authorizes and translates the payload, the drain stores activity + captures the native id, and the dashboard rails / banner / glyph update through the same code path Cortex uses.
+### Activity observation: one spine, four axes (the extensibility seam)
+
+The full design lives in [`activity-ingestion.md`](activity-ingestion.md). In
+short: every transport emits one `ActivityUpdate` (source, `SessionKey`,
+`Fidelity`, `ActivityState`) into a single shell-side `correlate()` spine that
+binds it to a Reverie session, captures native ids, and emits the frontend events.
+Adding a CLI is a short decision tree, classified on four orthogonal axes:
+**transport** (push | file-watch | poll | in-band), **derivation** (snapshot |
+fold), **binding** (token → `SessionKey::Reverie` | native-id →
+`SessionKey::Native`), and **fidelity** (`Definitive` > `Inferred` > `Coarse`, for
+multi-source merge). Two engines exist:
+
+1. **Push** (`hook_server`): the CLI POSTs lifecycle events; translated to an
+   update keyed by the owning Reverie session at `Definitive`. Claude uses this.
+2. **File** (`session_log`): watches only the *active* files registered via
+   `SessionLogControl`, tails only new bytes (O(new output), not O(history)), and
+   folds each via a per-file `SessionLogFold` that carries its own source kind and
+   fidelity. One `CompositeLogSource` serves both file CLIs on one thread: Codex
+   (`CodexLogSource`, `LogReadMode::Append`, rollout JSONL) and Cortex
+   (`CortexStateSource`, `LogReadMode::Snapshot`, `activity/state.json`). The launch
+   path registers a session's watch file (derived per CLI by `watch_path_for_ref`)
+   at launch capture and at boot for already-running sessions, and unregisters at
+   exit.
+
+**Why one engine serves both file CLIs:** snapshot-vs-append-log is one transport
+(file-watch) with two derivations. Cortex pre-computes a tiny snapshot (re-read is
+O(1)); Codex makes us fold a growing log (a 177 MB log folds in hundreds of ms, so
+the incremental tail keeps it O(new bytes), ×N sessions on one thread).
+
+### Phase 1: Claude Code (landed)
+
+- `hook_config.rs::build_claude_settings` writes the correct
+  `{ matcher, hooks: [{type:"http", url}] }` shape (`matcher:"*"` for the tool
+  events; no matcher for `SessionStart`/`SessionEnd`/`Stop`/`StopFailure`/
+  `UserPromptSubmit`, so `SessionStart` fires on resume too). Files live under a
+  private `<app cache>/sessions/<id>/claude/settings.json` (`0700`/`0600`).
+- `start_session` mints a token, registers it (`HookServerControl` +
+  `HookTokenRegistry`), writes the settings file, and appends `--settings <file>`
+  via the adapter seam `AgentAdapter::hook_config_args`. No `CLAUDE_CONFIG_DIR` is
+  set, so `assert_safe_cli_env` still passes and the user stays logged in.
+  Relaunch revokes the prior token; `remove_session` revokes + deletes the dir.
+- **Native id capture** comes from the SessionStart hook payload (the interactive
+  TUI ignores `--session-id`): `record_session_activity_by_id` writes activity and
+  captures the CLI `session_id` into `nativeSessionRef` on first sight, then emits
+  `session_record_changed` so the dashboard refetches and binds the now-live
+  session. A hook-independent fallback (`ClaudeCodeAdapter::discover_native_session`
+  scanning `~/.claude/projects/<encoded-cwd>/*.jsonl`, cwd-validated from the file
+  envelope since the dir name is a lossy encoding) captures the id if hooks never
+  fire. `PreToolUse`/`PostToolUse` now carry tool detail so the card reads
+  "Run shell: …" rather than a bare "Working".
+
+### Phase 2: Codex CLI (landed, except the definitive approval hook)
+
+- `codex_rollout` (core) folds the append-only rollout JSONL into `ActivityState`
+  (`session_meta`→id+cwd, `task_started`→working, `function_call`→working+tool,
+  `*_output`→clear, `task_complete`/`turn_aborted`→idle, `error`→error). The
+  `sequence` is the folded-record count, so each re-read after the file grows is
+  strictly newer. `discover_latest_codex_rollout_for_cwd` reads the first
+  `session_meta` (cwd-validated, launch-window bounded) so `codex resume <id>`
+  works; `CodexCliAdapter::discover_native_session` uses it.
+- `codex_watcher` (core) + `drain_codex_activity` (shell) mirror the Cortex
+  watcher: watch `~/.codex/sessions/**/rollout-*.jsonl`, fold on change, emit by
+  native id through the same bridge path. Started in `main.rs` like Cortex.
+- **Approval (baseline):** the reader surfaces a real `awaiting_permission` from
+  the rollout: an escalated `function_call` (`with_escalated_permissions:true`)
+  with no matching output yet means the user is being prompted. This is
+  best-effort (can't always distinguish "approving" from "running long"); the
+  definitive signal is still the command hook below.
+- **Approval (definitive): NOT yet built, needs live validation.** A trusted
+  `PermissionRequest` `type:"command"` forwarder routed into the existing
+  `/hooks/codex` server route. The attach mechanism (`~/.codex/reverie.config.toml`
+  + `codex --profile reverie` vs `hooks.json`) and the `/hooks` trust-hash
+  behavior are version-sensitive (codex 0.135.0) and must be validated against a
+  live `codex` session before building, not guessed. When it lands, a per-session
+  aggregator unifies watcher + hook under one sequence (sticky `awaiting_permission`)
+  so a stale `working` cannot clobber a live approval.
+
+### Cross-CLI parity: launch-time capture (landed)
+
+Capture/attach used to run only at exit, so a file-watched session (Cortex,
+Codex) bound its live state only after exiting once. `spawn_launch_capture_poll`
+(runtime) now polls adapter discovery for ~10s after launch and attaches the
+native ref as soon as the CLI writes its session file, then emits
+`session_record_changed`. This is generic, so Cortex and Codex both bind live on
+the first run, at parity with Claude (which binds live via the hook). It needed
+no changes to cortex-mono or Codex itself: those CLIs already persist their
+session metadata at start; Reverie just reads it sooner. Exit-time capture stays
+as the backstop.
 
 ## Guardrails
 
@@ -229,15 +360,24 @@ End-to-end flow now works the day a user installs `claude` or `codex` on `PATH`:
 - Do not let terminal proof code become the production architecture by accident.
 - Do not add cloud/account/sync seams in v1.
 - Do not hide dangerous/YOLO behavior behind defaults; it stays explicit.
-- Do not move to WebGPU until production-session evidence says Canvas is the bottleneck.
+- Do not move the production terminal path to WebGPU until Tauri's WebView runtime supports it reliably and the WebGL2 path has shown a measured bottleneck.
 
 ## Checks to keep green
 
 ```bash
-PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" npm run build
+npm run typecheck
+npm run build:web
+npx vitest run apps/desktop/web/terminal apps/desktop/web/domain/terminalInput.test.ts
 cargo test
 PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
 PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
-node --check apps/desktop/web/terminal-render-proof.js
-node --check apps/desktop/web/terminal-canvas-renderer.js
+git diff --check
 ```
+
+Manual terminal-pipeline stress check:
+
+```bash
+npm run dev:terminal-stress
+```
+
+This launches the desktop app into the hidden multi-terminal stress route and should report a passing metrics payload in the window after the spawned PTY sessions exit.

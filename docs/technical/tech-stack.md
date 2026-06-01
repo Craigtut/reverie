@@ -47,7 +47,7 @@ reverie/
 | Styling | **Panda CSS** (`@pandacss/dev`) | Tokens, recipes, codegen to `apps/desktop/web/styled-system/` (gitignored) |
 | Animation | **Motion** (`motion`) | Restrained shell-level animation only — never in the terminal paint loop |
 | Icons | **Phosphor Icons** (`@phosphor-icons/react`) | App-shell iconography |
-| Terminal renderer | Imperative **Canvas 2D** island | Consumes Ghostty-derived `TerminalFrame` events from Rust; WebGPU/WebGL2 reserved for evidence-driven escalation |
+| Terminal renderer | Imperative **WebGL2-first** canvas island | Consumes Ghostty-derived `TerminalFrame` events from Rust; Canvas 2D fallback remains available, and WebGPU stays behind the renderer boundary until Tauri's WebView runtime supports it reliably |
 | Tauri bridge | `@tauri-apps/api` | Commands/events between React and the Rust backend |
 
 ### Fonts & theming

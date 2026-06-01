@@ -120,6 +120,57 @@ it with no `DYLD_*` set produced no `Library not loaded` error (a load-time
 linked dylib aborts at startup if unresolved, so this is conclusive). The app and
 the dylib are ad-hoc signed.
 
+## The reverie-bridge helper sidecar
+
+The inter-agent connection bridge hands each agent CLI (Claude Code, Codex,
+Cortex) an absolute path to a helper binary (`reverie-bridge`) and lets the CLI
+spawn it as a stdio MCP server. A second helper, `reverie-bridge-preturn-hook`,
+backs the pre-turn lifecycle hook. Both must exist on disk at the path written
+into the CLI's config, or the agent reports `MCP client failed to start: No
+such file or directory`.
+
+The load-bearing invariant is **the helper lives next to the desktop binary**.
+`resolve_bridge_binaries` (in `connection_commands.rs`) writes
+`current_exe().parent()/reverie-bridge`, with a dev-only fallback to the root
+workspace target dir. `install_*_bridge` refuses to write a path that does not
+exist (`BridgeBinaries::ensure_present`), so a half-built tree fails loudly
+instead of poisoning a user's config.
+
+Two facts make staging necessary. First, the helpers are members of the **root**
+cargo workspace and build into `<repo>/target`, while the desktop app is its own
+nested workspace and builds into `apps/desktop/src-tauri/target`, so they never
+land in the same directory on their own. Second, a bundled `.app` needs the
+helper inside `Contents/MacOS/`, signed. Both are solved by
+`scripts/stage-bridge.mjs`, which builds the helper crate (`cargo build -p
+reverie-bridge`, no Zig needed) and copies each binary to:
+
+- `apps/desktop/src-tauri/binaries/<name>-<target-triple>` (gitignored) — the
+  Tauri `externalBin` staging location. `tauri.conf.json > bundle > externalBin`
+  lists `binaries/reverie-bridge` and `binaries/reverie-bridge-preturn-hook`; the
+  bundler copies them into `Contents/MacOS/` (triple suffix stripped) and signs
+  them next to the main binary.
+- `apps/desktop/src-tauri/target/<profile>/<name>` — next to the dev/run desktop
+  binary, so `current_exe().parent()` resolves in `npm run dev` / `run:release`.
+
+Staging is wired in two ways. The cargo-direct scripts (`dev:desktop`,
+`dev:tauri`, `build:desktop`, `run:release`) call `npm run stage:bridge`
+themselves; `npm run bundle` and the release CI go through Tauri, so
+`beforeBuildCommand` / `beforeDevCommand` stage the helpers (with the fixed
+`--triple aarch64-apple-darwin`, matching the bundle target).
+
+`tauri_build::build()` validates configured `externalBin` files at **compile**
+time, the same as `frameworks` (a bare `cargo check` of the desktop crate fails
+with `resource path binaries/reverie-bridge-<triple> doesn't exist` otherwise).
+So `build.rs` also ensures those files exist: for each helper it copies the
+freshly built binary from `<root>/target/<profile>/` when present, and otherwise
+writes a zero-byte placeholder (logged as a warning). That keeps bare `cargo
+check`, rust-analyzer, and `npm run check` green without a prior staging step.
+The placeholder is never shipped: `beforeBuildCommand` runs `stage-bridge.mjs`
+ahead of the bundle, so by the time the bundler copies `externalBin` the real
+signed binary is in place. `build.rs` does **not** build the helper crate
+(cargo cannot reentrantly build a sibling crate); `stage-bridge.mjs` owns the
+build.
+
 ## Why not static linking (yet)
 
 It is tempting to link `libghostty-vt.a` and ship a single self-contained

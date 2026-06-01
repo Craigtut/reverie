@@ -10,6 +10,7 @@ Documentation for Reverie, a local-first agentic workspace. Start with the visio
 ## Product
 
 - [`product/v1-product-spec.md`](product/v1-product-spec.md) — v1 scope, target users, UX flows, requirements, and non-goals.
+- [`product/search-and-recall.md`](product/search-and-recall.md) — content-level recall ("find the session I was working on"): native-file completeness research, the Reverie-owned conversation index, discovered/external sessions, and the unified command-palette UX.
 
 ## Technical
 
@@ -17,6 +18,8 @@ Documentation for Reverie, a local-first agentic workspace. Start with the visio
 - [`technical/technical-architecture.md`](technical/technical-architecture.md) — Rust/Tauri architecture, domain model, persistence, agent-adapter contracts, terminal boundary.
 - [`technical/frontend-architecture.md`](technical/frontend-architecture.md) — React/Panda shell direction and the imperative terminal-renderer boundary.
 - [`technical/terminal-strategy.md`](technical/terminal-strategy.md) — Ghostty/libghostty research and terminal implementation strategy.
+- [`technical/terminal-overhaul-handoff.md`](technical/terminal-overhaul-handoff.md): focused handoff for the terminal renderer overhaul, current status, open bugs, and next tasks.
 - [`technical/implementation-queue.md`](technical/implementation-queue.md) — current build status, immediate build queue, and the "checks to keep green".
 - [`technical/packaging-and-distribution.md`](technical/packaging-and-distribution.md): how the app is bundled, how the Ghostty dylib is shipped without runtime `DYLD_LIBRARY_PATH`, code signing, and the tag-driven release flow.
 - [`technical/cortex-activity-contract.md`](technical/cortex-activity-contract.md) — authoritative spec for the Cortex Code activity-state surface (per-session `activity/state.json` + `events.jsonl`).
+- [`technical/activity-ingestion.md`](technical/activity-ingestion.md) — how per-CLI session lifecycle signal is normalized into one `ActivityState`: the `ActivityUpdate` spine, the correlator, the four-axis taxonomy, and the "how to add a CLI" decision tree.
