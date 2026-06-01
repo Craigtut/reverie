@@ -1,7 +1,7 @@
 import { registerAction } from './actionRegistry';
 import { registerResolver } from './targetRegistry';
 import { asUrl, detectLinks } from './linkProvider';
-import { rowPlainText } from './selectionModel';
+import { terminalRowTextLayout, terminalTextRangeToCellSpan } from '../cellGeometry';
 import type { GridTarget, LinkTarget, SelectionTarget } from './types';
 
 // Registers the built-in resolvers + actions. Idempotent: safe to call from the
@@ -43,15 +43,18 @@ export function registerDefaultInteractions(): void {
       if (!probe.cell) return [];
       const row = probe.frame.rows.find(r => r.index === probe.cell?.row);
       if (!row) return [];
-      const text = rowPlainText(row, probe.surface.cols);
-      const hit = detectLinks(text).find(
-        link => probe.cell !== null && probe.cell.col >= link.start && probe.cell.col < link.end,
-      );
+      const layout = terminalRowTextLayout(row, probe.surface.cols);
+      const hit = detectLinks(layout.text).find(link => {
+        const span = terminalTextRangeToCellSpan(layout, link.start, link.end);
+        return (
+          probe.cell !== null && probe.cell.col >= span.startCol && probe.cell.col < span.endCol
+        );
+      });
       if (!hit) return [];
       const target: LinkTarget = {
         kind: 'link',
         href: hit.href,
-        text: text.slice(hit.start, hit.end),
+        text: layout.text.slice(hit.start, hit.end),
         cell: probe.cell,
       };
       return [target];

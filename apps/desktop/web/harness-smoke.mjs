@@ -3,12 +3,14 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 
 const ROOT_URL = process.env.REVERIE_HARNESS_URL ?? 'http://127.0.0.1:1421';
 const SERVER_TIMEOUT_MS = 20_000;
 const CHROME_TIMEOUT_MS = 30_000;
+const CHROME_POLL_MS = 100;
 
-const scenarios = [
+const allScenarios = [
   {
     name: 'empty-onboarding',
     query: 'fixture=empty&resetFixture=1&harnessSmoke=empty-onboarding',
@@ -29,9 +31,49 @@ const scenarios = [
     query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-interaction',
     profileGroup: 'terminal-interaction',
   },
+  {
+    name: 'terminal-concurrent-sessions',
+    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-concurrent-sessions',
+    profileGroup: 'terminal-concurrent-sessions',
+  },
+  {
+    name: 'terminal-alternate-screen',
+    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-alternate-screen',
+    profileGroup: 'terminal-alternate-screen',
+  },
+  {
+    name: 'terminal-history-find',
+    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-history-find',
+    profileGroup: 'terminal-history-find',
+  },
+  {
+    name: 'terminal-resize-storm',
+    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-resize-storm',
+    profileGroup: 'terminal-resize-storm',
+    useGpu: true,
+  },
+  {
+    name: 'terminal-long-history-scroll',
+    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-long-history-scroll',
+    profileGroup: 'terminal-long-history-scroll',
+    useGpu: true,
+  },
+  {
+    name: 'terminal-render-performance',
+    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-render-performance',
+    profileGroup: 'terminal-render-performance',
+    useGpu: true,
+  },
 ];
+const scenarioFilter = process.env.REVERIE_HARNESS_SCENARIO;
+const scenarios = scenarioFilter
+  ? allScenarios.filter(scenario => scenario.name === scenarioFilter)
+  : allScenarios;
+if (scenarioFilter && scenarios.length === 0) {
+  throw new Error(`Unknown harness scenario filter: ${scenarioFilter}`);
+}
 
-const chromePath = resolveChromePath();
+const chrome = resolveChromeCommand();
 const spawnedServer = await ensureHarnessServer();
 const profileDirs = new Map();
 
@@ -101,11 +143,12 @@ async function canReachHarness() {
   }
 }
 
-async function runChromeScenario({ name, url, profileDir }) {
+async function runChromeScenario({ name, url, profileDir, useGpu = false }) {
+  const debugPort = await reservePort();
   const args = [
     '--headless=new',
     '--no-sandbox',
-    '--disable-gpu',
+    ...(useGpu ? [] : ['--disable-gpu']),
     '--disable-background-networking',
     '--disable-sync',
     '--disable-extensions',
@@ -114,87 +157,208 @@ async function runChromeScenario({ name, url, profileDir }) {
     '--no-default-browser-check',
     '--hide-scrollbars',
     '--run-all-compositor-stages-before-draw',
-    '--virtual-time-budget=12000',
+    '--remote-debugging-address=127.0.0.1',
+    `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${profileDir}`,
-    '--dump-dom',
     url,
   ];
 
-  const { stdout, stderr, code } = await runProcessUntil(
-    chromePath,
-    args,
-    CHROME_TIMEOUT_MS,
-    output => output.includes('id="reverie-harness-smoke-result"'),
-  );
-  if (code !== 0 && !stdout.includes('id="reverie-harness-smoke-result"')) {
-    throw new Error(`Chrome exited with code ${code} for ${name}\n${stderr}`);
-  }
+  const child = spawn(chrome.command, [...chrome.args, ...args], {
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', chunk => {
+    stderr += chunk.toString();
+  });
 
-  if (
-    !stdout.includes('id="reverie-harness-smoke-result"') ||
-    !stdout.includes('data-harness-smoke="passed"')
-  ) {
-    const resultSnippet = extractResultSnippet(stdout);
-    throw new Error(
-      `Harness smoke scenario failed: ${name}\n${resultSnippet || stdout.slice(-3000)}\n${stderr}`,
-    );
+  try {
+    const result = await waitForHarnessResult({
+      debugPort,
+      url,
+      child,
+      name,
+      stderrForError,
+    });
+    if (result.status !== 'passed') {
+      throw new Error(
+        `Harness smoke scenario failed: ${name}\n${result.text}\n${stderrForError()}`,
+      );
+    }
+    printScenarioDetails(name, result.text);
+  } finally {
+    await stopProcess(child);
   }
 
   console.log(`✓ ${name}`);
+
+  function stderrForError() {
+    return stderr.slice(-3000);
+  }
 }
 
-function runProcessUntil(command, args, timeoutMs, isDone) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
-
-    const finish = code => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill('SIGKILL');
+function printScenarioDetails(name, text) {
+  if (name !== 'terminal-render-performance') return;
+  try {
+    const result = JSON.parse(text);
+    for (const assertion of result.assertions ?? []) {
+      if (typeof assertion === 'string' && assertion.includes('WebGL2')) {
+        console.log(`  ${assertion}`);
       }
-      resolve({ stdout, stderr, code });
-    };
+    }
+  } catch {
+    // The pass/fail result is already handled by the caller.
+  }
+}
 
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      child.kill('SIGKILL');
-      reject(
-        new Error(
-          `Timed out running ${command}\n${extractResultSnippet(stdout) || stdout.slice(-3000)}\n${stderr}`,
-        ),
+async function waitForPageWebSocket(debugPort, url, child, stderrForError) {
+  const started = Date.now();
+  while (Date.now() - started < CHROME_TIMEOUT_MS) {
+    if (child.exitCode !== null) {
+      throw new Error(
+        `Chrome exited before DevTools was reachable for ${url}\n${stderrForError()}`,
       );
-    }, timeoutMs);
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${debugPort}/json/list`, {
+        signal: AbortSignal.timeout(750),
+      });
+      const targets = await response.json();
+      const page =
+        targets.find(target => target.type === 'page' && target.url === url) ??
+        targets.find(target => target.type === 'page');
+      if (page?.webSocketDebuggerUrl) return page.webSocketDebuggerUrl;
+    } catch {
+      // Chrome is still booting.
+    }
+    await delay(CHROME_POLL_MS);
+  }
 
-    child.stdout.on('data', chunk => {
-      stdout += chunk.toString();
-      if (isDone(stdout)) finish(0);
+  throw new Error(`Timed out waiting for Chrome DevTools target for ${url}\n${stderrForError()}`);
+}
+
+async function waitForHarnessResult({ debugPort, url, child, name, stderrForError }) {
+  let cdp = null;
+  try {
+    const started = Date.now();
+    while (Date.now() - started < CHROME_TIMEOUT_MS) {
+      try {
+        if (!cdp) {
+          const pageWsUrl = await waitForPageWebSocket(debugPort, url, child, stderrForError);
+          cdp = await connectCdp(pageWsUrl);
+          await cdp.send('Runtime.enable');
+        }
+        const value = await cdp.evaluate(`
+          (() => {
+            const marker = document.querySelector('#reverie-harness-smoke-result');
+            if (!marker) return null;
+            return {
+              status: document.body.getAttribute('data-harness-smoke'),
+              text: marker.textContent || ''
+            };
+          })()
+        `);
+        if (value) return value;
+      } catch (error) {
+        if (!isRecoverableCdpError(error)) throw error;
+        cdp?.close();
+        cdp = null;
+      }
+      await delay(CHROME_POLL_MS);
+    }
+
+    const bodyText = cdp
+      ? await cdp
+          .evaluate(`(() => document.body ? document.body.textContent.slice(0, 3000) : '')()`)
+          .catch(() => '')
+      : '';
+    throw new Error(`Timed out waiting for harness smoke result: ${name}\n${bodyText}`);
+  } finally {
+    cdp?.close();
+  }
+}
+
+function isRecoverableCdpError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('Inspected target navigated or closed') ||
+    message.includes('Execution context was destroyed') ||
+    message.includes('Cannot find context with specified id') ||
+    message.includes('CDP socket closed') ||
+    message.includes('WebSocket is not open')
+  );
+}
+
+function connectCdp(pageWsUrl) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(pageWsUrl);
+    const pending = new Map();
+    let nextId = 0;
+    let opened = false;
+
+    socket.addEventListener('open', () => {
+      opened = true;
+      resolve({
+        send(method, params = {}) {
+          if (socket.readyState !== WebSocket.OPEN) {
+            return Promise.reject(new Error('CDP socket closed'));
+          }
+          const id = ++nextId;
+          socket.send(JSON.stringify({ id, method, params }));
+          return new Promise((resolveMessage, rejectMessage) => {
+            pending.set(id, { resolve: resolveMessage, reject: rejectMessage });
+          });
+        },
+        async evaluate(expression) {
+          const result = await this.send('Runtime.evaluate', {
+            expression,
+            returnByValue: true,
+          });
+          if (result.exceptionDetails) {
+            throw new Error(result.exceptionDetails.text ?? 'Runtime.evaluate failed');
+          }
+          return result.result?.value ?? null;
+        },
+        close() {
+          socket.close();
+        },
+      });
     });
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString();
+
+    socket.addEventListener('message', event => {
+      const message = JSON.parse(event.data.toString());
+      const pendingMessage = pending.get(message.id);
+      if (!pendingMessage) return;
+      pending.delete(message.id);
+      if (message.error) pendingMessage.reject(new Error(message.error.message));
+      else pendingMessage.resolve(message.result);
     });
-    child.on('error', error => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      reject(error);
+
+    socket.addEventListener('error', error => {
+      if (!opened) reject(error);
+      for (const pendingMessage of pending.values()) pendingMessage.reject(error);
+      pending.clear();
     });
-    child.on('close', code => {
-      finish(code ?? 0);
+
+    socket.addEventListener('close', () => {
+      const error = new Error('CDP socket closed');
+      if (!opened) reject(error);
+      for (const pendingMessage of pending.values()) pendingMessage.reject(error);
+      pending.clear();
     });
   });
 }
 
-function extractResultSnippet(dom) {
-  const marker = 'reverie-harness-smoke-result';
-  const index = dom.indexOf(marker);
-  if (index === -1) return '';
-  return dom.slice(Math.max(0, index - 500), Math.min(dom.length, index + 2500));
+function resolveChromeCommand() {
+  const chromePath = resolveChromePath();
+  if (
+    process.platform === 'darwin' &&
+    process.arch === 'arm64' &&
+    chromePath.startsWith('/Applications/') &&
+    existsSync('/usr/bin/arch')
+  ) {
+    return { command: '/usr/bin/arch', args: ['-arm64', chromePath] };
+  }
+  return { command: chromePath, args: [] };
 }
 
 function resolveChromePath() {
@@ -212,6 +376,39 @@ function resolveChromePath() {
     );
   }
   return found;
+}
+
+function reservePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(() => {
+        if (typeof address === 'object' && address) resolve(address.port);
+        else reject(new Error('Could not reserve a local debug port'));
+      });
+    });
+  });
+}
+
+function stopProcess(child) {
+  return new Promise(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const timeout = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      resolve();
+    }, 500);
+    child.once('close', () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    child.kill('SIGTERM');
+  });
 }
 
 function delay(ms) {

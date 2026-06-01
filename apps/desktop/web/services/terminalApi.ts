@@ -141,3 +141,7 @@ export function fetchGhosttyFrameSequence() {
 export function recordRenderMetrics(metrics: RenderMetrics) {
   return invoke('record_render_metrics', { metrics });
 }
+
+export function recordTerminalDiagnostics(events: unknown[]) {
+  return invoke('record_terminal_diagnostics', { events });
+}

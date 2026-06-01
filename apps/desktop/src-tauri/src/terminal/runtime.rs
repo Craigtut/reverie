@@ -3,7 +3,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use reverie_core::TerminalSpawnSpec;
 use reverie_core::agents::derive_session_title;
-use reverie_core::domain::{AgentKind, SessionId};
+use reverie_core::domain::{AgentKind, NativeSessionRef, SessionId};
 use reverie_core::pty::{PtyController, PtyProcess};
 use reverie_core::terminal::{TerminalColor, TerminalFrame, TerminalId};
 use serde::Serialize;
@@ -24,9 +24,13 @@ use reverie_core::session_log::SessionLogControl;
 use reverie_core::transcript::TranscriptStore;
 
 const READ_BUFFER_BYTES: usize = 4096;
+const PTY_DRAIN_MAX_BYTES: usize = 64 * 1024;
+const PTY_DRAIN_MAX_CHUNKS: usize = 64;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const BACKGROUND_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+const SYNC_OUTPUT_FRAME_TIMEOUT: Duration = Duration::from_millis(1000);
 const HISTORY_WINDOW_CACHE_ENTRIES: usize = 6;
+const HISTORY_SEGMENT_ROWS_CACHE_ENTRIES: usize = 12;
 const HISTORY_WINDOW_PREFETCH_ROWS: usize = 2_048;
 /// Shared grace period for batch shutdown: SIGTERM every session, wait this
 /// long once, then SIGKILL any stragglers.
@@ -102,9 +106,16 @@ struct HistoryWindowCacheEntry {
     frame: TerminalFrame,
 }
 
+#[derive(Clone, Debug)]
+struct HistorySegmentRowsCacheEntry {
+    key: HistoryCacheKey,
+    rows: Vec<usize>,
+}
+
 #[derive(Default, Debug)]
 struct HistoryReplayCache {
     windows: VecDeque<HistoryWindowCacheEntry>,
+    segment_rows: VecDeque<HistorySegmentRowsCacheEntry>,
 }
 
 enum TerminalRuntimeCommand {
@@ -135,6 +146,17 @@ enum TerminalRuntimeCommand {
 #[derive(Debug)]
 enum PtyReadEvent {
     Chunk(Vec<u8>),
+    Exited { child_success: bool },
+    Failed(String),
+}
+
+struct PtyReadBatch {
+    bytes: Vec<u8>,
+    chunks: usize,
+    deferred_event: Option<DeferredPtyReadEvent>,
+}
+
+enum DeferredPtyReadEvent {
     Exited { child_success: bool },
     Failed(String),
 }
@@ -217,6 +239,26 @@ struct TerminalFrameEvent {
 }
 
 impl HistoryReplayCache {
+    fn get_segment_rows(&mut self, key: &HistoryCacheKey) -> Option<Vec<usize>> {
+        let index = self
+            .segment_rows
+            .iter()
+            .position(|entry| entry.key == *key)?;
+        let entry = self.segment_rows.remove(index)?;
+        let rows = entry.rows.clone();
+        self.segment_rows.push_back(entry);
+        Some(rows)
+    }
+
+    fn put_segment_rows(&mut self, key: HistoryCacheKey, rows: Vec<usize>) {
+        self.segment_rows.retain(|entry| entry.key != key);
+        self.segment_rows
+            .push_back(HistorySegmentRowsCacheEntry { key, rows });
+        while self.segment_rows.len() > HISTORY_SEGMENT_ROWS_CACHE_ENTRIES {
+            self.segment_rows.pop_front();
+        }
+    }
+
     fn get_window(
         &mut self,
         key: &HistoryCacheKey,
@@ -356,6 +398,36 @@ impl TerminalSessionRuntime {
             .lock()
             .ok()
             .and_then(|mut cache| cache.get_window(&key, start_row, row_count))
+    }
+
+    pub fn cached_history_segment_rows(
+        &self,
+        session_id: SessionId,
+        transcripts: &[Vec<u8>],
+        cols: u16,
+        surface_rows: u16,
+        colors: TerminalThemeColors,
+    ) -> Option<Vec<usize>> {
+        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
+        self.history_cache
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get_segment_rows(&key))
+    }
+
+    pub fn remember_history_segment_rows(
+        &self,
+        session_id: SessionId,
+        transcripts: &[Vec<u8>],
+        cols: u16,
+        surface_rows: u16,
+        colors: TerminalThemeColors,
+        rows: Vec<usize>,
+    ) {
+        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
+        if let Ok(mut cache) = self.history_cache.lock() {
+            cache.put_segment_rows(key, rows);
+        }
     }
 
     pub fn remember_history_window(
@@ -698,6 +770,7 @@ impl TerminalSessionRuntime {
         let mut last_frame_emit = Instant::now()
             .checked_sub(TERMINAL_FRAME_INTERVAL)
             .unwrap_or_else(Instant::now);
+        let mut sync_output_started_at = None;
         let mut viewport_state = TerminalViewportState {
             follow_tail: true,
             frontend_active: true,
@@ -721,12 +794,14 @@ impl TerminalSessionRuntime {
                 pending_frame = true;
             }
 
-            if terminal_frame_due(
+            if terminal_frame_ready(
                 pending_frame,
                 last_frame_emit,
                 &viewport_state,
+                &terminal,
+                &mut sync_output_started_at,
                 Instant::now(),
-            ) {
+            )? {
                 let emit_ms = emit_terminal_frame_event(
                     &app,
                     request.session_id,
@@ -753,13 +828,18 @@ impl TerminalSessionRuntime {
 
             match read_rx.recv_timeout(Duration::from_millis(4)) {
                 Ok(PtyReadEvent::Chunk(chunk)) => {
-                    chunks_read += 1;
-                    bytes_read += chunk.len();
-                    bytes_rendered += chunk.len();
-                    bytes_since_last_frame += chunk.len();
+                    let PtyReadBatch {
+                        bytes,
+                        chunks,
+                        deferred_event,
+                    } = drain_pty_read_batch(chunk, &read_rx)?;
+                    chunks_read += chunks;
+                    bytes_read += bytes.len();
+                    bytes_rendered += bytes.len();
+                    bytes_since_last_frame += bytes.len();
                     last_output_at = Instant::now();
 
-                    terminal.write(&chunk);
+                    terminal.write(&bytes);
                     // A title only changes as a side effect of program output,
                     // so poll it right after the VT write (deduped internally).
                     if let Some(ctx) = &title_ctx {
@@ -774,12 +854,20 @@ impl TerminalSessionRuntime {
                     // Capture the raw bytes durably (the chunk is no longer
                     // needed after the VT write). Cheap: just a channel send.
                     if let Some(writer) = &transcript_writer {
-                        writer.append(chunk);
+                        writer.append(bytes);
                     }
                     if viewport_state.follow_tail {
                         terminal.scroll_bottom();
                     }
                     pending_frame = true;
+                    if let Some(deferred_event) = deferred_event {
+                        match deferred_event {
+                            DeferredPtyReadEvent::Exited { child_success } => {
+                                break child_success;
+                            }
+                            DeferredPtyReadEvent::Failed(message) => bail!(message),
+                        }
+                    }
                 }
                 Ok(PtyReadEvent::Exited { child_success }) => break child_success,
                 Ok(PtyReadEvent::Failed(message)) => bail!(message),
@@ -792,12 +880,14 @@ impl TerminalSessionRuntime {
             // Gate on `pending_frame` so an idle terminal (no new PTY output and
             // no applied commands) never emits. Without this guard the loop ships
             // a full grid frame every TERMINAL_FRAME_INTERVAL forever, per session.
-            if terminal_frame_due(
+            if terminal_frame_ready(
                 pending_frame,
                 last_frame_emit,
                 &viewport_state,
+                &terminal,
+                &mut sync_output_started_at,
                 Instant::now(),
-            ) {
+            )? {
                 let emit_ms = emit_terminal_frame_event(
                     &app,
                     request.session_id,
@@ -1054,6 +1144,42 @@ fn emit_terminal_frame_event(
     Ok(emit_started.elapsed().as_secs_f64() * 1000.0)
 }
 
+fn drain_pty_read_batch(
+    first_chunk: Vec<u8>,
+    receiver: &Receiver<PtyReadEvent>,
+) -> Result<PtyReadBatch> {
+    let mut bytes = first_chunk;
+    let mut chunks = 1;
+    let mut deferred_event = None;
+
+    while chunks < PTY_DRAIN_MAX_CHUNKS && bytes.len() < PTY_DRAIN_MAX_BYTES {
+        match receiver.try_recv() {
+            Ok(PtyReadEvent::Chunk(chunk)) => {
+                chunks += 1;
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(PtyReadEvent::Exited { child_success }) => {
+                deferred_event = Some(DeferredPtyReadEvent::Exited { child_success });
+                break;
+            }
+            Ok(PtyReadEvent::Failed(message)) => {
+                deferred_event = Some(DeferredPtyReadEvent::Failed(message));
+                break;
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                bail!("terminal reader disconnected before reporting process exit")
+            }
+        }
+    }
+
+    Ok(PtyReadBatch {
+        bytes,
+        chunks,
+        deferred_event,
+    })
+}
+
 fn spawn_pty_reader_thread(
     terminal_id: TerminalId,
     mut reader: reverie_core::pty::PtyReader,
@@ -1179,6 +1305,31 @@ fn terminal_frame_due(
         && now.saturating_duration_since(last_frame_emit) >= terminal_frame_interval(state)
 }
 
+fn terminal_frame_ready(
+    pending_frame: bool,
+    last_frame_emit: Instant,
+    state: &TerminalViewportState,
+    terminal: &GhosttyTerminalState<'_, '_>,
+    sync_output_started_at: &mut Option<Instant>,
+    now: Instant,
+) -> Result<bool> {
+    if !terminal_frame_due(pending_frame, last_frame_emit, state, now) {
+        return Ok(false);
+    }
+
+    if terminal.sync_output_mode()? {
+        let started_at = sync_output_started_at.get_or_insert(now);
+        if now.saturating_duration_since(*started_at) < SYNC_OUTPUT_FRAME_TIMEOUT {
+            return Ok(false);
+        }
+        *sync_output_started_at = Some(now);
+        return Ok(true);
+    }
+
+    *sync_output_started_at = None;
+    Ok(true)
+}
+
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         format!("terminal worker panicked: {message}")
@@ -1206,37 +1357,37 @@ fn persist_native_session_after_launch(
             Some(launch_started_ms),
             agent_home_dir(agent_kind),
         );
-        // The Codex rollout file stops changing once the process exits, so stop
-        // tailing it (the launch poll re-registers it on resume). Claude (hooks)
-        // and Cortex (its own watcher) are not in the session-log engine.
-        if agent_kind == Some(AgentKind::CodexCli) {
+        // A file-transport session's live-state file stops changing once the
+        // process exits, so stop tailing it (the launch poll re-registers it on
+        // resume). Claude uses hooks, so it has nothing registered to drop.
+        if agent_kind.is_some_and(is_file_transport) {
             unregister_active_file_watch(app, &service, session_id);
         }
     }
 }
 
-/// Register a Codex session's rollout file with the session-log watcher so its
-/// appends are tailed for live state. No-op for non-Codex adapters (Claude uses
-/// hooks, Cortex its own watcher) and when the watcher control or the rollout
-/// path is not available yet.
+/// Register a file-transport session's live-state file with the session-log
+/// watcher so its changes are folded into activity. Codex (rollout) and Cortex
+/// (snapshot) both flow through the one engine; Claude uses hooks, not a file.
+/// No-op when the watcher control or the session's watch path is not available.
 fn register_active_file_watch(
     app: &AppHandle,
     service: &WorkspaceService,
     session_id: SessionId,
     agent_kind: AgentKind,
 ) {
-    if agent_kind != AgentKind::CodexCli {
+    if !is_file_transport(agent_kind) {
         return;
     }
     let Some(control) = app.try_state::<SessionLogControl>() else {
         return;
     };
-    if let Some(path) = session_native_metadata_path(service, session_id) {
+    if let Some(path) = session_watch_path(service, session_id) {
         control.register(path);
     }
 }
 
-/// Stop tailing a Codex session's rollout file.
+/// Stop tailing a file-transport session's live-state file.
 fn unregister_active_file_watch(
     app: &AppHandle,
     service: &WorkspaceService,
@@ -1245,32 +1396,53 @@ fn unregister_active_file_watch(
     let Some(control) = app.try_state::<SessionLogControl>() else {
         return;
     };
-    if let Some(path) = session_native_metadata_path(service, session_id) {
+    if let Some(path) = session_watch_path(service, session_id) {
         control.unregister(path);
     }
 }
 
-/// The on-disk session-file path captured into a session's native ref (Codex's
-/// rollout file), if any.
-fn session_native_metadata_path(
-    service: &WorkspaceService,
-    session_id: SessionId,
-) -> Option<PathBuf> {
-    service
+/// Whether a CLI reports live state through a watched file (vs. push hooks).
+fn is_file_transport(agent_kind: AgentKind) -> bool {
+    matches!(agent_kind, AgentKind::CodexCli | AgentKind::CortexCode)
+}
+
+/// The on-disk file the session-log engine should watch for a session, if any.
+fn session_watch_path(service: &WorkspaceService, session_id: SessionId) -> Option<PathBuf> {
+    let reference = service
         .snapshot()
         .ok()?
         .sessions
         .into_iter()
         .find(|session| session.id == session_id)?
-        .native_session_ref
-        .and_then(|reference| reference.metadata_path)
+        .native_session_ref?;
+    watch_path_for_ref(&reference)
 }
 
-/// How long to poll for the CLI's session file after launch, and how often.
-/// ~10s is long enough for any of the CLIs to write their first session record,
-/// short enough that the thread does not linger; we stop early once captured.
-const LAUNCH_CAPTURE_ATTEMPTS: usize = 20;
-const LAUNCH_CAPTURE_INTERVAL: Duration = Duration::from_millis(500);
+/// Derive the live-state file to watch from a session's native ref. Codex points
+/// its `metadata_path` straight at the rollout file; Cortex's points at
+/// `meta.json`, so we derive the sibling `activity/state.json` snapshot. Claude
+/// uses hooks, so it has no watched file.
+pub(crate) fn watch_path_for_ref(reference: &NativeSessionRef) -> Option<PathBuf> {
+    let metadata_path = reference.metadata_path.as_ref()?;
+    match reference.kind {
+        AgentKind::CodexCli => Some(metadata_path.clone()),
+        AgentKind::CortexCode => Some(metadata_path.parent()?.join("activity").join("state.json")),
+        AgentKind::ClaudeCode => None,
+    }
+}
+
+/// Launch-time native-session capture timing. We poll frequently at first
+/// (Cortex writes its `state.json` and Claude fires its SessionStart hook
+/// immediately), then back off and keep trying for several minutes, because
+/// Codex flushes its rollout file lazily: often a minute or more into the
+/// session, when its first turn completes (observed gaps of 3s to 20min between
+/// session start and the `session_meta` record being written). A short fixed
+/// window would miss Codex entirely, so its native ref would never be captured
+/// and resume would fall back to a brand-new session. We stop early once
+/// captured; the exit-time backstop is the final catch.
+const LAUNCH_CAPTURE_INITIAL_INTERVAL: Duration = Duration::from_millis(500);
+const LAUNCH_CAPTURE_MAX_INTERVAL: Duration = Duration::from_secs(5);
+const LAUNCH_CAPTURE_TOTAL_WAIT: Duration = Duration::from_secs(300);
 
 /// Poll adapter-driven native-session discovery for a short window after launch
 /// so a session binds its native ref (and the dashboard binds its live activity)
@@ -1294,8 +1466,15 @@ fn spawn_launch_capture_poll(
     };
 
     thread::spawn(move || {
-        for _ in 0..LAUNCH_CAPTURE_ATTEMPTS {
-            thread::sleep(LAUNCH_CAPTURE_INTERVAL);
+        let mut waited = Duration::ZERO;
+        let mut interval = LAUNCH_CAPTURE_INITIAL_INTERVAL;
+        while waited < LAUNCH_CAPTURE_TOTAL_WAIT {
+            thread::sleep(interval);
+            waited += interval;
+            // Back off after the initial burst so a long-lived ref-less session
+            // costs only an occasional cheap discovery scan.
+            interval = interval.saturating_mul(2).min(LAUNCH_CAPTURE_MAX_INTERVAL);
+
             let Some((service, session_id)) = workspace_service(&app, Some(session_id)) else {
                 return;
             };
@@ -1518,6 +1697,7 @@ mod tests {
     fn blank_test_frame() -> TerminalFrame {
         TerminalFrame {
             dirty: TerminalDirtyState::Full,
+            cols: 0,
             colors: TerminalColors {
                 foreground: TerminalColor { r: 0, g: 0, b: 0 },
                 background: TerminalColor { r: 0, g: 0, b: 0 },
@@ -1700,6 +1880,59 @@ mod tests {
     }
 
     #[test]
+    fn history_segment_rows_cache_uses_lru_entry() {
+        let session_id = SessionId::new_v4();
+        let key = HistoryCacheKey {
+            session_id,
+            cols: 80,
+            surface_rows: 24,
+            foreground: (1, 2, 3),
+            background: (4, 5, 6),
+            segment_lengths: vec![100, 200],
+        };
+        let mut cache = HistoryReplayCache::default();
+
+        cache.put_segment_rows(key.clone(), vec![10, 20]);
+
+        assert_eq!(cache.get_segment_rows(&key), Some(vec![10, 20]));
+    }
+
+    #[test]
+    fn drain_pty_read_batch_coalesces_queued_chunks() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(PtyReadEvent::Chunk(b"b".to_vec())).unwrap();
+        sender.send(PtyReadEvent::Chunk(b"c".to_vec())).unwrap();
+
+        let batch = drain_pty_read_batch(b"a".to_vec(), &receiver).unwrap();
+
+        assert_eq!(batch.bytes, b"abc");
+        assert_eq!(batch.chunks, 3);
+        assert!(batch.deferred_event.is_none());
+    }
+
+    #[test]
+    fn drain_pty_read_batch_defers_exit_until_after_chunks() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(PtyReadEvent::Chunk(b"b".to_vec())).unwrap();
+        sender
+            .send(PtyReadEvent::Exited {
+                child_success: true,
+            })
+            .unwrap();
+
+        let batch = drain_pty_read_batch(b"a".to_vec(), &receiver).unwrap();
+
+        assert_eq!(batch.bytes, b"ab");
+        assert_eq!(batch.chunks, 2);
+        assert!(matches!(
+            batch.deferred_event,
+            Some(DeferredPtyReadEvent::Exited {
+                child_success: true
+            })
+        ));
+    }
+
+    #[test]
     fn terminal_frame_due_throttles_background_sessions_under_output_pressure() {
         let active_frames = simulated_pending_frame_emits(true, 500, 4);
         let background_frames = simulated_pending_frame_emits(false, 500, 4);
@@ -1741,6 +1974,59 @@ mod tests {
             &viewport_state,
             next_tick
         ));
+    }
+
+    #[test]
+    fn terminal_frame_ready_buffers_synchronized_output_until_timeout() {
+        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let viewport_state = TerminalViewportState {
+            follow_tail: true,
+            frontend_active: true,
+        };
+        let now = Instant::now();
+        let last_frame_emit = now.checked_sub(TERMINAL_FRAME_INTERVAL).unwrap_or(now);
+        let mut sync_output_started_at = None;
+
+        terminal.write(b"\x1b[?2026h");
+
+        assert!(
+            !terminal_frame_ready(
+                true,
+                last_frame_emit,
+                &viewport_state,
+                &terminal,
+                &mut sync_output_started_at,
+                now,
+            )
+            .unwrap()
+        );
+        assert!(sync_output_started_at.is_some());
+        assert!(
+            terminal_frame_ready(
+                true,
+                last_frame_emit,
+                &viewport_state,
+                &terminal,
+                &mut sync_output_started_at,
+                now + SYNC_OUTPUT_FRAME_TIMEOUT,
+            )
+            .unwrap()
+        );
+
+        terminal.write(b"\x1b[?2026l");
+
+        assert!(
+            terminal_frame_ready(
+                true,
+                last_frame_emit,
+                &viewport_state,
+                &terminal,
+                &mut sync_output_started_at,
+                now + SYNC_OUTPUT_FRAME_TIMEOUT + Duration::from_millis(1),
+            )
+            .unwrap()
+        );
+        assert!(sync_output_started_at.is_none());
     }
 
     fn simulated_pending_frame_emits(active: bool, duration_ms: u64, tick_ms: u64) -> usize {

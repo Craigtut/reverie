@@ -1,7 +1,7 @@
 // Shared runtime-layer types. Kept dependency-free so both the runtime shim
 // and the browser fixture can import them without a cycle.
 
-export type RuntimeMode = 'tauri' | 'browser-fixture';
+export type RuntimeMode = 'tauri' | 'browser-fixture' | 'terminal-bridge';
 export type UnlistenFn = () => void;
 export type EventHandler<T> = (event: { payload: T }) => void;
 

@@ -1,0 +1,3678 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import type { SessionTerminalView } from '../domain';
+import type { TerminalSurface } from '../terminalScrollback';
+import type {
+  TerminalFrame,
+  TerminalRenderer,
+  TerminalRendererBackend,
+  TerminalRow,
+} from '../terminalTypes';
+import {
+  createTerminalBuffer,
+  frameFromBufferSnapshot,
+  type TerminalBufferState,
+} from './bufferModel';
+import { createTerminalController } from './terminalController';
+
+const surface: TerminalSurface = { cols: 80, rows: 4, cellWidth: 8, cellHeight: 10 };
+
+function row(index: number, text = ''): TerminalRow {
+  return { index, dirty: true, cells: text ? [{ col: 0, text }] : [] };
+}
+
+function rowRange(start: number, endExclusive: number) {
+  const rows = new Map<number, TerminalRow>();
+  for (let index = start; index < endExclusive; index += 1) {
+    rows.set(index, row(index, String(index % 10)));
+  }
+  return rows;
+}
+
+function frame(rows: TerminalRow[]): TerminalFrame {
+  return {
+    dirty: 'full',
+    rows,
+    cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+  };
+}
+
+function liveFrameAtBottom(offset: number, rows: TerminalRow[]): TerminalFrame {
+  return {
+    ...frame(rows),
+    scrollback: {
+      scrollbackRows: offset,
+      viewportOffset: offset,
+      viewportRows: surface.rows,
+      totalRows: offset + surface.rows,
+      atBottom: true,
+    },
+  };
+}
+
+function rowText(row: TerminalRow) {
+  return row.cells
+    .map(cell => cell.text)
+    .join('')
+    .trim();
+}
+
+function fakeRenderer(
+  displayRows: number,
+  backend: TerminalRendererBackend = 'canvas2d',
+): TerminalRenderer {
+  return {
+    capabilities: {
+      backend,
+      gpuAccelerated: backend !== 'canvas2d',
+      fallback: backend === 'canvas2d',
+      explicitResourceManagement: backend !== 'canvas2d',
+      retainedPartialPaint: backend === 'canvas2d' || backend === 'webgl2',
+    },
+    cols: surface.cols,
+    rows: displayRows,
+    cellWidth: surface.cellWidth,
+    cellHeight: surface.cellHeight,
+    clear: vi.fn(),
+    paintFrame: vi.fn(),
+    rowsToPaint: (frame: TerminalFrame) => frame.rows,
+  };
+}
+
+function canvasWithRendererEvents() {
+  const listeners = new Map<string, EventListenerOrEventListenerObject>();
+  const addEventListener = vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+    listeners.set(type, listener);
+  });
+  const removeEventListener = vi.fn(
+    (type: string, listener: EventListenerOrEventListenerObject) => {
+      if (listeners.get(type) === listener) listeners.delete(type);
+    },
+  );
+  const canvas = {
+    style: {},
+    addEventListener,
+    removeEventListener,
+  } as unknown as HTMLCanvasElement;
+
+  return {
+    canvas,
+    addEventListener,
+    removeEventListener,
+    dispatch(type: string, event: Event) {
+      const listener = listeners.get(type);
+      if (!listener) return;
+      if (typeof listener === 'function') listener(event);
+      else listener.handleEvent(event);
+    },
+  };
+}
+
+describe('createTerminalController', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('sizes the scroll spacer from the buffer total, not only cached rows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 0, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(246, 250),
+      cachedRanges: [{ start: 246, end: 250 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    expect(spacer.style.height).toBe('2510px');
+    expect(spacer.style.width).toBe('640px');
+  });
+
+  it('pins live follow to the tail before painting a buffered view', () => {
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        rafCallbacks.push(callback);
+        return rafCallbacks.length;
+      }),
+    );
+
+    const onLiveFollow = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 2400 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(246, 250),
+      cachedRanges: [{ start: 246, end: 250 }],
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: true,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    expect(viewport.scrollTop).toBe(2470);
+    expect(controller.isAutoScrolling()).toBe(true);
+    rafCallbacks.shift()?.(0);
+    expect(controller.isAutoScrolling()).toBe(false);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(true);
+  });
+
+  it('keeps user scroll intent off even when new backend frames are at the tail', () => {
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        rafCallbacks.push(callback);
+        return rafCallbacks.length;
+      }),
+    );
+
+    const onLiveFollow = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrames(
+      'session-1',
+      [liveFrameAtBottom(20, [row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')])],
+      true,
+    );
+    rafCallbacks.shift()?.(0);
+    rafCallbacks.shift()?.(0);
+    expect(controller.isLiveFollow()).toBe(true);
+
+    controller.setLiveFollow(false);
+    onLiveFollow.mockClear();
+
+    controller.ingestFrames(
+      'session-1',
+      [liveFrameAtBottom(21, [row(0, 'two'), row(1, 'three'), row(2, 'four'), row(3, 'five')])],
+      true,
+    );
+
+    expect(controller.isLiveFollow()).toBe(false);
+    expect(controller.isAutoScrolling()).toBe(false);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(false);
+  });
+
+  it('coalesces scheduled scroll paints into one animation frame', () => {
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        rafCallbacks.push(callback);
+        return rafCallbacks.length;
+      }),
+    );
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 2400 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(240, 250),
+      cachedRanges: [{ start: 240, end: 250 }],
+    };
+    controller.applyView(
+      {
+        lastFrame: null,
+        compositeFrame: frameFromBufferSnapshot(buffer),
+        scrollbackRows: [],
+        rowCount: 246,
+        liveFollow: false,
+      },
+      surface,
+      buffer,
+    );
+    rafCallbacks.length = 0;
+    paintFrame.mockClear();
+
+    controller.schedulePaintWindow();
+    controller.schedulePaintWindow();
+
+    expect(rafCallbacks).toHaveLength(1);
+    expect(paintFrame).not.toHaveBeenCalled();
+    rafCallbacks[0]?.(0);
+    expect(paintFrame).toHaveBeenCalledTimes(1);
+  });
+
+  it('publishes paint samples for scheduled scroll repaints', () => {
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        rafCallbacks.push(callback);
+        return rafCallbacks.length;
+      }),
+    );
+
+    const onPaintSample = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onPaintSample,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+    controller.paintFrame(frame([row(0, 'a'), row(1, 'b')]));
+    rafCallbacks.length = 0;
+    onPaintSample.mockClear();
+
+    controller.schedulePaintWindow();
+    rafCallbacks[0]?.(0);
+
+    expect(onPaintSample).toHaveBeenCalledWith(
+      expect.objectContaining({
+        backend: 'canvas2d',
+        reason: 'scroll',
+        bufferBacked: false,
+        historyMode: false,
+        rowsPainted: 4,
+        cellsPainted: 2,
+      }),
+    );
+  });
+
+  it('remounts and repaints after a WebGL context restore', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrames: ReturnType<typeof vi.fn>[] = [];
+    const clears: ReturnType<typeof vi.fn>[] = [];
+    const disposes: ReturnType<typeof vi.fn>[] = [];
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => {
+      const paintFrame = vi.fn();
+      const clear = vi.fn();
+      const dispose = vi.fn();
+      paintFrames.push(paintFrame);
+      clears.push(clear);
+      disposes.push(dispose);
+      return {
+        ...fakeRenderer(displayRows),
+        capabilities: {
+          backend: 'webgl2' as const,
+          gpuAccelerated: true,
+          fallback: false,
+          explicitResourceManagement: true,
+          retainedPartialPaint: false,
+        },
+        clear,
+        paintFrame,
+        dispose,
+      };
+    });
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const events = canvasWithRendererEvents();
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas: events.canvas, viewport, spacer });
+    controller.paintFrame(frame([row(0, 'a'), row(1, 'b')]));
+
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    paintFrames[0]?.mockClear();
+    clears[0]?.mockClear();
+
+    const lostEvent = { preventDefault: vi.fn() } as unknown as Event;
+    events.dispatch('webglcontextlost', lostEvent);
+    expect(lostEvent.preventDefault).toHaveBeenCalledTimes(1);
+    expect(disposes[0]).toHaveBeenCalledTimes(1);
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    expect(controller.tryMountRenderer()).toBe(false);
+    controller.paintFrame(frame([row(0, 'while-lost')]));
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+
+    events.dispatch('webglcontextrestored', { preventDefault: vi.fn() } as unknown as Event);
+
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+    expect(clears[1]).not.toHaveBeenCalled();
+    expect(paintFrames[1]).toHaveBeenCalledTimes(1);
+    expect((paintFrames[1]?.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      'while-lost',
+      '',
+      '',
+      '',
+    ]);
+  });
+
+  it('repaints a buffered window from the frontend cache after WebGL context restore', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrames: ReturnType<typeof vi.fn>[] = [];
+    const disposes: ReturnType<typeof vi.fn>[] = [];
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => {
+      const paintFrame = vi.fn();
+      const dispose = vi.fn();
+      paintFrames.push(paintFrame);
+      disposes.push(dispose);
+      return {
+        ...fakeRenderer(displayRows),
+        capabilities: {
+          backend: 'webgl2' as const,
+          gpuAccelerated: true,
+          fallback: false,
+          explicitResourceManagement: true,
+          retainedPartialPaint: false,
+        },
+        paintFrame,
+        dispose,
+      };
+    });
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const events = canvasWithRendererEvents();
+    const viewport = { clientHeight: 40, scrollHeight: 1010, scrollTop: 520 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas: events.canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 100,
+      viewportRows: surface.rows,
+      viewportOffset: 96,
+      rowsById: rowRange(40, 70),
+      cachedRanges: [{ start: 40, end: 70 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 96,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    paintFrames[0]?.mockClear();
+
+    events.dispatch('webglcontextlost', { preventDefault: vi.fn() } as unknown as Event);
+    expect(disposes[0]).toHaveBeenCalledTimes(1);
+    events.dispatch('webglcontextrestored', { preventDefault: vi.fn() } as unknown as Event);
+
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+    expect(paintFrames[1]).toHaveBeenCalledTimes(1);
+    const painted = paintFrames[1]?.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.rows).toHaveLength(10);
+    expect(painted.rows[0]?.index).toBe(0);
+    expect(painted.rows.map(rowText)).toEqual(['8', '9', '0', '1', '2', '3', '4', '5', '6', '7']);
+  });
+
+  it('accepts an async renderer factory and repaints the latest composite when it resolves', async () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    let resolveRenderer: (renderer: TerminalRenderer) => void = () => {};
+    const rendererPromise = new Promise<TerminalRenderer>(resolve => {
+      resolveRenderer = resolve;
+    });
+    const createRenderer = vi.fn(() => rendererPromise);
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.paintFrame(frame([row(0, 'first')]));
+    controller.paintFrame(frame([row(0, 'second')]));
+
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    expect(paintFrame).not.toHaveBeenCalled();
+
+    resolveRenderer({
+      ...fakeRenderer(surface.rows),
+      paintFrame,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(paintFrame).toHaveBeenCalledTimes(1);
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      'second',
+      '',
+      '',
+      '',
+    ]);
+  });
+
+  it('disposes an async renderer that resolves after the canvas changes', async () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const dispose = vi.fn();
+    let resolveRenderer: (renderer: TerminalRenderer) => void = () => {};
+    const rendererPromise = new Promise<TerminalRenderer>(resolve => {
+      resolveRenderer = resolve;
+    });
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: vi.fn(() => rendererPromise),
+    });
+    const first = canvasWithRendererEvents();
+    const second = canvasWithRendererEvents();
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas: first.canvas, viewport, spacer });
+    controller.paintFrame(frame([row(0, 'first')]));
+    controller.attach({ canvas: second.canvas, viewport, spacer });
+
+    resolveRenderer({
+      ...fakeRenderer(surface.rows),
+      paintFrame,
+      dispose,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(paintFrame).not.toHaveBeenCalled();
+  });
+
+  it('disposes an async renderer that resolves after surface geometry changes', async () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const dispose = vi.fn();
+    let resolveRenderer: (renderer: TerminalRenderer) => void = () => {};
+    const rendererPromise = new Promise<TerminalRenderer>(resolve => {
+      resolveRenderer = resolve;
+    });
+    const createRenderer = vi.fn(() => rendererPromise);
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.paintFrame(frame([row(0, 'first')]));
+    controller.setSurface({ ...surface, cols: 81 });
+
+    resolveRenderer({
+      ...fakeRenderer(surface.rows),
+      paintFrame,
+      dispose,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(paintFrame).not.toHaveBeenCalled();
+  });
+
+  it('mounts a fresh async renderer after a pending surface-change renderer is invalidated', async () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const staleDispose = vi.fn();
+    const freshPaintFrame = vi.fn();
+    let resolveStale: (renderer: TerminalRenderer) => void = () => {};
+    let resolveFresh: (renderer: TerminalRenderer) => void = () => {};
+    const stalePromise = new Promise<TerminalRenderer>(resolve => {
+      resolveStale = resolve;
+    });
+    const freshPromise = new Promise<TerminalRenderer>(resolve => {
+      resolveFresh = resolve;
+    });
+    const rendererPromises = [stalePromise, freshPromise];
+    const createRenderer = vi.fn(
+      (_canvas: HTMLCanvasElement, _surface: TerminalSurface, _displayRows: number) => {
+        const next = rendererPromises.shift();
+        if (!next) throw new Error('unexpected renderer mount');
+        return next;
+      },
+    );
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.paintFrame(frame([row(0, 'first')]));
+    const nextSurface = { ...surface, cols: 81 };
+    controller.setSurface(nextSurface);
+    controller.paintCurrent(null, nextSurface);
+
+    resolveStale({
+      ...fakeRenderer(surface.rows),
+      dispose: staleDispose,
+    });
+    resolveFresh({
+      ...fakeRenderer(surface.rows),
+      cols: 81,
+      paintFrame: freshPaintFrame,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(staleDispose).toHaveBeenCalledTimes(1);
+    expect(freshPaintFrame).toHaveBeenCalledTimes(1);
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+    expect(createRenderer.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ cols: 81 }));
+  });
+
+  it('disposes an async renderer that resolves after device pixel ratio changes', async () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+    vi.stubGlobal('window', { devicePixelRatio: 1 });
+
+    const paintFrame = vi.fn();
+    const dispose = vi.fn();
+    let resolveRenderer: (renderer: TerminalRenderer) => void = () => {};
+    const rendererPromise = new Promise<TerminalRenderer>(resolve => {
+      resolveRenderer = resolve;
+    });
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: vi.fn(() => rendererPromise),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.paintFrame(frame([row(0, 'first')]));
+    Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });
+
+    resolveRenderer({
+      ...fakeRenderer(surface.rows),
+      paintFrame,
+      dispose,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(paintFrame).not.toHaveBeenCalled();
+  });
+
+  it('mounts a fresh async renderer after a pending DPR-change renderer is rejected', async () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+    vi.stubGlobal('window', { devicePixelRatio: 1 });
+
+    const staleDispose = vi.fn();
+    const freshPaintFrame = vi.fn();
+    let resolveStale: (renderer: TerminalRenderer) => void = () => {};
+    let resolveFresh: (renderer: TerminalRenderer) => void = () => {};
+    const stalePromise = new Promise<TerminalRenderer>(resolve => {
+      resolveStale = resolve;
+    });
+    const freshPromise = new Promise<TerminalRenderer>(resolve => {
+      resolveFresh = resolve;
+    });
+    const rendererPromises = [stalePromise, freshPromise];
+    const createRenderer = vi.fn(
+      (_canvas: HTMLCanvasElement, _surface: TerminalSurface, _displayRows: number) => {
+        const next = rendererPromises.shift();
+        if (!next) throw new Error('unexpected renderer mount');
+        return next;
+      },
+    );
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.paintFrame(frame([row(0, 'first')]));
+    Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });
+    controller.paintFrame(frame([row(0, 'second')]));
+
+    resolveStale({
+      ...fakeRenderer(surface.rows),
+      dispose: staleDispose,
+    });
+    resolveFresh({
+      ...fakeRenderer(surface.rows),
+      paintFrame: freshPaintFrame,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(staleDispose).toHaveBeenCalledTimes(1);
+    expect(freshPaintFrame).toHaveBeenCalledTimes(1);
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+  });
+
+  it('moves renderer lifecycle listeners when the canvas changes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const first = canvasWithRendererEvents();
+    const second = canvasWithRendererEvents();
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+
+    controller.attach({ canvas: first.canvas, viewport, spacer });
+    controller.attach({ canvas: second.canvas, viewport, spacer });
+
+    expect(first.addEventListener).toHaveBeenCalledWith('webglcontextlost', expect.any(Function));
+    expect(first.addEventListener).toHaveBeenCalledWith(
+      'webglcontextrestored',
+      expect.any(Function),
+    );
+    expect(first.removeEventListener).toHaveBeenCalledWith(
+      'webglcontextlost',
+      expect.any(Function),
+    );
+    expect(first.removeEventListener).toHaveBeenCalledWith(
+      'webglcontextrestored',
+      expect.any(Function),
+    );
+    expect(second.addEventListener).toHaveBeenCalledWith('webglcontextlost', expect.any(Function));
+    expect(second.addEventListener).toHaveBeenCalledWith(
+      'webglcontextrestored',
+      expect.any(Function),
+    );
+  });
+
+  it('disposes the mounted renderer when the canvas changes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const dispose = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        dispose,
+      }),
+    });
+    const first = canvasWithRendererEvents();
+    const second = canvasWithRendererEvents();
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+
+    controller.attach({ canvas: first.canvas, viewport, spacer });
+    controller.tryMountRenderer();
+    controller.attach({ canvas: second.canvas, viewport, spacer });
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('remounts the renderer when cell geometry changes without a row or column change', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const disposes: ReturnType<typeof vi.fn>[] = [];
+    const createRenderer = vi.fn((_canvas, nextSurface: TerminalSurface, displayRows) => {
+      const dispose = vi.fn();
+      disposes.push(dispose);
+      return {
+        ...fakeRenderer(displayRows),
+        cellWidth: nextSurface.cellWidth,
+        cellHeight: nextSurface.cellHeight,
+        dispose,
+      };
+    });
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.paintFrame(frame([row(0, 'a')]));
+    controller.setSurface({ ...surface, cellWidth: 10, cellHeight: 12 });
+    controller.paintFrame(frame([row(0, 'b')]));
+
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+    expect(disposes[0]).toHaveBeenCalledTimes(1);
+    expect(createRenderer.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({ cellWidth: 10, cellHeight: 12 }),
+    );
+  });
+
+  it('remounts the renderer when device pixel ratio changes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+    vi.stubGlobal('window', { devicePixelRatio: 1 });
+
+    const disposes: ReturnType<typeof vi.fn>[] = [];
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => {
+      const dispose = vi.fn();
+      disposes.push(dispose);
+      return {
+        ...fakeRenderer(displayRows),
+        dispose,
+      };
+    });
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.paintFrame(frame([row(0, 'a')]));
+    Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true });
+    controller.paintFrame(frame([row(0, 'b')]));
+
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+    expect(disposes[0]).toHaveBeenCalledTimes(1);
+  });
+
+  it('focuses the terminal text input before falling back to the canvas', () => {
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {}, focus: vi.fn() } as unknown as HTMLCanvasElement;
+    const input = { focus: vi.fn() } as unknown as HTMLTextAreaElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+
+    controller.attach({ canvas, viewport, spacer, input });
+    controller.focusCanvas();
+
+    expect(input.focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(canvas.focus).not.toHaveBeenCalled();
+
+    controller.attach({ canvas, viewport, spacer, input: null });
+    controller.focusCanvas();
+
+    expect(canvas.focus).toHaveBeenCalledWith({ preventScroll: true });
+  });
+
+  it('positions the terminal text input on the rendered cursor cell', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const input = { style: {} } as HTMLTextAreaElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer, input });
+
+    controller.paintFrame({
+      ...frame([row(0, 'a'), row(1, 'b'), row(2, 'c')]),
+      cursor: { visible: true, row: 2, col: 3, position: { row: 2, col: 3 } },
+    });
+
+    expect(input.style.left).toBe('24px');
+    expect(input.style.top).toBe('30px');
+    expect(input.style.width).toBe('8px');
+    expect(input.style.height).toBe('10px');
+  });
+
+  it('repaints only overlay rows when selection changes inside the same window', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const clear = vi.fn();
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        clear,
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+    controller.paintFrame(frame([row(0, 'a'), row(1, 'b'), row(2, 'c'), row(3, 'd')]));
+    clear.mockClear();
+    paintFrame.mockClear();
+
+    controller.setSelection({
+      start: { row: 1, col: 0 },
+      end: { row: 1, col: 0 },
+    });
+
+    expect(clear).not.toHaveBeenCalled();
+    expect(paintFrame).toHaveBeenCalledTimes(1);
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).dirty).toBe('partial');
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(row => row.index)).toEqual([
+      1,
+    ]);
+
+    paintFrame.mockClear();
+    controller.setSelection({
+      start: { row: 2, col: 0 },
+      end: { row: 2, col: 0 },
+    });
+
+    expect(clear).not.toHaveBeenCalled();
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).dirty).toBe('partial');
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(row => row.index)).toEqual([
+      1, 2,
+    ]);
+
+    paintFrame.mockClear();
+    controller.clearSelection();
+
+    expect(clear).not.toHaveBeenCalled();
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).dirty).toBe('partial');
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(row => row.index)).toEqual([
+      2,
+    ]);
+  });
+
+  it('expands selection overlays to whole wide cells', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+    controller.paintFrame(
+      frame([
+        {
+          index: 0,
+          dirty: true,
+          cells: [
+            { col: 0, text: 'A' },
+            { col: 1, width: 2, text: '界' },
+            { col: 3, text: 'B' },
+          ],
+        },
+      ]),
+    );
+    paintFrame.mockClear();
+
+    controller.setSelection({
+      start: { row: 0, col: 2 },
+      end: { row: 0, col: 2 },
+    });
+
+    expect(controller.getSelection()).toEqual({
+      start: { row: 0, col: 1 },
+      end: { row: 0, col: 2 },
+    });
+    expect(paintFrame.mock.calls[0]?.[1]?.selection).toEqual([{ row: 0, startCol: 1, endCol: 3 }]);
+  });
+
+  it('preserves every frame in a coalesced ingestion batch but paints once', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 0, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrames(
+      'session-1',
+      [
+        {
+          ...frame([row(0, 'one')]),
+          dirty: 'partial',
+        },
+        {
+          ...frame([row(1, 'two')]),
+          dirty: 'partial',
+        },
+      ],
+      true,
+    );
+
+    expect(paintFrame).toHaveBeenCalledTimes(1);
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.rows).toHaveLength(10);
+    expect(painted.rows.slice(0, 4).map(rowText)).toEqual(['one', 'two', '', '']);
+  });
+
+  it('paints only dirty primary-buffer rows plus cursor rows after partial frames', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        cursor: { visible: true, row: 0, col: 0, position: { row: 0, col: 0 } },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(2, 'TWO')]),
+        dirty: 'partial',
+        cursor: { visible: true, row: 1, col: 0, position: { row: 1, col: 0 } },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.rows.map(row => row.index)).toEqual([0, 1, 2]);
+    expect(painted.rows.map(rowText)).toEqual(['zero', 'one', 'TWO']);
+  });
+
+  it('paints a full live-buffer window for non-retained GPU partial updates', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => {
+        const renderer = fakeRenderer(displayRows, 'webgl2');
+        return {
+          ...renderer,
+          capabilities: {
+            ...renderer.capabilities,
+            retainedPartialPaint: false,
+          },
+          paintFrame,
+        };
+      },
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(2, 'TWO')]),
+        dirty: 'partial',
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('full');
+    expect(painted.rows.slice(0, 4).map(rowText)).toEqual(['zero', 'one', 'TWO', 'three']);
+  });
+
+  it('uses retained partial-paint capability instead of backend name', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => {
+        const renderer = fakeRenderer(displayRows, 'webgl2');
+        return {
+          ...renderer,
+          capabilities: {
+            ...renderer.capabilities,
+            retainedPartialPaint: true,
+          },
+          paintFrame,
+        };
+      },
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(2, 'TWO')]),
+        dirty: 'partial',
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.rows.map(rowText)).toEqual(['TWO']);
+  });
+
+  it('does not schedule a tail repaint when retained partial paint is already aligned', () => {
+    const requestAnimationFrame = vi.fn();
+    vi.stubGlobal('requestAnimationFrame', requestAnimationFrame);
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows, 'webgl2'),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+      true,
+    );
+    requestAnimationFrame.mockClear();
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(2, 'TWO')]),
+        dirty: 'partial',
+      },
+      true,
+    );
+
+    expect(requestAnimationFrame).not.toHaveBeenCalled();
+    expect(paintFrame).toHaveBeenCalledTimes(1);
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).dirty).toBe('partial');
+  });
+
+  it('does not repaint the active primary buffer for clean frames', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame('session-1', frame([row(0, 'stable')]), true);
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'clean',
+        scrollback: { totalRows: 4, viewportOffset: 0, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    expect(paintFrame).not.toHaveBeenCalled();
+    expect(controller.getComposite()?.rows.map(rowText)).toEqual(['stable', '', '', '']);
+  });
+
+  it('updates live-buffer scroll metadata for clean off-screen output without repainting', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const onScrollbackRowCount = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount,
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1010, scrollTop: 410 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'scrolled'), row(1, 'stable'), row(2, 'viewport'), row(3, 'rows')]),
+        scrollback: { totalRows: 100, viewportOffset: 40, viewportRows: 4, atBottom: false },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+    onScrollbackRowCount.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'clean',
+        scrollback: { totalRows: 110, viewportOffset: 40, viewportRows: 4, atBottom: false },
+      },
+      true,
+    );
+
+    expect(paintFrame).not.toHaveBeenCalled();
+    expect(controller.getRowCount()).toBe(110);
+    expect(spacer.style.height).toBe('1110px');
+    expect(onScrollbackRowCount).toHaveBeenLastCalledWith(106);
+  });
+
+  it('repaints clean buffered metadata when the painted window no longer covers the viewport', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const onMissingLiveRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewportState = { clientHeight: 40, scrollHeight: 2010, scrollTop: 0 };
+    const viewport = viewportState as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.seedEmptyView('session-1');
+    controller.paintCurrent('session-1');
+    controller.setLiveFollow(false);
+    viewportState.scrollTop = 0;
+    paintFrame.mockClear();
+    onMissingLiveRows.mockClear();
+
+    const transcriptFrames: TerminalFrame[] = [];
+    for (let offset = 0; offset <= 120; offset += surface.rows) {
+      transcriptFrames.push({
+        ...frame(
+          Array.from({ length: surface.rows }, (_, localRow) =>
+            row(localRow, `abs-${offset + localRow}`),
+          ),
+        ),
+        scrollback: {
+          totalRows: 200,
+          viewportOffset: offset,
+          viewportRows: surface.rows,
+          atBottom: false,
+        },
+      });
+    }
+    controller.ingestFrames('session-1', transcriptFrames, true);
+    expect(controller.getStartRow()).toBe(0);
+
+    paintFrame.mockClear();
+    onMissingLiveRows.mockClear();
+    viewportState.scrollTop = 810;
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'clean',
+        scrollback: {
+          totalRows: 200,
+          viewportOffset: 120,
+          viewportRows: surface.rows,
+          atBottom: false,
+        },
+      },
+      true,
+    );
+
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
+    expect(paintFrame).toHaveBeenCalledTimes(1);
+    expect(controller.getStartRow()).toBe(77);
+    expect(canvas.style.top).toBe('780px');
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      'abs-77',
+      'abs-78',
+      'abs-79',
+      'abs-80',
+      'abs-81',
+      'abs-82',
+      'abs-83',
+      'abs-84',
+      'abs-85',
+      'abs-86',
+    ]);
+  });
+
+  it('repaints when clean live metadata moves the followed tail', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      liveFrameAtBottom(16, [row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')]),
+      true,
+    );
+    expect(viewport.scrollTop).toBe(170);
+
+    paintFrame.mockClear();
+    viewport.scrollTop = 120;
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'clean',
+        scrollback: { totalRows: 20, viewportOffset: 16, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    expect(viewport.scrollTop).toBe(170);
+    expect(paintFrame).toHaveBeenCalled();
+  });
+
+  it('paints alternate screen frames without overwriting the primary scroll cache', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 0, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame('session-1', frame([row(0, 'primary')]), true);
+
+    paintFrame.mockClear();
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'alternate')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      'alternate',
+      '',
+      '',
+      '',
+    ]);
+
+    paintFrame.mockClear();
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(1, 'primary two')]),
+        dirty: 'partial',
+        modes: { alternateScreen: false },
+      },
+      true,
+    );
+
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.slice(0, 4).map(rowText)).toEqual([
+      'primary',
+      'primary two',
+      '',
+      '',
+    ]);
+  });
+
+  it('keeps alternate-screen scroll-away intent until primary output resumes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onLiveFollow = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      liveFrameAtBottom(20, [row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')]),
+      true,
+    );
+    controller.setLiveFollow(false);
+    onLiveFollow.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'alternate')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    expect(controller.isLiveFollow()).toBe(false);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(false);
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...liveFrameAtBottom(21, [row(0, 'two'), row(1, 'three'), row(2, 'four'), row(3, 'five')]),
+        modes: { alternateScreen: false },
+      },
+      true,
+    );
+
+    expect(controller.isLiveFollow()).toBe(false);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(false);
+  });
+
+  it('paints a full alternate-screen frame over the primary buffer', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const clear = vi.fn();
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        clear,
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame('session-1', frame([row(0, 'primary'), row(1, 'kept')]), true);
+    clear.mockClear();
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(3, 'alternate prompt')]),
+        dirty: 'partial',
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    expect(clear).not.toHaveBeenCalled();
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('full');
+    expect(painted.rows.map(rowText)).toEqual(['', '', '', 'alternate prompt']);
+  });
+
+  it('preserves alternate-screen clean rows across partial redraws', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'old status'), row(1, 'stable details')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'new status')]),
+        dirty: 'partial',
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    const composite = controller.getComposite();
+    expect(composite?.rows.map(rowText)).toEqual(['new status', 'stable details', '', '']);
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.rows.map(rowText)).toEqual(['new status']);
+  });
+
+  it('keeps WebGL alternate-screen partial updates retained in the backbuffer', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows, 'webgl2'),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(2, 'TWO')]),
+        dirty: 'partial',
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.rows.map(row => row.index)).toEqual([2]);
+    expect(painted.rows.map(rowText)).toEqual(['TWO']);
+  });
+
+  it('does not repaint the active alternate screen for clean frames', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'stable status')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'clean',
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    expect(paintFrame).not.toHaveBeenCalled();
+    expect(controller.getComposite()?.rows.map(rowText)).toEqual(['stable status', '', '', '']);
+  });
+
+  it('preserves every alternate-screen frame in a coalesced ingestion batch', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'first old'), row(1, 'second old'), row(2, 'stable')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrames(
+      'session-1',
+      [
+        {
+          ...frame([row(0, 'first new')]),
+          dirty: 'partial',
+          modes: { alternateScreen: true },
+        },
+        {
+          ...frame([row(1, 'second new')]),
+          dirty: 'partial',
+          modes: { alternateScreen: true },
+        },
+      ],
+      true,
+    );
+
+    expect(paintFrame).toHaveBeenCalledTimes(1);
+    expect(controller.getComposite()?.rows.map(rowText)).toEqual([
+      'first new',
+      'second new',
+      'stable',
+      '',
+    ]);
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.rows.map(rowText)).toEqual(['first new', 'second new']);
+  });
+
+  it('preserves alternate-screen composite state across a surface resize', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'base zero'), row(1, 'stable one'), row(2, 'base two')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+    controller.ingestFrames(
+      'session-1',
+      [
+        {
+          ...frame([row(0, 'updated zero')]),
+          dirty: 'partial',
+          modes: { alternateScreen: true },
+        },
+        {
+          ...frame([row(2, 'updated two')]),
+          dirty: 'partial',
+          modes: { alternateScreen: true },
+        },
+      ],
+      true,
+    );
+
+    const resized = { ...surface, rows: 6 };
+    controller.setSurface(resized);
+    controller.paintCurrent('session-1', resized);
+
+    expect(controller.getComposite()?.rows.slice(0, 3).map(rowText)).toEqual([
+      'updated zero',
+      'stable one',
+      'updated two',
+    ]);
+  });
+
+  it('preserves alternate-screen rows when a sparse full frame lands during resize reflow', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'old header'), row(1, 'stable one'), row(2, 'stable two')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    const resized = { ...surface, cols: 100 };
+    controller.setSurface(resized);
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'new header')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    expect(controller.getComposite()?.rows.slice(0, 4).map(rowText)).toEqual([
+      'new header',
+      'stable one',
+      'stable two',
+      '',
+    ]);
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.rows.slice(0, 3).map(rowText)).toEqual([
+      'new header',
+      'stable one',
+      'stable two',
+    ]);
+  });
+
+  it('preserves alternate-screen rows when a sparse partial frame lands during resize reflow', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'old header'), row(1, 'stable one'), row(2, 'stable two')]),
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    const resized = { ...surface, cols: 100, rows: 6 };
+    controller.setSurface(resized);
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'new header')]),
+        dirty: 'partial',
+        modes: { alternateScreen: true },
+      },
+      true,
+    );
+
+    expect(controller.getComposite()?.rows.slice(0, 6).map(rowText)).toEqual([
+      'new header',
+      'stable one',
+      'stable two',
+      '',
+      '',
+      '',
+    ]);
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('full');
+    expect(painted.rows.slice(0, 3).map(rowText)).toEqual([
+      'new header',
+      'stable one',
+      'stable two',
+    ]);
+  });
+
+  it('preserves background alternate-screen state for later activation', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrames(
+      'session-1',
+      [
+        {
+          ...frame([row(0, 'background old'), row(1, 'background stable')]),
+          modes: { alternateScreen: true },
+        },
+        {
+          ...frame([row(0, 'background new')]),
+          dirty: 'partial',
+          modes: { alternateScreen: true },
+        },
+      ],
+      false,
+    );
+
+    expect(paintFrame).not.toHaveBeenCalled();
+    controller.paintCurrent('session-1');
+
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      'background new',
+      'background stable',
+      '',
+      '',
+    ]);
+  });
+
+  it('preserves the live row cache across height-only surface resizes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        rows: displayRows,
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 50, scrollHeight: 50, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')]),
+        scrollback: { totalRows: 5, viewportOffset: 1, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    controller.setSurface({ ...surface, rows: 5 });
+    paintFrame.mockClear();
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero')]),
+        dirty: 'partial',
+        scrollback: { totalRows: 5, viewportOffset: 0, viewportRows: 5, atBottom: true },
+      },
+      true,
+    );
+
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.slice(0, 5).map(rowText)).toEqual([
+      'zero',
+      'one',
+      'two',
+      'three',
+      'four',
+    ]);
+  });
+
+  it('pins live-follow buffered paints to the tail during a surface resize', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 310, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const liveRows = (offset: number, labels: string[], atBottom: boolean): TerminalFrame => ({
+      ...frame(labels.map((label, index) => row(index, label))),
+      cols: surface.cols,
+      scrollback: {
+        totalRows: 30,
+        viewportOffset: offset,
+        viewportRows: surface.rows,
+        atBottom,
+      },
+    });
+
+    controller.ingestFrame('session-1', liveRows(18, ['18', '19', '20', '21'], false), true);
+    controller.ingestFrame('session-1', liveRows(22, ['22', '23', '24', '25'], false), true);
+    controller.ingestFrame('session-1', liveRows(26, ['26', '27', '28', '29'], true), true);
+
+    viewport.scrollTop = 0;
+    Object.assign(viewport, { clientHeight: 60, scrollHeight: 310 });
+    const resized = { ...surface, rows: 6 };
+    controller.setSurface(resized);
+    paintFrame.mockClear();
+    controller.paintCurrent('session-1', resized);
+
+    expect(viewport.scrollTop).toBe(250);
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      '18',
+      '19',
+      '20',
+      '21',
+      '22',
+      '23',
+      '24',
+      '25',
+      '26',
+      '27',
+      '28',
+      '29',
+    ]);
+  });
+
+  it('treats a tail-offset live buffer as bottomed while follow intent is on', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 310, scrollTop: 270 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame(['26', '27', '28', '29'].map((label, index) => row(index, label))),
+        cols: surface.cols,
+        scrollback: {
+          totalRows: 30,
+          viewportOffset: 26,
+          viewportRows: surface.rows,
+          atBottom: false,
+        },
+      },
+      true,
+    );
+
+    expect(controller.isLiveFollow()).toBe(true);
+
+    Object.assign(viewport, { clientHeight: 30, scrollHeight: 310, scrollTop: 270 });
+    const resized = { ...surface, rows: 3 };
+    controller.setSurface(resized);
+    paintFrame.mockClear();
+    controller.paintCurrent('session-1', resized);
+
+    expect(viewport.scrollTop).toBe(280);
+    expect(controller.getBufferDebug()).toEqual(
+      expect.objectContaining({
+        atBottom: true,
+        viewportOffset: 27,
+      }),
+    );
+    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText).slice(-3)).toEqual([
+      '27',
+      '28',
+      '29',
+    ]);
+  });
+
+  it('keeps live-follow off when a resize makes the live cache fit the viewport', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onLiveFollow = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow,
+      createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 310, scrollTop: 270 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const liveRows = (offset: number, labels: string[], atBottom: boolean): TerminalFrame => ({
+      ...frame(labels.map((label, index) => row(index, label))),
+      cols: surface.cols,
+      scrollback: {
+        totalRows: 30,
+        viewportOffset: offset,
+        viewportRows: surface.rows,
+        atBottom,
+      },
+    });
+
+    controller.ingestFrame('session-1', liveRows(18, ['18', '19', '20', '21'], false), true);
+    controller.ingestFrame('session-1', liveRows(22, ['22', '23', '24', '25'], false), true);
+    controller.ingestFrame('session-1', liveRows(26, ['26', '27', '28', '29'], true), true);
+
+    expect(controller.scrollBufferedToRow(21)).toBe(true);
+    expect(controller.isLiveFollow()).toBe(false);
+
+    const resized = { ...surface, rows: 20 };
+    Object.assign(viewport, { clientHeight: 200, scrollHeight: 310 });
+    controller.setSurface(resized);
+    controller.paintCurrent('session-1', resized);
+
+    expect(controller.isLiveFollow()).toBe(false);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(false);
+  });
+
+  it('ignores active frames that still describe the pre-resize geometry', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'stable'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        cols: surface.cols,
+        scrollback: { totalRows: 4, viewportOffset: 0, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    const resized = { ...surface, rows: 6 };
+    controller.setSurface(resized);
+    paintFrame.mockClear();
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'stale resize frame')]),
+        dirty: 'full',
+        cols: surface.cols,
+        scrollback: { totalRows: 4, viewportOffset: 0, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    expect(paintFrame).not.toHaveBeenCalled();
+    expect(rowText(controller.getComposite()?.rows[0] as TerminalRow)).toBe('stable');
+  });
+
+  it('preserves the live row cache across column resizes until the backend replies', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn((_canvas, nextSurface: TerminalSurface, displayRows) => ({
+      ...fakeRenderer(displayRows),
+      cols: nextSurface.cols,
+      rows: displayRows,
+      paintFrame,
+    }));
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+      true,
+    );
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(2, 'TWO')]),
+        dirty: 'partial',
+      },
+      true,
+    );
+
+    const resized = { ...surface, cols: 81 };
+    controller.setSurface(resized);
+    controller.paintCurrent('session-1', resized);
+
+    expect(controller.getComposite()?.rows.map(rowText)).toEqual(['zero', 'one', 'TWO', 'three']);
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+    expect(createRenderer.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ cols: 81 }));
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'TWO'), row(3, 'three')]),
+        cols: resized.cols,
+      },
+      true,
+    );
+
+    expect(createRenderer).toHaveBeenCalledTimes(3);
+    expect(createRenderer.mock.calls[2]?.[1]).toEqual(expect.objectContaining({ cols: 81 }));
+  });
+
+  it('keeps cached live rows when a resize frame is temporarily blank', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'ROW 017'), row(1, 'ROW 018'), row(2, 'ROW 019'), row(3, 'ROW 020')]),
+        cols: surface.cols,
+        scrollback: { totalRows: 20, viewportOffset: 16, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    const resized = { ...surface, cols: 100 };
+    controller.setSurface(resized);
+    paintFrame.mockClear();
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0), row(1), row(2), row(3)]),
+        cols: resized.cols,
+        scrollback: { totalRows: 20, viewportOffset: 16, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0), row(1), row(2), row(3)]),
+        cols: resized.cols,
+        scrollback: { totalRows: 20, viewportOffset: 16, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    expect(
+      (paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.slice(-4).map(rowText),
+    ).toEqual(['ROW 017', 'ROW 018', 'ROW 019', 'ROW 020']);
+  });
+
+  it('scrolls a live buffered viewport to an absolute row when cached', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onLiveFollow = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(240, 250),
+      cachedRanges: [{ start: 240, end: 250 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(controller.scrollBufferedToRow(246)).toBe(true);
+    expect(viewport.scrollTop).toBe(2470);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(true);
+  });
+
+  it('reports a live buffered scroll miss when target rows are not cached', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(246, 250),
+      cachedRanges: [{ start: 246, end: 250 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(controller.scrollBufferedToRow(100)).toBe(false);
+    expect(viewport.scrollTop).toBe(0);
+  });
+
+  it('requests a history jump when live painting lands on uncached buffer rows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 1210 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(246, 250),
+      cachedRanges: [{ start: 246, end: 250 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 117,
+      rowCount: 10,
+      totalRows: 250,
+      generation: 0,
+    });
+  });
+
+  it('does not request a live history jump when visible rows are cached but overscan is missing', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn();
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 0,
+      rowsById: rowRange(0, 4),
+      cachedRanges: [{ start: 0, end: 4 }],
+      atBottom: false,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
+    expect(
+      (paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.map(rowText).slice(0, 4),
+    ).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('does not request a live history jump during stale-shape resize when visible rows are cached', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn();
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const staleShape = { ...surface, cols: surface.cols + 20 };
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(staleShape),
+      totalRows: 250,
+      viewportRows: staleShape.rows,
+      viewportOffset: 0,
+      rowsById: rowRange(0, 4),
+      cachedRanges: [{ start: 0, end: 4 }],
+      atBottom: false,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
+    expect(
+      (paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.map(rowText).slice(0, 4),
+    ).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('does not paint blank placeholder rows for a requested live cache miss', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn(() => true);
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => fakeRenderer(displayRows));
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 1210 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(246, 250),
+      cachedRanges: [{ start: 246, end: 250 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalled();
+    expect(createRenderer).not.toHaveBeenCalled();
+  });
+
+  it('paints the cached live tail instead of placeholder overscan rows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn(() => true);
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn(
+      (_canvas: HTMLCanvasElement, nextSurface: TerminalSurface, displayRows: number) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        cellWidth: nextSurface.cellWidth,
+        cellHeight: nextSurface.cellHeight,
+        paintFrame,
+      }),
+    );
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 60, scrollHeight: 210, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 20,
+      viewportRows: surface.rows,
+      viewportOffset: 16,
+      rowsById: rowRange(16, 20),
+      cachedRanges: [{ start: 16, end: 20 }],
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 16,
+      liveFollow: true,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 8,
+      rowCount: 12,
+      totalRows: 20,
+      generation: 0,
+    });
+    expect(painted.rows.map(rowText)).toEqual(['6', '7', '8', '9']);
+    expect(canvas.style.top).toBe('170px');
+  });
+
+  it('paints cached stale-width rows while a shape-correct live cache fill is requested', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn(() => true);
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn(
+      (_canvas: HTMLCanvasElement, nextSurface: TerminalSurface, displayRows: number) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        cellWidth: nextSurface.cellWidth,
+        cellHeight: nextSurface.cellHeight,
+        paintFrame,
+      }),
+    );
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewportState = { clientHeight: 60, scrollHeight: 210, scrollTop: 0 };
+    const viewport = viewportState as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 20,
+      viewportRows: surface.rows,
+      viewportOffset: 16,
+      rowsById: rowRange(6, 20),
+      cachedRanges: [{ start: 6, end: 20 }],
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 16,
+      liveFollow: true,
+    };
+    controller.applyView(view, surface, buffer);
+
+    createRenderer.mockClear();
+    paintFrame.mockClear();
+    onMissingLiveRows.mockClear();
+    viewportState.clientHeight = 80;
+    viewportState.scrollHeight = 210;
+
+    const resized = { ...surface, cols: 100, rows: 6 };
+    controller.setSurface(resized);
+    controller.applyView(view, resized, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 6,
+      rowCount: 14,
+      totalRows: 20,
+      generation: 1,
+    });
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 100 }));
+    expect((paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      '6',
+      '7',
+      '8',
+      '9',
+      '0',
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+      '9',
+    ]);
+  });
+
+  it('keeps stale-width cached rows anchored when the resized viewport is uncached', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn(() => true);
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn(
+      (_canvas: HTMLCanvasElement, nextSurface: TerminalSurface, displayRows: number) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        cellWidth: nextSurface.cellWidth,
+        cellHeight: nextSurface.cellHeight,
+        paintFrame,
+      }),
+    );
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewportState = { clientHeight: 60, scrollHeight: 810, scrollTop: 0 };
+    const viewport = viewportState as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 80,
+      viewportRows: surface.rows,
+      viewportOffset: 76,
+      rowsById: rowRange(0, 12),
+      cachedRanges: [{ start: 0, end: 12 }],
+      atBottom: false,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 76,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    createRenderer.mockClear();
+    paintFrame.mockClear();
+    onMissingLiveRows.mockClear();
+    viewportState.clientHeight = 80;
+    viewportState.scrollTop = 670;
+
+    const resized = { ...surface, cols: 100, rows: 6 };
+    controller.setSurface(resized);
+    controller.applyView(view, resized, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 63,
+      rowCount: 14,
+      totalRows: 80,
+      generation: 1,
+    });
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 100 }));
+    expect(canvas.style.top).toBe('640px');
+    expect((paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      '0',
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+      '9',
+      '0',
+      '1',
+      '',
+      '',
+    ]);
+  });
+
+  it('keeps the previous live paint when a stale tail cache is too short', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn(() => true);
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn(
+      (_canvas: HTMLCanvasElement, nextSurface: TerminalSurface, displayRows: number) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        cellWidth: nextSurface.cellWidth,
+        cellHeight: nextSurface.cellHeight,
+        paintFrame,
+      }),
+    );
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewportState = { clientHeight: 410, scrollHeight: 1620, scrollTop: 1210 };
+    const viewport = viewportState as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const fullTailBuffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 161,
+      viewportRows: surface.rows,
+      viewportOffset: 157,
+      rowsById: rowRange(114, 161),
+      cachedRanges: [{ start: 114, end: 161 }],
+      atBottom: true,
+    };
+    const fullTailView: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(fullTailBuffer),
+      scrollbackRows: [],
+      rowCount: 157,
+      liveFollow: true,
+    };
+    controller.applyView(fullTailView, surface, fullTailBuffer);
+
+    createRenderer.mockClear();
+    paintFrame.mockClear();
+    onMissingLiveRows.mockClear();
+
+    const shortTailBuffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 161,
+      viewportRows: surface.rows,
+      viewportOffset: 157,
+      rowsById: rowRange(136, 161),
+      cachedRanges: [{ start: 136, end: 161 }],
+      atBottom: true,
+    };
+    const shortTailView: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(shortTailBuffer),
+      scrollbackRows: [],
+      rowCount: 157,
+      liveFollow: true,
+    };
+    const resized = { ...surface, cols: 100, rows: 6 };
+    controller.setSurface(resized);
+    controller.applyView(shortTailView, resized, shortTailBuffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 114,
+      rowCount: 47,
+      totalRows: 161,
+      generation: 1,
+    });
+    expect(createRenderer).not.toHaveBeenCalled();
+    expect(paintFrame).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live tail canvas full-size after a resize cache reset', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => ({
+      ...fakeRenderer(displayRows),
+      paintFrame,
+    }));
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 60, scrollHeight: 210, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 20,
+      viewportRows: surface.rows,
+      viewportOffset: 16,
+      rowsById: rowRange(16, 20),
+      cachedRanges: [{ start: 16, end: 20 }],
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 16,
+      liveFollow: true,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.rows.map(rowText)).toEqual(['', '', '', '', '', '', '', '', '6', '7', '8', '9']);
+    expect(createRenderer).toHaveBeenLastCalledWith(canvas, surface, 12);
+    expect(canvas.style.top).toBe('90px');
+    expect(canvas.style.transform).toBe('none');
+  });
+
+  it('does not request a live history jump for an empty live buffer', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer = createTerminalBuffer(surface);
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 0,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
+  });
+
+  it('requests missing cached rows while following the live tail', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 1210 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(246, 250),
+      cachedRanges: [{ start: 246, end: 250 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: true,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 240,
+      rowCount: 10,
+      totalRows: 250,
+      generation: 0,
+    });
+  });
+
+  it('merges a lagging live cache fill without shrinking the advanced buffer', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      liveFrameAtBottom(16, [row(0, '16'), row(1, '17'), row(2, '18'), row(3, '19')]),
+      true,
+    );
+    controller.ingestFrame(
+      'session-1',
+      liveFrameAtBottom(17, [row(0, '17'), row(1, '18'), row(2, '19'), row(3, '20')]),
+      true,
+    );
+
+    // The fill was requested while the total was 20; by the time it returns the live
+    // buffer has advanced to 21. Its rows are addressed by absolute id and remain
+    // valid (genuine staleness from a reflow/clear is caught by the generation
+    // check), so it must merge. Rejecting it on the lagging total is what livelocked
+    // the live tail under continuous output: every fill came back "stale", the
+    // missing rows were never filled, and the renderer kept repainting empty rows.
+    // The merge must not let the lagging total shrink the advanced buffer.
+    const merged = controller.mergeLiveRows(frame([row(0, 'history-8')]), 8, 20);
+
+    expect(merged).toBe(true);
+    expect(controller.getRowCount()).toBe(21);
+  });
+
+  it('ignores stale history fills after the history snapshot row count changes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+    controller.enterHistoryWindow(frame([row(0, '0'), row(1, '1'), row(2, '2')]), 0, 20, false);
+
+    const merged = controller.mergeHistoryWindow(frame([row(0, 'stale')]), 10, 21);
+
+    expect(merged).toBe(false);
+    expect(controller.getRowCount()).toBe(20);
+  });
+
+  it('does not paint an all-blank live resize miss over cached text', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn(() => true);
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => ({
+      ...fakeRenderer(displayRows),
+      paintFrame,
+    }));
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 20,
+      viewportRows: surface.rows,
+      viewportOffset: 16,
+      rowsById: rowRange(0, 4),
+      cachedRanges: [{ start: 0, end: 4 }],
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 16,
+      liveFollow: true,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalled();
+    expect(createRenderer).not.toHaveBeenCalled();
+    expect(paintFrame).not.toHaveBeenCalled();
+  });
+
+  it('keeps the live backing renderer stable while a short buffer grows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => fakeRenderer(displayRows));
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 50, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const bufferForRows = (totalRows: number): TerminalBufferState => ({
+      ...createTerminalBuffer(surface),
+      totalRows,
+      viewportRows: surface.rows,
+      viewportOffset: Math.max(0, totalRows - surface.rows),
+      rowsById: rowRange(0, totalRows),
+      cachedRanges: [{ start: 0, end: totalRows }],
+    });
+    const viewForBuffer = (buffer: TerminalBufferState): SessionTerminalView => ({
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: Math.max(0, buffer.totalRows - buffer.viewportRows),
+      liveFollow: false,
+    });
+
+    const firstBuffer = bufferForRows(4);
+    controller.applyView(viewForBuffer(firstBuffer), surface, firstBuffer);
+
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    expect(createRenderer.mock.calls[0]?.[2]).toBe(10);
+
+    const secondBuffer = bufferForRows(5);
+    controller.applyView(viewForBuffer(secondBuffer), surface, secondBuffer, {
+      dirtyAbsoluteRows: new Set([4]),
+    });
+
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+  });
+
+  it('remounts the renderer when height-only surface resizes change the paint rows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const traces: unknown[] = [];
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => fakeRenderer(displayRows));
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onTrace: event => traces.push(event),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+      true,
+    );
+
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    expect(createRenderer.mock.calls[0]?.[2]).toBe(10);
+
+    Object.assign(viewport, { clientHeight: 50 });
+    const fiveRows = { ...surface, rows: 5 };
+    controller.setSurface(fiveRows);
+    controller.paintCurrent('session-1', fiveRows);
+
+    Object.assign(viewport, { clientHeight: 90 });
+    const nineRows = { ...surface, rows: 9 };
+    controller.setSurface(nineRows);
+    controller.paintCurrent('session-1', nineRows);
+
+    expect(createRenderer).toHaveBeenCalledTimes(3);
+    expect(createRenderer.mock.calls[1]?.[2]).toBe(11);
+    expect(createRenderer.mock.calls[2]?.[2]).toBe(15);
+
+    Object.assign(viewport, { clientHeight: 110 });
+    const elevenRows = { ...surface, rows: 11 };
+    controller.setSurface(elevenRows);
+    controller.paintCurrent('session-1', elevenRows);
+
+    expect(createRenderer).toHaveBeenCalledTimes(4);
+    expect(createRenderer.mock.calls[3]?.[2]).toBe(17);
+    expect(
+      traces.filter(
+        event =>
+          typeof event === 'object' &&
+          event !== null &&
+          'kind' in event &&
+          event.kind === 'surface_change',
+      ),
+    ).toHaveLength(3);
+  });
+
+  it('remounts the renderer at the exact column count during width resizes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const createRenderer = vi.fn((_canvas, nextSurface: TerminalSurface, displayRows) => ({
+      ...fakeRenderer(displayRows),
+      cols: nextSurface.cols,
+      rows: displayRows,
+    }));
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer,
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+      true,
+    );
+
+    expect(createRenderer).toHaveBeenCalledTimes(1);
+    expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 80 }));
+
+    const eightyOneCols = { ...surface, cols: 81 };
+    controller.setSurface(eightyOneCols);
+    controller.paintCurrent('session-1', eightyOneCols);
+
+    expect(createRenderer).toHaveBeenCalledTimes(2);
+    expect(createRenderer.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ cols: 81 }));
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        cols: eightyOneCols.cols,
+      },
+      true,
+    );
+
+    expect(createRenderer).toHaveBeenCalledTimes(3);
+    expect(createRenderer.mock.calls[2]?.[1]).toEqual(expect.objectContaining({ cols: 81 }));
+
+    const ninetyCols = { ...surface, cols: 90 };
+    controller.setSurface(ninetyCols);
+    controller.paintCurrent('session-1', ninetyCols);
+
+    expect(createRenderer).toHaveBeenCalledTimes(4);
+    expect(createRenderer.mock.calls[3]?.[1]).toEqual(expect.objectContaining({ cols: 90 }));
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        cols: ninetyCols.cols,
+      },
+      true,
+    );
+
+    expect(createRenderer).toHaveBeenCalledTimes(5);
+    expect(createRenderer.mock.calls[4]?.[1]).toEqual(expect.objectContaining({ cols: 90 }));
+
+    const ninetySevenCols = { ...surface, cols: 97 };
+    controller.setSurface(ninetySevenCols);
+    controller.paintCurrent('session-1', ninetySevenCols);
+
+    expect(createRenderer).toHaveBeenCalledTimes(6);
+    expect(createRenderer.mock.calls[5]?.[1]).toEqual(expect.objectContaining({ cols: 97 }));
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        cols: ninetySevenCols.cols,
+      },
+      true,
+    );
+
+    expect(createRenderer).toHaveBeenCalledTimes(7);
+    expect(createRenderer.mock.calls[6]?.[1]).toEqual(expect.objectContaining({ cols: 97 }));
+  });
+
+  it('exposes only the painted live-buffer window as the interaction composite', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 10_010, scrollTop: 1_210 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 1_000,
+      viewportRows: surface.rows,
+      viewportOffset: 996,
+      rowsById: rowRange(100, 180),
+      cachedRanges: [{ start: 100, end: 180 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 996,
+      liveFollow: false,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    const composite = controller.getComposite();
+    expect(composite?.rows).toHaveLength(10);
+    expect(composite?.rows[0]?.index).toBe(117);
+    expect(composite?.rows.at(-1)?.index).toBe(126);
+    expect(controller.getRowCount()).toBe(1_000);
+  });
+
+  it('expands live-buffer selections against absolute cached rows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2_510, scrollTop: 1_210 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rows = new Map<number, TerminalRow>([
+      [
+        120,
+        {
+          index: 120,
+          dirty: true,
+          cells: [
+            { col: 0, text: 'A' },
+            { col: 1, width: 2, text: '界' },
+            { col: 3, text: 'B' },
+          ],
+        },
+      ],
+    ]);
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rows,
+      cachedRanges: [{ start: 120, end: 121 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    controller.setSelection({
+      start: { row: 120, col: 2 },
+      end: { row: 120, col: 2 },
+    });
+
+    expect(controller.getSelection()).toEqual({
+      start: { row: 120, col: 1 },
+      end: { row: 120, col: 2 },
+    });
+  });
+
+  it('publishes live scroll metrics from the frontend buffer position', () => {
+    const rafCallbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      'requestAnimationFrame',
+      vi.fn((callback: FrameRequestCallback) => {
+        rafCallbacks.push(callback);
+        return rafCallbacks.length;
+      }),
+    );
+
+    const onScrollMetrics = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onScrollMetrics,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(240, 250),
+      cachedRanges: [{ start: 240, end: 250 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+    rafCallbacks.length = 0;
+    onScrollMetrics.mockClear();
+
+    expect(controller.scrollBufferedToRow(244)).toBe(true);
+
+    expect(onScrollMetrics).not.toHaveBeenCalled();
+    expect(rafCallbacks).toHaveLength(1);
+    rafCallbacks[0]?.(0);
+    expect(onScrollMetrics).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mode: 'live',
+        atBottom: false,
+        totalRows: 250,
+        viewportRows: 4,
+        offsetRows: 244,
+      }),
+    );
+  });
+
+  it('requests missing history rows for the painted window', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingHistoryRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingHistoryRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 110, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.enterHistoryWindow(frame([row(0, 'tail-a'), row(1, 'tail-b')]), 8, 10, false);
+
+    expect(controller.isHistoryFullyCached()).toBe(false);
+    expect(onMissingHistoryRows).toHaveBeenCalledWith({
+      startRow: 0,
+      rowCount: 10,
+      totalRows: 10,
+      generation: 1,
+    });
+  });
+
+  it('paints a history window at its initial target row before requesting rows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingHistoryRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingHistoryRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rows = Array.from({ length: 60 }, (_, index) => row(index, `cached-${index}`));
+    controller.enterHistoryWindow(frame(rows), 20, 100, false, 40);
+
+    expect(viewport.scrollTop).toBe(410);
+    expect(onMissingHistoryRows).not.toHaveBeenCalled();
+  });
+
+  it('moves a history viewport only when the target rows are cached', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rows = Array.from({ length: 30 }, (_, index) => row(index, `cached-${index}`));
+    controller.enterHistoryWindow(frame(rows), 40, 100, false, 50);
+
+    expect(viewport.scrollTop).toBe(510);
+    expect(controller.scrollHistoryBufferedRows(5)).toBe(true);
+    expect(viewport.scrollTop).toBe(560);
+    expect(controller.scrollHistoryBufferedRows(40)).toBe(false);
+    expect(viewport.scrollTop).toBe(560);
+  });
+
+  it('prefetches adjacent history rows before the painted window reaches a cache edge', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingHistoryRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingHistoryRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rows = Array.from({ length: 30 }, (_, index) => row(index, `cached-${index}`));
+    controller.enterHistoryWindow(frame(rows), 20, 100, false, 40);
+
+    expect(onMissingHistoryRows).toHaveBeenCalledWith({
+      startRow: 50,
+      rowCount: 32,
+      totalRows: 100,
+      generation: 1,
+    });
+  });
+
+  it('ignores stale history window merges from an older generation', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const painted: TerminalFrame[] = [];
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame: vi.fn((frame: TerminalFrame) => painted.push(frame)),
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.enterHistoryWindow(frame([row(0, 'first')]), 20, 100, false, 20);
+    controller.enterHistoryWindow(frame([row(0, 'second')]), 40, 100, false, 40);
+    controller.mergeHistoryWindow(frame([row(0, 'stale')]), 20, 100, 1);
+
+    controller.scrollToHistoryTopRow(20);
+
+    const topRowText =
+      painted
+        .at(-1)
+        ?.rows[0]?.cells.map(cell => cell.text)
+        .join('') ?? '';
+    expect(topRowText).toBe('');
+  });
+
+  it('keeps the history composite bounded to the painted window after distant merges', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const firstWindow = Array.from({ length: 20 }, (_, index) => row(index, `first-${index}`));
+    const distantWindow = Array.from({ length: 10 }, (_, index) => row(index, `distant-${index}`));
+    controller.enterHistoryWindow(frame(firstWindow), 20, 100, false, 20);
+    controller.mergeHistoryWindow(frame(distantWindow), 80, 100);
+
+    const composite = controller.getComposite();
+    expect(composite?.rows).toHaveLength(10);
+    expect(composite?.rows[0]?.index).toBe(17);
+    expect(composite?.rows.at(-1)?.index).toBe(26);
+    expect(composite?.rows.map(rowText)).toEqual([
+      '',
+      '',
+      '',
+      'first-0',
+      'first-1',
+      'first-2',
+      'first-3',
+      'first-4',
+      'first-5',
+      'first-6',
+    ]);
+  });
+
+  it('can position a history window with an exact top row', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.enterHistoryWindow(frame([row(0, 'chunk-a'), row(1, 'chunk-b')]), 120, 250, false);
+    controller.scrollToHistoryTopRow(120);
+
+    expect(viewport.scrollTop).toBe(1210);
+  });
+
+  it('positions find navigation from virtual history height when DOM scrollHeight is stale', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 0, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.enterHistoryWindow(frame([row(0, 'chunk-a'), row(1, 'chunk-b')]), 120, 250, false);
+    controller.scrollToHistoryRow(96);
+
+    expect(viewport.scrollTop).toBe(960);
+  });
+
+  it('requests missing rows when find navigation lands outside the cached history window', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingHistoryRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingHistoryRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1610, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rows = Array.from({ length: 108 }, (_, index) => row(index, `cached-${index}`));
+    controller.enterHistoryWindow(frame(rows), 0, 160, false, 0);
+    onMissingHistoryRows.mockClear();
+
+    controller.scrollToHistoryRow(144);
+
+    expect(onMissingHistoryRows).toHaveBeenCalledWith({
+      startRow: 140,
+      rowCount: 10,
+      totalRows: 160,
+      generation: 1,
+    });
+  });
+});

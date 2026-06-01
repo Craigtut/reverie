@@ -1,5 +1,5 @@
 import type { TerminalFrame } from '../terminalTypes';
-import { rowPlainText } from './interaction/selectionModel';
+import { terminalRowTextLayout, terminalTextRangeToCellSpan } from './cellGeometry';
 
 // Pure substring-find model for the terminal: no DOM, no state. The interaction
 // controller + find bar drive these. v1 is plain substring with a case toggle
@@ -54,10 +54,12 @@ export function findMatchesInFrame(
   if (query.length === 0) return [];
   const out: FrameMatch[] = [];
   for (const row of frame.rows) {
-    const lineText = rowPlainText(row, cols).replace(/\s+$/u, '');
+    const layout = terminalRowTextLayout(row, cols);
+    const lineText = layout.text.replace(/\s+$/u, '');
     if (lineText.length === 0) continue;
     for (const match of findMatchesInLine(lineText, query, caseSensitive)) {
-      out.push({ row: row.index, startCol: match.startCol, endCol: match.endCol, lineText });
+      const span = terminalTextRangeToCellSpan(layout, match.startCol, match.endCol);
+      out.push({ row: row.index, startCol: span.startCol, endCol: span.endCol, lineText });
     }
   }
   return out;
@@ -74,4 +76,18 @@ export function formatMatchCount(current: number, total: number, capped: boolean
 export function cycleIndex(index: number, total: number, delta: number): number {
   if (total <= 0) return -1;
   return (((index + delta) % total) + total) % total;
+}
+
+// When a same-query search replay resolves after the user has navigated, keep
+// the visible active match instead of snapping back to the first result.
+export function resolvedActiveMatchIndex(matches: FrameMatch[], active?: FrameMatch): number {
+  if (matches.length === 0) return -1;
+  if (!active) return 0;
+  const index = matches.findIndex(
+    match =>
+      match.row === active.row &&
+      match.startCol === active.startCol &&
+      match.endCol === active.endCol,
+  );
+  return index >= 0 ? index : 0;
 }

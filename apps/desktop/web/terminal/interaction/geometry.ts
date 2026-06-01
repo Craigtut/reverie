@@ -6,9 +6,9 @@ import type { BufferCell } from './types';
 // row under virtualization) is unit-testable in isolation.
 //
 // The canvas is virtualized: it paints only a window of rows and is positioned
-// with `transform: translateY(startRow * cellHeight)`. A pointer's coordinates
-// relative to the canvas element (clientXY minus the canvas bounding rect) are
-// therefore window-local. We add the painted `startRow` back to land in
+// with `top: startRow * cellHeight`. A pointer's coordinates relative to the
+// canvas element (clientXY minus the canvas bounding rect) are therefore
+// window-local. We add the painted `startRow` back to land in
 // composite-frame ("buffer") coordinates, which survive scrolling.
 
 export function clamp(value: number, min: number, max: number): number {

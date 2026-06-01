@@ -316,6 +316,7 @@ fn main() {
             commands::terminate_session,
             commands::confirm_quit,
             commands::record_render_metrics,
+            commands::record_terminal_diagnostics,
             commands::open_url,
             #[cfg(unix)]
             connection_commands::bridge_installation_status,

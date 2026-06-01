@@ -1,4 +1,9 @@
 import type { TerminalFrame, TerminalRow } from './terminalTypes';
+import {
+  terminalCellEndCol,
+  terminalCellWidth,
+  terminalRowTextLayout,
+} from './terminal/cellGeometry';
 
 // Frontend scrollback is a rendered-history foothold, not the final source of terminal truth.
 // The backend/Ghostty snapshot still owns authoritative terminal state; this module only keeps
@@ -98,7 +103,10 @@ export function frameForSurface(frame: TerminalFrame, surface: TerminalSurface):
     return {
       index,
       dirty: source?.dirty ?? true,
-      cells: source?.cells.filter(cell => cell.col < surface.cols) ?? [],
+      cells:
+        source?.cells
+          .filter(cell => cell.col < surface.cols)
+          .map(cell => ({ ...cell, width: terminalCellWidth(cell, surface.cols) })) ?? [],
     };
   });
 
@@ -120,6 +128,7 @@ export function frameForSurface(frame: TerminalFrame, surface: TerminalSurface):
   return {
     ...frame,
     dirty: frame.dirty ?? 'full',
+    cols: surface.cols,
     rows,
     cursor,
   };
@@ -169,6 +178,7 @@ export function frameWithScrollback(
   return {
     ...viewportFrame,
     dirty: 'full',
+    cols: viewportFrame.cols,
     rows: [...historyRows, ...viewportRows],
     cursor,
   };
@@ -242,11 +252,8 @@ function hasMeaningfulRows(signatures: string[]) {
 }
 
 function rowPlainText(row: TerminalRow) {
-  return row.cells
-    .slice()
-    .sort((left, right) => left.col - right.col)
-    .map(cell => cell.text)
-    .join('');
+  const cols = row.cells.reduce((max, cell) => Math.max(max, terminalCellEndCol(cell)), 1);
+  return terminalRowTextLayout(row, cols).text;
 }
 
 export function cloneTerminalRow(row: TerminalRow): TerminalRow {

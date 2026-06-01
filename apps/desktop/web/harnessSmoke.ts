@@ -1,4 +1,20 @@
-type HarnessScenario = 'empty-onboarding' | 'partial-cli' | 'no-cli' | 'terminal-interaction';
+import { createTerminalGpuRenderer } from './terminal-gpu-renderer';
+import { makeSyntheticFrame, percentile, TERMINAL_SURFACE } from './terminal-canvas-renderer';
+import { OVERSCAN_ROWS } from './terminal/frameModel';
+import type { RenderMetrics } from './domain';
+import type { TerminalFrame } from './terminalTypes';
+
+type HarnessScenario =
+  | 'empty-onboarding'
+  | 'partial-cli'
+  | 'no-cli'
+  | 'terminal-interaction'
+  | 'terminal-concurrent-sessions'
+  | 'terminal-alternate-screen'
+  | 'terminal-history-find'
+  | 'terminal-resize-storm'
+  | 'terminal-long-history-scroll'
+  | 'terminal-render-performance';
 
 type HarnessResult = {
   scenario: HarnessScenario;
@@ -46,11 +62,88 @@ async function runHarnessSmokeScenario(scenario: HarnessScenario) {
     case 'terminal-interaction':
       await runTerminalInteractionScenario();
       break;
+    case 'terminal-concurrent-sessions':
+      await runTerminalConcurrentSessionsScenario();
+      break;
+    case 'terminal-alternate-screen':
+      await runTerminalAlternateScreenScenario();
+      break;
+    case 'terminal-history-find':
+      await runTerminalHistoryFindScenario();
+      break;
+    case 'terminal-resize-storm':
+      await runTerminalResizeStormScenario();
+      break;
+    case 'terminal-long-history-scroll':
+      await runTerminalLongHistoryScrollScenario();
+      break;
+    case 'terminal-render-performance':
+      await runTerminalRenderPerformanceScenario();
+      break;
     default:
       throw new Error(`Unknown harness smoke scenario: ${scenario}`);
   }
 
   publishHarnessResult({ scenario, status: 'passed', assertions: [...assertions] });
+}
+
+async function runTerminalRenderPerformanceScenario() {
+  const cols = TERMINAL_SURFACE.cols;
+  const rows = TERMINAL_SURFACE.rows;
+  const canvas = document.createElement('canvas');
+  canvas.width = cols * TERMINAL_SURFACE.cellWidth;
+  canvas.height = rows * TERMINAL_SURFACE.cellHeight;
+  canvas.style.cssText =
+    'position:fixed;left:-10000px;top:0;width:1080px;height:648px;pointer-events:none;';
+  document.body.appendChild(canvas);
+
+  try {
+    const renderer = createTerminalGpuRenderer(canvas, {
+      cols,
+      rows,
+      cellWidth: TERMINAL_SURFACE.cellWidth,
+      cellHeight: TERMINAL_SURFACE.cellHeight,
+      preferredBackends: ['webgl2', 'canvas2d'],
+    });
+    const backend = renderer.capabilities.backend;
+    if (backend !== 'webgl2') {
+      throw new Error(`terminal renderer benchmark expected webgl2, got ${backend}`);
+    }
+
+    for (let frameIndex = 0; frameIndex < 96; frameIndex += 1) {
+      renderer.paintFrame(makeSyntheticFrame(frameIndex, { cols, rows }));
+    }
+    await nextAnimationFrame();
+    await expectCanvasPainted(canvas, 'benchmark canvas paints through WebGL2');
+    await expectDirtyPaintPreservesUntouchedRows(renderer, canvas, cols, rows);
+
+    const fullWindow = await measureRendererFrames(renderer, frameIndex =>
+      makeSyntheticFrame(1000 + frameIndex, { cols, rows }),
+    );
+    const dirtyRows = await measureRendererFrames(renderer, frameIndex =>
+      makeSyntheticFrame(2000 + frameIndex, {
+        cols,
+        rows,
+        dirtyOnly: true,
+        dirtyRowsPerFrame: 8,
+      }),
+    );
+
+    assertRendererBudget(fullWindow, 'full-window WebGL2 paints stay inside 60 FPS budget', {
+      p95Ms: 16.7,
+      avgMs: 10,
+      slowFrames: 3,
+    });
+    assertRendererBudget(dirtyRows, 'dirty-row WebGL2 paints leave scroll headroom', {
+      p95Ms: 8,
+      avgMs: 5,
+      slowFrames: 0,
+    });
+  } finally {
+    canvas.remove();
+  }
+
+  await runTerminalControllerWebGlPerformanceScenario();
 }
 
 async function runEmptyOnboardingScenario() {
@@ -258,13 +351,323 @@ async function runAssertPersistedScenario() {
 interface FixtureHook {
   stopStream(terminalId: string): void;
   emitTerminalFrame(terminalId: string, lines: string[]): void;
+  emitRawTerminalFrame(terminalId: string, frame: TerminalFrame, seq?: number): void;
+  finishTerminal(terminalId: string, childSuccess?: boolean): void;
+  frontendActivityEvents(): Array<{ terminalId: string; active: boolean }>;
   recordedInputs(): Array<{ terminalId: string; input: string }>;
+  recordedRenderMetrics(): RenderMetrics[];
+}
+
+interface TerminalDebugHook {
+  trace(): Array<Record<string, unknown>>;
+  clear(): void;
+  summary(): {
+    surface?: { cols: number; rows: number; cellWidth: number; cellHeight: number };
+    historyMode?: boolean;
+    liveFollow?: boolean;
+    startRow?: number;
+    rowCount?: number;
+    visibleRowCount?: number;
+    firstVisibleRow?: number | null;
+    lastVisibleRow?: number | null;
+    traceLength?: number;
+    traceCounts?: Record<string, number>;
+    metrics?: Record<string, number>;
+  };
+  visibleRows(): Array<{ index: number; text: string }>;
 }
 
 function fixtureHook(): FixtureHook {
   const hook = (window as unknown as { __REVERIE_FIXTURE__?: FixtureHook }).__REVERIE_FIXTURE__;
   if (!hook) throw new Error('fixture test hook (__REVERIE_FIXTURE__) is not present');
   return hook;
+}
+
+function terminalDebugHook(): TerminalDebugHook {
+  const hook = (window as unknown as { __REVERIE_TERMINAL_DEBUG__?: TerminalDebugHook })
+    .__REVERIE_TERMINAL_DEBUG__;
+  if (!hook) throw new Error('terminal debug hook (__REVERIE_TERMINAL_DEBUG__) is not present');
+  return hook;
+}
+
+async function createRunningTerminalSession(topicTitle: string, labelPrefix: string) {
+  await clickTestId('empty-create-project-button');
+  await clickTestId('choose-project-folder-button');
+  await waitFor(
+    () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
+    `${labelPrefix} project folder is selected`,
+  );
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-project-button')),
+    `${labelPrefix} project submit enables`,
+  );
+  await clickTestId('submit-project-button');
+  fillInput('focus-title-input', topicTitle);
+  await waitFor(
+    () => !isDisabled(requireSelector(selectorForCli('codex_cli'))),
+    `${labelPrefix} Codex tile enables after the topic is named`,
+  );
+  await clickCliChoice('codex_cli');
+  await expectTestId('terminal-body', `${labelPrefix} session opens terminal body`);
+  await waitForTextIncludes('terminal-status-label', 'Running', `${labelPrefix} session starts`);
+  const terminalId = await waitForTerminalId(`${labelPrefix} session has a terminal id`);
+  const fixture = fixtureHook();
+  fixture.stopStream(terminalId);
+  return {
+    terminalId,
+    fixture,
+    canvas: requireTestId<HTMLCanvasElement>('terminal-canvas'),
+    viewport: requireTestId<HTMLDivElement>('terminal-viewport'),
+    debug: terminalDebugHook(),
+  };
+}
+
+async function runTerminalControllerWebGlPerformanceScenario() {
+  await clickTestId('empty-create-session-button');
+  await expectComposerMode('session');
+  await clickCliChoice('codex_cli');
+  await expectTestId('terminal-body', 'controller WebGL session opens terminal body');
+  await waitForTextIncludes('terminal-status-label', 'Running', 'controller WebGL session starts');
+  const terminalId = await waitForTerminalId('controller WebGL session has a terminal id');
+  const fixture = fixtureHook();
+  const canvas = requireTestId<HTMLCanvasElement>('terminal-canvas');
+  await waitFor(
+    () => canvas.width > 0 && canvas.height > 0 && canvas.getBoundingClientRect().height > 0,
+    'controller WebGL canvas has a backing store',
+  );
+  fixture.stopStream(terminalId);
+  await flushDom();
+  const viewport = requireTestId<HTMLDivElement>('terminal-viewport');
+  viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await flushDom();
+
+  fixture.emitRawTerminalFrame(
+    terminalId,
+    terminalFrameFromLines([
+      'controller WebGL row zero before',
+      'controller WebGL row one',
+      'controller WebGL row two',
+      'controller WebGL row three',
+      'controller WebGL row four',
+      'controller WebGL stable sentinel',
+    ]),
+    30_000,
+  );
+  await flushDom();
+  viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await flushDom();
+  const partialUpdates = 16;
+
+  for (let index = 0; index < partialUpdates; index += 1) {
+    fixture.emitRawTerminalFrame(
+      terminalId,
+      terminalFrameFromLines([`controller WebGL row zero ${index}`], {
+        dirty: 'partial',
+        rowOffset: 0,
+      }),
+      30_001 + index,
+    );
+    await flushDom();
+  }
+
+  fixture.finishTerminal(terminalId, true);
+  await waitFor(() => {
+    return fixture.recordedRenderMetrics().some(metrics => metrics.terminalId === terminalId);
+  }, 'controller WebGL session records render metrics');
+  const metrics = fixture
+    .recordedRenderMetrics()
+    .filter(metrics => metrics.terminalId === terminalId)
+    .at(-1);
+  if (!metrics) throw new Error('missing controller WebGL render metrics');
+  if (metrics.rendererBackend !== 'webgl2') {
+    throw new Error(`controller terminal expected WebGL2 backend, got ${metrics.rendererBackend}`);
+  }
+  const paintSamples = metrics.paintSamples ?? 0;
+  const averageRowsPainted =
+    paintSamples === 0 ? 0 : (metrics.rendererRowsPainted ?? 0) / paintSamples;
+  if (averageRowsPainted <= 0) {
+    throw new Error(
+      `controller WebGL retained paints did not record painted rows: avg rows ${averageRowsPainted.toFixed(
+        2,
+      )}`,
+    );
+  }
+  assertions.push(
+    `controller WebGL2 path records retained dirty-row paints: avgRows=${averageRowsPainted.toFixed(
+      1,
+    )}`,
+  );
+}
+
+async function runTerminalResizeStormScenario() {
+  const { terminalId, fixture, viewport, canvas, debug } = await createRunningTerminalSession(
+    'Resize Storm Topic',
+    'resize-storm',
+  );
+  await setTerminalViewportRows(viewport, 20, 'resize-storm baseline surface rows');
+  fixture.emitRawTerminalFrame(
+    terminalId,
+    terminalFrameFromLines(
+      Array.from({ length: 40 }, (_, index) => `resize storm stable row ${index}`),
+    ),
+    40_000,
+  );
+  await waitFor(
+    () => debug.visibleRows().some(row => row.text.startsWith('resize storm stable row')),
+    'resize-storm visible rows show the baseline frame',
+  );
+  assertCanvasGeometry(canvas, 'resize-storm canvas has a nonzero backing store');
+  debug.clear();
+
+  const stormSizes = [
+    { cols: 121, rows: 21 },
+    { cols: 124, rows: 22 },
+    { cols: 127, rows: 23 },
+    { cols: 122, rows: 24 },
+    { cols: 120, rows: 22 },
+    { cols: 126, rows: 20 },
+    { cols: 121, rows: 21 },
+    { cols: 127, rows: 24 },
+    { cols: 123, rows: 23 },
+    { cols: 120, rows: 20 },
+  ];
+  for (const { cols, rows } of stormSizes) {
+    await setTerminalViewportSize(
+      viewport,
+      cols,
+      rows,
+      `resize-storm surface reaches ${cols}x${rows}`,
+    );
+    await waitFor(
+      () => debug.visibleRows().some(row => row.text.startsWith('resize storm stable row')),
+      `resize-storm content stays visible at ${cols}x${rows}`,
+    );
+    assertCanvasGeometry(canvas, `resize-storm canvas geometry stays valid at ${cols}x${rows}`);
+  }
+
+  const summary = debug.summary();
+  const counts = summary.traceCounts ?? {};
+  const mountStarts = counts['renderer_mount:start'] ?? 0;
+  const rendererDisposes = Object.entries(counts)
+    .filter(([key]) => key.startsWith('renderer_dispose'))
+    .reduce((sum, [, count]) => sum + count, 0);
+  const surfaceChanges = counts.surface_change ?? 0;
+  if (mountStarts !== 0 || rendererDisposes !== 0) {
+    throw new Error(
+      `within-capacity resize remounted renderer: mountStarts=${mountStarts} disposes=${rendererDisposes}`,
+    );
+  }
+  if (surfaceChanges < stormSizes.length) {
+    throw new Error(
+      `resize storm did not report enough surface changes: ${surfaceChanges}/${stormSizes.length}`,
+    );
+  }
+  assertions.push('within-capacity resize storm does not remount the renderer');
+  assertions.push('within-capacity resize storm keeps the terminal canvas painted');
+}
+
+function assertCanvasGeometry(canvas: HTMLCanvasElement, label: string) {
+  const rect = canvas.getBoundingClientRect();
+  if (canvas.width <= 0 || canvas.height <= 0 || rect.width <= 0 || rect.height <= 0) {
+    throw new Error(
+      `${label}: invalid canvas geometry ${canvas.width}x${canvas.height}, rect=${rect.width}x${rect.height}`,
+    );
+  }
+  assertions.push(label);
+}
+
+async function runTerminalLongHistoryScrollScenario() {
+  const { terminalId, fixture, viewport, debug } = await createRunningTerminalSession(
+    'Long History Topic',
+    'long-history',
+  );
+  await setTerminalViewportRows(viewport, 24, 'long-history baseline surface rows');
+  const lines = Array.from({ length: 720 }, (_, index) => longHistoryLine(index));
+  fixture.emitRawTerminalFrame(terminalId, terminalFrameFromLines(lines), 50_000);
+  await flushDom();
+
+  await clickTestId('view-history-button');
+  await waitFor(() => debug.summary().historyMode === true, 'long-history enters full history');
+  assertions.push('long-history enters full history');
+
+  await waitForHistoryRow(viewport, 700, 'long-history starts near the transcript tail');
+  for (const row of [0, 96, 360, 719, 42, 600]) {
+    await scrollHistoryToRow(viewport, row, `long-history scrolls to row ${row}`);
+  }
+}
+
+async function setTerminalViewportRows(viewport: HTMLDivElement, rows: number, label: string) {
+  await setTerminalViewportSize(viewport, TERMINAL_SURFACE.cols, rows, label);
+}
+
+async function setTerminalViewportSize(
+  viewport: HTMLDivElement,
+  cols: number,
+  rows: number,
+  label: string,
+) {
+  const width = cols * TERMINAL_SURFACE.cellWidth;
+  const height = rows * TERMINAL_SURFACE.cellHeight;
+  viewport.style.width = `${width}px`;
+  viewport.style.maxWidth = viewport.style.width;
+  viewport.style.height = `${height}px`;
+  viewport.style.maxHeight = viewport.style.height;
+  await nextAnimationFrame();
+  await flushDom();
+  await waitFor(() => {
+    const surface = terminalDebugHook().summary().surface;
+    return surface?.cols === cols && surface.rows === rows;
+  }, label);
+  assertions.push(label);
+}
+
+async function scrollHistoryToRow(viewport: HTMLDivElement, row: number, label: string) {
+  viewport.scrollTop = row * TERMINAL_SURFACE.cellHeight + TERMINAL_SURFACE.cellHeight;
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await waitForHistoryRow(viewport, row, label);
+}
+
+async function waitForHistoryRow(viewport: HTMLDivElement, row: number, label: string) {
+  await waitFor(
+    () =>
+      terminalDebugHook()
+        .visibleRows()
+        .some(visible => historyRowMatches(visible, row)),
+    label,
+    8000,
+  );
+  assertVisibleHistoryRows(terminalDebugHook().visibleRows(), label);
+  assertCanvasGeometry(requireTestId<HTMLCanvasElement>('terminal-canvas'), `${label} canvas`);
+  assertions.push(label);
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+}
+
+function assertVisibleHistoryRows(rows: Array<{ index: number; text: string }>, label: string) {
+  const seen = new Set<string>();
+  const nonBlankRows = rows.filter(row => row.text.length > 0);
+  if (nonBlankRows.length === 0) throw new Error(`${label}: no visible history text`);
+  for (const row of nonBlankRows) {
+    const expected = longHistoryLine(row.index);
+    if (row.text !== expected) {
+      throw new Error(
+        `${label}: row ${row.index} rendered ${JSON.stringify(row.text)}, expected ${JSON.stringify(
+          expected,
+        )}`,
+      );
+    }
+    if (seen.has(row.text)) throw new Error(`${label}: repeated visible row text ${row.text}`);
+    seen.add(row.text);
+  }
+}
+
+function historyRowMatches(row: { index: number; text: string }, index: number) {
+  return row.index === index && row.text === longHistoryLine(index);
+}
+
+function longHistoryLine(index: number) {
+  return `history row ${String(index).padStart(4, '0')} ${index % 2 === 0 ? 'even' : 'odd'}`;
 }
 
 // Exercises the terminal interaction layer end-to-end against the browser
@@ -298,6 +701,9 @@ async function runTerminalInteractionScenario() {
   // Freeze the synthetic stream and inject a deterministic line with a URL.
   const fixture = fixtureHook();
   fixture.stopStream(terminalId);
+  const canvas = requireTestId<HTMLCanvasElement>('terminal-canvas');
+  const textInput = requireTestId<HTMLTextAreaElement>('terminal-text-input');
+  await expectPrimaryDirtyPaintPreservesStablePixels(fixture, terminalId, canvas);
   fixture.emitTerminalFrame(terminalId, ['hello https://reverie.test/docs world']);
   await flushDom();
   const viewport = requireTestId('terminal-viewport');
@@ -305,7 +711,7 @@ async function runTerminalInteractionScenario() {
   viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
   await flushDom();
 
-  const canvas = requireTestId<HTMLCanvasElement>('terminal-canvas');
+  await expectCanvasPainted(canvas, 'terminal canvas paints the injected frame');
   const pointer = (type: string, col: number, rowPx = 9, button = 0) => {
     const rect = canvas.getBoundingClientRect();
     canvas.dispatchEvent(
@@ -363,6 +769,40 @@ async function runTerminalInteractionScenario() {
   await expectTestId('menu-item-copy-link-address', 'link menu offers Copy link address');
   await closeMenu();
 
+  textInput.focus();
+  textInput.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+  textInput.value = '界';
+  textInput.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '界' }));
+  await waitFor(
+    () => fixture.recordedInputs().some(entry => entry.input.includes('界')),
+    'IME composition commits text to the terminal',
+  );
+  assertions.push('IME composition commits text to the terminal');
+
+  const wideInputCountBefore = fixture.recordedInputs().length;
+  const rowBeforeWideFrame = canvasRowFingerprint(canvas, 0);
+  fixture.emitRawTerminalFrame(terminalId, terminalWideCellFrame('A界B'));
+  await waitFor(
+    () => canvasRowFingerprint(canvas, 0) !== rowBeforeWideFrame,
+    'wide-cell frame paints',
+  );
+  pointer('pointerdown', 2);
+  pointer('pointermove', 1);
+  pointer('pointerup', 1);
+  await flushDom();
+  contextMenu(2);
+  await expectTestId('menu-item-send-to-input', 'wide-cell selection can send to input');
+  await clickTestId('menu-item-send-to-input');
+  await waitFor(
+    () => fixture.recordedInputs().length > wideInputCountBefore,
+    'wide-cell selection is written to terminal input',
+  );
+  const wideInput = fixture.recordedInputs().at(-1)?.input ?? '';
+  if (wideInput !== '界') {
+    throw new Error(`wide-cell selection copied unexpected text: ${JSON.stringify(wideInput)}`);
+  }
+  assertions.push('wide-cell selection copies the glyph once from either cell half');
+
   // A plain click on a blank cell clears the selection; right-click there yields
   // the empty-grid menu (Paste + Select all only, no Copy).
   pointer('pointerdown', 2, 99);
@@ -373,6 +813,547 @@ async function runTerminalInteractionScenario() {
   await expectTestId('menu-item-select-all', 'empty-grid menu offers Select all');
   expectAbsentTestId('menu-item-copy', 'empty-grid menu has no Copy');
   await closeMenu();
+}
+
+async function expectPrimaryDirtyPaintPreservesStablePixels(
+  fixture: FixtureHook,
+  terminalId: string,
+  canvas: HTMLCanvasElement,
+) {
+  fixture.emitRawTerminalFrame(
+    terminalId,
+    terminalFrameFromLines(['primary row zero before', '', '', '', '', 'primary stable sentinel']),
+    20_001,
+  );
+  await waitFor(() => canvasHasVisibleVariance(canvas), 'primary dirty-paint base frame renders');
+  await nextAnimationFrame();
+  const viewport = requireTestId<HTMLDivElement>('terminal-viewport');
+  viewport.scrollTop = 0;
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await nextAnimationFrame();
+  const changedBefore = canvasRowFingerprint(canvas, 0);
+  const stableBefore = canvasRowFingerprint(canvas, 5);
+
+  fixture.emitRawTerminalFrame(
+    terminalId,
+    terminalFrameFromLines(['primary row zero after'], {
+      dirty: 'partial',
+      rowOffset: 0,
+    }),
+    20_002,
+  );
+  await waitFor(
+    () => canvasRowFingerprint(canvas, 0) !== changedBefore,
+    'primary dirty row repaints changed row',
+  );
+
+  const stableAfter = canvasRowFingerprint(canvas, 5);
+  if (stableAfter !== stableBefore) {
+    throw new Error('primary dirty-row paint changed an untouched stable row');
+  }
+  assertions.push('primary dirty-row paint preserves untouched rows');
+}
+
+async function runTerminalConcurrentSessionsScenario() {
+  await clickTestId('empty-create-project-button');
+  await clickTestId('choose-project-folder-button');
+  await waitFor(
+    () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
+    'project folder is selected',
+  );
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-project-button')),
+    'project submit enables',
+  );
+  await clickTestId('submit-project-button');
+  fillInput('focus-title-input', 'Concurrent Terminal Topic');
+  await waitFor(
+    () => !isDisabled(requireSelector(selectorForCli('codex_cli'))),
+    'agent tiles enable after the topic is named',
+  );
+
+  await clickCliChoice('codex_cli');
+  await waitForTextIncludes('terminal-status-label', 'Running', 'first session starts running');
+  const codexTerminalId = await waitForTerminalId('first session receives a terminal id');
+  await waitForFrontendActivity({ [codexTerminalId]: true }, 'first terminal is marked foreground');
+
+  await clickTestId('create-session-button');
+  await clickCliChoice('claude_code');
+  await waitForTextIncludes('session-tabs', 'Claude', 'second session becomes active');
+  const claudeTerminalId = await waitForTerminalId('second session receives a terminal id');
+  await waitForFrontendActivity(
+    { [codexTerminalId]: false, [claudeTerminalId]: true },
+    'foreground priority moves to the second terminal',
+  );
+
+  await clickTestId('create-session-button');
+  await clickCliChoice('cortex_code');
+  await waitForTextIncludes('session-tabs', 'Cortex', 'third session becomes active');
+  const cortexTerminalId = await waitForTerminalId('third session receives a terminal id');
+  if (new Set([codexTerminalId, claudeTerminalId, cortexTerminalId]).size !== 3) {
+    throw new Error('concurrent terminal sessions did not receive distinct terminal ids');
+  }
+  assertions.push('concurrent terminal sessions receive distinct terminal ids');
+  await waitForFrontendActivity(
+    {
+      [codexTerminalId]: false,
+      [claudeTerminalId]: false,
+      [cortexTerminalId]: true,
+    },
+    'foreground priority moves to the third terminal',
+  );
+  await waitForTextIncludes('terminal-status-label', 'Running', 'third terminal is input-ready');
+
+  const fixture = fixtureHook();
+  fixture.finishTerminal(claudeTerminalId, true);
+  await waitForFrontendActivity(
+    { [codexTerminalId]: false, [cortexTerminalId]: true },
+    'background terminal exit keeps the current terminal foreground',
+  );
+  await waitForTextIncludes(
+    'terminal-status-label',
+    'Running',
+    'background terminal exit keeps foreground input armed',
+  );
+
+  const textInput = requireTestId<HTMLTextAreaElement>('terminal-text-input');
+  textInput.focus();
+  const inputText = 'foreground input after background exit';
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLTextAreaElement.prototype,
+    'value',
+  )?.set;
+  setter?.call(textInput, inputText);
+  textInput.dispatchEvent(
+    new InputEvent('input', {
+      bubbles: true,
+      data: inputText,
+      inputType: 'insertText',
+    }),
+  );
+  await waitFor(
+    () =>
+      fixture
+        .recordedInputs()
+        .some(
+          entry =>
+            entry.terminalId === cortexTerminalId &&
+            entry.input.includes('foreground input after background exit'),
+        ),
+    'background terminal exit does not disarm foreground input',
+  );
+  assertions.push('background terminal exit does not disarm foreground input');
+
+  await clickSessionTabWithText('Codex');
+  await waitForFrontendActivity(
+    { [codexTerminalId]: true, [cortexTerminalId]: false },
+    'foreground priority returns to a reselected terminal',
+  );
+}
+
+async function runTerminalAlternateScreenScenario() {
+  await clickTestId('empty-create-project-button');
+  await clickTestId('choose-project-folder-button');
+  await waitFor(
+    () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
+    'project folder is selected',
+  );
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-project-button')),
+    'project submit enables',
+  );
+  await clickTestId('submit-project-button');
+  fillInput('focus-title-input', 'Alternate Screen Topic');
+  await waitFor(
+    () => !isDisabled(requireSelector(selectorForCli('codex_cli'))),
+    'Codex tile enables after the topic is named',
+  );
+  await clickCliChoice('codex_cli');
+  await expectTestId('terminal-body', 'alternate-screen session opens terminal body');
+  await waitForTextIncludes('terminal-status-label', 'Running', 'alternate-screen session starts');
+  const terminalId = await waitForTerminalId('alternate-screen session has a terminal id');
+
+  const fixture = fixtureHook();
+  fixture.stopStream(terminalId);
+  const canvas = requireTestId<HTMLCanvasElement>('terminal-canvas');
+
+  fixture.emitTerminalFrame(terminalId, ['primary stale row zero', 'primary stale row one']);
+  await flushDom();
+  const viewport = requireTestId('terminal-viewport');
+  viewport.scrollTop = 0;
+  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+  await flushDom();
+  await waitFor(
+    () => canvasHasVisibleVariance(canvas),
+    'primary frame paints before alternate-screen entry',
+  );
+  const primaryRowZero = canvasRowFingerprint(canvas, 0);
+
+  fixture.emitRawTerminalFrame(
+    terminalId,
+    terminalFrameFromLines(['ink base row zero', 'ink stable row one', 'ink base row two'], {
+      alternateScreen: true,
+    }),
+    10_001,
+  );
+  await waitFor(
+    () => canvasRowFingerprint(canvas, 0) !== primaryRowZero,
+    'alternate-screen frame replaces primary row pixels',
+  );
+
+  const baseRowZero = canvasRowFingerprint(canvas, 0);
+  const baseStableRowOne = canvasRowFingerprint(canvas, 1);
+  const baseRowTwo = canvasRowFingerprint(canvas, 2);
+
+  fixture.emitRawTerminalFrame(
+    terminalId,
+    terminalFrameFromLines(['ink row zero updated'], {
+      alternateScreen: true,
+      dirty: 'partial',
+      rowOffset: 0,
+    }),
+    10_002,
+  );
+  fixture.emitRawTerminalFrame(
+    terminalId,
+    terminalFrameFromLines(['ink row two updated'], {
+      alternateScreen: true,
+      dirty: 'partial',
+      rowOffset: 2,
+    }),
+    10_003,
+  );
+  await waitFor(
+    () =>
+      canvasRowFingerprint(canvas, 0) !== baseRowZero &&
+      canvasRowFingerprint(canvas, 2) !== baseRowTwo,
+    'coalesced alternate-screen partial rows repaint together',
+  );
+  const stableRowOne = canvasRowFingerprint(canvas, 1);
+  if (stableRowOne !== baseStableRowOne) {
+    throw new Error('alternate-screen dirty-row paint changed an untouched stable row');
+  }
+  assertions.push('alternate-screen dirty-row paint preserves untouched rows');
+  openContextMenu(canvas, 1, TERMINAL_SURFACE.cellHeight * 5);
+  await clickTestId('menu-item-select-all');
+  await flushDom();
+  openContextMenu(canvas, 1, 9);
+  await expectTestId('menu-item-send-to-input', 'alternate-screen selection can send to input');
+  const inputCountBeforeSend = fixture.recordedInputs().length;
+  await clickTestId('menu-item-send-to-input');
+  await waitFor(
+    () => fixture.recordedInputs().length > inputCountBeforeSend,
+    'alternate-screen selection is written to terminal input',
+  );
+  const input = fixture.recordedInputs().at(-1)?.input ?? '';
+  if (
+    !input.includes('ink row zero updated') ||
+    !input.includes('ink stable row one') ||
+    !input.includes('ink row two updated') ||
+    input.includes('primary stale')
+  ) {
+    throw new Error(`unexpected alternate-screen selection text: ${JSON.stringify(input)}`);
+  }
+  assertions.push('alternate-screen composite selection contains only current rows');
+}
+
+async function runTerminalHistoryFindScenario() {
+  await clickTestId('empty-create-project-button');
+  await clickTestId('choose-project-folder-button');
+  await waitFor(
+    () => requireTestId('project-folder-selection').getAttribute('data-selected') === 'true',
+    'project folder is selected',
+  );
+  await waitFor(
+    () => !isDisabled(requireTestId('submit-project-button')),
+    'project submit enables',
+  );
+  await clickTestId('submit-project-button');
+  fillInput('focus-title-input', 'History Find Topic');
+  await waitFor(
+    () => !isDisabled(requireSelector(selectorForCli('codex_cli'))),
+    'Codex tile enables after the topic is named',
+  );
+  await clickCliChoice('codex_cli');
+  await expectTestId('terminal-body', 'history-find session opens terminal body');
+  await waitForTextIncludes('terminal-status-label', 'Running', 'history-find session starts');
+  const terminalId = await waitForTerminalId('history-find session has a terminal id');
+  const viewport = requireTestId<HTMLDivElement>('terminal-viewport');
+  viewport.style.height = `${TERMINAL_SURFACE.rows * TERMINAL_SURFACE.cellHeight}px`;
+  viewport.style.maxHeight = viewport.style.height;
+  await flushDom();
+
+  const fixture = fixtureHook();
+  fixture.stopStream(terminalId);
+  const lines = Array.from({ length: 160 }, (_, index) => {
+    if (index === 8) return 'lower needle first';
+    if (index === 96) return 'A界Needle second';
+    if (index === 144) return 'lower needle third';
+    return `history filler ${index}`;
+  });
+  fixture.emitRawTerminalFrame(terminalId, terminalHistoryFindFrame(lines));
+  await flushDom();
+
+  const input = requireTestId<HTMLTextAreaElement>('terminal-text-input');
+  input.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'f',
+      metaKey: true,
+    }),
+  );
+  await expectTestId('terminal-find-bar', 'Cmd-F opens terminal find');
+  fillInput('terminal-find-input', 'needle');
+  await waitForTextIncludes(
+    'terminal-find-count',
+    '1 / 3',
+    'find searches the replayed terminal history',
+  );
+  const firstMatchScrollTop = viewport.scrollTop;
+  await clickTestId('terminal-find-next');
+  await waitForTextIncludes(
+    'terminal-find-count',
+    '2 / 3',
+    'find next advances across replayed terminal history',
+  );
+  await waitFor(
+    () => viewport.scrollTop > firstMatchScrollTop,
+    'find next scrolls the replayed history viewport to the active match',
+  );
+  assertions.push('find next scrolls the replayed history viewport to the active match');
+  await waitFor(() => {
+    const localRow = Math.floor(TERMINAL_SURFACE.rows / 3) + OVERSCAN_ROWS;
+    const coveredWideCellSignal = canvasCellTopEdgeSignal(
+      requireTestId<HTMLCanvasElement>('terminal-canvas'),
+      localRow,
+      2,
+    );
+    const matchStartSignal = canvasCellTopEdgeSignal(
+      requireTestId<HTMLCanvasElement>('terminal-canvas'),
+      localRow,
+      3,
+    );
+    return matchStartSignal > coveredWideCellSignal * 1.2;
+  }, 'wide-cell find highlight starts after the wide glyph');
+  assertions.push('wide-cell find highlight starts after the wide glyph');
+  const secondMatchScrollTop = viewport.scrollTop;
+  await clickTestId('terminal-find-next');
+  await waitForTextIncludes(
+    'terminal-find-count',
+    '3 / 3',
+    'find next reaches matches outside the initial history window',
+  );
+  await waitFor(
+    () => viewport.scrollTop > secondMatchScrollTop,
+    'find next scrolls into a lazily fetched history window',
+  );
+  assertions.push('find next scrolls into a lazily fetched history window');
+  await clickTestId('terminal-find-prev');
+  await waitForTextIncludes(
+    'terminal-find-count',
+    '2 / 3',
+    'find previous returns across replayed terminal history',
+  );
+
+  await clickTestId('terminal-find-case-toggle');
+  await waitForTextIncludes(
+    'terminal-find-count',
+    '1 / 2',
+    'case-sensitive find recomputes replayed history matches',
+  );
+
+  await clickTestId('terminal-find-close');
+  await flushDom();
+  expectAbsentTestId('terminal-find-bar', 'closing find hides the terminal find bar');
+}
+
+function terminalFrameFromLines(
+  lines: string[],
+  options: {
+    alternateScreen?: boolean;
+    dirty?: TerminalFrame['dirty'];
+    rowOffset?: number;
+  } = {},
+): TerminalFrame {
+  const rowOffset = options.rowOffset ?? 0;
+  const dirty = options.dirty ?? 'full';
+  const totalRows = Math.max(TERMINAL_SURFACE.rows, rowOffset + lines.length);
+  return {
+    dirty,
+    rows: lines.map((line, lineIndex) => ({
+      index: rowOffset + lineIndex,
+      dirty: true,
+      cells: [...line].map((text, col) => ({ col, text })),
+    })),
+    cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+    modes: { alternateScreen: options.alternateScreen === true },
+    scrollback: {
+      totalRows,
+      scrollbackRows: Math.max(0, totalRows - TERMINAL_SURFACE.rows),
+      viewportOffset: 0,
+      viewportRows: TERMINAL_SURFACE.rows,
+      atBottom: true,
+    },
+  };
+}
+
+function terminalWideCellFrame(text: 'A界B'): TerminalFrame {
+  return {
+    dirty: 'full',
+    rows: [
+      {
+        index: 0,
+        dirty: true,
+        cells: [
+          { col: 0, text: text[0] ?? 'A' },
+          { col: 1, width: 2, text: text[1] ?? '界' },
+          { col: 3, text: text[2] ?? 'B' },
+        ],
+      },
+    ],
+    cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+    scrollback: {
+      totalRows: TERMINAL_SURFACE.rows,
+      scrollbackRows: 0,
+      viewportOffset: 0,
+      viewportRows: TERMINAL_SURFACE.rows,
+      atBottom: true,
+    },
+  };
+}
+
+function terminalHistoryFindFrame(lines: string[]): TerminalFrame {
+  const frame = terminalFrameFromLines(lines);
+  return {
+    ...frame,
+    rows: frame.rows.map(row =>
+      row.index === 96
+        ? {
+            ...row,
+            cells: [
+              { col: 0, text: 'A' },
+              { col: 1, width: 2, text: '界' },
+              ...'Needle second'.split('').map((text, index) => ({ col: 3 + index, text })),
+            ],
+          }
+        : row,
+    ),
+  };
+}
+
+function openContextMenu(canvas: HTMLCanvasElement, col: number, rowPx = 9) {
+  const rect = canvas.getBoundingClientRect();
+  canvas.dispatchEvent(
+    new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: rect.left + col * TERMINAL_SURFACE.cellWidth + 1,
+      clientY: rect.top + rowPx,
+    }),
+  );
+}
+
+function canvasRowFingerprint(canvas: HTMLCanvasElement, row: number) {
+  const backingScale = canvasBackingScale(canvas);
+  const cellHeight = TERMINAL_SURFACE.cellHeight * backingScale;
+  const cellWidth = TERMINAL_SURFACE.cellWidth * backingScale;
+  const x = 0;
+  const y = Math.max(0, Math.round(row * cellHeight));
+  const width = Math.max(1, Math.min(canvas.width, Math.round(cellWidth * 48)));
+  const height = Math.max(1, Math.min(canvas.height - y, Math.round(cellHeight)));
+  const data = canvasRegionPixels(canvas, x, y, width, height);
+  let hash = 2166136261;
+  let signal = 0;
+  for (let offset = 0; offset < data.length; offset += 4) {
+    const alpha = data[offset + 3] ?? 0;
+    signal += alpha;
+    hash ^= data[offset] ?? 0;
+    hash = Math.imul(hash, 16777619);
+    hash ^= data[offset + 1] ?? 0;
+    hash = Math.imul(hash, 16777619);
+    hash ^= data[offset + 2] ?? 0;
+    hash = Math.imul(hash, 16777619);
+    hash ^= alpha;
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${hash >>> 0}:${signal}`;
+}
+
+function canvasBackingScale(canvas: HTMLCanvasElement) {
+  const cssHeight =
+    parseCssPx(canvas.style.height) ||
+    canvas.getBoundingClientRect().height ||
+    canvas.height / (window.devicePixelRatio || 1);
+  return cssHeight > 0 ? canvas.height / cssHeight : window.devicePixelRatio || 1;
+}
+
+function parseCssPx(value: string) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function canvasCellTopEdgeSignal(canvas: HTMLCanvasElement, row: number, col: number) {
+  const backingScale = canvasBackingScale(canvas);
+  const cellHeight = TERMINAL_SURFACE.cellHeight * backingScale;
+  const cellWidth = TERMINAL_SURFACE.cellWidth * backingScale;
+  const x = Math.max(0, Math.round(col * cellWidth));
+  const y = Math.max(0, Math.round(row * cellHeight));
+  const width = Math.max(1, Math.round(cellWidth));
+  const height = Math.max(1, Math.round(Math.min(cellHeight, 2 * backingScale)));
+  const data = canvasRegionPixels(canvas, x, y, width, height);
+  let signal = 0;
+  for (let offset = 0; offset < data.length; offset += 4) {
+    signal += (data[offset] ?? 0) + (data[offset + 1] ?? 0) + (data[offset + 2] ?? 0);
+  }
+  return signal / Math.max(1, data.length / 4);
+}
+
+function canvasRegionPixels(
+  canvas: HTMLCanvasElement,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+) {
+  const snapshot = document.createElement('canvas');
+  snapshot.width = canvas.width;
+  snapshot.height = canvas.height;
+  const context = snapshot.getContext('2d');
+  if (context) {
+    try {
+      context.drawImage(canvas, 0, 0);
+      return context.getImageData(x, y, width, height).data;
+    } catch {
+      // Fall through to WebGL readback.
+    }
+  }
+
+  const gl = canvas.getContext('webgl2');
+  if (!gl) return new Uint8Array(width * height * 4);
+  const pixels = new Uint8Array(width * height * 4);
+  gl.finish();
+  gl.readPixels(x, canvas.height - y - height, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+  return pixels;
+}
+
+async function waitForFrontendActivity(expected: Record<string, boolean>, label: string) {
+  await waitFor(() => {
+    const latest = latestFrontendActivity();
+    return Object.entries(expected).every(
+      ([terminalId, active]) => latest.get(terminalId) === active,
+    );
+  }, label);
+  assertions.push(label);
+}
+
+function latestFrontendActivity() {
+  const latest = new Map<string, boolean>();
+  for (const event of fixtureHook().frontendActivityEvents()) {
+    latest.set(event.terminalId, event.active);
+  }
+  return latest;
 }
 
 async function waitForTerminalId(label: string) {
@@ -409,6 +1390,156 @@ async function closeActiveSessionTab() {
   if (!closeButton) throw new Error('Could not find active session tab close control');
   closeButton.click();
   await flushDom();
+  if (queryByTestId('confirm-accept')) {
+    await clickTestId('confirm-accept');
+  }
+  await flushDom();
+}
+
+async function expectCanvasPainted(canvas: HTMLCanvasElement, label: string) {
+  await waitFor(() => canvasHasVisibleVariance(canvas), label);
+  assertions.push(label);
+}
+
+async function expectDirtyPaintPreservesUntouchedRows(
+  renderer: ReturnType<typeof createTerminalGpuRenderer>,
+  canvas: HTMLCanvasElement,
+  cols: number,
+  rows: number,
+) {
+  const guardRow = rows - 1;
+  renderer.paintFrame(makeSyntheticFrame(3000, { cols, rows }));
+  await nextAnimationFrame();
+  const before = canvasRowFingerprint(canvas, guardRow);
+
+  renderer.paintFrame(
+    makeSyntheticFrame(0, {
+      cols,
+      rows,
+      dirtyOnly: true,
+      dirtyRowsPerFrame: 1,
+    }),
+  );
+  await nextAnimationFrame();
+
+  const after = canvasRowFingerprint(canvas, guardRow);
+  if (after !== before) {
+    throw new Error(`dirty-row WebGL2 paint changed untouched row ${guardRow}`);
+  }
+  assertions.push('dirty-row WebGL2 paints preserve untouched rows');
+}
+
+interface RenderTimingSummary {
+  frames: number;
+  avgMs: number;
+  p95Ms: number;
+  maxMs: number;
+  slowFrames: number;
+}
+
+async function measureRendererFrames(
+  renderer: ReturnType<typeof createTerminalGpuRenderer>,
+  frameAt: (index: number) => TerminalFrame,
+) {
+  const samples: number[] = [];
+  for (let frameIndex = 0; frameIndex < 90; frameIndex += 1) {
+    await nextAnimationFrame();
+    const started = performance.now();
+    renderer.paintFrame(frameAt(frameIndex));
+    samples.push(performance.now() - started);
+  }
+
+  return summarizeRenderTimings(samples);
+}
+
+function summarizeRenderTimings(samples: number[]): RenderTimingSummary {
+  return {
+    frames: samples.length,
+    avgMs: samples.reduce((sum, sample) => sum + sample, 0) / Math.max(1, samples.length),
+    p95Ms: percentile(samples, 0.95),
+    maxMs: Math.max(0, ...samples),
+    slowFrames: samples.filter(sample => sample > 16.7).length,
+  };
+}
+
+function assertRendererBudget(
+  summary: RenderTimingSummary,
+  label: string,
+  budget: { p95Ms: number; avgMs: number; slowFrames: number },
+) {
+  const message = `${label}: avg=${summary.avgMs.toFixed(2)}ms p95=${summary.p95Ms.toFixed(
+    2,
+  )}ms max=${summary.maxMs.toFixed(2)}ms slow=${summary.slowFrames}/${summary.frames}`;
+  if (
+    summary.p95Ms > budget.p95Ms ||
+    summary.avgMs > budget.avgMs ||
+    summary.slowFrames > budget.slowFrames
+  ) {
+    throw new Error(message);
+  }
+  assertions.push(message);
+}
+
+function canvasHasVisibleVariance(canvas: HTMLCanvasElement) {
+  if (canvas.width <= 0 || canvas.height <= 0) return false;
+
+  if (snapshotCanvasHasVisibleVariance(canvas)) return true;
+
+  const gl = canvas.getContext('webgl2');
+  if (gl) {
+    const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+    gl.finish();
+    gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    return imageHasVisibleVariance(pixels);
+  }
+
+  const context = canvas.getContext('2d');
+  if (!context) return false;
+  try {
+    return imageHasVisibleVariance(context.getImageData(0, 0, canvas.width, canvas.height).data);
+  } catch {
+    return false;
+  }
+}
+
+function snapshotCanvasHasVisibleVariance(canvas: HTMLCanvasElement) {
+  const snapshot = document.createElement('canvas');
+  snapshot.width = canvas.width;
+  snapshot.height = canvas.height;
+  const context = snapshot.getContext('2d');
+  if (!context) return false;
+  try {
+    context.drawImage(canvas, 0, 0);
+    return imageHasVisibleVariance(
+      context.getImageData(0, 0, snapshot.width, snapshot.height).data,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function imageHasVisibleVariance(data: Uint8Array | Uint8ClampedArray) {
+  if (data.length < 8) return false;
+  const baseR = data[0] ?? 0;
+  const baseG = data[1] ?? 0;
+  const baseB = data[2] ?? 0;
+  const baseA = data[3] ?? 0;
+
+  for (let offset = 4; offset < data.length; offset += 16) {
+    const alpha = data[offset + 3] ?? 0;
+    if (alpha <= 0) continue;
+    const delta =
+      Math.abs((data[offset] ?? 0) - baseR) +
+      Math.abs((data[offset + 1] ?? 0) - baseG) +
+      Math.abs((data[offset + 2] ?? 0) - baseB) +
+      Math.abs(alpha - baseA);
+    if (delta > 12) return true;
+  }
+  return false;
+}
+
+async function nextAnimationFrame() {
+  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 }
 
 async function expectTestId(testId: string, label: string) {

@@ -1,6 +1,10 @@
 use anyhow::Result;
+use std::collections::HashMap;
+
+use libghostty_vt::ffi;
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
+use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::{RgbColor, Style, Underline as GhosttyUnderline};
 use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
@@ -13,6 +17,8 @@ use serde::Serialize;
 
 const DEFAULT_CELL_WIDTH_PX: u32 = 9;
 const DEFAULT_CELL_HEIGHT_PX: u32 = 18;
+const SCROLLBACK_BYTES_PER_CELL: usize = 16;
+const MIN_SCROLLBACK_BYTES: usize = 1024 * 1024;
 
 /// One substring match in the terminal buffer. `row` is the screen row index
 /// from the top of the current buffer (scrollback included); columns are
@@ -33,6 +39,14 @@ pub struct TerminalSearchResult {
     /// Total matches found (may exceed `matches.len()` when capped).
     pub total: usize,
     pub capped: bool,
+    pub total_rows: usize,
+}
+
+struct PendingSearchMatch {
+    row: usize,
+    start_chars: usize,
+    end_chars: usize,
+    line_text: String,
 }
 
 /// Ghostty-backed terminal state for converting VT byte streams into Reverie frames.
@@ -44,6 +58,7 @@ pub struct GhosttyTerminalState<'alloc, 'cb> {
     terminal: Terminal<'alloc, 'cb>,
     render_state: RenderState<'alloc>,
     force_next_full_frame: bool,
+    last_frame: Option<TerminalFrame>,
 }
 
 impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
@@ -56,11 +71,16 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
             })?,
             render_state: RenderState::new()?,
             force_next_full_frame: true,
+            last_frame: None,
         })
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+    }
+
+    pub fn sync_output_mode(&self) -> Result<bool> {
+        Ok(self.terminal.mode(Mode::SYNC_OUTPUT)?)
     }
 
     /// The terminal title most recently set by the program via OSC 0/1/2, or
@@ -122,6 +142,9 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
     }
 
     pub fn scroll_bottom(&mut self) {
+        if matches!(self.is_viewport_at_bottom(), Ok(true)) {
+            return;
+        }
         self.terminal.scroll_viewport(ScrollViewport::Bottom);
         self.force_next_full_frame = true;
     }
@@ -156,43 +179,65 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         Ok(())
     }
 
+    /// Scroll the viewport so `row` is the first rendered row, clamped to the
+    /// last valid viewport start. Unlike `scroll_to_row`, this is exact and is
+    /// used by windowed history replay.
+    pub fn scroll_to_row_start(&mut self, row: usize) -> Result<()> {
+        let scrollbar = self.terminal.scrollbar()?;
+        let total = scrollbar.total as usize;
+        let len = scrollbar.len as usize;
+        let offset = scrollbar.offset as usize;
+        let max_offset = total.saturating_sub(len);
+        let target = row.min(max_offset);
+        let delta = target as isize - offset as isize;
+        if delta != 0 {
+            self.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+            self.force_next_full_frame = true;
+        }
+        Ok(())
+    }
+
     /// Substring search over the whole current buffer (viewport + scrollback) as
     /// plain text. Case-insensitive when `case_sensitive` is false. Stops
     /// collecting matches at `max_matches` but keeps counting (so the UI can show
     /// "N+"). Matches are within a single rendered row (v1 does not span wraps).
     pub fn search(
-        &self,
+        &mut self,
         query: &str,
         case_sensitive: bool,
         max_matches: usize,
     ) -> Result<TerminalSearchResult> {
+        let total_rows = self.total_rows()?;
         if query.is_empty() {
             return Ok(TerminalSearchResult {
                 matches: Vec::new(),
                 total: 0,
                 capped: false,
+                total_rows,
             });
         }
-        let mut formatter = Formatter::new(
-            &self.terminal,
-            FormatterOptions {
-                format: Format::Plain,
-                trim: true,
-                unwrap: false,
-            },
-        )?;
-        let len = formatter.format_len()?;
-        let mut buf = vec![0u8; len];
-        let written = formatter.format_buf(&mut buf)?;
-        buf.truncate(written);
-        let text = String::from_utf8_lossy(&buf);
+        let text = {
+            let mut formatter = Formatter::new(
+                &self.terminal,
+                FormatterOptions {
+                    format: Format::Plain,
+                    trim: true,
+                    unwrap: false,
+                },
+            )?;
+            let len = formatter.format_len()?;
+            let mut buf = vec![0u8; len];
+            let written = formatter.format_buf(&mut buf)?;
+            buf.truncate(written);
+            String::from_utf8_lossy(&buf).into_owned()
+        };
 
         let needle = if case_sensitive {
             query.to_owned()
         } else {
             query.to_lowercase()
         };
-        let mut matches = Vec::new();
+        let mut pending_matches = Vec::new();
         let mut total = 0_usize;
         let mut capped = false;
 
@@ -207,13 +252,11 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
                 let byte_start = from + rel;
                 let byte_end = byte_start + needle.len();
                 total += 1;
-                if matches.len() < max_matches {
-                    matches.push(TerminalSearchMatch {
+                if pending_matches.len() < max_matches {
+                    pending_matches.push(PendingSearchMatch {
                         row,
-                        // Cell columns are char offsets (1:1 with cells for the
-                        // BMP text terminals emit; wide glyphs are approximate).
-                        start_col: haystack[..byte_start].chars().count() as u16,
-                        end_col: haystack[..byte_end].chars().count() as u16,
+                        start_chars: haystack[..byte_start].chars().count(),
+                        end_chars: haystack[..byte_end].chars().count(),
                         line_text: line.to_owned(),
                     });
                 } else {
@@ -226,23 +269,150 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
             }
         }
 
+        let original_offset = self.terminal.scrollbar()?.offset as usize;
+        let cols = self.terminal.cols()?;
+        let mut row_cache = HashMap::new();
+        let mut matches = Vec::with_capacity(pending_matches.len());
+        for pending in pending_matches {
+            if !row_cache.contains_key(&pending.row) {
+                let row = self.absolute_row(pending.row).ok().flatten();
+                row_cache.insert(pending.row, row);
+            }
+            let row = row_cache.get(&pending.row).and_then(Option::as_ref);
+            let (start_col, end_col) = row
+                .map(|row| {
+                    cell_span_for_char_range(row, cols, pending.start_chars, pending.end_chars)
+                })
+                .unwrap_or((
+                    saturating_usize_to_u16(pending.start_chars),
+                    saturating_usize_to_u16(pending.end_chars),
+                ));
+            matches.push(TerminalSearchMatch {
+                row: pending.row,
+                start_col,
+                end_col,
+                line_text: pending.line_text,
+            });
+        }
+        self.scroll_to_row_start(original_offset)?;
+        self.force_next_full_frame = true;
+
         Ok(TerminalSearchResult {
             matches,
             total,
             capped,
+            total_rows,
         })
     }
 
-    pub fn frame(&mut self) -> Result<TerminalFrame> {
-        let mut frame = extract_frame(&mut self.render_state, &self.terminal)?;
-        if std::mem::take(&mut self.force_next_full_frame) {
-            frame.dirty = TerminalDirtyState::Full;
-            for row in &mut frame.rows {
-                row.dirty = true;
-            }
-        }
-        Ok(frame)
+    fn absolute_row(&mut self, row: usize) -> Result<Option<TerminalRow>> {
+        self.scroll_to_row_start(row)?;
+        let scrollbar = self.terminal.scrollbar()?;
+        let offset = scrollbar.offset as usize;
+        let local_row = match row.checked_sub(offset) {
+            Some(local) => local,
+            None => return Ok(None),
+        };
+        let frame = self.frame()?;
+        Ok(frame
+            .rows
+            .into_iter()
+            .find(|terminal_row| usize::from(terminal_row.index) == local_row))
     }
+
+    pub fn frame(&mut self) -> Result<TerminalFrame> {
+        let force_full_frame = std::mem::take(&mut self.force_next_full_frame);
+        let frame = extract_frame(&mut self.render_state, &self.terminal)?;
+        Ok(self.diff_frame(frame, force_full_frame))
+    }
+
+    fn diff_frame(&mut self, mut frame: TerminalFrame, force_full_frame: bool) -> TerminalFrame {
+        let previous = self.last_frame.replace(canonical_frame(&frame));
+        let Some(previous) = previous else {
+            mark_full_frame(&mut frame);
+            return frame;
+        };
+
+        if force_full_frame || needs_full_frame(&previous, &frame) {
+            mark_full_frame(&mut frame);
+            return frame;
+        }
+
+        let changed_rows = changed_rows(&previous.rows, &frame.rows);
+        let cursor_changed = previous.cursor != frame.cursor;
+        frame.rows = changed_rows;
+        if frame.rows.is_empty() && !cursor_changed {
+            frame.dirty = TerminalDirtyState::Clean;
+        } else {
+            frame.dirty = TerminalDirtyState::Partial;
+        }
+        frame
+    }
+}
+
+/// Convert Reverie's user-facing scrollback row budget to Ghostty's byte budget.
+///
+/// libghostty-vt names this option `max_scrollback`, but Ghostty's screen
+/// implementation treats it as bytes. Keep the app contract in rows and give
+/// Ghostty enough backing storage for typical styled terminal cells.
+pub fn ghostty_scrollback_bytes_for_rows(rows: usize, cols: u16) -> usize {
+    if rows == 0 {
+        return 0;
+    }
+    let cols = usize::from(cols.max(1));
+    rows.saturating_mul(cols)
+        .saturating_mul(SCROLLBACK_BYTES_PER_CELL)
+        .max(MIN_SCROLLBACK_BYTES)
+}
+
+fn canonical_frame(frame: &TerminalFrame) -> TerminalFrame {
+    let mut canonical = frame.clone();
+    canonical.dirty = TerminalDirtyState::Clean;
+    for row in &mut canonical.rows {
+        row.dirty = false;
+    }
+    canonical
+}
+
+fn mark_full_frame(frame: &mut TerminalFrame) {
+    frame.dirty = TerminalDirtyState::Full;
+    for row in &mut frame.rows {
+        row.dirty = true;
+    }
+}
+
+fn needs_full_frame(previous: &TerminalFrame, frame: &TerminalFrame) -> bool {
+    previous.colors != frame.colors
+        || previous.cols != frame.cols
+        || previous.modes != frame.modes
+        || previous.rows.len() != frame.rows.len()
+        || previous.scrollback.viewport_offset != frame.scrollback.viewport_offset
+        || previous.scrollback.viewport_rows != frame.scrollback.viewport_rows
+        || frame.scrollback.total_rows < previous.scrollback.total_rows
+}
+
+fn changed_rows(previous: &[TerminalRow], current: &[TerminalRow]) -> Vec<TerminalRow> {
+    let previous_by_index = previous
+        .iter()
+        .map(|row| (row.index, row))
+        .collect::<HashMap<_, _>>();
+    current
+        .iter()
+        .filter_map(|row| {
+            let changed = previous_by_index
+                .get(&row.index)
+                .is_none_or(|previous| row_cells_changed(previous, row));
+            changed.then(|| {
+                let mut row = row.clone();
+                row.dirty = true;
+                row
+            })
+        })
+        .collect()
+}
+
+fn row_cells_changed(previous: &TerminalRow, current: &TerminalRow) -> bool {
+    previous.cells != current.cells
 }
 
 fn extract_frame<'alloc, 'cb>(
@@ -250,6 +420,7 @@ fn extract_frame<'alloc, 'cb>(
     terminal: &Terminal<'alloc, 'cb>,
 ) -> Result<TerminalFrame> {
     let snapshot = render_state.update(terminal)?;
+    let dirty_state = map_dirty(snapshot.dirty()?);
     let colors = snapshot.colors()?;
     let cursor_viewport = snapshot.cursor_viewport()?;
     let scrollbar = terminal.scrollbar()?;
@@ -281,16 +452,29 @@ fn extract_frame<'alloc, 'cb>(
         let mut col = 0_u16;
 
         while let Some(cell) = cell_iteration.next() {
+            let width = match cell.raw_cell()?.wide()? {
+                CellWide::Narrow => 1,
+                CellWide::Wide => 2,
+                CellWide::SpacerTail | CellWide::SpacerHead => {
+                    col = col.saturating_add(1);
+                    continue;
+                }
+            };
             let text = cell_text(cell)?;
-            let style = cell.style()?;
+            let fg = cell.fg_color()?.map(map_color);
+            let bg = cell.bg_color()?.map(map_color);
+            let style = map_cell_style(cell.style()?);
 
-            cells.push(TerminalCell {
-                col,
-                text,
-                fg: cell.fg_color()?.map(map_color),
-                bg: cell.bg_color()?.map(map_color),
-                style: map_cell_style(style),
-            });
+            if !is_default_blank_cell(width, &text, fg, bg, &style) {
+                cells.push(TerminalCell {
+                    col,
+                    width,
+                    text,
+                    fg,
+                    bg,
+                    style,
+                });
+            }
 
             col = col.saturating_add(1);
         }
@@ -304,7 +488,8 @@ fn extract_frame<'alloc, 'cb>(
     }
 
     Ok(TerminalFrame {
-        dirty: map_dirty(snapshot.dirty()?),
+        dirty: dirty_state,
+        cols: terminal.cols()?,
         colors: TerminalColors {
             foreground: map_color(colors.foreground),
             background: map_color(colors.background),
@@ -317,6 +502,8 @@ fn extract_frame<'alloc, 'cb>(
             bracketed_paste: terminal.mode(Mode::BRACKETED_PASTE)?,
             sync_output: terminal.mode(Mode::SYNC_OUTPUT)?,
             mouse_tracking: terminal.is_mouse_tracking()?,
+            alternate_screen: terminal.active_screen()?
+                == ffi::GhosttyTerminalScreen_GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
             kitty_keyboard_flags: terminal.kitty_keyboard_flags()?.bits(),
         },
         scrollback: TerminalScrollback {
@@ -346,6 +533,56 @@ fn cell_text(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<Stri
     }
 
     Ok(cell.graphemes()?.into_iter().collect())
+}
+
+fn cell_span_for_char_range(
+    row: &TerminalRow,
+    cols: u16,
+    start_chars: usize,
+    end_chars: usize,
+) -> (u16, u16) {
+    let boundaries = row_text_boundaries(row, cols);
+    let max = boundaries.len().saturating_sub(1);
+    let start = start_chars.min(max);
+    let end = end_chars.min(max).max(start);
+    (boundaries[start], boundaries[end])
+}
+
+fn row_text_boundaries(row: &TerminalRow, cols: u16) -> Vec<u16> {
+    let mut boundaries = vec![0_u16];
+    let mut col = 0_u16;
+    let mut cells = row.cells.iter().collect::<Vec<_>>();
+    cells.sort_by_key(|cell| cell.col);
+
+    for cell in cells {
+        let start = cell.col.min(cols);
+        let end = cell.col.saturating_add(cell.width.max(1)).min(cols);
+        if start >= cols || end <= col {
+            continue;
+        }
+        while col < start {
+            boundaries.push(col.saturating_add(1));
+            col = col.saturating_add(1);
+        }
+        append_text_boundaries(&mut boundaries, &cell.text, start, end);
+        col = end;
+    }
+
+    boundaries
+}
+
+fn append_text_boundaries(boundaries: &mut Vec<u16>, text: &str, start: u16, end: u16) {
+    let len = text.chars().count();
+    if len == 0 {
+        return;
+    }
+    for index in 1..=len {
+        boundaries.push(if index == len { end } else { start });
+    }
+}
+
+fn saturating_usize_to_u16(value: usize) -> u16 {
+    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 fn map_dirty(dirty: Dirty) -> TerminalDirtyState {
@@ -378,9 +615,36 @@ fn map_cell_style(style: Style) -> TerminalCellStyle {
     TerminalCellStyle {
         bold: style.bold,
         italic: style.italic,
+        faint: style.faint,
+        blink: style.blink,
+        invisible: style.invisible,
         underline: map_underline(style.underline),
         inverse: style.inverse,
+        strikethrough: style.strikethrough,
+        overline: style.overline,
     }
+}
+
+fn is_default_blank_cell(
+    width: u16,
+    text: &str,
+    fg: Option<TerminalColor>,
+    bg: Option<TerminalColor>,
+    style: &TerminalCellStyle,
+) -> bool {
+    width == 1
+        && text == " "
+        && fg.is_none()
+        && bg.is_none()
+        && !style.bold
+        && !style.italic
+        && !style.faint
+        && !style.blink
+        && !style.invisible
+        && style.underline == TerminalUnderline::None
+        && !style.inverse
+        && !style.strikethrough
+        && !style.overline
 }
 
 fn map_underline(underline: GhosttyUnderline) -> TerminalUnderline {
@@ -414,6 +678,52 @@ mod tests {
 
         assert!(rendered.contains("Reverie terminal backend"));
         assert_eq!(frame.rows.len(), 8);
+    }
+
+    #[test]
+    fn ghostty_terminal_state_preserves_wide_cell_widths() {
+        let mut terminal = GhosttyTerminalState::new(20, 4, 100).unwrap();
+        terminal.write("A界B\r\n".as_bytes());
+        let frame = terminal.frame().unwrap();
+        let row = frame.rows.iter().find(|row| row.index == 0).unwrap();
+
+        let cells = row
+            .cells
+            .iter()
+            .filter(|cell| {
+                cell.text.trim().is_empty() || ["A", "界", "B"].contains(&cell.text.as_str())
+            })
+            .collect::<Vec<_>>();
+
+        let a = cells.iter().find(|cell| cell.text == "A").unwrap();
+        let wide = cells.iter().find(|cell| cell.text == "界").unwrap();
+        let b = cells.iter().find(|cell| cell.text == "B").unwrap();
+
+        assert_eq!((a.col, a.width), (0, 1));
+        assert_eq!((wide.col, wide.width), (1, 2));
+        assert_eq!((b.col, b.width), (3, 1));
+        assert!(
+            !row.cells
+                .iter()
+                .any(|cell| cell.col == 2 && cell.text == " ")
+        );
+    }
+
+    #[test]
+    fn ghostty_terminal_search_maps_wide_cells_to_cell_columns() {
+        let mut terminal = GhosttyTerminalState::new(20, 4, 100).unwrap();
+        terminal.write("A界B\r\n".as_bytes());
+
+        let after_wide = terminal.search("B", false, 10).unwrap();
+        assert_eq!(after_wide.total, 1);
+        assert_eq!(after_wide.matches[0].start_col, 3);
+        assert_eq!(after_wide.matches[0].end_col, 4);
+
+        let across_wide = terminal.search("界B", false, 10).unwrap();
+        assert_eq!(across_wide.total, 1);
+        assert_eq!(across_wide.matches[0].start_col, 1);
+        assert_eq!(across_wide.matches[0].end_col, 4);
+        assert_eq!(across_wide.matches[0].line_text, "A界B");
     }
 
     #[test]
@@ -469,7 +779,7 @@ mod tests {
 
     #[test]
     fn ghostty_terminal_state_preserves_truecolor_cells() {
-        let mut terminal = GhosttyTerminalState::new(24, 4, 100).unwrap();
+        let mut terminal = GhosttyTerminalState::new(40, 4, 100).unwrap();
         terminal.write(b"\x1b[38;2;1;2;3mfg\x1b[48;2;4;5;6mbg\x1b[0m\r\n");
         let frame = terminal.frame().unwrap();
         let styled_cell = frame.rows[0]
@@ -500,6 +810,46 @@ mod tests {
             .expect("inverse video cell should render");
 
         assert!(inverse_cell.style.inverse);
+    }
+
+    #[test]
+    fn ghostty_terminal_state_preserves_text_decoration_styles() {
+        let mut terminal = GhosttyTerminalState::new(40, 4, 100).unwrap();
+        terminal.write(
+            b"\x1b[2mfaint\x1b[0m \x1b[5mblink\x1b[0m \x1b[8minvis\x1b[0m \x1b[9mstrike\x1b[0m \x1b[53mover\x1b[0m\r\n",
+        );
+        let frame = terminal.frame().unwrap();
+        let faint_cell = frame.rows[0]
+            .cells
+            .iter()
+            .find(|cell| cell.text == "f")
+            .expect("faint cell should render");
+        let blink_cell = frame.rows[0]
+            .cells
+            .iter()
+            .find(|cell| cell.text == "b")
+            .expect("blink cell should render");
+        let invisible_cell = frame.rows[0]
+            .cells
+            .iter()
+            .find(|cell| cell.text == "v")
+            .expect("invisible cell should render");
+        let strike_cell = frame.rows[0]
+            .cells
+            .iter()
+            .find(|cell| cell.text == "r")
+            .expect("strikethrough cell should render");
+        let overline_cell = frame.rows[0]
+            .cells
+            .iter()
+            .find(|cell| cell.text == "o")
+            .expect("overline cell should render");
+
+        assert!(faint_cell.style.faint);
+        assert!(blink_cell.style.blink);
+        assert!(invisible_cell.style.invisible);
+        assert!(strike_cell.style.strikethrough);
+        assert!(overline_cell.style.overline);
     }
 
     #[test]
@@ -559,21 +909,65 @@ mod tests {
     #[test]
     fn ghostty_terminal_state_exposes_input_modes_to_frontend() {
         let mut terminal = GhosttyTerminalState::new(40, 8, 100).unwrap();
-        terminal.write(b"\x1b[?1h\x1b[?66h\x1b[?2004h\x1b[?2026h");
+        terminal.write(b"\x1b[?1h\x1b[?66h\x1b[?2004h\x1b[?2026h\x1b[?1049h");
         let frame = terminal.frame().unwrap();
 
         assert!(frame.modes.cursor_key_application);
         assert!(frame.modes.keypad_key_application);
         assert!(frame.modes.bracketed_paste);
         assert!(frame.modes.sync_output);
+        assert!(frame.modes.alternate_screen);
 
-        terminal.write(b"\x1b[?1l\x1b[?66l\x1b[?2004l\x1b[?2026l");
+        terminal.write(b"\x1b[?1l\x1b[?66l\x1b[?2004l\x1b[?2026l\x1b[?1049l");
         let frame = terminal.frame().unwrap();
 
         assert!(!frame.modes.cursor_key_application);
         assert!(!frame.modes.keypad_key_application);
         assert!(!frame.modes.bracketed_paste);
         assert!(!frame.modes.sync_output);
+        assert!(!frame.modes.alternate_screen);
+    }
+
+    #[test]
+    fn ghostty_terminal_state_preserves_alternate_screen_redraw_rows() {
+        let mut terminal = GhosttyTerminalState::new(40, 6, 100).unwrap();
+        terminal.write(b"\x1b[?1049h\x1b[Hstatus-one\r\nstable-line");
+        let first = terminal.frame().unwrap();
+
+        assert!(first.modes.alternate_screen);
+        assert_eq!(first.rows[0].plain_text().trim_end(), "status-one");
+        assert_eq!(first.rows[1].plain_text().trim_end(), "stable-line");
+
+        terminal.write(b"\x1b[Hstatus-two");
+        let second = terminal.frame().unwrap();
+
+        assert!(second.modes.alternate_screen);
+        assert_eq!(second.dirty, TerminalDirtyState::Partial);
+        assert!(
+            second
+                .rows
+                .iter()
+                .any(|row| row.index == 0 && row.plain_text().trim_end() == "status-two")
+        );
+        assert!(second.rows.iter().all(|row| row.dirty));
+        assert!(second.rows.iter().any(|row| row.index == 0 && row.dirty));
+        assert!(!second.rows.iter().any(|row| row.index == 1));
+    }
+
+    #[test]
+    fn changed_rows_ignores_stale_dirty_flags() {
+        let mut previous = test_frame(TerminalDirtyState::Full, 3);
+        let mut current = test_frame(TerminalDirtyState::Full, 3);
+        previous.rows[1].cells.push(test_cell("old"));
+        current.rows[1].cells.push(test_cell("new"));
+        current.rows[2].dirty = true;
+
+        let rows = changed_rows(&previous.rows, &current.rows);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].index, 1);
+        assert!(rows[0].dirty);
+        assert_eq!(rows[0].plain_text(), "new");
     }
 
     #[test]
@@ -624,6 +1018,41 @@ mod tests {
         assert_eq!(top.rows[0].plain_text().trim_end(), "L01");
     }
 
+    #[test]
+    fn scroll_bottom_does_not_force_clean_tail_frame_full() {
+        let mut terminal = GhosttyTerminalState::new(24, 4, 100).unwrap();
+        terminal.write(b"status-one\r\nstable-line");
+        let _ = terminal.frame().unwrap();
+
+        terminal.scroll_bottom();
+        let _ = terminal.frame().unwrap();
+        terminal.scroll_bottom();
+        let frame = terminal.frame().unwrap();
+
+        assert_eq!(frame.dirty, TerminalDirtyState::Clean);
+        assert!(frame.rows.is_empty());
+    }
+
+    #[test]
+    fn ghostty_terminal_state_forces_full_frame_when_viewport_offset_changes() {
+        let mut terminal = GhosttyTerminalState::new(24, 3, 100).unwrap();
+        for _ in 0..4 {
+            terminal.write(b"repeat\r\n");
+        }
+        let before = terminal.frame().unwrap();
+
+        terminal.write(b"repeat\r\n");
+        let after = terminal.frame().unwrap();
+
+        assert!(
+            after.scrollback.viewport_offset > before.scrollback.viewport_offset,
+            "test setup must advance the viewport offset"
+        );
+        assert_eq!(after.dirty, TerminalDirtyState::Full);
+        assert_eq!(after.rows.len(), 3);
+        assert!(after.rows.iter().all(|row| row.dirty));
+    }
+
     fn count_non_empty_rows(frame: &TerminalFrame) -> usize {
         frame
             .rows
@@ -643,5 +1072,57 @@ mod tests {
             .chars()
             .filter(|ch| !ch.is_whitespace())
             .collect::<String>()
+    }
+
+    fn test_frame(dirty: TerminalDirtyState, rows: u16) -> TerminalFrame {
+        TerminalFrame {
+            dirty,
+            cols: 0,
+            colors: TerminalColors {
+                foreground: TerminalColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+                background: TerminalColor { r: 0, g: 0, b: 0 },
+                cursor: None,
+            },
+            cursor: TerminalCursor {
+                visible: false,
+                blinking: false,
+                style: TerminalCursorStyle::Block,
+                position: None,
+            },
+            modes: TerminalModes::default(),
+            scrollback: TerminalScrollback::default(),
+            rows: (0..rows)
+                .map(|index| TerminalRow {
+                    index,
+                    dirty: true,
+                    cells: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn test_cell(text: &str) -> TerminalCell {
+        TerminalCell {
+            col: 0,
+            width: 1,
+            text: text.to_owned(),
+            fg: None,
+            bg: None,
+            style: TerminalCellStyle {
+                bold: false,
+                italic: false,
+                faint: false,
+                blink: false,
+                invisible: false,
+                underline: TerminalUnderline::None,
+                inverse: false,
+                strikethrough: false,
+                overline: false,
+            },
+        }
     }
 }

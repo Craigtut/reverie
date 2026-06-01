@@ -216,36 +216,58 @@ A minimal Tauri v2 desktop shell now exists under `apps/desktop/src-tauri/`, wit
 What it currently implements:
 
 - The frontend now runs as the real Vite/React app surface under the monorepo desktop app path, with npm scripts kept at the repository root.
-- `apps/desktop/web/terminal-canvas-renderer.js` owns the legacy imperative Canvas terminal renderer proof boundary: sizing, dirty-row painting, cursor drawing, and synthetic frame generation.
-- `apps/desktop/web/terminal-render-proof.js` remains the syntax-checked proof harness around that renderer, rendering synthetic Reverie-style `TerminalFrame` data to a Canvas surface sized at `120x36` cells.
-- The proof measures synthetic rendering modes, batch Ghostty frame rendering, and live PTY/Ghostty/Tauri event streaming.
+- `apps/desktop/web/terminal-gpu-renderer.ts` owns the current WebGL2-first imperative renderer boundary: backend selection, glyph atlas, cell painting, cursor drawing, overlays, and Canvas 2D fallback.
+- `apps/desktop/web/terminal-canvas-renderer.ts` remains the Canvas fallback and synthetic frame fixture helper.
+- Reverie's `TerminalCell` model now carries Ghostty's cell width, so wide CJK and emoji cells can be cached, painted, selected, searched, link-hit-tested, highlighted, and cursor-filled without the frontend guessing display geometry. Deep-history search also maps match text offsets back through Ghostty-rendered cells before returning row spans.
+- Ghostty-derived partial frames now extract and cross the Tauri boundary as dirty-row diffs rather than full visible-row snapshots. The frontend cache owns unchanged rows, while forced full frames still carry the complete viewport for first paint, resize, scroll jumps, and history replay.
+- Deep-history replay now preserves the real terminal surface height when rebuilding Ghostty state. Frontend scroll caches may request larger windows, but Rust stitches those windows from multiple correctly-sized viewport snapshots so Ink-style redraws and Claude Code resume output do not see a different terminal geometry during replay.
+- Durable transcript capture now records a fresh-PTY run index per launch. Deep-history replay and search replay each run in a clean Ghostty state, then stitch row windows and match rows into one history coordinate space, which matches resumptions without carrying stale TUI state across launches.
+- For local transcripts captured before that run index existed, replay infers Claude Code fresh-launch boundaries from Claude's terminal initialization marker in the first transcript run segment. This keeps legacy Ink redraws from corrupting history by being replayed as one continuous PTY without splitting newer explicit resumed runs a second time.
+- History-window requests now return wider backend prefetch bands and keep a small rendered-window cache in the Rust runtime. The terminal still replays with the real viewport height, while adjacent frontend scroll misses can reuse a cached band instead of forcing repeated full transcript replays.
+- The production terminal controller now emits paint-loop samples, and runtime session metrics include renderer backend, frame/scroll paint timing, rows/cells painted, WebGL draw calls, GPU upload bytes, and glyph-atlas churn.
+- The interaction island now forwards modern SGR 1006 mouse tracking input to the PTY when Ghostty reports mouse tracking mode, while Shift keeps local selection/context-menu behavior available.
+- The terminal surface now uses a hidden textarea for focus, paste, and IME composition. The input is positioned on the rendered cursor cell and committed text is forwarded through the same PTY input path as normal key events.
+- The frontend now pushes active/background terminal priority into the Rust runtime. Active terminals keep the 16 ms frame cadence; background terminals still process PTY output and transcript capture, but their `terminal_frame` events are throttled to a lower cadence so several live sessions do not all drive 60 FPS WebView events.
+- The old JavaScript render proof has been superseded by the React harness plus TypeScript renderer tests.
+- The historical proof measured synthetic rendering modes, batch Ghostty frame rendering, and live PTY/Ghostty/Tauri event streaming.
 - The Tauri shell exposes a `ghostty_frame_sequence` invoke command that builds real `libghostty-vt` terminal state, extracts Ghostty-derived Reverie `TerminalFrame` snapshots, and returns them across the desktop command boundary.
-- The shell also exposes `start_live_pty_stream_proof`, which spawns a controlled `/bin/sh` process in a real PTY, feeds output into Ghostty VT state, emits `TerminalFrame` updates through Tauri events, and lets the WebView Canvas renderer measure paint/cadence/backpressure.
-- The WebView proof can render both the returned Ghostty frame batch and the live event stream, then report metrics back through a Rust command.
-- The Tauri shell auto-runs the Ghostty bridge proof and live stream proof in the desktop WebView, making the proof reproducible from `cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml`.
-- Root Rust tests pass with `cargo test`; frontend syntax passes with `node --check apps/desktop/web/terminal-render-proof.js`; the Tauri shell passes `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml` when Zig `0.15.2` is on `PATH`.
+- The production `start_session` command now owns the live PTY/Ghostty/Tauri event stream. The older standalone live-stream proof command is not part of the current command surface.
+- Runtime session exits report render and emit metrics through `record_render_metrics` when the frontend receives the corresponding `terminal_exit` event.
+- Root Rust tests pass with `cargo test`; frontend terminal behavior is covered by Vitest renderer/controller tests; the Tauri shell passes `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml` when Zig `0.15.2` is on `PATH`.
+- The browser harness now exercises the terminal interaction path end-to-end against the fixture runtime: launch, tab switching, deterministic terminal output injection, nonblank canvas-pixel verification, selection drag, context menu targets, send-to-input, link detection, IME composition commit, empty-grid menu behavior, multi-session foreground priority, background terminal exit without disarming the foreground terminal, and Claude/Ink-style alternate-screen redraws across coalesced partial frames.
+- The browser harness now includes a dedicated WebGL2 renderer budget scenario. It instantiates the production `createTerminalGpuRenderer` in Chrome, verifies the benchmark canvas paints through WebGL2, then paints warmed full-window and dirty-row frames on animation frames with 60 FPS budget gates.
+- `npm run dev:terminal-stress` launches the real Tauri shell into the hidden `TauriTerminalStressProof` route. It starts several real PTY sessions, marks one foreground and the rest background, paints through the production WebGL2 renderer on offscreen canvases, and records renderer/runtime metrics from the full Rust to WebView path.
 
-Desktop runtime benchmark results:
+Historical desktop runtime benchmark results:
 
 - `cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml` launched the actual Tauri desktop shell and emitted `REVERIE_RENDER_METRICS` from the WebView proof.
 - Ghostty frame bridge: `92` frames, `397,440` cells drawn, `308.0ms` total paint, `3.217ms` average paint, `4.0ms` p95 paint, `14.0ms` max paint, ~`1.29M` cells/sec, `1,053ms` bridge fetch, `23,590` VT bytes.
 - Ghostty live PTY event stream: `44` PTY read chunks / emitted frames, `44` frames received, `0` dropped frames, `31,381` output bytes, `190,080` cells drawn, `748ms` receive elapsed, `732.9ms` Rust stream elapsed, `3.477ms` average paint, `4.0ms` p95 paint, `5.0ms` max paint, `16.65ms` average inter-event cadence, `19ms` p95 inter-event cadence, `165ms` max inter-event gap, `7.20ms` average Tauri emit call, `7.76ms` max emit call, child exit success.
+- Browser WebGL2 renderer budget: `90` warmed full-window frames averaged `1.42ms`, p95 `1.30ms`, max `16.50ms`, with `0/90` frames over `16.7ms`; `90` dirty-row frames averaged `0.34ms`, p95 `0.40ms`, max `0.50ms`, with `0/90` frames over `16.7ms`.
+- Desktop Tauri WebGL2 multi-terminal stress (`npm run dev:terminal-stress`): `3` real PTY sessions, `93,600` output bytes, `789` read chunks, `21` frames received and rendered, `0` dropped frames, `90,720` cells drawn, `492ms` elapsed, `2.29ms` average paint, `13.0ms` p95 paint, `17.0ms` max paint, child exits successful.
 
-What this proves:
+What this proved:
 
 - Reverie's app boundary can carry Ghostty-derived frame snapshots, not just synthetic JavaScript data.
 - A real PTY process can stream bytes into Ghostty VT state, produce incremental `TerminalFrame` updates, and deliver those frames into the Tauri WebView without drops in this controlled proof.
-- Canvas dirty-row rendering remains credible enough to continue for the first production terminal surface; paint p95 is still around `4ms` at `120x36`, which is not the obvious bottleneck yet.
+- Canvas dirty-row rendering was credible enough to reach the first production terminal surface, but the long-term renderer direction is now WebGL2-first with Canvas 2D fallback.
 - The earlier batch command bridge remains comparatively expensive (`~1s` fetch), but live event streaming changes the shape of the cost: cadence is acceptable, while per-event serialization/emit cost needs continued attention before scaling to heavier output.
 
-What it does not prove yet:
+What is now covered by focused checks:
 
-- Full keyboard/paste/mouse fidelity through the production UI path.
-- Selection, clipboard behavior, search, alternate screen behavior, scrollback UX, text shaping/ligature quality, IME correctness, or accessibility.
-- Heavy long-running concurrent sessions, multiple terminals, or pathological TUI redraw rates inside the full React app shell.
+- Rust/Ghostty extraction covers Unicode, truecolor, inverse video, input modes, resize reflow, alternate screen state, wide-cell widths, and search span mapping.
+- Rust runtime tests cover control-command rejection, viewport scroll commands, active/background terminal frame cadence selection, simulated multi-session output pressure, and fast foreground reactivation when a background terminal has pending output.
+- Frontend unit tests cover WebGL2 backend selection/fallback, glyph atlas stats, overlay paint, cursor and block-glyph wide-cell geometry, terminal text-input focus positioning, sparse row caching, lazy history windowing, find span mapping, selection/copy behavior, link actions, context-menu targets, SGR mouse tracking encoding/forwarding, alternate screen cache isolation, resize cache preservation, and renderer context recovery.
+- Browser harness smoke covers terminal launch and browser-visible terminal interaction against fixture services, including a canvas-pixel assertion after deterministic output injection, a browser IME composition commit through the hidden textarea, multi-session frontend priority switching, the background-exit foreground-input regression case, and alternate-screen composite selection after coalesced partial redraws.
+- Browser harness performance smoke covers the production WebGL2 renderer in Chrome with a 60 FPS paint-budget gate for warmed full-window and dirty-row frame paints.
+
+What it still does not prove:
+
+- Full screen-reader accessibility, native IME candidate-window quality across macOS input methods, or full terminal mouse protocol fidelity beyond the modern SGR 1006 path.
+- Heavy long-running concurrent sessions with multiple active-output background sessions through the full Rust/Tauri event pipeline, pathological TUI redraw rates, or sustained real-user scrolling under worst-case output across several live sessions.
 - Windows/Linux packaging.
 
-Next step: keep Canvas as the near-term v1 terminal rendering path, build the React/Panda app shell around an imperative terminal renderer boundary, and prove richer input plus production session lifecycle before escalating to WebGPU/WebGL2.
+Current implementation direction: keep libghostty-vt on the Rust side for terminal emulation correctness, keep React out of terminal cell reconciliation, and let the frontend own an imperative WebGL2 renderer plus a sparse row cache for scroll, selection, find overlays, and lazy history windows. WebGPU stays behind the same renderer boundary until Tauri's WebView runtime supports it reliably.
 
 ## Implementation boundaries
 

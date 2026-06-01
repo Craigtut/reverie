@@ -1,4 +1,4 @@
-import type { KeyboardEvent, WheelEvent } from 'react';
+import type { WheelEvent } from 'react';
 
 import { describe, it, expect } from 'vitest';
 
@@ -11,15 +11,17 @@ interface FakeKey {
   metaKey?: boolean;
   ctrlKey?: boolean;
   altKey?: boolean;
+  isComposing?: boolean;
 }
 
-function keyEvent(parts: FakeKey): KeyboardEvent<HTMLCanvasElement> {
+function keyEvent(parts: FakeKey) {
   return {
     metaKey: false,
     ctrlKey: false,
     altKey: false,
+    nativeEvent: { isComposing: parts.isComposing ?? false },
     ...parts,
-  } as unknown as KeyboardEvent<HTMLCanvasElement>;
+  };
 }
 
 function wheelEvent(parts: { deltaY: number; deltaMode?: number }): WheelEvent<HTMLElement> {
@@ -36,6 +38,11 @@ describe('terminalInputForKey', () => {
   it('returns null when the meta key is held (reserved for app shortcuts)', () => {
     expect(terminalInputForKey(keyEvent({ key: 'c', metaKey: true }))).toBeNull();
     expect(terminalInputForKey(keyEvent({ key: 'Enter', metaKey: true }))).toBeNull();
+  });
+
+  it('returns null while IME composition is active', () => {
+    expect(terminalInputForKey(keyEvent({ key: 'a', isComposing: true }))).toBeNull();
+    expect(terminalInputForKey(keyEvent({ key: 'Process' }))).toBeNull();
   });
 
   describe('ctrl combinations', () => {
@@ -112,7 +119,9 @@ describe('terminalWheelDeltaRows', () => {
 
   it('returns 0 for a non-finite deltaY', () => {
     expect(terminalWheelDeltaRows(wheelEvent({ deltaY: Number.NaN }), surface())).toBe(0);
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: Number.POSITIVE_INFINITY }), surface())).toBe(0);
+    expect(
+      terminalWheelDeltaRows(wheelEvent({ deltaY: Number.POSITIVE_INFINITY }), surface()),
+    ).toBe(0);
   });
 
   it('treats deltaMode line (1) as a row count', () => {
@@ -122,28 +131,45 @@ describe('terminalWheelDeltaRows', () => {
   });
 
   it('treats deltaMode page (2) as a whole surface of rows', () => {
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: 1, deltaMode: 2 }), surface({ rows: 30 }))).toBe(30);
+    expect(
+      terminalWheelDeltaRows(wheelEvent({ deltaY: 1, deltaMode: 2 }), surface({ rows: 30 })),
+    ).toBe(30);
   });
 
   it('converts pixel deltas (deltaMode 0) into rows via cellHeight', () => {
     // 32px / 16px cellHeight = 2 rows
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: 32, deltaMode: 0 }), surface({ cellHeight: 16 }))).toBe(2);
+    expect(
+      terminalWheelDeltaRows(wheelEvent({ deltaY: 32, deltaMode: 0 }), surface({ cellHeight: 16 })),
+    ).toBe(2);
     // ceil rounding: 17px / 16 = 1.06 -> 2
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: 17, deltaMode: 0 }), surface({ cellHeight: 16 }))).toBe(2);
+    expect(
+      terminalWheelDeltaRows(wheelEvent({ deltaY: 17, deltaMode: 0 }), surface({ cellHeight: 16 })),
+    ).toBe(2);
   });
 
   it('preserves sign for upward (negative) scrolls', () => {
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: -48, deltaMode: 0 }), surface({ cellHeight: 16 }))).toBe(-3);
+    expect(
+      terminalWheelDeltaRows(
+        wheelEvent({ deltaY: -48, deltaMode: 0 }),
+        surface({ cellHeight: 16 }),
+      ),
+    ).toBe(-3);
     expect(terminalWheelDeltaRows(wheelEvent({ deltaY: -5, deltaMode: 1 }), surface())).toBe(-5);
   });
 
   it('clamps the magnitude to at least 1 row', () => {
     // 4px / 16px = 0.25 -> ceil 1, clamped min 1
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: 4, deltaMode: 0 }), surface({ cellHeight: 16 }))).toBe(1);
+    expect(
+      terminalWheelDeltaRows(wheelEvent({ deltaY: 4, deltaMode: 0 }), surface({ cellHeight: 16 })),
+    ).toBe(1);
   });
 
-  it('clamps the magnitude to the surface row count', () => {
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: 99, deltaMode: 1 }), surface({ rows: 24 }))).toBe(24);
-    expect(terminalWheelDeltaRows(wheelEvent({ deltaY: -99, deltaMode: 1 }), surface({ rows: 24 }))).toBe(-24);
+  it('clamps large wheel flings to four surface pages', () => {
+    expect(
+      terminalWheelDeltaRows(wheelEvent({ deltaY: 99, deltaMode: 1 }), surface({ rows: 24 })),
+    ).toBe(96);
+    expect(
+      terminalWheelDeltaRows(wheelEvent({ deltaY: -99, deltaMode: 1 }), surface({ rows: 24 })),
+    ).toBe(-96);
   });
 });

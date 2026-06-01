@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  expandRangeToCellBounds,
   normalizeRange,
   rangesEqual,
   selectionText,
@@ -47,6 +48,46 @@ describe('normalizeRange', () => {
   });
 });
 
+describe('expandRangeToCellBounds', () => {
+  it('expands selections that start or end inside a wide cell', () => {
+    const wideFrame: TerminalFrame = {
+      dirty: 'full',
+      rows: [row(0, [cell(0, 'A'), { col: 1, width: 2, text: '界' }, cell(3, 'B')])],
+    };
+
+    expect(
+      expandRangeToCellBounds(
+        wideFrame,
+        { start: { row: 0, col: 2 }, end: { row: 0, col: 2 } },
+        COLS,
+      ),
+    ).toEqual({ start: { row: 0, col: 1 }, end: { row: 0, col: 2 } });
+
+    expect(
+      expandRangeToCellBounds(
+        wideFrame,
+        { start: { row: 0, col: 2 }, end: { row: 0, col: 3 } },
+        COLS,
+      ),
+    ).toEqual({ start: { row: 0, col: 1 }, end: { row: 0, col: 3 } });
+  });
+
+  it('normalizes reversed ranges before expanding wide cell bounds', () => {
+    const wideFrame: TerminalFrame = {
+      dirty: 'full',
+      rows: [row(0, [cell(0, 'A'), { col: 1, width: 2, text: '界' }, cell(3, 'B')])],
+    };
+
+    expect(
+      expandRangeToCellBounds(
+        wideFrame,
+        { start: { row: 0, col: 3 }, end: { row: 0, col: 2 } },
+        COLS,
+      ),
+    ).toEqual({ start: { row: 0, col: 1 }, end: { row: 0, col: 3 } });
+  });
+});
+
 describe('rangesEqual', () => {
   it('compares by value and handles null', () => {
     expect(rangesEqual(null, null)).toBe(true);
@@ -84,6 +125,20 @@ describe('selectionText', () => {
     // row 0 from col 6 = "world" (trailing blanks trimmed), row 1 full = "abc  xyz", row 2 blank = ""
     expect(text).toBe('world\nabc  xyz\n');
   });
+
+  it('copies wide cells once without a phantom spacer', () => {
+    const wideFrame: TerminalFrame = {
+      dirty: 'full',
+      rows: [row(0, [cell(0, 'A'), { col: 1, width: 2, text: '界' }, cell(3, 'B')])],
+    };
+
+    expect(
+      selectionText(wideFrame, { start: { row: 0, col: 0 }, end: { row: 0, col: 3 } }, COLS),
+    ).toBe('A界B');
+    expect(
+      selectionText(wideFrame, { start: { row: 0, col: 2 }, end: { row: 0, col: 2 } }, COLS),
+    ).toBe('界');
+  });
 });
 
 describe('wordRangeAt', () => {
@@ -101,6 +156,18 @@ describe('wordRangeAt', () => {
       end: { row: 0, col: 5 },
     });
   });
+
+  it('treats either half of a wide cell as the same word character', () => {
+    const wideFrame: TerminalFrame = {
+      dirty: 'full',
+      rows: [row(0, [cell(0, 'A'), { col: 1, width: 2, text: '界' }, cell(3, 'B')])],
+    };
+
+    expect(wordRangeAt(wideFrame, { row: 0, col: 2 }, COLS)).toEqual({
+      start: { row: 0, col: 0 },
+      end: { row: 0, col: 3 },
+    });
+  });
 });
 
 describe('lineRangeAt', () => {
@@ -108,6 +175,18 @@ describe('lineRangeAt', () => {
     expect(lineRangeAt(frame(), { row: 1, col: 0 })).toEqual({
       start: { row: 1, col: 0 },
       end: { row: 1, col: 7 },
+    });
+  });
+
+  it('ends line selection at the visual end of a wide cell', () => {
+    const wideFrame: TerminalFrame = {
+      dirty: 'full',
+      rows: [row(0, [{ col: 1, width: 2, text: '界' }])],
+    };
+
+    expect(lineRangeAt(wideFrame, { row: 0, col: 0 })).toEqual({
+      start: { row: 0, col: 0 },
+      end: { row: 0, col: 2 },
     });
   });
 });

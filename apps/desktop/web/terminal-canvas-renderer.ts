@@ -5,8 +5,13 @@ import type {
   TerminalFrame,
   TerminalOverlay,
   TerminalRenderer,
+  TerminalRendererBackend,
+  TerminalRendererCapabilities,
+  TerminalRendererStats,
   TerminalRow,
+  TerminalUnderlineStyle,
 } from './terminalTypes';
+import { terminalCellAtColumn, terminalCellWidth } from './terminal/cellGeometry';
 
 const DEFAULT_CELL_WIDTH = 9;
 const DEFAULT_CELL_HEIGHT = 18;
@@ -28,11 +33,19 @@ const SELECTION_ALPHA = 0.38;
 // (foreground-tinted); the active match also gets a 1px outline.
 const SEARCH_MATCH_ALPHA = 0.22;
 const ACTIVE_MATCH_ALPHA = 0.48;
+const FAINT_ALPHA = 0.55;
 // Link underline is drawn at the foreground color; the hovered link gets a
 // slightly thicker rule.
 const LINK_UNDERLINE_HEIGHT = 1;
 const HOVER_LINK_UNDERLINE_HEIGHT = 2;
 const PALETTE = ['#d8dee9', '#88c0d0', '#a3be8c', '#ebcb8b', '#d08770', '#b48ead', '#81a1c1'];
+const CANVAS_RENDERER_CAPABILITIES: TerminalRendererCapabilities = {
+  backend: 'canvas2d',
+  gpuAccelerated: false,
+  fallback: true,
+  explicitResourceManagement: false,
+  retainedPartialPaint: true,
+};
 
 export const TERMINAL_SURFACE = Object.freeze({
   cols: 120,
@@ -84,6 +97,7 @@ export function createTerminalCanvasRenderer(
   }
 
   const ctx: CanvasRenderingContext2D = context;
+  let stats = emptyRendererStats('canvas2d');
 
   canvas.width = cols * cellWidth * dpr;
   canvas.height = rows * cellHeight * dpr;
@@ -95,8 +109,8 @@ export function createTerminalCanvasRenderer(
   setFont(false);
   ctx.textRendering = 'geometricPrecision';
 
-  function setFont(bold: boolean) {
-    ctx.font = `${bold ? '700' : '400'} ${fontSize}px ${fontFamily}`;
+  function setFont(bold: boolean, italic = false) {
+    ctx.font = `${italic ? 'italic ' : ''}${bold ? '700' : '400'} ${fontSize}px ${fontFamily}`;
   }
 
   function colorToCss(color: TerminalColor | undefined, fallback: string) {
@@ -105,12 +119,23 @@ export function createTerminalCanvasRenderer(
     return `rgb(${color.r}, ${color.g}, ${color.b})`;
   }
 
-  function underlineEnabled(cell: TerminalCell) {
-    return Boolean(cell.underline || (cell.style && cell.style.underline !== 'none'));
+  function underlineStyle(cell: TerminalCell): TerminalUnderlineStyle | null {
+    if (cell.underline) return 'single';
+    const underline = cell.style?.underline;
+    if (!underline || underline === 'none') return null;
+    return underline;
   }
 
   function cellBold(cell: TerminalCell) {
     return Boolean(cell.bold || cell.style?.bold);
+  }
+
+  function cellItalic(cell: TerminalCell) {
+    return Boolean(cell.style?.italic);
+  }
+
+  function cellForegroundAlpha(cell: TerminalCell) {
+    return cell.style?.faint ? FAINT_ALPHA : 1;
   }
 
   function cursorPosition(cursor: TerminalCursor | undefined) {
@@ -157,6 +182,7 @@ export function createTerminalCanvasRenderer(
   }
 
   function clear(backgroundColor?: TerminalColor) {
+    stats.clears += 1;
     paintDefaultBackground(
       0,
       0,
@@ -166,58 +192,116 @@ export function createTerminalCanvasRenderer(
     );
   }
 
-  function paintBlockGlyph(text: string, x: number, y: number, color: string) {
-    const halfWidth = Math.ceil(cellWidth / 2);
+  function paintBlockGlyph(text: string, x: number, y: number, width: number, color: string) {
+    const halfWidth = Math.ceil(width / 2);
     const halfHeight = Math.ceil(cellHeight / 2);
+    const rightHalfX = x + Math.floor(width / 2);
     ctx.fillStyle = color;
 
     switch (text) {
       case '█':
-        ctx.fillRect(x, y, cellWidth, cellHeight);
+        ctx.fillRect(x, y, width, cellHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▀':
-        ctx.fillRect(x, y, cellWidth, halfHeight);
+        ctx.fillRect(x, y, width, halfHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▄':
-        ctx.fillRect(x, y + Math.floor(cellHeight / 2), cellWidth, halfHeight);
+        ctx.fillRect(x, y + Math.floor(cellHeight / 2), width, halfHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▌':
         ctx.fillRect(x, y, halfWidth, cellHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▐':
-        ctx.fillRect(x + Math.floor(cellWidth / 2), y, halfWidth, cellHeight);
+        ctx.fillRect(rightHalfX, y, halfWidth, cellHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▖':
         ctx.fillRect(x, y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▗':
-        ctx.fillRect(
-          x + Math.floor(cellWidth / 2),
-          y + Math.floor(cellHeight / 2),
-          halfWidth,
-          halfHeight,
-        );
+        ctx.fillRect(rightHalfX, y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▘':
         ctx.fillRect(x, y, halfWidth, halfHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       case '▝':
-        ctx.fillRect(x + Math.floor(cellWidth / 2), y, halfWidth, halfHeight);
+        ctx.fillRect(rightHalfX, y, halfWidth, halfHeight);
+        stats.blockGlyphsPainted += 1;
         return true;
       default:
         return false;
     }
   }
 
-  function cellAt(frame: TerminalFrame, rowIndex: number, col: number) {
-    return frame.rows.find(row => row.index === rowIndex)?.cells.find(cell => cell.col === col);
+  function paintCellUnderline(
+    x: number,
+    y: number,
+    width: number,
+    style: TerminalUnderlineStyle,
+    color: string,
+  ) {
+    ctx.fillStyle = color;
+    const baseline = y + cellHeight - 3;
+    switch (style) {
+      case 'double':
+        ctx.fillRect(x, baseline - 2, width, 1);
+        ctx.fillRect(x, baseline + 1, width, 1);
+        break;
+      case 'dotted':
+        for (let offset = 0; offset < width; offset += 4) {
+          ctx.fillRect(x + offset, baseline, Math.min(2, width - offset), 1);
+        }
+        break;
+      case 'dashed':
+        for (let offset = 0; offset < width; offset += 7) {
+          ctx.fillRect(x + offset, baseline, Math.min(4, width - offset), 1);
+        }
+        break;
+      case 'curly':
+        for (let offset = 0; offset < width; offset += 4) {
+          const segmentWidth = Math.min(2, width - offset);
+          ctx.fillRect(x + offset, baseline + (offset % 8 === 0 ? 0 : 1), segmentWidth, 1);
+        }
+        break;
+      default:
+        ctx.fillRect(x, baseline, width, 1);
+    }
   }
 
-  function paintCursor(frame: TerminalFrame, foreground: string, background: string) {
+  function paintCellRule(x: number, y: number, width: number, offsetY: number, color: string) {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y + offsetY, width, 1);
+  }
+
+  function cellAt(frame: TerminalFrame, rowIndex: number, col: number) {
+    return terminalCellAtColumn(
+      frame.rows.find(row => row.index === rowIndex),
+      col,
+      cols,
+    );
+  }
+
+  function paintCursor(
+    frame: TerminalFrame,
+    foreground: string,
+    background: string,
+    paintedRows: ReadonlySet<number>,
+  ) {
     const cursor = cursorPosition(frame.cursor);
     if (!frame.cursor?.visible || !cursor) return;
+    if (!paintedRows.has(cursor.row)) return;
 
-    const x = cursor.col * cellWidth;
+    const cell = cellAt(frame, cursor.row, cursor.col);
+    const cursorCol = cell?.col ?? cursor.col;
+    const cursorWidth = terminalCellWidth(cell ?? { col: cursorCol }, cols) * cellWidth;
+    const x = cursorCol * cellWidth;
     const y = cursor.row * cellHeight;
     const cursorColor = colorToCss(frame.colors?.cursor, defaultCursor);
     const style = frame.cursor.style ?? 'block';
@@ -230,23 +314,23 @@ export function createTerminalCanvasRenderer(
 
     if (style === 'underline') {
       ctx.fillStyle = cursorColor;
-      ctx.fillRect(x, y + cellHeight - 3, cellWidth, 2);
+      ctx.fillRect(x, y + cellHeight - 3, cursorWidth, 2);
       return;
     }
 
     if (style === 'block_hollow') {
       ctx.strokeStyle = cursorColor;
-      ctx.strokeRect(x + 0.5, y + 0.5, cellWidth - 1, cellHeight - 1);
+      ctx.strokeRect(x + 0.5, y + 0.5, cursorWidth - 1, cellHeight - 1);
       return;
     }
 
     ctx.fillStyle = cursorColor;
-    ctx.fillRect(x, y, cellWidth, cellHeight);
+    ctx.fillRect(x, y, cursorWidth, cellHeight);
 
-    const cell = cellAt(frame, cursor.row, cursor.col);
-    if (cell?.text && cell.text !== ' ') {
+    if (cell?.text && cell.text !== ' ' && !cell.style?.invisible) {
       ctx.fillStyle = background === cursorColor ? foreground : background;
-      setFont(cellBold(cell));
+      setFont(cellBold(cell), cellItalic(cell));
+      stats.glyphsPainted += 1;
       ctx.fillText(cell.text, x, y + 1);
     }
   }
@@ -329,6 +413,12 @@ export function createTerminalCanvasRenderer(
 
   function paintFrame(frame: TerminalFrame, overlay?: TerminalOverlay) {
     const paintRows = rowsToPaint(frame);
+    const cellsPainted = paintRows.reduce((sum, row) => sum + row.cells.length, 0);
+    stats.paints += 1;
+    stats.rowsPainted += paintRows.length;
+    stats.cellsPainted += cellsPainted;
+    stats.maxRowsPerPaint = Math.max(stats.maxRowsPerPaint, paintRows.length);
+    stats.maxCellsPerPaint = Math.max(stats.maxCellsPerPaint, cellsPainted);
     // The default foreground/background are Reverie's theme colors (the renderer
     // options), not Ghostty's hardwired white-on-black `frame.colors`. Cells the
     // CLI styled carry explicit fg/bg and still paint with their own colors;
@@ -341,37 +431,59 @@ export function createTerminalCanvasRenderer(
       paintDefaultBackground(0, row.index * cellHeight, cols * cellWidth, cellHeight, background);
 
       for (const cell of row.cells) {
+        const drawWidth = terminalCellWidth(cell, cols) * cellWidth;
         const inverse = Boolean(cell.style?.inverse);
         const fg = inverse ? colorToCss(cell.bg, background) : colorToCss(cell.fg, foreground);
         const bg = inverse ? colorToCss(cell.fg, foreground) : colorToCss(cell.bg, background);
         if (bg !== background) {
           ctx.fillStyle = bg;
-          ctx.fillRect(cell.col * cellWidth, row.index * cellHeight, cellWidth, cellHeight);
+          ctx.fillRect(cell.col * cellWidth, row.index * cellHeight, drawWidth, cellHeight);
         }
 
         const x = cell.col * cellWidth;
         const y = row.index * cellHeight;
-        if (!paintBlockGlyph(cell.text, x, y, fg)) {
-          ctx.fillStyle = fg;
-          setFont(cellBold(cell));
-          ctx.fillText(cell.text, x, y + 1);
-        }
+        if (!cell.style?.invisible) {
+          const previousAlpha = ctx.globalAlpha;
+          ctx.globalAlpha = previousAlpha * cellForegroundAlpha(cell);
 
-        if (underlineEnabled(cell)) {
-          ctx.fillRect(cell.col * cellWidth, row.index * cellHeight + cellHeight - 3, cellWidth, 1);
+          if (!paintBlockGlyph(cell.text, x, y, drawWidth, fg)) {
+            ctx.fillStyle = fg;
+            setFont(cellBold(cell), cellItalic(cell));
+            stats.glyphsPainted += 1;
+            ctx.fillText(cell.text, x, y + 1);
+          }
+
+          const underline = underlineStyle(cell);
+          if (underline) {
+            paintCellUnderline(
+              cell.col * cellWidth,
+              row.index * cellHeight,
+              drawWidth,
+              underline,
+              fg,
+            );
+          }
+          if (cell.style?.strikethrough) {
+            paintCellRule(x, y, drawWidth, Math.floor(cellHeight / 2), fg);
+          }
+          if (cell.style?.overline) {
+            paintCellRule(x, y, drawWidth, 1, fg);
+          }
+
+          ctx.globalAlpha = previousAlpha;
         }
       }
     }
 
-    paintCursor(frame, foreground, background);
-
+    const paintedRows = new Set(paintRows.map(row => row.index));
+    paintCursor(frame, foreground, background, paintedRows);
     if (overlay) {
-      const paintedRows = new Set(paintRows.map(row => row.index));
       paintOverlay(overlay, paintedRows, foreground);
     }
   }
 
   return {
+    capabilities: CANVAS_RENDERER_CAPABILITIES,
     cols,
     rows,
     cellWidth,
@@ -379,6 +491,37 @@ export function createTerminalCanvasRenderer(
     clear,
     paintFrame,
     rowsToPaint,
+    takeStats() {
+      const out = stats;
+      stats = emptyRendererStats('canvas2d');
+      return out;
+    },
+    dispose() {},
+  };
+}
+
+function emptyRendererStats(backend: TerminalRendererBackend): TerminalRendererStats {
+  return {
+    backend,
+    paints: 0,
+    clears: 0,
+    rowsPainted: 0,
+    cellsPainted: 0,
+    glyphsPainted: 0,
+    blockGlyphsPainted: 0,
+    drawCalls: 0,
+    rectDrawCalls: 0,
+    glyphDrawCalls: 0,
+    rectVertices: 0,
+    glyphVertices: 0,
+    bufferUploads: 0,
+    bufferUploadBytes: 0,
+    glyphAtlasHits: 0,
+    glyphAtlasMisses: 0,
+    glyphAtlasUploads: 0,
+    glyphAtlasResets: 0,
+    maxRowsPerPaint: 0,
+    maxCellsPerPaint: 0,
   };
 }
 

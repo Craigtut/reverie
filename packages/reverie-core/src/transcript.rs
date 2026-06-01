@@ -7,7 +7,10 @@
 //! bytes through a headless terminal (so clears + reflow reproduce exactly).
 //!
 //! This is an append-only log. A single per-session writer owns the monotonic
-//! `seq` and cumulative `byte_offset`, so the store itself stays a thin sink.
+//! `seq`, cumulative `byte_offset`, and launch `run_index`, so the store itself
+//! stays a thin sink. A run is one fresh PTY launch. Deep-history replay treats
+//! runs as separate terminal instances and stitches their rendered rows, matching
+//! what the user saw across resumptions.
 
 use crate::domain::SessionId;
 use crate::repository::RepoResult;
@@ -19,6 +22,7 @@ pub trait TranscriptStore: Send + Sync {
     fn append_transcript_chunk(
         &self,
         session_id: SessionId,
+        run_index: u64,
         seq: u64,
         byte_offset: u64,
         bytes: &[u8],
@@ -32,6 +36,10 @@ pub trait TranscriptStore: Send + Sync {
     /// session continue the monotonic `seq`.
     fn transcript_chunk_count(&self, session_id: SessionId) -> RepoResult<u64>;
 
+    /// Number of fresh-PTY transcript runs stored for a session. A resumed
+    /// launch starts a new run so replay does not carry VT state across launches.
+    fn transcript_run_count(&self, session_id: SessionId) -> RepoResult<u64>;
+
     /// Read `len` bytes starting at absolute `start`, spanning chunk boundaries.
     /// Returns fewer bytes only at end-of-transcript. Used by the deep-scroll
     /// replay engine.
@@ -41,4 +49,8 @@ pub trait TranscriptStore: Send + Sync {
         start: u64,
         len: u64,
     ) -> RepoResult<Vec<u8>>;
+
+    /// Read the transcript grouped by fresh-PTY run, preserving run order and
+    /// chunk order within each run. Used by deep-history replay.
+    fn read_transcript_segments(&self, session_id: SessionId) -> RepoResult<Vec<Vec<u8>>>;
 }

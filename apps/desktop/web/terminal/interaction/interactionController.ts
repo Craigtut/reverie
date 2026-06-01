@@ -1,7 +1,14 @@
 import type { TerminalFrame, TerminalModes } from '../../terminalTypes';
 import type { TerminalSurface } from '../../terminalScrollback';
 import { pointToCell } from './geometry';
-import { lineRangeAt, normalizeRange, selectAllRange, wordRangeAt } from './selectionModel';
+import {
+  encodeSgrMouseEvent,
+  terminalMouseButtonFromDom,
+  terminalMouseCellFromClientPoint,
+  type TerminalMouseButton,
+  type TerminalMouseCell,
+} from './mouseEncoding';
+import { lineRangeAt, normalizeRange, wordRangeAt } from './selectionModel';
 import type { BufferCell, BufferLinkSpan, SelectionMode, SelectionRange } from './types';
 
 // The imperative input island for the terminal. It normalizes pointer events,
@@ -21,11 +28,13 @@ export interface TerminalInteractionPort {
   getViewport(): HTMLDivElement | null;
   getSurface(): TerminalSurface;
   getStartRow(): number;
+  getRowCount(): number;
   getComposite(): TerminalFrame | null;
   getLastFrameModes(): TerminalModes | undefined;
   getSelection(): SelectionRange | null;
   setSelection(range: SelectionRange | null): void;
   clearSelection(): void;
+  selectAll(): void;
   setHoverLink(link: BufferLinkSpan | null): void;
   linkAt(cell: BufferCell): BufferLinkSpan | null;
   focusCanvas(): void;
@@ -42,6 +51,8 @@ export interface TerminalInteractionOptions {
   onContextMenu?: (context: ContextMenuContext) => void;
   // Activate a link (plain click on a URL). The host opens it externally.
   onActivateLink?: (href: string) => void;
+  // Forward terminal mouse tracking sequences to the PTY when an app requests them.
+  sendMouseInput?: (input: string) => void;
 }
 
 // Two clicks within this window on (about) the same cell escalate the selection
@@ -68,7 +79,7 @@ function unionRange(a: SelectionRange, b: SelectionRange): SelectionRange {
 }
 
 export function createTerminalInteraction(options: TerminalInteractionOptions) {
-  const { port, onContextMenu, onActivateLink } = options;
+  const { port, onContextMenu, onActivateLink, sendMouseInput } = options;
 
   let attachedCanvas: HTMLCanvasElement | null = null;
   let dragging = false;
@@ -83,13 +94,15 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
   let clickCount = 0;
   let pendingEvent: PointerEvent | null = null;
   let dragRaf = 0;
+  let trackingButton: TerminalMouseButton | null = null;
+  let trackingPointerId: number | null = null;
+  let lastTrackingCell: TerminalMouseCell | null = null;
 
   function cellAtEvent(event: { clientX: number; clientY: number }): BufferCell | null {
     const canvas = port.getCanvas();
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const composite = port.getComposite();
-    const rowCount = composite?.rows.length ?? 0;
+    const rowCount = port.getRowCount();
     return pointToCell(
       event.clientX - rect.left,
       event.clientY - rect.top,
@@ -103,6 +116,105 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
   // unless Shift is held, mirroring the wheel-scroll gate and iTerm/Ghostty.
   function localSelectionAllowed(event: { shiftKey: boolean }): boolean {
     return !port.getLastFrameModes()?.mouseTracking || event.shiftKey;
+  }
+
+  function mouseTrackingEnabled(event: { shiftKey: boolean }): boolean {
+    return Boolean(sendMouseInput && port.getLastFrameModes()?.mouseTracking && !event.shiftKey);
+  }
+
+  function mouseCellAtEvent(event: { clientX: number; clientY: number }): TerminalMouseCell | null {
+    const canvas = port.getCanvas();
+    if (!canvas) return null;
+    return terminalMouseCellFromClientPoint(
+      event.clientX,
+      event.clientY,
+      canvas,
+      port.getSurface(),
+    );
+  }
+
+  function capturePointer(pointerId: number) {
+    try {
+      port.getCanvas()?.setPointerCapture(pointerId);
+    } catch {
+      // setPointerCapture can throw if the pointer is already gone; ignore.
+    }
+  }
+
+  function releasePointer(pointerId: number) {
+    try {
+      port.getCanvas()?.releasePointerCapture(pointerId);
+    } catch {
+      // already released
+    }
+  }
+
+  function trackingModifiers(event: { shiftKey: boolean; altKey: boolean; ctrlKey: boolean }) {
+    return { shift: event.shiftKey, alt: event.altKey, ctrl: event.ctrlKey };
+  }
+
+  function beginMouseTracking(event: PointerEvent): boolean {
+    if (!mouseTrackingEnabled(event)) return false;
+    const button = terminalMouseButtonFromDom(event.button);
+    if (button === null) return false;
+    const cell = mouseCellAtEvent(event);
+    if (!cell || !sendMouseInput) return false;
+    port.focusCanvas();
+    sendMouseInput(
+      encodeSgrMouseEvent({
+        cell,
+        button,
+        action: 'press',
+        modifiers: trackingModifiers(event),
+      }),
+    );
+    trackingButton = button;
+    trackingPointerId = event.pointerId;
+    lastTrackingCell = cell;
+    capturePointer(event.pointerId);
+    event.preventDefault();
+    return true;
+  }
+
+  function moveMouseTracking(event: PointerEvent): boolean {
+    if (trackingButton === null) return false;
+    if (trackingPointerId !== null && event.pointerId !== trackingPointerId) return false;
+    const cell = mouseCellAtEvent(event);
+    if (cell && sendMouseInput) {
+      lastTrackingCell = cell;
+      sendMouseInput(
+        encodeSgrMouseEvent({
+          cell,
+          button: trackingButton,
+          action: 'motion',
+          modifiers: trackingModifiers(event),
+        }),
+      );
+    }
+    event.preventDefault();
+    return true;
+  }
+
+  function endMouseTracking(event: PointerEvent): boolean {
+    if (trackingButton === null) return false;
+    if (trackingPointerId !== null && event.pointerId !== trackingPointerId) return false;
+    const cell = mouseCellAtEvent(event) ?? lastTrackingCell;
+    if (cell && sendMouseInput) {
+      sendMouseInput(
+        encodeSgrMouseEvent({
+          cell,
+          button: trackingButton,
+          action: 'release',
+          modifiers: trackingModifiers(event),
+        }),
+      );
+    }
+    if (trackingPointerId !== null) releasePointer(trackingPointerId);
+    trackingButton = null;
+    trackingPointerId = null;
+    lastTrackingCell = null;
+    event.preventDefault();
+    return true;
   }
 
   function extendTo(event: { clientX: number; clientY: number }) {
@@ -159,6 +271,7 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
   }
 
   function onPointerDown(event: PointerEvent) {
+    if (beginMouseTracking(event)) return;
     if (event.button !== 0) return; // primary button only; right-click -> contextmenu
     port.focusCanvas();
     if (!localSelectionAllowed(event)) return;
@@ -184,12 +297,7 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
     dragging = true;
     moved = false;
     activePointerId = event.pointerId;
-    const canvas = port.getCanvas();
-    try {
-      canvas?.setPointerCapture(event.pointerId);
-    } catch {
-      // setPointerCapture can throw if the pointer is already gone; ignore.
-    }
+    capturePointer(event.pointerId);
 
     const composite = port.getComposite();
     const cols = port.getSurface().cols;
@@ -230,6 +338,7 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
   }
 
   function onPointerMove(event: PointerEvent) {
+    if (moveMouseTracking(event)) return;
     if (dragging) {
       pendingEvent = event;
       return;
@@ -238,6 +347,7 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
   }
 
   function endDrag(event: PointerEvent) {
+    if (endMouseTracking(event)) return;
     if (!dragging) return;
     dragging = false;
     stopDragLoop();
@@ -245,11 +355,7 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
     extendTo(event);
     pendingEvent = null;
     if (activePointerId !== null) {
-      try {
-        port.getCanvas()?.releasePointerCapture(activePointerId);
-      } catch {
-        // already released
-      }
+      releasePointer(activePointerId);
       activePointerId = null;
     }
     // A plain click that never moved either opens a link under it or deselects.
@@ -261,6 +367,10 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
   }
 
   function onContextMenuEvent(event: MouseEvent) {
+    if (mouseTrackingEnabled(event)) {
+      event.preventDefault();
+      return;
+    }
     if (!onContextMenu) return;
     const cell = cellAtEvent(event);
     onContextMenu({ event, cell, selection: port.getSelection() });
@@ -281,6 +391,9 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
 
   function detach() {
     stopDragLoop();
+    trackingButton = null;
+    trackingPointerId = null;
+    lastTrackingCell = null;
     const canvas = attachedCanvas;
     if (!canvas) return;
     canvas.removeEventListener('pointerdown', onPointerDown);
@@ -298,10 +411,7 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
     detach,
     // Imperative helpers the hook wires to keyboard/menu actions.
     selectAll() {
-      const composite = port.getComposite();
-      if (!composite) return;
-      const range = selectAllRange(composite, port.getSurface().cols);
-      if (range) port.setSelection(range);
+      port.selectAll();
     },
     clearSelection() {
       port.clearSelection();

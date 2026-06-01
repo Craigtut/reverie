@@ -15,12 +15,15 @@ import { TerminalScrollbar } from './TerminalScrollbar';
 type TerminalSurfaceHandle = Pick<
   TerminalSession,
   | 'canvasRef'
+  | 'terminalTextInputRef'
   | 'attachViewport'
   | 'terminalScrollSpacerRef'
   | 'handleTerminalScroll'
-  | 'handleTerminalWheel'
   | 'focusTerminalCanvas'
   | 'handleTerminalKeyDown'
+  | 'handleTerminalCompositionStart'
+  | 'handleTerminalCompositionEnd'
+  | 'handleTerminalTextInput'
   | 'handleTerminalPaste'
   | 'followLiveTerminalOutput'
   | 'contextMenu'
@@ -127,8 +130,9 @@ export function TerminalSurface({
           ref={terminal.attachViewport}
           className={surfaceViewportClass}
           data-testid="terminal-viewport"
+          role="application"
+          aria-label="Terminal viewport"
           onScroll={terminal.handleTerminalScroll}
-          onWheel={terminal.handleTerminalWheel}
           onMouseDown={terminal.focusTerminalCanvas}
         >
           <div
@@ -141,10 +145,27 @@ export function TerminalSurface({
               className="terminal-canvas"
               data-testid="terminal-canvas"
               aria-label="Terminal runtime surface"
-              tabIndex={0}
+              tabIndex={-1}
               onKeyDown={terminal.handleTerminalKeyDown}
               onPaste={terminal.handleTerminalPaste}
               onMouseDown={terminal.focusTerminalCanvas}
+            />
+            <textarea
+              ref={terminal.terminalTextInputRef}
+              className={terminalTextInputClass}
+              data-testid="terminal-text-input"
+              aria-label="Terminal text input"
+              autoCapitalize="off"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck={false}
+              rows={1}
+              tabIndex={0}
+              onKeyDown={terminal.handleTerminalKeyDown}
+              onCompositionStart={terminal.handleTerminalCompositionStart}
+              onCompositionEnd={terminal.handleTerminalCompositionEnd}
+              onInput={terminal.handleTerminalTextInput}
+              onPaste={terminal.handleTerminalPaste}
             />
           </div>
           {!terminalBinding ? (
@@ -264,7 +285,7 @@ const surfaceViewportClass = css({
   // full-history views. Hiding the native one drops its inner gutter too.
   scrollbarWidth: 'none',
   '&::-webkit-scrollbar': { width: 0, height: 0 },
-  background: 'transparent',
+  background: 'var(--terminal-bg, #0B0A09)',
 });
 
 const terminalScrollSpacerClass = css({
@@ -274,6 +295,27 @@ const terminalScrollSpacerClass = css({
   // calm inset + max measure while the scroll/hover target stays edge to edge.
   margin: '0 auto',
   overflow: 'hidden',
+  background: 'var(--terminal-bg, #0B0A09)',
+});
+
+const terminalTextInputClass = css({
+  position: 'absolute',
+  left: 0,
+  top: 0,
+  zIndex: 2,
+  width: '1px',
+  height: '1px',
+  padding: 0,
+  margin: 0,
+  border: 0,
+  outline: 0,
+  resize: 'none',
+  overflow: 'hidden',
+  opacity: 0,
+  color: 'transparent',
+  background: 'transparent',
+  caretColor: 'transparent',
+  pointerEvents: 'none',
 });
 
 // The floating jump-to-latest affordance. Anchored to the terminal body (which is

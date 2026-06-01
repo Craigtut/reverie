@@ -1,4 +1,10 @@
 import type { TerminalFrame, TerminalRow } from '../../terminalTypes';
+import {
+  terminalCellAtColumn,
+  terminalCellEndCol,
+  terminalRowTextLayout,
+  terminalRowTextSlice,
+} from '../cellGeometry';
 import type { BufferCell, SelectionRange } from './types';
 
 // Pure selection model: range normalization, word/line expansion, and text
@@ -6,30 +12,14 @@ import type { BufferCell, SelectionRange } from './types';
 // INCLUSIVE start/end cells in buffer (composite-frame) coordinates; the
 // interaction controller owns the live anchor/head and turns it into ranges.
 //
-// Cells are sparse and carry no width metadata, so we index a row by column into
-// a map and fill absent columns with a space. Wide/CJK glyphs occupy their left
-// column only; we accept a possible trailing space after such a glyph rather
-// than guess widths we do not have.
-
-function rowByColumn(row: TerminalRow | undefined): Map<number, string> {
-  const byCol = new Map<number, string>();
-  if (!row) return byCol;
-  for (const cell of row.cells) byCol.set(cell.col, cell.text);
-  return byCol;
-}
-
 function findRow(frame: TerminalFrame, index: number): TerminalRow | undefined {
   return frame.rows.find(row => row.index === index);
 }
 
-// A row's plain text over [0, cols), absent columns filled with a space. Used
-// for link detection (which scans a row's text). Trailing blanks are harmless to
-// the URL regex, so the row is not trimmed here.
+// A row's plain text over [0, cols), absent columns filled with a space. Wide
+// cells emit their glyph once and skip their covered spacer cell.
 export function rowPlainText(row: TerminalRow | undefined, cols: number): string {
-  const byCol = rowByColumn(row);
-  let out = '';
-  for (let col = 0; col < cols; col += 1) out += byCol.get(col) ?? ' ';
-  return out;
+  return terminalRowTextLayout(row, cols).text;
 }
 
 export function rowAt(frame: TerminalFrame, index: number): TerminalRow | undefined {
@@ -40,16 +30,58 @@ function isWordChar(ch: string): boolean {
   return ch.length > 0 && ch.trim().length > 0;
 }
 
-function rtrim(value: string): string {
-  return value.replace(/\s+$/u, '');
-}
-
 // Order two cells into a normalized range (start before end in reading order).
 export function normalizeRange(a: BufferCell, b: BufferCell): SelectionRange {
   if (a.row < b.row || (a.row === b.row && a.col <= b.col)) {
     return { start: { ...a }, end: { ...b } };
   }
   return { start: { ...b }, end: { ...a } };
+}
+
+// Expand range endpoints to whole rendered cells. This keeps visual selection
+// aligned with copy/search behavior when a pointer lands on the covered tail
+// column of a wide glyph.
+export function expandRangeToCellBounds(
+  frame: TerminalFrame,
+  range: SelectionRange,
+  cols: number,
+): SelectionRange {
+  if (cols <= 0) return normalizeRange(range.start, range.end);
+  const normalized = normalizeRange(range.start, range.end);
+  const maxCol = Math.max(0, Math.floor(cols) - 1);
+
+  const start = expandStart(frame, normalized.start, maxCol, cols);
+  const end = expandEnd(frame, normalized.end, maxCol, cols);
+  return normalizeRange(start, end);
+}
+
+function expandStart(
+  frame: TerminalFrame,
+  cell: BufferCell,
+  maxCol: number,
+  cols: number,
+): BufferCell {
+  const col = clampCol(cell.col, maxCol);
+  const renderedCell = terminalCellAtColumn(findRow(frame, cell.row), col, cols);
+  return { row: cell.row, col: renderedCell ? clampCol(renderedCell.col, maxCol) : col };
+}
+
+function expandEnd(
+  frame: TerminalFrame,
+  cell: BufferCell,
+  maxCol: number,
+  cols: number,
+): BufferCell {
+  const col = clampCol(cell.col, maxCol);
+  const renderedCell = terminalCellAtColumn(findRow(frame, cell.row), col, cols);
+  return {
+    row: cell.row,
+    col: renderedCell ? clampCol(terminalCellEndCol(renderedCell, cols) - 1, maxCol) : col,
+  };
+}
+
+function clampCol(col: number, maxCol: number) {
+  return Math.max(0, Math.min(maxCol, Math.floor(Number.isFinite(col) ? col : 0)));
 }
 
 export function rangesEqual(a: SelectionRange | null, b: SelectionRange | null): boolean {
@@ -68,14 +100,9 @@ export function rangesEqual(a: SelectionRange | null, b: SelectionRange | null):
 export function selectionText(frame: TerminalFrame, range: SelectionRange, cols: number): string {
   const lines: string[] = [];
   for (let r = range.start.row; r <= range.end.row; r += 1) {
-    const byCol = rowByColumn(findRow(frame, r));
     const from = r === range.start.row ? range.start.col : 0;
     const toInclusive = r === range.end.row ? range.end.col : cols - 1;
-    let line = '';
-    for (let c = from; c <= toInclusive; c += 1) {
-      line += byCol.get(c) ?? ' ';
-    }
-    lines.push(rtrim(line));
+    lines.push(terminalRowTextSlice(findRow(frame, r), from, toInclusive, cols, true));
   }
   return lines.join('\n');
 }
@@ -83,8 +110,8 @@ export function selectionText(frame: TerminalFrame, range: SelectionRange, cols:
 // Expand a cell to the surrounding run of non-whitespace characters (the unit a
 // double-click selects). A whitespace cell selects just itself.
 export function wordRangeAt(frame: TerminalFrame, cell: BufferCell, cols: number): SelectionRange {
-  const byCol = rowByColumn(findRow(frame, cell.row));
-  const charAt = (col: number) => byCol.get(col) ?? ' ';
+  const row = findRow(frame, cell.row);
+  const charAt = (col: number) => terminalCellAtColumn(row, col, cols)?.text ?? ' ';
   if (!isWordChar(charAt(cell.col))) {
     return { start: { ...cell }, end: { ...cell } };
   }
@@ -102,7 +129,7 @@ export function lineRangeAt(frame: TerminalFrame, cell: BufferCell): SelectionRa
   let lastCol = 0;
   if (row) {
     for (const c of row.cells) {
-      if (c.text.trim().length > 0) lastCol = Math.max(lastCol, c.col);
+      if (c.text.trim().length > 0) lastCol = Math.max(lastCol, terminalCellEndCol(c) - 1);
     }
   }
   return { start: { row: cell.row, col: 0 }, end: { row: cell.row, col: lastCol } };

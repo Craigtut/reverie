@@ -14,6 +14,7 @@ export const OVERSCAN_ROWS = 3;
 export function blankTerminalFrame(surface: TerminalSurface): TerminalFrame {
   return {
     dirty: 'full',
+    cols: surface.cols,
     rows: Array.from({ length: surface.rows }, (_, index) => ({
       index,
       dirty: true,
@@ -41,13 +42,46 @@ export function buildSessionTerminalView(
   frame: TerminalFrame,
   surface: TerminalSurface,
 ): SessionTerminalView {
-  const surfaceFrame = frameForSurface(frame, surface);
+  const surfaceFrame =
+    frame.dirty === 'partial'
+      ? mergePartialFrameForSurface(previousView?.lastFrame ?? null, frame, surface)
+      : frameForSurface(frame, surface);
   return {
     lastFrame: surfaceFrame,
     compositeFrame: surfaceFrame,
     scrollbackRows: [],
     rowCount: surfaceFrame.scrollback?.scrollbackRows ?? 0,
     liveFollow: surfaceFrame.scrollback?.atBottom ?? previousView?.liveFollow ?? true,
+  };
+}
+
+function mergePartialFrameForSurface(
+  previousFrame: TerminalFrame | null,
+  frame: TerminalFrame,
+  surface: TerminalSurface,
+): TerminalFrame {
+  const current = frameForSurface({ ...frame, dirty: 'full' }, surface);
+  const previousRows =
+    previousFrame && previousFrame.modes?.alternateScreen === frame.modes?.alternateScreen
+      ? new Map(previousFrame.rows.map(row => [row.index, row]))
+      : new Map<number, TerminalFrame['rows'][number]>();
+  const currentRows = new Map(current.rows.map(row => [row.index, row]));
+  const dirtyRows = new Set(
+    frame.rows
+      .filter(row => row.index >= 0 && row.index < surface.rows && row.dirty !== false)
+      .map(row => row.index),
+  );
+  const rows = Array.from({ length: surface.rows }, (_, index) => {
+    const row = dirtyRows.has(index) ? currentRows.get(index) : previousRows.get(index);
+    return row
+      ? { ...cloneTerminalRow(row), index, dirty: dirtyRows.has(index) }
+      : { index, dirty: dirtyRows.has(index), cells: [] };
+  });
+
+  return {
+    ...current,
+    dirty: 'partial',
+    rows,
   };
 }
 

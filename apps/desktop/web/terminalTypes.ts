@@ -1,13 +1,21 @@
 export type TerminalColor = string | { r: number; g: number; b: number };
+export type TerminalUnderlineStyle = 'none' | 'single' | 'double' | 'curly' | 'dotted' | 'dashed';
 
 export interface TerminalCellStyle {
   bold?: boolean;
-  underline?: string;
+  italic?: boolean;
+  faint?: boolean;
+  blink?: boolean;
+  invisible?: boolean;
+  underline?: TerminalUnderlineStyle;
   inverse?: boolean;
+  strikethrough?: boolean;
+  overline?: boolean;
 }
 
 export interface TerminalCell {
   col: number;
+  width?: number;
   text: string;
   fg?: TerminalColor;
   bg?: TerminalColor;
@@ -40,6 +48,7 @@ export interface TerminalModes {
   bracketedPaste?: boolean;
   syncOutput?: boolean;
   mouseTracking?: boolean;
+  alternateScreen?: boolean;
   kittyKeyboardFlags?: number;
 }
 
@@ -53,6 +62,7 @@ export interface TerminalScrollback {
 
 export interface TerminalFrame {
   dirty?: 'clean' | 'full' | 'partial';
+  cols?: number;
   rows: TerminalRow[];
   cursor?: TerminalCursor;
   modes?: TerminalModes;
@@ -82,7 +92,61 @@ export interface TerminalOverlay {
   activeMatch?: RowSpan;
 }
 
+export type TerminalRendererBackend = 'webgpu' | 'webgl2' | 'canvas2d';
+
+export interface TerminalRendererCapabilities {
+  backend: TerminalRendererBackend;
+  gpuAccelerated: boolean;
+  fallback: boolean;
+  explicitResourceManagement: boolean;
+  // True when partial paints can rely on pixels from previous paints remaining
+  // valid between browser frames. Canvas 2D can retain and repaint dirty rows;
+  // WebGL/WebGPU paths should usually paint self-contained visible windows unless
+  // they own an explicit retained texture/FBO.
+  retainedPartialPaint: boolean;
+}
+
+export interface TerminalRendererStats {
+  backend: TerminalRendererBackend;
+  paints: number;
+  clears: number;
+  rowsPainted: number;
+  cellsPainted: number;
+  glyphsPainted: number;
+  blockGlyphsPainted: number;
+  drawCalls: number;
+  rectDrawCalls: number;
+  glyphDrawCalls: number;
+  rectVertices: number;
+  glyphVertices: number;
+  bufferUploads: number;
+  bufferUploadBytes: number;
+  glyphAtlasHits: number;
+  glyphAtlasMisses: number;
+  glyphAtlasUploads: number;
+  glyphAtlasResets: number;
+  maxRowsPerPaint: number;
+  maxCellsPerPaint: number;
+}
+
+export type TerminalPaintReason = 'frame' | 'scroll' | 'overlay' | 'history' | 'clear';
+
+export interface TerminalPaintSample {
+  backend?: TerminalRendererBackend;
+  reason: TerminalPaintReason;
+  elapsedMs: number;
+  startRow: number;
+  displayRows: number;
+  fullPaint: boolean;
+  bufferBacked: boolean;
+  historyMode: boolean;
+  rowsPainted: number;
+  cellsPainted: number;
+  rendererStats?: TerminalRendererStats;
+}
+
 export interface TerminalRenderer {
+  capabilities: TerminalRendererCapabilities;
   cols: number;
   rows: number;
   cellWidth: number;
@@ -90,4 +154,6 @@ export interface TerminalRenderer {
   clear: (background?: TerminalColor) => void;
   paintFrame: (frame: TerminalFrame, overlay?: TerminalOverlay) => void;
   rowsToPaint: (frame: TerminalFrame) => TerminalRow[];
+  takeStats?: () => TerminalRendererStats;
+  dispose?: () => void;
 }

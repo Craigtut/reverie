@@ -1,4 +1,11 @@
 import { invokeBrowserFixture, subscribeFixtureEvent } from './fixtures';
+import {
+  invokeTerminalBridge,
+  listenTerminalBridge,
+  terminalBridgeEnabled,
+  terminalBridgeHandlesCommand,
+  terminalBridgeHandlesEvent,
+} from './terminalBridge';
 import type { EventHandler, RuntimeMode, UnlistenFn } from './types';
 
 export type { UnlistenFn } from './types';
@@ -18,6 +25,7 @@ if (typeof window !== 'undefined' && !realTauriRuntime) {
 }
 
 export function appRuntimeMode(): RuntimeMode {
+  if (!realTauriRuntime && terminalBridgeEnabled()) return 'terminal-bridge';
   return realTauriRuntime ? 'tauri' : 'browser-fixture';
 }
 
@@ -30,6 +38,10 @@ export async function invoke<T = unknown>(
     return tauriCore.invoke<T>(command, args);
   }
 
+  if (terminalBridgeEnabled() && terminalBridgeHandlesCommand(command)) {
+    return invokeTerminalBridge<T>(command, args);
+  }
+
   return invokeBrowserFixture<T>(command, args);
 }
 
@@ -37,6 +49,10 @@ export async function listen<T>(eventName: string, handler: EventHandler<T>): Pr
   if (realTauriRuntime) {
     const tauriEvent = await import('@tauri-apps/api/event');
     return tauriEvent.listen<T>(eventName, handler);
+  }
+
+  if (terminalBridgeEnabled() && terminalBridgeHandlesEvent(eventName)) {
+    return listenTerminalBridge<T>(eventName, handler);
   }
 
   return subscribeFixtureEvent<T>(eventName, handler);

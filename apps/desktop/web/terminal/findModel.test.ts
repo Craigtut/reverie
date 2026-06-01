@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { findMatchesInLine, findMatchesInFrame, formatMatchCount, cycleIndex } from './findModel';
+import {
+  findMatchesInLine,
+  findMatchesInFrame,
+  formatMatchCount,
+  cycleIndex,
+  resolvedActiveMatchIndex,
+} from './findModel';
 import type { TerminalCell, TerminalFrame, TerminalRow } from '../terminalTypes';
 
 function row(index: number, text: string): TerminalRow {
@@ -64,6 +70,30 @@ describe('findMatchesInFrame', () => {
       { row: 902, startCol: 0, endCol: 2, lineText: 'me too' },
     ]);
   });
+
+  it('maps matches after wide cells back to cell columns', () => {
+    const wide: TerminalFrame = {
+      dirty: 'full',
+      rows: [
+        {
+          index: 0,
+          dirty: true,
+          cells: [
+            { col: 0, text: 'A' },
+            { col: 1, width: 2, text: '界' },
+            { col: 3, text: 'B' },
+          ],
+        },
+      ],
+    };
+
+    expect(findMatchesInFrame(wide, 'B', false, 20)).toEqual([
+      { row: 0, startCol: 3, endCol: 4, lineText: 'A界B' },
+    ]);
+    expect(findMatchesInFrame(wide, '界B', false, 20)).toEqual([
+      { row: 0, startCol: 1, endCol: 4, lineText: 'A界B' },
+    ]);
+  });
 });
 
 describe('formatMatchCount', () => {
@@ -80,5 +110,32 @@ describe('cycleIndex', () => {
     expect(cycleIndex(2, 3, 1)).toBe(0);
     expect(cycleIndex(0, 3, -1)).toBe(2);
     expect(cycleIndex(0, 0, 1)).toBe(-1);
+  });
+});
+
+describe('resolvedActiveMatchIndex', () => {
+  const matches = [
+    { row: 5, startCol: 6, endCol: 12, lineText: 'lower needle first' },
+    { row: 42, startCol: 6, endCol: 12, lineText: 'mixed Needle second' },
+    { row: 60, startCol: 6, endCol: 12, lineText: 'lower needle third' },
+  ];
+
+  it('preserves the active match when a same-query replay resolves later', () => {
+    expect(resolvedActiveMatchIndex(matches, matches[1])).toBe(1);
+  });
+
+  it('falls back to the first match when the previous active match is absent', () => {
+    expect(
+      resolvedActiveMatchIndex(matches, {
+        row: 99,
+        startCol: 0,
+        endCol: 6,
+        lineText: 'needle elsewhere',
+      }),
+    ).toBe(0);
+  });
+
+  it('returns -1 for an empty result set', () => {
+    expect(resolvedActiveMatchIndex([], matches[0])).toBe(-1);
   });
 });

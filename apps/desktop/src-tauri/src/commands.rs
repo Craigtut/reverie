@@ -3,6 +3,8 @@
 //! Handlers are thin wrappers over `WorkspaceService` and the terminal runtime.
 
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,7 +25,7 @@ use tauri_plugin_opener::OpenerExt;
 #[cfg(unix)]
 use crate::bridge::{BridgeInfo, mint_session_secret};
 use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
-use crate::terminal::ghostty::GhosttyTerminalState;
+use crate::terminal::ghostty::{GhosttyTerminalState, ghostty_scrollback_bytes_for_rows};
 use crate::terminal::runtime::{
     TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest,
 };
@@ -817,6 +819,9 @@ pub(crate) fn start_session(
         register_session_with_bridge(&app, &service, shell_session_id, &mut spawn_spec);
     }
 
+    let max_scrollback_rows = request.max_scrollback.unwrap_or(10_000);
+    let max_scrollback = ghostty_scrollback_bytes_for_rows(max_scrollback_rows, spawn_spec.cols);
+
     runtime
         .spawn_session_stream(
             app,
@@ -824,7 +829,7 @@ pub(crate) fn start_session(
                 session_id,
                 terminal_id,
                 spawn_spec,
-                max_scrollback: request.max_scrollback.unwrap_or(10_000),
+                max_scrollback,
                 target_frames: None,
                 agent_kind,
                 folder_name,
@@ -959,9 +964,28 @@ pub(crate) async fn terminal_history_info(
     let runtime = runtime.inner().clone();
     run_terminal_blocking_command(move || {
         let transcripts = read_history_transcript_segments(&runtime, session_id)?;
-        let total_rows =
-            crate::terminal::history::history_total_rows_segments(&transcripts, cols, rows)
-                .map_err(|err| err.to_string())?;
+        let colors = runtime.default_colors();
+        let segment_rows = runtime
+            .cached_history_segment_rows(session_id, &transcripts, cols, rows, colors)
+            .map(Ok::<Vec<usize>, String>)
+            .unwrap_or_else(|| {
+                let segment_rows =
+                    crate::terminal::history::history_segment_row_counts(&transcripts, cols, rows)
+                        .map_err(|err| err.to_string())?;
+                runtime.remember_history_segment_rows(
+                    session_id,
+                    &transcripts,
+                    cols,
+                    rows,
+                    colors,
+                    segment_rows.clone(),
+                );
+                Ok(segment_rows)
+            })?;
+        let total_rows = segment_rows
+            .into_iter()
+            .fold(0_usize, |total, rows| total.saturating_add(rows.max(1)))
+            .max(1);
         Ok(TerminalHistoryInfo { total_rows })
     })
     .await
@@ -1003,8 +1027,29 @@ pub(crate) async fn terminal_history_window(
                 frame,
             });
         }
-        let frame = crate::terminal::history::history_window_segments_prefetched(
+        let segment_rows = runtime
+            .cached_history_segment_rows(session_id, &transcripts, cols, surface_rows, colors)
+            .map(Ok::<Vec<usize>, String>)
+            .unwrap_or_else(|| {
+                let segment_rows = crate::terminal::history::history_segment_row_counts(
+                    &transcripts,
+                    cols,
+                    surface_rows,
+                )
+                .map_err(|err| err.to_string())?;
+                runtime.remember_history_segment_rows(
+                    session_id,
+                    &transcripts,
+                    cols,
+                    surface_rows,
+                    colors,
+                    segment_rows.clone(),
+                );
+                Ok(segment_rows)
+            })?;
+        let frame = crate::terminal::history::history_window_segments_prefetched_with_counts(
             &transcripts,
+            &segment_rows,
             cols,
             surface_rows,
             start_row,
@@ -1197,6 +1242,35 @@ pub(crate) fn ghostty_frame_sequence() -> Result<GhosttyFrameSequence, String> {
 pub(crate) fn record_render_metrics(metrics: serde_json::Value) -> Result<(), String> {
     let encoded = serde_json::to_string(&metrics).map_err(|err| err.to_string())?;
     println!("REVERIE_RENDER_METRICS {encoded}");
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn record_terminal_diagnostics(
+    app: AppHandle,
+    events: serde_json::Value,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let path = dir.join("terminal-diagnostics.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| err.to_string())?;
+
+    match events {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                let encoded = serde_json::to_string(&item).map_err(|err| err.to_string())?;
+                writeln!(file, "{encoded}").map_err(|err| err.to_string())?;
+            }
+        }
+        item => {
+            let encoded = serde_json::to_string(&item).map_err(|err| err.to_string())?;
+            writeln!(file, "{encoded}").map_err(|err| err.to_string())?;
+        }
+    }
     Ok(())
 }
 

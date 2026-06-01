@@ -1,5 +1,3 @@
-import type { KeyboardEvent } from 'react';
-
 import type { TerminalSurface } from '../terminalScrollback';
 import type { TerminalModes } from '../terminalTypes';
 
@@ -7,10 +5,18 @@ import type { TerminalModes } from '../terminalTypes';
 // scroll deltas. No DOM mutation, no React state; the event objects are read
 // only for their data.
 
-export function terminalInputForKey(
-  event: KeyboardEvent<HTMLCanvasElement>,
-  modes?: TerminalModes,
-) {
+export interface TerminalKeyInput {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  nativeEvent?: {
+    isComposing?: boolean;
+  };
+}
+
+export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalModes) {
+  if (event.nativeEvent?.isComposing || event.key === 'Process') return null;
   if (event.metaKey) return null;
 
   if (event.ctrlKey) {
@@ -82,5 +88,6 @@ export function terminalWheelDeltaRows(
     rows = Math.ceil(Math.abs(event.deltaY) / surface.cellHeight);
   }
 
-  return sign * Math.max(1, Math.min(surface.rows, rows));
+  const maxRowsPerWheel = Math.max(1, surface.rows * 4);
+  return sign * Math.max(1, Math.min(maxRowsPerWheel, rows));
 }

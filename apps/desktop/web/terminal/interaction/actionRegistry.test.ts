@@ -61,6 +61,30 @@ describe('resolveTopTarget', () => {
   it('falls back to empty when there is no cell', () => {
     expect(resolveTopTarget(probe({}))).toEqual({ kind: 'empty', cell: null });
   });
+
+  it('does not treat a wide-cell spacer column before a link as part of the link', () => {
+    const linkFrame: TerminalFrame = {
+      dirty: 'full',
+      rows: [
+        {
+          index: 0,
+          dirty: true,
+          cells: [
+            { col: 0, width: 2, text: '界' },
+            ...'https://x.com'.split('').map((text, index) => ({ col: index + 2, text })),
+          ],
+        },
+      ],
+    };
+
+    expect(resolveTopTarget(probe({ frame: linkFrame, cell: { row: 0, col: 1 } }))).toEqual({
+      kind: 'grid',
+      cell: { row: 0, col: 1 },
+    });
+    expect(resolveTopTarget(probe({ frame: linkFrame, cell: { row: 0, col: 2 } }))).toEqual(
+      expect.objectContaining({ kind: 'link', href: 'https://x.com' }),
+    );
+  });
 });
 
 describe('buildMenuItems for a selection', () => {
