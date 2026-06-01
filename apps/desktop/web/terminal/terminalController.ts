@@ -748,33 +748,21 @@ export function createTerminalController(options: TerminalControllerOptions) {
           startRow = tailWindow.startRow;
           displayRows = tailWindow.displayRows;
         }
-        if (!canPaintPartialLiveTail && buffer.totalRows > buffer.viewportRows) {
-          const cachedWindow = cachedPaintWindowForMissingRows(buffer, startRow, displayRows);
-          const cachedWindowOverlaps =
-            cachedWindow !== null &&
-            cachedWindow.startRow < startRow + displayRows &&
-            cachedWindow.startRow + cachedWindow.displayRows > startRow;
-          if (cachedWindow && cachedWindowOverlaps) {
-            startRow = cachedWindow.startRow;
-            displayRows = cachedWindow.displayRows;
-          } else {
-            emitScrollMetrics(forSurface);
-            return;
-          }
-        }
+        // Scrolled back into an uncached region: fall through and paint the window
+        // in place now, with blank placeholder rows where the mirror is still empty,
+        // rather than freezing on the last paint until the prefetch band lands. The
+        // async band repaints these rows when it arrives. Rows that must not show as
+        // content (stale width after a resize) are dropped from the mirror up front,
+        // so a blank here always means "fetching", never "wrong width".
+        // (research: never block the gesture; show placeholders and fill async.)
       }
     }
 
     const windowFrame = frameFromBufferWindow(buffer, startRow, displayRows);
-    if (
-      !cacheStatus.cached &&
-      !liveFollow &&
-      terminalBufferHasRenderableRows(buffer) &&
-      !terminalFrameHasRenderableCells(windowFrame)
-    ) {
-      emitScrollMetrics(forSurface);
-      return;
-    }
+    // A scrolled-back miss paints blank placeholder rows (per the fall-through
+    // above) so the gesture keeps moving while the band loads. Only suppress the
+    // paint while following the live tail, where a blank flash during output churn
+    // reads worse than holding the last frame for a beat.
     if (
       !cacheStatus.cached &&
       liveFollow &&

@@ -2541,11 +2541,15 @@ describe('createTerminalController', () => {
     ).toEqual(['0', '1', '2', '3']);
   });
 
-  it('does not paint blank placeholder rows for a requested live cache miss', () => {
+  it('paints blank placeholder rows for a requested live cache miss', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
     const onMissingLiveRows = vi.fn(() => true);
-    const createRenderer = vi.fn((_canvas, _surface, displayRows) => fakeRenderer(displayRows));
+    const paintFrame = vi.fn();
+    const createRenderer = vi.fn((_canvas, _surface, displayRows) => ({
+      ...fakeRenderer(displayRows),
+      paintFrame,
+    }));
     const controller = createTerminalController({
       surface,
       onScrollbackRowCount: vi.fn(),
@@ -2565,6 +2569,7 @@ describe('createTerminalController', () => {
       viewportOffset: 246,
       rowsById: rowRange(246, 250),
       cachedRanges: [{ start: 246, end: 250 }],
+      atBottom: false,
     };
     const view: SessionTerminalView = {
       lastFrame: null,
@@ -2575,8 +2580,13 @@ describe('createTerminalController', () => {
     };
     controller.applyView(view, surface, buffer);
 
+    // Scrolled back into an uncached region: request the fill AND paint blank
+    // placeholder rows in place now, so the gesture never freezes on the round-trip.
     expect(onMissingLiveRows).toHaveBeenCalled();
-    expect(createRenderer).not.toHaveBeenCalled();
+    expect(createRenderer).toHaveBeenCalled();
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.rows.length).toBeGreaterThan(0);
+    expect(painted.rows.every(row => rowText(row) === '')).toBe(true);
   });
 
   it('paints the cached live tail instead of placeholder overscan rows', () => {
