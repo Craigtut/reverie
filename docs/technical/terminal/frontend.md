@@ -30,7 +30,7 @@ The mirror is a copy of the rows near the viewport: seeded by the snapshot, kept
 - Scrolling moves the viewport pointer over the mirror and repaints from it. It is local: no backend round-trip, so it is instant.
 - As the viewport approaches the top of the mirrored rows, the frontend sends a history-range request for a band of older rows, ahead of running out. The backend serves them from `libghostty`'s buffer; the frontend prepends them to the mirror. The user keeps scrolling smoothly while the top-up happens in the background.
 - Reach is `libghostty`'s scrollback budget (a dial). Scrolling stops at the oldest row the buffer holds; older rows have evicted and are gone (we persist nothing). The frontend shows that edge as the top of available history.
-- Pinned to the bottom, the viewport follows new output. Scrolled up, new output lands in the mirror without moving the view.
+- Follow-tail is frontend-owned. At the bottom, the viewport stays pinned and follows new output as it arrives. When the user scrolls up it unpins (new output lands in the mirror without moving the view), and a jump-to-bottom button appears in the bottom-right; clicking it returns the viewport to the live tail and re-pins. The button is hidden whenever the viewport is already at the bottom.
 - On resize, the generation bumps; the frontend drops its mirror, re-seeds from the fresh snapshot, and re-issues history requests against the new generation. It never mixes rows from two generations, because reflow renumbers them.
 
 ## Input

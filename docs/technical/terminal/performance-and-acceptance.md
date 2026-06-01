@@ -36,6 +36,7 @@ Out of scope, not measured: search (a separate feature), and anything involving 
 - [ ] Keystroke echo is imperceptible.
 - [ ] Scrolling within the buffer is local, smooth at 60fps at any depth, and never blocks on the backend.
 - [ ] Older rows are fetched as an async prefetch that tops up the mirror ahead of need; reaching not-yet-fetched rows shows a brief fill, not a freeze.
+- [ ] At the bottom, the viewport stays pinned and follows new output; scrolled up, a jump-to-bottom button appears and returns to the live tail and re-pins; the button is hidden at the bottom.
 - [ ] A burst of output drains without deadlock and without blocking input.
 - [ ] Dozens of concurrent sessions run with the focused one smooth and background ones not dragging it.
 - [ ] An idle session costs near-zero CPU and GPU.

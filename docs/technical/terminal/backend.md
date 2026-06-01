@@ -56,7 +56,7 @@ This is the small per-cell shape every fast terminal converges on. See [`wire-pr
 
 ## Bounded scrollback (v0)
 
-`libghostty-vt` keeps an in-memory scrollback. That buffer is the entire history we serve; the seed snapshot plus history-range replies deliver it. It is bounded by a memory budget (default 10 MB per session, lazily allocated, a dial we can raise), not a fixed row count; see [`libghostty-history-limits.md`](libghostty-history-limits.md). Rows that scroll past the oldest the buffer holds evict and are gone; we persist nothing, and a restart uses the CLI's resume (D5).
+`libghostty-vt` keeps an in-memory scrollback. That buffer is the entire history we serve; the seed snapshot plus history-range replies deliver it. It is bounded by a memory budget that Reverie sets to 100 MB per session (libghostty's own default is 10 MB), lazily allocated, not a fixed row count; see [`libghostty-history-limits.md`](libghostty-history-limits.md). Rows that scroll past the oldest the buffer holds evict and are gone; we persist nothing, and a restart uses the CLI's resume (D5).
 
 ## Many sessions (tiers)
 

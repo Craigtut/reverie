@@ -6,7 +6,7 @@
 
 ## The headline: scrollback is a memory budget, not a row count
 
-`libghostty` bounds scrollback by **bytes of page memory, not by number of rows.** The config option `scrollback-limit` is a byte count, default **10 MB per terminal surface** (`src/config/Config.zig`). When the limit is reached, the oldest lines are evicted. The buffer is allocated lazily up to the limit, so a large limit does not immediately cost memory.
+`libghostty` bounds scrollback by **bytes of page memory, not by number of rows.** The config option `scrollback-limit` is a byte count, default **10 MB per terminal surface** (`src/config/Config.zig`). When the limit is reached, the oldest lines are evicted. The buffer is allocated lazily up to the limit, so a large limit does not immediately cost memory. Reverie sets this dial to **100 MB per session** (see [`decisions.md`](decisions.md), D7); because allocation is lazy, that ceiling only costs what a session actually produces.
 
 The common "~10k rows" belief is a misread. There is a `10_000` constant in the source, but it is also a byte value (a low struct default used only when an embedder builds a terminal without passing config), not a row count. Reverie should reason about scrollback in **bytes** and convert to an approximate row reach only for display.
 
@@ -47,9 +47,9 @@ What `libghostty` keeps stable across reflow is its internal tracked pins (handl
 
 ## Memory cost, and what it means for dozens of sessions
 
-A cell is exactly 8 bytes. A standard page (215 by 215 cells) is on the order of 395 KB including its side pools. The number that governs cost is the byte cap, not row math: each session's primary scrollback is capped at `scrollback-limit` (default 10 MB), allocated lazily.
+A cell is exactly 8 bytes. A standard page (215 by 215 cells) is on the order of 395 KB including its side pools. The number that governs cost is the byte cap, not row math: each session's primary scrollback is capped at `scrollback-limit`, which Reverie sets to 100 MB, allocated lazily.
 
-So the worst case for dozens of sessions is roughly 10 MB per session that actually fills its scrollback (40 full sessions is about 400 MB), independent of width because the cap is in bytes. Idle or short sessions cost far less due to lazy allocation. The single effective knob is `scrollback-limit` per surface: if dozens of resident full sessions are too heavy, lower it. (This excludes Kitty graphics storage, which has its own large separate cap if images are enabled.)
+So the theoretical worst case for dozens of sessions is roughly 100 MB per session that actually fills its scrollback (40 full sessions about 4 GB), independent of width because the cap is in bytes. In practice almost no session fills 100 MB, and lazy allocation means idle and short sessions cost far less; background buffers are also shed under memory pressure. The effective levers are shedding off-screen sessions' buffers and the `scrollback-limit` dial. (This excludes Kitty graphics storage, which has its own large separate cap if images are enabled.)
 
 This is what makes D3 (dozens, no hard cap, shed under pressure) affordable, and it names the levers if we ever need to shed: lower the per-session byte cap, or drop off-screen sessions' buffers entirely.
 
@@ -66,7 +66,7 @@ This is what makes D3 (dozens, no hard cap, shed under pressure) affordable, and
 
 - Live viewport uses the fast render-state path; history scroll-back uses the slower grid-reference path. Two paths by design.
 - History reads are order-of-pages expensive, so the backend resolves a requested band once, copies rows out under the lock, and caches them. Never read history per cell per frame. This matches the wire protocol's "prefetch a band, not a row at a time" rule.
-- Budget memory in bytes (default 10 MB per session, lazy), not rows. The lever for many sessions is `scrollback-limit`.
+- Budget memory in bytes (Reverie sets 100 MB per session, lazy), not rows. The levers for many sessions are shedding background buffers under pressure and the `scrollback-limit` dial.
 - Re-seed on any resize; never trust an absolute row index across a width change.
 - Suppress scroll-back on the alternate screen; re-seed when the agent returns to the primary screen.
 - Reach ends at the byte cap, which is a dial we can raise. Past it, the oldest rows have evicted and are gone; we persist nothing. A restart resumes the CLI, not stored history.

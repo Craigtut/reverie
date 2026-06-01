@@ -78,7 +78,7 @@ A log of pivotal, hard-to-reverse terminal decisions: the choice, why, the alter
 **Decision.**
 
 - `libghostty` is the sole source of truth for everything it holds. The backend serves scroll-back rows only by reading `libghostty`'s live buffer. We persist nothing and serve no stale rows.
-- How far back a user can scroll is set by `libghostty`'s scrollback budget, which is a configuration dial (default 10 MB, roughly tens of thousands of rows). It is already generous; we can turn it up at will so the buffer holds, in practice, a whole typical session. It is lazily allocated, kept to a sane per-session cap (not unbounded), and shed for background sessions under memory pressure.
+- How far back a user can scroll is set by `libghostty`'s scrollback budget, which is a configuration dial. libghostty's own default is 10 MB; **Reverie sets it to 100 MB per session**, which holds a whole session for all but the most extreme cases. It grows lazily, so a budget that large only costs what a session actually produces, and background sessions' buffers are shed under memory pressure.
 - The frontend does not receive the whole buffer at once. It holds a window near the viewport and fetches more rows lazily as it scrolls, caching each band so a given region is read from `libghostty` about once. Reads are never done per frame or per cell.
 
 **Why.**

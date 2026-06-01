@@ -84,7 +84,7 @@ A useful consequence of this scope: the known Claude/Ink "history looks corrupte
 
 ## Concurrency: dozens of sessions, no hard cap
 
-Only the focused session paints at full 60fps. Background sessions keep consuming output and updating their state, but their frames are throttled or not pushed while off-screen; on focus, the backend sends a fresh seed snapshot and resumes diffs. Per-session memory is bounded by `libghostty`'s scrollback budget (default 10 MB, lazily allocated, so idle and short sessions cost little), which keeps dozens of resident sessions affordable. The design does not hard-cap session count; under real memory pressure the levers are lowering the per-session budget or shedding off-screen sessions' buffers. See [`backend.md`](backend.md) and [`performance-and-acceptance.md`](performance-and-acceptance.md).
+Only the focused session paints at full 60fps. Background sessions keep consuming output and updating their state, but their frames are throttled or not pushed while off-screen; on focus, the backend sends a fresh seed snapshot and resumes diffs. Per-session memory is bounded by `libghostty`'s scrollback budget, which Reverie sets to 100 MB per session. It is allocated lazily, so idle and short sessions cost little, and the realistic footprint is what sessions actually produce, not the cap. The design does not hard-cap session count; under real memory pressure the levers are shedding off-screen sessions' buffers or lowering the per-session budget. See [`backend.md`](backend.md) and [`performance-and-acceptance.md`](performance-and-acceptance.md).
 
 ## Non-goals
 
