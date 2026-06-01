@@ -92,12 +92,17 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
 
     /// Advance `lines_evicted` by any drop in `total_rows` since the last
     /// observation, the best-effort eviction signal libghostty leaves us (D8): a
-    /// page pruned off the top shrinks `total_rows`, and within a generation the
-    /// only thing that shrinks it is eviction. Called after every [`Self::write`],
+    /// page pruned off the top shrinks `total_rows`, and at the cap that is by far
+    /// the dominant cause. It is best-effort, not exact: a write batch that both
+    /// appends and prunes inside one `vt_write` masks part of the count (an
+    /// under-count), and a scrollback-clearing sequence (ED 3) or an alt-screen
+    /// toggle inside a batch can shrink `total_rows` for a non-eviction reason (an
+    /// over-count). Both resolve to transient drift the frontend's reconciliation
+    /// heals (D8); never silent wrong content. Called after every [`Self::write`],
     /// where eviction physically happens (inside `vt_write`). Below the cap
     /// `total_rows` only grows, so this is a no-op and `lines_evicted` stays 0
-    /// (id == position). Resize rebaselines instead of counting (reflow changes
-    /// the row count for non-eviction reasons), so it is never miscounted here.
+    /// (id == position). Resize rebaselines instead of counting, since reflow
+    /// changes the row count for non-eviction reasons.
     fn observe_eviction(&mut self) {
         let total = self.total_rows().unwrap_or(self.last_observed_total);
         if total < self.last_observed_total {
@@ -170,8 +175,11 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         // shrink the row count), so rebaseline the eviction observer rather than
         // let the next write miscount that change as eviction. The frontend
         // re-seeds on the generation bump that accompanies a resize, so stable
-        // ids are re-derived against the new geometry anyway (D8).
-        self.last_observed_total = self.total_rows().unwrap_or(self.last_observed_total);
+        // ids are re-derived against the new geometry anyway (D8). On the rare
+        // total_rows() error here, rebaseline to 0 rather than keep the stale
+        // pre-resize value: the next observe then sees growth (no phantom drop)
+        // instead of miscounting the reflow shrink as eviction.
+        self.last_observed_total = self.total_rows().unwrap_or(0);
         Ok(())
     }
 
@@ -1161,9 +1169,12 @@ mod tests {
         );
         // The floor plus what remains should closely track everything written:
         // every row is either still buffered or counted as evicted. The count is
-        // best-effort (D8) and can under-count slightly, but under line-by-line
-        // writes (where `observe_eviction` runs after every line and catches each
-        // page prune) the gap is tiny, never a wild divergence.
+        // best-effort (D8) and can under-count, but under line-by-line writes
+        // (where `observe_eviction` runs after every line and catches each page
+        // prune) the gap is tiny, never a wild divergence. NOTE: production
+        // coalesces PTY chunks (`drain_pty_read_batch`), so batched writes drift
+        // far more by design; Phase B's anchor reconciliation is what closes that,
+        // and its tests should exercise the batched/giant-write path.
         let accounted = oldest_id + total;
         assert!(
             written.abs_diff(accounted) < 512,
