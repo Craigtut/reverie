@@ -41,6 +41,20 @@ pub struct GhosttyTerminalState<'alloc, 'cb> {
     render_state: RenderState<'alloc>,
     force_next_full_frame: bool,
     last_frame: Option<TerminalFrame>,
+    /// Monotonic count of rows evicted off the top of libghostty's buffer, i.e.
+    /// the stable id of the oldest row still buffered (the WezTerm StableRowIndex
+    /// `first_id`; see decisions.md D8). A buffered row at `buffer_position` has
+    /// stable id `buffer_position + lines_evicted`. Below the scrollback cap
+    /// nothing evicts and this stays 0, so id == position. At the cap it is
+    /// best-effort: libghostty emits no eviction signal, so [`Self::observe_eviction`]
+    /// infers evictions from drops in `total_rows`, which can under-count under
+    /// bursty output; the frontend's reconciliation heals the resulting transient
+    /// drift (D8, the one accepted residual).
+    lines_evicted: u64,
+    /// The `total_rows` seen at the last observation, to detect a drop (eviction)
+    /// since then. Rebaselined on resize so reflow's row-count change is never
+    /// miscounted as eviction.
+    last_observed_total: usize,
 }
 
 impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
@@ -50,20 +64,54 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
     /// frontend, not a per-session row count, decides reach by scrolling, so the
     /// budget is a single constant applied here at construction.
     pub fn new(cols: u16, rows: u16) -> Result<Self> {
+        Self::new_with_scrollback_limit(cols, rows, SCROLLBACK_LIMIT_BYTES)
+    }
+
+    /// Construct with an explicit scrollback byte cap. Production goes through
+    /// [`Self::new`] (the fixed [`SCROLLBACK_LIMIT_BYTES`] dial); tests pass a
+    /// small cap to exercise eviction without producing 100 MB of output.
+    pub fn new_with_scrollback_limit(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
         Ok(Self {
             terminal: Terminal::new(TerminalOptions {
                 cols,
                 rows,
-                max_scrollback: SCROLLBACK_LIMIT_BYTES,
+                max_scrollback,
             })?,
             render_state: RenderState::new()?,
             force_next_full_frame: true,
             last_frame: None,
+            lines_evicted: 0,
+            last_observed_total: 0,
         })
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.terminal.vt_write(bytes);
+        self.observe_eviction();
+    }
+
+    /// Advance `lines_evicted` by any drop in `total_rows` since the last
+    /// observation, the best-effort eviction signal libghostty leaves us (D8): a
+    /// page pruned off the top shrinks `total_rows`, and within a generation the
+    /// only thing that shrinks it is eviction. Called after every [`Self::write`],
+    /// where eviction physically happens (inside `vt_write`). Below the cap
+    /// `total_rows` only grows, so this is a no-op and `lines_evicted` stays 0
+    /// (id == position). Resize rebaselines instead of counting (reflow changes
+    /// the row count for non-eviction reasons), so it is never miscounted here.
+    fn observe_eviction(&mut self) {
+        let total = self.total_rows().unwrap_or(self.last_observed_total);
+        if total < self.last_observed_total {
+            self.lines_evicted += (self.last_observed_total - total) as u64;
+        }
+        self.last_observed_total = total;
+    }
+
+    /// The stable id of the oldest row currently buffered (the WezTerm-style
+    /// `first_id`; see decisions.md D8). A buffered row at `buffer_position` has
+    /// stable id `buffer_position + oldest_id()`. Reported to the frontend so its
+    /// cache and viewport anchor survive trim; below the cap it is always 0.
+    pub fn oldest_id(&self) -> u64 {
+        self.lines_evicted
     }
 
     pub fn sync_output_mode(&self) -> Result<bool> {
@@ -115,6 +163,12 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         self.terminal
             .resize(cols, rows, DEFAULT_CELL_WIDTH_PX, DEFAULT_CELL_HEIGHT_PX)?;
         self.force_next_full_frame = true;
+        // Reflow recomputes total_rows for non-eviction reasons (rewrapping can
+        // shrink the row count), so rebaseline the eviction observer rather than
+        // let the next write miscount that change as eviction. The frontend
+        // re-seeds on the generation bump that accompanies a resize, so stable
+        // ids are re-derived against the new geometry anyway (D8).
+        self.last_observed_total = self.total_rows().unwrap_or(self.last_observed_total);
         Ok(())
     }
 
@@ -1051,6 +1105,80 @@ mod tests {
         assert!(
             after.scrollback.at_bottom,
             "the unconditional restore must put the pin back on the tail on any exit path"
+        );
+    }
+
+    #[test]
+    fn oldest_id_is_zero_below_the_scrollback_cap() {
+        // A generous cap (the production dial) never evicts for a short session,
+        // so the stable-id floor stays 0 and id == buffer position (D8).
+        let mut terminal = GhosttyTerminalState::new(40, 8).unwrap();
+        for index in 1..=200 {
+            terminal.write(format!("line {index:04}\r\n").as_bytes());
+        }
+        assert_eq!(
+            terminal.oldest_id(),
+            0,
+            "no eviction below the cap, so the id floor stays 0"
+        );
+    }
+
+    #[test]
+    fn oldest_id_advances_when_the_buffer_evicts() {
+        // A small byte cap so eviction triggers after about a page instead of
+        // 100 MB. Writing far more rows than the cap can hold forces libghostty
+        // to prune the oldest pages, which `observe_eviction` infers from the
+        // resulting drops in `total_rows`.
+        let mut terminal =
+            GhosttyTerminalState::new_with_scrollback_limit(40, 10, 512 * 1024).unwrap();
+        assert_eq!(terminal.oldest_id(), 0);
+
+        let written = 30_000_u64;
+        for index in 1..=written {
+            terminal.write(format!("line {index:05}\r\n").as_bytes());
+        }
+
+        let total = terminal.total_rows().unwrap() as u64;
+        assert!(
+            total < written,
+            "the byte cap should have evicted rows (total={total}, written={written})"
+        );
+        let oldest_id = terminal.oldest_id();
+        assert!(
+            oldest_id > 0,
+            "eviction must advance the stable-id floor (oldest_id={oldest_id})"
+        );
+        // The floor plus what remains should closely track everything written:
+        // every row is either still buffered or counted as evicted. The count is
+        // best-effort (D8) and can under-count slightly, but under line-by-line
+        // writes (where `observe_eviction` runs after every line and catches each
+        // page prune) the gap is tiny, never a wild divergence.
+        let accounted = oldest_id + total;
+        assert!(
+            written.abs_diff(accounted) < 512,
+            "evicted + remaining should closely track what was written \
+             (oldest_id={oldest_id}, total={total}, written={written}, accounted={accounted})"
+        );
+    }
+
+    #[test]
+    fn resize_does_not_miscount_reflow_as_eviction() {
+        // Wrapped content at 24 cols occupies several rows; widening unwraps it
+        // to fewer rows, so `total_rows` DROPS for a non-eviction reason. Without
+        // the resize rebaseline, the next write would miscount that drop as
+        // eviction; with it, the id floor stays 0 (nothing actually evicted).
+        let mut terminal = GhosttyTerminalState::new(24, 4).unwrap();
+        terminal.write(b"reverie resize proof keeps wrapped text intact across a shape change\r\n");
+        assert_eq!(terminal.oldest_id(), 0);
+
+        terminal.resize(80, 4).unwrap();
+        // A write after the resize is what triggers `observe_eviction`; the
+        // rebaseline must have absorbed the reflow row-count drop.
+        terminal.write(b"after resize\r\n");
+        assert_eq!(
+            terminal.oldest_id(),
+            0,
+            "reflow shrinking total_rows must not be miscounted as eviction"
         );
     }
 
