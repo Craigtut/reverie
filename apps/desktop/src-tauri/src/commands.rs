@@ -890,12 +890,12 @@ pub(crate) fn resize_terminal(
 pub(crate) fn read_terminal_rows(
     runtime: State<'_, TerminalSessionRuntime>,
     terminal_id: TerminalId,
-    start_row: usize,
+    start_id: u64,
     count: usize,
     generation: u32,
 ) -> Result<Vec<u8>, String> {
     runtime
-        .read_terminal_rows(terminal_id, start_row, count, generation)
+        .read_terminal_rows(terminal_id, start_id, count, generation)
         .map_err(|err| err.to_string())
 }
 

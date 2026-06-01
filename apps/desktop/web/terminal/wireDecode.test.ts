@@ -173,8 +173,8 @@ describe('decodeTerminalFrame (golden cross-check with Rust encoder)', () => {
 const GOLDEN_BAND_BYTES = new Uint8Array([
   // kind (2 = row band), generation (u32 LE = 1)
   0x02, 0x01, 0x00, 0x00, 0x00,
-  // start_row (u32 = 2)
-  0x02, 0x00, 0x00, 0x00,
+  // start_id (u64 = 2)
+  0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   // row_count (u32 = 2)
   0x02, 0x00, 0x00, 0x00,
   // band row[0]: cell_count (u16 = 1)
@@ -195,7 +195,7 @@ describe('decodeRowBand (golden cross-check with Rust encoder)', () => {
     const decoded = decodeRowBand(GOLDEN_BAND_BYTES.buffer);
 
     expect(decoded.generation).toBe(1);
-    expect(decoded.startRow).toBe(2);
+    expect(decoded.startId).toBe(2);
     expect(decoded.rows).toEqual([
       {
         index: 0,

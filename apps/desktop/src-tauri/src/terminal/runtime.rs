@@ -88,7 +88,7 @@ enum TerminalRuntimeCommand {
     // the band, extracts it, and restores the pin to the tail) on its own thread
     // and replies with the encoded row band over the oneshot `reply` channel.
     ReadRows {
-        start: usize,
+        start_id: u64,
         count: usize,
         generation: u32,
         reply: Sender<Vec<u8>>,
@@ -347,14 +347,14 @@ impl TerminalSessionRuntime {
     pub fn read_terminal_rows(
         &self,
         terminal_id: TerminalId,
-        start_row: usize,
+        start_id: u64,
         count: usize,
         generation: u32,
     ) -> Result<Vec<u8>> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.command_sender_for(terminal_id)?
             .send(TerminalRuntimeCommand::ReadRows {
-                start: start_row,
+                start_id,
                 count,
                 generation,
                 reply: reply_tx,
@@ -958,11 +958,17 @@ fn apply_terminal_commands(
                 applied.needs_frame = true;
             }
             TerminalRuntimeCommand::ReadRows {
-                start,
+                start_id,
                 count,
                 generation: requested_generation,
                 reply,
             } => {
+                // Map the requested stable id to a buffer position using the live
+                // floor (oldest_id = lines_evicted): below the cap oldest_id is 0
+                // so id == position; a requested id below the floor (its row has
+                // evicted) clamps to position 0, the oldest still-buffered row.
+                let oldest_id = terminal.oldest_id();
+                let start = start_id.saturating_sub(oldest_id) as usize;
                 // Serve the band only if the frontend's generation still matches
                 // the live one; a resize the frontend has not seen yet renumbers
                 // rows, so an old-generation request is answered with an empty
@@ -980,7 +986,7 @@ fn apply_terminal_commands(
                         Err(error) => {
                             eprintln!(
                                 "[reverie-terminal] read_rows failed for terminal {terminal_id} \
-                                 (start={start}, count={count}): {error}"
+                                 (start_id={start_id}, count={count}): {error}"
                             );
                             Vec::new()
                         }
@@ -988,7 +994,11 @@ fn apply_terminal_commands(
                 } else {
                     Vec::new()
                 };
-                let band = encode_row_band(&rows, *generation, start as u32);
+                // Echo the ACTUAL served start id (= served position + floor): a
+                // request whose id fell below the floor is keyed by the frontend
+                // at the floor, not at its (now evicted) requested id.
+                let served_start_id = oldest_id.saturating_add(start as u64);
+                let band = encode_row_band(&rows, *generation, served_start_id);
                 // The requester may have given up (dropped the receiver); ignore
                 // a send error rather than failing the worker.
                 let _ = reply.send(band);
@@ -1508,7 +1518,7 @@ mod tests {
         let (reply_tx, reply_rx) = mpsc::channel();
         sender
             .send(TerminalRuntimeCommand::ReadRows {
-                start: 0,
+                start_id: 0,
                 count: 4,
                 generation: 1,
                 reply: reply_tx,
@@ -1528,7 +1538,7 @@ mod tests {
         let band_bytes = reply_rx.recv().unwrap();
         let band = decode_row_band(&band_bytes).unwrap();
         assert_eq!(band.generation, 1);
-        assert_eq!(band.start_row, 0);
+        assert_eq!(band.start_id, 0);
         let text = band
             .rows
             .iter()
@@ -1562,7 +1572,7 @@ mod tests {
         let (reply_tx, reply_rx) = mpsc::channel();
         sender
             .send(TerminalRuntimeCommand::ReadRows {
-                start: 0,
+                start_id: 0,
                 count: 4,
                 generation: 1,
                 reply: reply_tx,
@@ -1610,7 +1620,7 @@ mod tests {
         let (reply_tx, reply_rx) = mpsc::channel();
         sender
             .send(TerminalRuntimeCommand::ReadRows {
-                start: 0,
+                start_id: 0,
                 count: 4,
                 generation: 1,
                 reply: reply_tx,

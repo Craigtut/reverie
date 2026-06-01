@@ -46,11 +46,11 @@ export function resizeTerminal(terminalId: string, cols: number, rows: number) {
 // still matches. This is the one place the frontend pulls from the backend.
 export function readTerminalRows(
   terminalId: string,
-  startRow: number,
+  startId: number,
   count: number,
   generation: number,
 ) {
-  return invoke<ArrayBuffer>('read_terminal_rows', { terminalId, startRow, count, generation });
+  return invoke<ArrayBuffer>('read_terminal_rows', { terminalId, startId, count, generation });
 }
 
 export function setTerminalFrontendActive(terminalId: string, active: boolean) {

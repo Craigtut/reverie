@@ -139,7 +139,7 @@ export async function invokeTerminalBridge<T = unknown>(
       // uniform binary shape and decode it with the same `decodeRowBand`.
       const base64 = await bridgePost<string>('/read_rows', {
         terminalId: args?.terminalId,
-        startRow: args?.startRow,
+        startId: args?.startId,
         count: args?.count,
         generation: args?.generation,
       });

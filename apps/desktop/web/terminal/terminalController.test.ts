@@ -2704,7 +2704,11 @@ describe('createTerminalController', () => {
       0x08,
       0x00,
       0x00,
-      0x00, // start_row = 8
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00, // start_id (u64) = 8
       0x02,
       0x00,
       0x00,
@@ -2729,7 +2733,7 @@ describe('createTerminalController', () => {
     const bandFrame: TerminalFrame = { dirty: 'full', cols: surface.cols, rows: band.rows };
     const merged = controller.mergeLiveRows(
       bandFrame,
-      band.startRow,
+      band.startId,
       request.totalRows,
       band.generation,
     );
@@ -3211,7 +3215,11 @@ describe('createTerminalController', () => {
       0x08,
       0x00,
       0x00,
-      0x00, // start_row=8
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+      0x00, // start_id (u64) = 8
       0x02,
       0x00,
       0x00,
@@ -3232,7 +3240,7 @@ describe('createTerminalController', () => {
       0x00, // row[1]: cell_count=0
     ]);
     const band = decodeRowBand(bandBytes.buffer);
-    expect(band.startRow).toBe(8);
+    expect(band.startId).toBe(8);
     expect(band.rows.map(r => r.index)).toEqual([0, 1]);
     expect(band.rows[0].cells.map(c => c.text)).toEqual(['H']);
 
@@ -3241,7 +3249,7 @@ describe('createTerminalController', () => {
     // matches the un-resized mirror) and the prefetched band extends the mirror's
     // cached range upward to include row 8, without shrinking the live total.
     const bandFrame: TerminalFrame = { dirty: 'full', cols: surface.cols, rows: band.rows };
-    const merged = controller.mergeLiveRows(bandFrame, band.startRow, 20, band.generation);
+    const merged = controller.mergeLiveRows(bandFrame, band.startId, 20, band.generation);
 
     expect(merged).toBe(true);
     expect(controller.getRowCount()).toBe(20);

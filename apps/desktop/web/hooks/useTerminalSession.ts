@@ -1175,21 +1175,24 @@ export function useTerminalSession(params: {
   async function fetchHistoryRowBand(request: TerminalHistoryRowsRequest): Promise<void> {
     const terminalId = useTerminalStore.getState().activeTerminalId;
     if (!terminalId) return;
-    const startRow = Math.max(0, Math.floor(request.startRow));
+    // `request.startRow` is the controller's fetch start. Today it is a buffer
+    // position; below the cap (oldest_id 0) position == stable id, so we send it
+    // as the start id. B2 will have the controller compute a true id.
+    const startId = Math.max(0, Math.floor(request.startRow));
     const count = Math.max(1, Math.floor(request.rowCount));
-    const key = `${terminalId}:${request.generation}:${startRow}:${count}`;
+    const key = `${terminalId}:${request.generation}:${startId}:${count}`;
     const inFlight = inFlightRowFetchesRef.current;
     if (inFlight.has(key)) return;
     inFlight.add(key);
     try {
-      const bytes = await readTerminalRows(terminalId, startRow, count, request.generation);
+      const bytes = await readTerminalRows(terminalId, startId, count, request.generation);
       // The active terminal may have changed while the band round-tripped; the
       // band belongs to the terminal we asked, so drop it if focus moved on
       // (the new session's own prefetch will fill its mirror).
       if (useTerminalStore.getState().activeTerminalId !== terminalId) return;
       const band = decodeRowBand(bytes);
       if (band.rows.length === 0) return;
-      // The band rows are contiguous from `band.startRow` and 0-indexed within
+      // The band rows are contiguous from `band.startId` and 0-indexed within
       // the band, which is exactly the frame shape `mergeLiveRows` expects. The
       // merge is dropped if the generation no longer matches the live mirror (a
       // resize bumped it), so a stale band can never mix rows across generations.
@@ -1198,7 +1201,7 @@ export function useTerminalSession(params: {
         cols: controller.getSurface().cols,
         rows: band.rows,
       };
-      controller.mergeLiveRows(frame, band.startRow, request.totalRows, band.generation);
+      controller.mergeLiveRows(frame, band.startId, request.totalRows, band.generation);
     } catch (error) {
       writeLog(`History rows fetch failed: ${errorMessage(error)}`);
     } finally {

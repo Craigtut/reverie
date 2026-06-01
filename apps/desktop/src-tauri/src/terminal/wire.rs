@@ -46,14 +46,14 @@ pub struct DecodedFrameMessage {
 }
 
 /// The decoded result of [`decode_row_band`]: a contiguous run of rows starting
-/// at `start_row`, tagged with the generation they were read at. Used by the
-/// round-trip + golden tests (the production path only encodes; the TS
+/// at stable id `start_id`, tagged with the generation they were read at. Used by
+/// the round-trip + golden tests (the production path only encodes; the TS
 /// `decodeRowBand` is the runtime consumer).
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecodedRowBand {
     pub generation: u32,
-    pub start_row: u32,
+    pub start_id: u64,
     pub rows: Vec<TerminalRow>,
 }
 
@@ -360,15 +360,16 @@ fn estimate_frame_bytes(frame: &TerminalFrame) -> usize {
 
 /// Encode a contiguous band of history rows (the reply to a history-range
 /// request) into the wire format from `wire-protocol.md` ("Row band reply").
-/// The rows are contiguous from `start_row`, so unlike a frame they carry no
-/// per-row index or dirty flag, only a cell count plus the cells. The `Cell`
-/// encoding is identical to a frame's (the same [`encode_cell`]), so one encoder
-/// and one decoder serve both messages.
-pub fn encode_row_band(rows: &[TerminalRow], generation: u32, start_row: u32) -> Vec<u8> {
+/// The rows are contiguous from stable id `start_id`, so unlike a frame they
+/// carry no per-row index or dirty flag, only a cell count plus the cells. The
+/// `Cell` encoding is identical to a frame's (the same [`encode_cell`]), so one
+/// encoder and one decoder serve both messages. `start_id` is a u64 to match the
+/// frame's `oldest_id` floor (D8).
+pub fn encode_row_band(rows: &[TerminalRow], generation: u32, start_id: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(estimate_row_band_bytes(rows));
     out.push(KIND_ROW_BAND);
     out.extend_from_slice(&generation.to_le_bytes());
-    out.extend_from_slice(&start_row.to_le_bytes());
+    out.extend_from_slice(&start_id.to_le_bytes());
     out.extend_from_slice(&(rows.len() as u32).to_le_bytes());
     for row in rows {
         out.extend_from_slice(&(row.cells.len() as u16).to_le_bytes());
@@ -380,7 +381,7 @@ pub fn encode_row_band(rows: &[TerminalRow], generation: u32, start_row: u32) ->
 }
 
 fn estimate_row_band_bytes(rows: &[TerminalRow]) -> usize {
-    let mut bytes = 13; // kind + generation + start_row + row_count
+    let mut bytes = 17; // kind(1) + generation(4) + start_id(8) + row_count(4)
     for row in rows {
         bytes += 2 + row.cells.len() * 16;
     }
@@ -517,9 +518,9 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DecodedFrameMessage, WireDecodeError
 }
 
 /// Decode a row-band reply (kind 2) back into its rows and the generation +
-/// start row they belong to. Symmetric with [`encode_row_band`]; the band rows
-/// are contiguous from `start_row`, so each decoded row's `index` is its 0-based
-/// offset within the band (the caller adds `start_row` to place it absolutely).
+/// start id they belong to. Symmetric with [`encode_row_band`]; the band rows
+/// are contiguous from stable id `start_id`, so each decoded row's `index` is its
+/// 0-based offset within the band (the caller adds `start_id` to place it).
 #[allow(dead_code)] // decode-only reference impl (see DecodedRowBand)
 pub fn decode_row_band(bytes: &[u8]) -> Result<DecodedRowBand, WireDecodeError> {
     let mut reader = Reader::new(bytes);
@@ -529,7 +530,7 @@ pub fn decode_row_band(bytes: &[u8]) -> Result<DecodedRowBand, WireDecodeError> 
         return Err(WireDecodeError::InvalidKind { value: kind });
     }
     let generation = reader.u32("generation")?;
-    let start_row = reader.u32("start_row")?;
+    let start_id = reader.u64("start_id")?;
     let row_count = reader.u32("row_count")? as usize;
     let mut rows = Vec::with_capacity(row_count);
     for index in 0..row_count {
@@ -547,7 +548,7 @@ pub fn decode_row_band(bytes: &[u8]) -> Result<DecodedRowBand, WireDecodeError> 
 
     Ok(DecodedRowBand {
         generation,
-        start_row,
+        start_id,
         rows,
     })
 }
@@ -1092,11 +1093,11 @@ mod tests {
     fn round_trips_a_row_band() {
         let rows = band_rows();
         let generation = 0xABCD_1234;
-        let start_row = 4_096;
-        let bytes = encode_row_band(&rows, generation, start_row);
+        let start_id: u64 = 4_096;
+        let bytes = encode_row_band(&rows, generation, start_id);
         let decoded = decode_row_band(&bytes).expect("row band should decode");
         assert_eq!(decoded.generation, generation);
-        assert_eq!(decoded.start_row, start_row);
+        assert_eq!(decoded.start_id, start_id);
         assert_eq!(decoded.rows, rows);
     }
 
@@ -1164,8 +1165,8 @@ mod tests {
     const GOLDEN_BAND_BYTES: &[u8] = &[
         // kind (2 = row band), generation (u32 LE = 1)
         0x02, 0x01, 0x00, 0x00, 0x00, //
-        // start_row (u32 = 2)
-        0x02, 0x00, 0x00, 0x00, //
+        // start_id (u64 = 2)
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
         // row_count (u32 = 2)
         0x02, 0x00, 0x00, 0x00, //
         // band row[0]: cell_count (u16 = 1)
@@ -1194,7 +1195,7 @@ mod tests {
     fn golden_band_bytes_decode_to_the_golden_band() {
         let decoded = decode_row_band(GOLDEN_BAND_BYTES).expect("golden band should decode");
         assert_eq!(decoded.generation, 1);
-        assert_eq!(decoded.start_row, 2);
+        assert_eq!(decoded.start_id, 2);
         assert_eq!(decoded.rows, golden_band_rows());
     }
 }

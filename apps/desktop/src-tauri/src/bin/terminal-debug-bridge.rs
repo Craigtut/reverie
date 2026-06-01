@@ -173,7 +173,7 @@ enum WorkerCommand {
     // `read_rows` and replies with the encoded band so the harness can prefetch
     // scroll-back over the same wire format the Tauri command returns.
     ReadRows {
-        start: usize,
+        start_id: u64,
         count: usize,
         generation: u32,
         reply: Sender<Vec<u8>>,
@@ -245,7 +245,7 @@ struct InputBody {
 #[serde(rename_all = "camelCase")]
 struct ReadRowsBody {
     terminal_id: TerminalId,
-    start_row: usize,
+    start_id: u64,
     count: usize,
     generation: u32,
 }
@@ -415,7 +415,7 @@ impl BridgeServer {
         self.command_for(
             body.terminal_id,
             WorkerCommand::ReadRows {
-                start: body.start_row,
+                start_id: body.start_id,
                 count: body.count,
                 generation: body.generation,
                 reply: reply_tx,
@@ -557,17 +557,20 @@ fn terminal_worker(
                     pending_frame = true;
                 }
                 WorkerCommand::ReadRows {
-                    start,
+                    start_id,
                     count,
                     generation: requested_generation,
                     reply,
                 } => {
+                    let oldest_id = terminal.oldest_id();
+                    let start = start_id.saturating_sub(oldest_id) as usize;
                     let rows = if requested_generation == generation {
                         terminal.read_rows(start, count)?
                     } else {
                         Vec::new()
                     };
-                    let _ = reply.send(encode_row_band(&rows, generation, start as u32));
+                    let served_start_id = oldest_id.saturating_add(start as u64);
+                    let _ = reply.send(encode_row_band(&rows, generation, served_start_id));
                 }
                 WorkerCommand::SetFrontendActive(active) => {
                     frontend_active = active;

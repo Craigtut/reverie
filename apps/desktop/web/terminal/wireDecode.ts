@@ -36,13 +36,13 @@ export interface DecodedTerminalFrame {
 }
 
 // The decoded history-range reply (kind 2): a contiguous run of rows starting
-// at `startRow`, tagged with the generation they were read at. Mirrors the Rust
-// `DecodedRowBand` in wire.rs. The frontend merges these into its mirror only
-// when `generation` still matches the latest it holds (a band a resize
+// at stable id `startId`, tagged with the generation they were read at. Mirrors
+// the Rust `DecodedRowBand` in wire.rs. The frontend merges these into its mirror
+// only when `generation` still matches the latest it holds (a band a resize
 // invalidated is dropped and re-requested against the new generation).
 export interface DecodedRowBand {
   generation: number;
-  startRow: number;
+  startId: number;
   rows: TerminalRow[];
 }
 
@@ -308,11 +308,11 @@ export function decodeTerminalFrameBase64(base64: string): DecodedTerminalFrame 
 
 /**
  * Decode one binary row-band reply (kind 2) into its rows plus the generation
- * and start row they belong to. Symmetric with the Rust `encode_row_band`.
+ * and start id they belong to. Symmetric with the Rust `encode_row_band`.
  *
- * Band rows are contiguous from `startRow`, so they carry no per-row index or
- * dirty flag: each decoded row's `index` is its 0-based offset within the band
- * (the caller adds `startRow` to place it absolutely) and `dirty` is true. The
+ * Band rows are contiguous from stable id `startId`, so they carry no per-row
+ * index or dirty flag: each decoded row's `index` is its 0-based offset within
+ * the band (the caller adds `startId` to place it) and `dirty` is true. The
  * `Cell` decode is the SAME {@link decodeCell} the frame path uses, so one
  * decoder serves both messages.
  */
@@ -324,7 +324,7 @@ export function decodeRowBand(input: ArrayBuffer | ArrayBufferView | number[]): 
     throw new Error(`decodeRowBand: unexpected message kind ${kind}`);
   }
   const generation = reader.u32();
-  const startRow = reader.u32();
+  const startId = reader.u64();
   const rowCount = reader.u32();
   const rows: TerminalRow[] = new Array(rowCount);
   for (let i = 0; i < rowCount; i += 1) {
@@ -336,7 +336,7 @@ export function decodeRowBand(input: ArrayBuffer | ArrayBufferView | number[]): 
     rows[i] = { index: i, dirty: true, cells };
   }
 
-  return { generation, startRow, rows };
+  return { generation, startId, rows };
 }
 
 // Decode a base64 row band (the harness bridge sends the SAME wire bytes the
