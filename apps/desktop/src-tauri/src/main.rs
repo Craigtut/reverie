@@ -318,6 +318,7 @@ fn main() {
             commands::record_render_metrics,
             commands::record_terminal_diagnostics,
             commands::open_url,
+            commands::system_home_dir,
             #[cfg(unix)]
             connection_commands::bridge_installation_status,
             #[cfg(unix)]

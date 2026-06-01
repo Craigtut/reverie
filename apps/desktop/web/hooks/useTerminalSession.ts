@@ -30,7 +30,7 @@ import {
 import { cycleIndex, resolvedActiveMatchIndex, type FrameMatch } from '../terminal/findModel';
 import {
   DEFAULT_TERMINAL_SCROLLBACK_ROWS,
-  USER_HOME,
+  getUserHome,
   errorMessage,
   shortId,
   terminalInputForKey,
@@ -1849,7 +1849,7 @@ export function useTerminalSession(params: {
     // ShellSession.agentKind is a free string; coerce to the request's enum.
     const agentKind =
       (selectedSession?.agentKind as CreateSessionRecordRequest['agentKind']) ?? 'cortex_code';
-    const cwd = selectedSession?.cwd ?? USER_HOME;
+    const cwd = selectedSession?.cwd ?? getUserHome();
     const preview = text.replace(/\s+/g, ' ').trim().slice(0, 40);
     const request: CreateSessionRecordRequest = {
       focusId,

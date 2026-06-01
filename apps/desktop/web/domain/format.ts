@@ -1,4 +1,4 @@
-import { USER_HOME } from './constants';
+import { getUserHome } from './constants';
 
 // Small pure formatting/string helpers shared across the shell.
 
@@ -7,8 +7,10 @@ import { USER_HOME } from './constants';
 // folder name intact so the user can always tell which project they're in.
 export function shortenCwd(cwd: string): string {
   if (!cwd) return '';
-  const home = USER_HOME;
-  const path = cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
+  // Only substitute `~` when we actually know the OS home; an empty home (not
+  // yet resolved) must not turn every path into `~...`.
+  const home = getUserHome();
+  const path = home && cwd.startsWith(home) ? `~${cwd.slice(home.length)}` : cwd;
   if (path.length <= 48) return path;
   const segments = path.split('/');
   if (segments.length <= 3) return path;

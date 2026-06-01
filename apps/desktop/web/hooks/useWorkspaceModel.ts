@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react';
 
 import { invoke } from '../services/runtime';
-import { activityForSession, dangerousLabel, errorMessage } from '../domain';
+import { activityForSession, dangerousLabel, errorMessage, setUserHome } from '../domain';
 import type {
   ActivityPermissionRequest,
   ActivityState,
@@ -223,6 +223,20 @@ export function useWorkspaceModel() {
       appendLog(`Workspace shell load failed: ${errorMessage(error)}`);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-once load.
+  }, []);
+
+  // Resolve the real OS home from the backend once on mount so cwd display
+  // (`shortenCwd`) and the default working directory are correct on any machine
+  // instead of relying on a path baked in at build time. Non-fatal on failure:
+  // home stays empty and callers fall back safely.
+  useEffect(() => {
+    if (!canUseAppServices) return;
+    invoke<string>('system_home_dir')
+      .then(home => setUserHome(home))
+      .catch(() => {
+        /* leave home unknown; shortenCwd skips ~ and the default cwd is empty */
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-once resolve.
   }, []);
 
   // Seed the live uiStore theme from the persisted workspace theme whenever it

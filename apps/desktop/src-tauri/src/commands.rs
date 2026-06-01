@@ -1288,6 +1288,18 @@ pub(crate) fn open_url(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+/// The current user's real OS home directory, reported to the web layer at
+/// startup. Resolving it here (rather than hardcoding a path in the frontend)
+/// is what keeps cwd display and the default working directory correct on any
+/// machine. Returns an empty string when `HOME` is unset; the frontend treats
+/// that as "home unknown" and falls back safely.
+#[tauri::command]
+pub(crate) fn system_home_dir() -> String {
+    env::var_os("HOME")
+        .map(|home| home.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn cortex_home_dir() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("CORTEX_HOME") {
         return Ok(PathBuf::from(path));

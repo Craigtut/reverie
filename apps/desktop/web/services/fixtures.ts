@@ -53,6 +53,8 @@ export async function invokeBrowserFixture<T>(
   switch (command) {
     case 'workspace_shell':
       return clone(fixtureShell) as T;
+    case 'system_home_dir':
+      return '/Users/user' as T;
     case 'choose_project_folder':
       return { name: 'reverie', path: '/Users/user/Code/reverie' } as T;
     case 'resolve_project_folder':

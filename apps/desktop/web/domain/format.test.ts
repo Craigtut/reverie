@@ -1,19 +1,32 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 
-import { USER_HOME } from './constants';
+import { setUserHome } from './constants';
 import { average, errorMessage, folderNameFromPath, shortenCwd, shortId } from './format';
 
+// shortenCwd reads the OS home the backend resolves at startup; pin a known
+// value so home-substitution is deterministic in tests.
+const HOME = '/Users/user';
+
 describe('shortenCwd', () => {
+  beforeEach(() => {
+    setUserHome(HOME);
+  });
+
   it('returns empty string for empty input', () => {
     expect(shortenCwd('')).toBe('');
   });
 
   it('substitutes the home directory with ~', () => {
-    expect(shortenCwd(`${USER_HOME}/Code/reverie`)).toBe('~/Code/reverie');
+    expect(shortenCwd(`${HOME}/Code/reverie`)).toBe('~/Code/reverie');
   });
 
   it('treats a bare home path as ~', () => {
-    expect(shortenCwd(USER_HOME)).toBe('~');
+    expect(shortenCwd(HOME)).toBe('~');
+  });
+
+  it('does not substitute ~ when the OS home is unknown', () => {
+    setUserHome('');
+    expect(shortenCwd(`${HOME}/Code/reverie`)).toBe(`${HOME}/Code/reverie`);
   });
 
   it('passes through paths of 48 chars or fewer unchanged', () => {
