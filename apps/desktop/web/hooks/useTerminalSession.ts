@@ -22,8 +22,6 @@ import {
   setTerminalFrontendActive,
   setTerminalTheme,
   startSession,
-  terminalHistoryInfo,
-  terminalHistoryWindow,
   writeTerminalInput,
 } from '../services/terminalApi';
 import {
@@ -59,20 +57,9 @@ import { openExternalUrl } from '../services/openApi';
 import {
   createTerminalController,
   type TerminalController,
-  type TerminalHistoryRowsRequest,
   type TimedTerminalControllerTraceEvent,
 } from '../terminal/terminalController';
 import type { TerminalPaintSample, TerminalRow } from '../terminalTypes';
-import {
-  historyWindowRows,
-  planHistoryWindowForMissingRows,
-  planHistoryWindowForTargetRow,
-  resolveHistoryTotalRows,
-} from '../terminal/historyWindowing';
-import {
-  createLatestHistoryJumpQueue,
-  type HistoryJumpRequest,
-} from '../terminal/historyJumpQueue';
 import {
   createTerminalFrameBatchAggregate,
   recordTerminalFrameBatch,
@@ -130,9 +117,6 @@ const TERMINAL_BACKEND_RESIZE_FLUSH_MS = 16;
 // storm into one commit. The first measure after the viewport mounts bypasses this
 // so initial paint stays instant.
 const SURFACE_RESIZE_SETTLE_MS = 80;
-const HISTORY_RESIZE_REPLAY_DEBOUNCE_MS = 240;
-const HISTORY_SCROLL_JUMP_DEBOUNCE_MS = 24;
-const PENDING_TARGET_SETTLE_FRAMES = 90;
 const TERMINAL_DIAGNOSTIC_FLUSH_MS = 500;
 const TERMINAL_DIAGNOSTIC_BATCH_LIMIT = 100;
 const TERMINAL_SLOW_PAINT_MS = 24;
@@ -252,11 +236,9 @@ function terminalTraceMetrics(
   let rendererMountStarts = 0;
   let rendererDisposes = 0;
   let terminalSurfaceChanges = 0;
-  let terminalHistoryRowRequests = 0;
-  let terminalHistoryWindowMerges = 0;
+  let terminalLiveRowRequests = 0;
   let terminalBufferCacheMisses = 0;
   let terminalLiveBufferCacheMisses = 0;
-  let terminalHistoryBufferCacheMisses = 0;
   let terminalFullPaints = 0;
   let terminalPartialPaints = 0;
   let maxRendererRows = 0;
@@ -271,13 +253,10 @@ function terminalTraceMetrics(
     } else if (event.kind === 'surface_change') {
       terminalSurfaceChanges += 1;
     } else if (event.kind === 'history_rows_request') {
-      terminalHistoryRowRequests += 1;
-    } else if (event.kind === 'history_window_merge') {
-      terminalHistoryWindowMerges += 1;
+      terminalLiveRowRequests += 1;
     } else if (event.kind === 'buffer_cache_miss') {
       terminalBufferCacheMisses += 1;
-      if (event.mode === 'live') terminalLiveBufferCacheMisses += 1;
-      else terminalHistoryBufferCacheMisses += 1;
+      terminalLiveBufferCacheMisses += 1;
     } else if (event.kind === 'paint') {
       if (event.fullPaint) terminalFullPaints += 1;
       else terminalPartialPaints += 1;
@@ -290,11 +269,9 @@ function terminalTraceMetrics(
     rendererMountStarts,
     rendererDisposes,
     terminalSurfaceChanges,
-    terminalHistoryRowRequests,
-    terminalHistoryWindowMerges,
+    terminalLiveRowRequests,
     terminalBufferCacheMisses,
     terminalLiveBufferCacheMisses,
-    terminalHistoryBufferCacheMisses,
     terminalFullPaints,
     terminalPartialPaints,
     maxRendererRows,
@@ -326,7 +303,6 @@ function terminalTraceEventShouldPersist(event: TimedTerminalControllerTraceEven
   if (event.kind === 'buffer_cache_miss') return true;
   if (event.kind === 'renderer_dispose') return event.hadRenderer || event.pendingRenderer;
   if (event.kind === 'renderer_mount') return event.phase !== 'start';
-  if (event.kind === 'history_window_merge') return true;
   return event.kind === 'history_rows_request' && event.source === 'miss';
 }
 
@@ -372,38 +348,6 @@ export function useTerminalSession(params: {
   const terminalWheelListenerRef = useRef<((event: globalThis.WheelEvent) => void) | null>(null);
   const terminalInputQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
 
-  const requestHistoryRowsRef = useRef<(request: TerminalHistoryRowsRequest) => void>(() => {});
-  const requestLiveRowsRef = useRef<(request: TerminalHistoryRowsRequest) => boolean>(() => false);
-  const historyWindowRequestsRef = useRef<Set<string>>(new Set());
-  const liveMissingRowsRequestKeyRef = useRef<string | null>(null);
-  const pendingHistoryRowsRequestRef = useRef<TerminalHistoryRowsRequest | null>(null);
-  const pendingHistoryScrollTargetRowRef = useRef<number | null>(null);
-  const pendingHistoryResizeReplayRef = useRef<{
-    targetRow: number;
-    knownTotalRows?: number;
-  } | null>(null);
-  const pendingHistoryJumpRef = useRef<{
-    targetRow: number;
-    knownTotalRows?: number;
-    fallbackDeltaRows?: number;
-    liveMissingRowsKey?: string;
-  } | null>(null);
-  const pendingLiveTopJumpRef = useRef(false);
-  const liveTopJumpRafRef = useRef(0);
-  const pendingLiveScrollTargetRowRef = useRef<number | null>(null);
-  const liveScrollSettleRafRef = useRef(0);
-  const pendingTargetSettleRafRef = useRef(0);
-  const historyResizeReplayTimerRef = useRef(0);
-  const historyJumpTimerRef = useRef(0);
-  const loadingHistoryRowsRef = useRef(false);
-  const runHistoryJumpRef = useRef<(request: HistoryJumpRequest) => Promise<boolean>>(async () => {
-    return false;
-  });
-  const historyJumpQueueRef = useRef(
-    createLatestHistoryJumpQueue(request => runHistoryJumpRef.current(request)),
-  );
-  const historyInfoCacheRef = useRef<Map<string, number>>(new Map());
-  const historyRequestSeqRef = useRef(0);
   const lastLiveFollowRef = useRef(true);
   const renderSampleCollectorsRef = useRef(
     new Map<string, (sample: TerminalPaintSample) => void>(),
@@ -439,17 +383,10 @@ export function useTerminalSession(params: {
       surface: TERMINAL_SURFACE,
       onScrollbackRowCount: count => useTerminalStore.getState().setScrollbackRowCount(count),
       onLiveFollow: live => {
-        const wasLive = lastLiveFollowRef.current;
         lastLiveFollowRef.current = live;
         useTerminalStore.getState().setTerminalLiveFollow(live);
-        if (live && !wasLive) clearHistoryWorkForLiveFollow();
       },
       onScrollMetrics: metrics => useTerminalStore.getState().setTerminalScroll(metrics),
-      onMissingHistoryRows: request => {
-        requestHistoryRowsRef.current(request);
-        return true;
-      },
-      onMissingLiveRows: request => requestLiveRowsRef.current(request),
       onPaintSample: sample => {
         const activeTerminalId = useTerminalStore.getState().activeTerminalId;
         if (!activeTerminalId) return;
@@ -541,7 +478,6 @@ export function useTerminalSession(params: {
         const terminalStore = useTerminalStore.getState();
         return {
           surface,
-          historyMode: controller.isHistoryMode(),
           liveFollow: controller.isLiveFollow(),
           startRow: controller.getStartRow(),
           rowCount: controller.getRowCount(),
@@ -594,230 +530,6 @@ export function useTerminalSession(params: {
   const interaction = interactionRef.current;
   const [contextMenu, setContextMenu] = useState<MenuModel | null>(null);
 
-  // Whether the full-history (deep scroll) view is showing.
-  const [historyViewing, setHistoryViewing] = useState(false);
-
-  function invalidateHistoryRequests(
-    options: {
-      clearJumpQueue?: boolean;
-      preserveLiveMissingRows?: boolean;
-      preserveScrollTarget?: boolean;
-    } = {},
-  ) {
-    const clearJumpQueue = options.clearJumpQueue ?? true;
-    historyRequestSeqRef.current += 1;
-    historyWindowRequestsRef.current.clear();
-    if (options.preserveLiveMissingRows !== true) {
-      liveMissingRowsRequestKeyRef.current = null;
-    }
-    pendingHistoryRowsRequestRef.current = null;
-    if (options.preserveScrollTarget !== true) {
-      pendingHistoryScrollTargetRowRef.current = null;
-      cancelLiveTopJump();
-      cancelLiveScrollSettle();
-      cancelPendingTargetSettle();
-    }
-    if (options.preserveScrollTarget !== true) {
-      cancelPendingHistoryResizeReplay();
-      cancelPendingHistoryJump();
-    }
-    if (clearJumpQueue) historyJumpQueueRef.current.clear();
-  }
-
-  function clearHistoryWorkForLiveFollow() {
-    historyRequestSeqRef.current += 1;
-    historyWindowRequestsRef.current.clear();
-    liveMissingRowsRequestKeyRef.current = null;
-    pendingHistoryRowsRequestRef.current = null;
-    pendingHistoryScrollTargetRowRef.current = null;
-    cancelLiveTopJump();
-    cancelLiveScrollSettle();
-    cancelPendingTargetSettle();
-    cancelPendingHistoryResizeReplay();
-    cancelPendingHistoryJump();
-    historyJumpQueueRef.current.clear();
-  }
-
-  function cancelPendingHistoryResizeReplay() {
-    pendingHistoryResizeReplayRef.current = null;
-    if (historyResizeReplayTimerRef.current !== 0) {
-      window.clearTimeout(historyResizeReplayTimerRef.current);
-      historyResizeReplayTimerRef.current = 0;
-    }
-  }
-
-  function scheduleHistoryResizeReplay(targetRow: number, knownTotalRows?: number) {
-    pendingHistoryResizeReplayRef.current = { targetRow, knownTotalRows };
-    if (historyResizeReplayTimerRef.current !== 0) {
-      window.clearTimeout(historyResizeReplayTimerRef.current);
-    }
-    historyResizeReplayTimerRef.current = window.setTimeout(() => {
-      historyResizeReplayTimerRef.current = 0;
-      const pending = pendingHistoryResizeReplayRef.current;
-      pendingHistoryResizeReplayRef.current = null;
-      if (!pending) return;
-      void loadHistoryAtRow(pending.targetRow, pending.knownTotalRows);
-    }, HISTORY_RESIZE_REPLAY_DEBOUNCE_MS);
-  }
-
-  function cancelPendingHistoryJump() {
-    pendingHistoryJumpRef.current = null;
-    if (historyJumpTimerRef.current !== 0) {
-      window.clearTimeout(historyJumpTimerRef.current);
-      historyJumpTimerRef.current = 0;
-    }
-  }
-
-  function cancelLiveTopJump() {
-    pendingLiveTopJumpRef.current = false;
-    if (liveTopJumpRafRef.current !== 0) {
-      cancelAnimationFrame(liveTopJumpRafRef.current);
-      liveTopJumpRafRef.current = 0;
-    }
-  }
-
-  function cancelLiveScrollSettle() {
-    pendingLiveScrollTargetRowRef.current = null;
-    if (liveScrollSettleRafRef.current !== 0) {
-      cancelAnimationFrame(liveScrollSettleRafRef.current);
-      liveScrollSettleRafRef.current = 0;
-    }
-  }
-
-  function cancelPendingTargetSettle() {
-    if (pendingTargetSettleRafRef.current !== 0) {
-      cancelAnimationFrame(pendingTargetSettleRafRef.current);
-      pendingTargetSettleRafRef.current = 0;
-    }
-  }
-
-  function settlePendingLiveTargetFromCache() {
-    const targetRow = pendingHistoryScrollTargetRowRef.current;
-    if (targetRow === null || controller.isHistoryMode()) return false;
-    if (!controller.scrollBufferedToRow(targetRow)) return false;
-    pendingHistoryScrollTargetRowRef.current = null;
-    pendingLiveScrollTargetRowRef.current = null;
-    pendingLiveTopJumpRef.current = false;
-    liveMissingRowsRequestKeyRef.current = null;
-    invalidateHistoryRequests();
-    cancelPendingTargetSettle();
-    return true;
-  }
-
-  function schedulePendingTargetSettle(attempt = 0) {
-    if (pendingTargetSettleRafRef.current !== 0) {
-      cancelAnimationFrame(pendingTargetSettleRafRef.current);
-    }
-    pendingTargetSettleRafRef.current = requestAnimationFrame(() => {
-      pendingTargetSettleRafRef.current = 0;
-      if (pendingHistoryScrollTargetRowRef.current === null || controller.isHistoryMode()) return;
-      if (settlePendingLiveTargetFromCache()) return;
-      if (attempt >= PENDING_TARGET_SETTLE_FRAMES) {
-        pendingHistoryScrollTargetRowRef.current = null;
-        pendingLiveScrollTargetRowRef.current = null;
-        pendingLiveTopJumpRef.current = false;
-        return;
-      }
-      schedulePendingTargetSettle(attempt + 1);
-    });
-  }
-
-  function scheduleHistoryJump(
-    targetRow: number,
-    knownTotalRows?: number,
-    options: {
-      fallbackDeltaRows?: number;
-      liveMissingRowsKey?: string;
-    } = {},
-  ) {
-    if (controller.isLiveFollow()) {
-      clearHistoryWorkForLiveFollow();
-      return;
-    }
-    pendingHistoryJumpRef.current = {
-      targetRow,
-      knownTotalRows,
-      fallbackDeltaRows: options.fallbackDeltaRows,
-      liveMissingRowsKey: options.liveMissingRowsKey,
-    };
-    schedulePendingTargetSettle();
-    if (historyJumpTimerRef.current !== 0) {
-      window.clearTimeout(historyJumpTimerRef.current);
-    }
-    historyJumpTimerRef.current = window.setTimeout(() => {
-      historyJumpTimerRef.current = 0;
-      const pending = pendingHistoryJumpRef.current;
-      pendingHistoryJumpRef.current = null;
-      if (!pending) return;
-      if (controller.isLiveFollow()) {
-        if (
-          pending.liveMissingRowsKey &&
-          liveMissingRowsRequestKeyRef.current === pending.liveMissingRowsKey
-        ) {
-          liveMissingRowsRequestKeyRef.current = null;
-        }
-        pendingHistoryScrollTargetRowRef.current = null;
-        return;
-      }
-      void loadHistoryAtRow(pending.targetRow, pending.knownTotalRows).then(loaded => {
-        if (!loaded && pending.liveMissingRowsKey) {
-          if (liveMissingRowsRequestKeyRef.current === pending.liveMissingRowsKey) {
-            liveMissingRowsRequestKeyRef.current = null;
-          }
-        }
-        if (!loaded && pending.fallbackDeltaRows !== undefined) {
-          void sendTerminalViewportScroll(pending.fallbackDeltaRows);
-        }
-      });
-    }, HISTORY_SCROLL_JUMP_DEBOUNCE_MS);
-  }
-
-  function startHistoryRequest(
-    sessionId: string,
-    surface: TerminalSurface,
-    options: {
-      clearJumpQueue?: boolean;
-      preserveLiveMissingRows?: boolean;
-      preserveScrollTarget?: boolean;
-    } = {},
-  ) {
-    invalidateHistoryRequests(options);
-    return {
-      seq: historyRequestSeqRef.current,
-      sessionId,
-      cols: surface.cols,
-      rows: surface.rows,
-    };
-  }
-
-  function historyInfoCacheKey(sessionId: string, cols: number, rows: number) {
-    return `${sessionId}:${cols}:${rows}`;
-  }
-
-  function currentHistoryRequest(sessionId: string, surface: TerminalSurface) {
-    return {
-      seq: historyRequestSeqRef.current,
-      sessionId,
-      cols: surface.cols,
-      rows: surface.rows,
-    };
-  }
-
-  function historyRequestIsCurrent(request: {
-    seq: number;
-    sessionId: string;
-    cols: number;
-    rows: number;
-  }) {
-    const surface = controller.getSurface();
-    return (
-      request.seq === historyRequestSeqRef.current &&
-      useNavigationStore.getState().selectedSessionId === request.sessionId &&
-      surface.cols === request.cols &&
-      surface.rows === request.rows
-    );
-  }
-
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
   const creationMode = useNavigationStore(s => s.creationMode);
   const selectedSessionId = selectedSession?.id ?? null;
@@ -868,14 +580,7 @@ export function useTerminalSession(params: {
   // coordinates. Keyed on the session id only, so a resize repaint never clears.
   // biome-ignore lint/correctness/useExhaustiveDependencies: session id is the trigger.
   useEffect(() => {
-    invalidateHistoryRequests();
     controller.resetInteraction();
-    // Drop the full-history view on session switch so the newly-selected session
-    // lands on its live tail.
-    if (controller.isHistoryMode()) {
-      controller.exitHistory();
-      setHistoryViewing(false);
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- session id is the trigger
   }, [selectedSessionId]);
 
@@ -917,49 +622,10 @@ export function useTerminalSession(params: {
     const previous = controller.getSurface();
     const next = terminalSurfaceForBounds(width, height, previous);
     if (next.cols === previous.cols && next.rows === previous.rows) return;
-    const wasHistoryMode = controller.isHistoryMode();
-    const wasLiveFollow = controller.isLiveFollow();
-    const scrollMetrics = useTerminalStore.getState().terminalScroll;
-    const historyTopRow = currentHistoryTopRow(
-      previous,
-      scrollMetrics?.offsetRows ?? controller.getStartRow(),
-    );
 
     controller.setSurface(next);
     useTerminalStore.getState().setTerminalSurface(next);
-    // In history view, only column changes need transcript reflow. Height-only
-    // resize keeps the same row cache and repaints in place; replaying on every
-    // height tick during a window drag is exactly the expensive churn that makes
-    // the terminal flicker and fall behind.
-    if (wasHistoryMode) {
-      pendingHistoryScrollTargetRowRef.current = null;
-      if (next.cols === previous.cols) {
-        controller.paintWindow(undefined, next, 'history');
-      } else {
-        pendingHistoryScrollTargetRowRef.current = historyTopRow;
-        controller.paintWindow(undefined, next, 'history');
-        if (controller.scrollHistoryBufferedToRow(historyTopRow)) {
-          pendingHistoryScrollTargetRowRef.current = null;
-        }
-        scheduleHistoryResizeReplay(historyTopRow);
-      }
-    } else {
-      if (!wasLiveFollow && next.cols !== previous.cols) {
-        pendingHistoryScrollTargetRowRef.current = historyTopRow === 0 ? null : historyTopRow;
-        controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
-        if (historyTopRow === 0) {
-          cancelLiveTopJump();
-          cancelLiveScrollSettle();
-          historyJumpQueueRef.current.clear();
-          cancelPendingHistoryResizeReplay();
-          cancelPendingHistoryJump();
-        } else {
-          scheduleHistoryResizeReplay(historyTopRow);
-        }
-      } else {
-        controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
-      }
-    }
+    controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
 
     const terminalId = useTerminalStore.getState().activeTerminalId;
     if (terminalId) {
@@ -1065,14 +731,6 @@ export function useTerminalSession(params: {
         window.clearTimeout(backendResizeTimerRef.current);
         backendResizeTimerRef.current = 0;
       }
-      if (historyResizeReplayTimerRef.current !== 0) {
-        window.clearTimeout(historyResizeReplayTimerRef.current);
-        historyResizeReplayTimerRef.current = 0;
-      }
-      if (historyJumpTimerRef.current !== 0) {
-        window.clearTimeout(historyJumpTimerRef.current);
-        historyJumpTimerRef.current = 0;
-      }
       if (terminalDiagnosticTimerRef.current !== 0) {
         window.clearTimeout(terminalDiagnosticTimerRef.current);
         terminalDiagnosticTimerRef.current = 0;
@@ -1083,8 +741,6 @@ export function useTerminalSession(params: {
       }
       pendingViewportSizeRef.current = null;
       pendingBackendResizeRef.current = null;
-      pendingHistoryResizeReplayRef.current = null;
-      pendingHistoryJumpRef.current = null;
       flushTerminalDiagnostics();
     };
   }, []);
@@ -1162,7 +818,6 @@ export function useTerminalSession(params: {
         payloads.map(payload => payload.frame),
         isActive,
       );
-      if (isActive) settlePendingLiveTargetFromCache();
       const frameEnded = performance.now();
       recordTerminalFrameBatch(frameBatchAggregate, payloads.length, frameEnded - frameStarted);
       for (const payload of payloads) {
@@ -1562,7 +1217,7 @@ export function useTerminalSession(params: {
   }
 
   function resumeLiveForUserInput() {
-    if (!controller.isHistoryMode() && controller.isLiveFollow()) return;
+    if (controller.isLiveFollow()) return;
     followLiveTerminalOutput();
   }
 
@@ -1693,76 +1348,33 @@ export function useTerminalSession(params: {
     }
     const viewport = event.currentTarget;
     if (controller.getLastFrameModes()?.alternateScreen) {
-      invalidateHistoryRequests();
       const target = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
       if (Math.abs(viewport.scrollTop - target) > SCROLL_FOLLOW_EPSILON_PX) {
         viewport.scrollTop = target;
       }
       return;
     }
-    if (controller.isHistoryMode()) {
-      const surface = controller.getSurface();
-      const metrics = useTerminalStore.getState().terminalScroll;
-      const totalRows = Math.max(metrics?.totalRows ?? controller.getRowCount(), surface.rows);
-      const maxStartRow = Math.max(0, totalRows - surface.rows);
-      const targetRow = Math.max(0, Math.min(maxStartRow, currentHistoryTopRow(surface)));
-      pendingHistoryScrollTargetRowRef.current = targetRow;
-      if (targetRow >= maxStartRow) {
-        pendingHistoryScrollTargetRowRef.current = null;
-        followLiveTerminalOutput();
-        return;
-      }
-      if (controller.scrollHistoryBufferedToRow(targetRow)) {
-        pendingHistoryScrollTargetRowRef.current = null;
-        cancelPendingHistoryJump();
-        return;
-      }
-      if (targetRow === 0) {
-        cancelLiveTopJump();
-        cancelLiveScrollSettle();
-        cancelPendingHistoryJump();
-        void loadHistoryAtRow(targetRow, totalRows);
-        return;
-      }
-      cancelLiveTopJump();
-      cancelLiveScrollSettle();
-      scheduleHistoryJump(targetRow, totalRows);
-      return;
-    }
     const following =
       viewport.scrollTop + viewport.clientHeight >=
       viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
-    if (!controller.isHistoryMode() && following) {
-      invalidateHistoryRequests();
-    }
     controller.setLiveFollow(following);
-    if (!controller.isHistoryMode() && !following) {
+    if (!following) {
+      // Scrolled up off the live tail: paint from the cached buffer at the
+      // viewport's top row. Range-fetching rows beyond what the live frames
+      // delivered is reworked in a later phase (serve straight from libghostty).
       const surface = controller.getSurface();
-      const metrics = useTerminalStore.getState().terminalScroll;
-      const totalRows = Math.max(metrics?.totalRows ?? controller.getRowCount(), surface.rows);
-      const maxStartRow = Math.max(0, totalRows - surface.rows);
-      const targetRow = Math.max(0, Math.min(maxStartRow, currentHistoryTopRow(surface)));
-      pendingHistoryScrollTargetRowRef.current = targetRow;
-      if (controller.scrollBufferedToRow(targetRow)) {
-        pendingHistoryScrollTargetRowRef.current = null;
-        cancelPendingHistoryJump();
-        return;
-      }
-      if (targetRow === 0) {
-        cancelLiveTopJump();
-        cancelLiveScrollSettle();
-        cancelPendingHistoryJump();
-        void loadHistoryAtRow(targetRow, totalRows);
-        return;
-      }
-      scheduleHistoryJump(targetRow, totalRows);
+      const inset = terminalInsetPx(surface);
+      const targetRow = Math.max(
+        0,
+        Math.floor((viewport.scrollTop - inset.top) / surface.cellHeight),
+      );
+      controller.scrollBufferedToRow(targetRow);
     }
   }
 
-  // Apply a wheel delta to the terminal: in the full-history view scroll the DOM
-  // viewport; while live, use the frontend row cache first and jump into a
-  // replayed history window when the target rows are not cached yet. Returns
-  // whether it consumed the event, so the caller can preventDefault.
+  // Apply a wheel delta to the terminal. Mouse-tracking apps consume the wheel as
+  // input; otherwise scroll back through the cached live buffer. Returns whether
+  // it consumed the event, so the caller can preventDefault.
   function applyWheelScroll(delta: {
     deltaY: number;
     deltaMode: number;
@@ -1775,59 +1387,9 @@ export function useTerminalSession(params: {
     const surface = controller.getSurface();
     const deltaRows = terminalWheelDeltaRows(delta, surface);
     if (deltaRows === 0) return false;
-    cancelPendingHistoryResizeReplay();
     const terminalId = useTerminalStore.getState().activeTerminalId;
-    if (controller.isHistoryMode()) {
-      const knownTotalRows = useTerminalStore.getState().terminalScroll?.totalRows;
-      const targetRow = targetHistoryRowForHistoryScroll(deltaRows, surface);
-      const maxStartRow = Math.max(
-        0,
-        Math.max(knownTotalRows ?? controller.getRowCount(), surface.rows) - surface.rows,
-      );
-      if (deltaRows > 0 && targetRow >= maxStartRow) {
-        followLiveTerminalOutput();
-        return true;
-      }
-      pendingHistoryScrollTargetRowRef.current = targetRow;
-      if (controller.scrollHistoryBufferedToRow(targetRow)) {
-        pendingHistoryScrollTargetRowRef.current = null;
-        cancelPendingHistoryJump();
-        return true;
-      }
-      if (targetRow === 0) {
-        cancelLiveTopJump();
-        cancelLiveScrollSettle();
-        cancelPendingHistoryJump();
-        void loadHistoryAtRow(targetRow);
-        return true;
-      }
-      cancelLiveTopJump();
-      cancelLiveScrollSettle();
-      if (terminalId) scheduleHistoryJump(targetRow, knownTotalRows);
-      return true;
-    }
     const modes = controller.getLastFrameModes();
     if (!terminalId) return false;
-    if (modes?.alternateScreen) {
-      if (modes.mouseTracking && !delta.shiftKey) {
-        const canvas = controller.getCanvas();
-        const cell =
-          canvas && delta.clientX !== undefined && delta.clientY !== undefined
-            ? terminalMouseCellFromClientPoint(delta.clientX, delta.clientY, canvas, surface)
-            : null;
-        if (!cell || !inputReady()) return false;
-        void sendTerminalInput(
-          encodeSgrWheelEvent({
-            cell,
-            direction: deltaRows < 0 ? 'up' : 'down',
-            modifiers: { alt: delta.altKey, ctrl: delta.ctrlKey },
-          }),
-        );
-      } else if (deltaRows < 0) {
-        enterAlternateScreenHistoryFromWheel(deltaRows, surface);
-      }
-      return true;
-    }
     if (modes?.mouseTracking && !delta.shiftKey) {
       const canvas = controller.getCanvas();
       const cell =
@@ -1844,67 +1406,25 @@ export function useTerminalSession(params: {
       );
       return true;
     }
-    if (deltaRows < 0) {
-      if (controller.isLiveFollow()) cancelPendingHistoryJump();
-      controller.setLiveFollow(false);
+    if (modes?.alternateScreen) {
+      // Alternate-screen apps without mouse tracking own the whole screen; there
+      // is nothing to scroll back into.
+      return true;
     }
-    const targetRow = targetHistoryRowForLiveScroll(deltaRows, surface);
-    const hasPendingHistoryTarget = pendingHistoryScrollTargetRowRef.current !== null;
-    const knownTotalRows = useTerminalStore.getState().terminalScroll?.totalRows;
-    const totalRows = Math.max(knownTotalRows ?? controller.getRowCount(), surface.rows);
+    const metrics = useTerminalStore.getState().terminalScroll;
+    const totalRows = Math.max(metrics?.totalRows ?? controller.getRowCount(), surface.rows);
     const maxStartRow = Math.max(0, totalRows - surface.rows);
     if (deltaRows > 0) {
-      if (targetRow >= maxStartRow) {
+      const offsetRows = metrics?.offsetRows ?? controller.getStartRow();
+      if (offsetRows + surface.rows >= maxStartRow + surface.rows) {
         followLiveTerminalOutput();
         return true;
       }
+    } else if (controller.isLiveFollow()) {
+      controller.setLiveFollow(false);
     }
-    if (!hasPendingHistoryTarget && controller.scrollBufferedRows(deltaRows)) return true;
-    pendingHistoryScrollTargetRowRef.current = targetRow;
-    if (controller.scrollBufferedToRow(targetRow)) {
-      pendingHistoryScrollTargetRowRef.current = null;
-      invalidateHistoryRequests();
-      return true;
-    }
-    if (targetRow === 0) {
-      cancelLiveTopJump();
-      cancelLiveScrollSettle();
-      cancelPendingHistoryJump();
-      void loadHistoryAtRow(targetRow, totalRows);
-      return true;
-    }
-    cancelLiveTopJump();
-    cancelLiveScrollSettle();
-    scheduleHistoryJump(targetRow, totalRows, { fallbackDeltaRows: deltaRows });
+    controller.scrollBufferedRows(deltaRows);
     return true;
-  }
-
-  async function enterAlternateScreenHistoryFromWheel(deltaRows: number, surface: TerminalSurface) {
-    const sessionId = useNavigationStore.getState().selectedSessionId;
-    if (!sessionId) return;
-    cancelLiveTopJump();
-    cancelLiveScrollSettle();
-    cancelPendingHistoryJump();
-    cancelPendingHistoryResizeReplay();
-    controller.setLiveFollow(false);
-    try {
-      const totalRows = Math.max(
-        (await terminalHistoryInfo(sessionId, surface.cols, surface.rows)).totalRows,
-        surface.rows,
-      );
-      const maxStartRow = Math.max(0, totalRows - surface.rows);
-      if (maxStartRow === 0) return;
-      const targetRow = clampWheelTargetRow(
-        maxStartRow + deltaRows,
-        deltaRows,
-        maxStartRow,
-        surface.rows,
-      );
-      pendingHistoryScrollTargetRowRef.current = targetRow;
-      await loadHistoryAtRow(targetRow, totalRows);
-    } catch (error) {
-      writeLog(`Alternate screen history failed: ${errorMessage(error)}`);
-    }
   }
 
   function handleTerminalWheel(event: WheelEvent<HTMLDivElement>) {
@@ -1922,481 +1442,32 @@ export function useTerminalSession(params: {
   }
 
   // Move the terminal to a scroll position (0 = top, 1 = bottom of content),
-  // driven by the overlay scrollbar's thumb. History sets the DOM scrollTop; live
-  // uses cached rows first, then swaps to a replayed history window if needed.
+  // driven by the overlay scrollbar's thumb, scrolling within the cached live
+  // buffer.
   function scrollToFraction(startFraction: number) {
     const metrics = useTerminalStore.getState().terminalScroll;
     if (!metrics?.scrollable) return;
-    if (metrics.mode === 'history') {
-      const target = Math.round(startFraction * metrics.totalRows);
-      const clamped = Math.max(0, Math.min(metrics.totalRows - metrics.viewportRows, target));
-      if (clamped >= Math.max(0, metrics.totalRows - metrics.viewportRows)) {
-        followLiveTerminalOutput();
-        return;
-      }
-      pendingHistoryScrollTargetRowRef.current = clamped;
-      if (controller.scrollHistoryBufferedToRow(clamped)) {
-        pendingHistoryScrollTargetRowRef.current = null;
-        cancelPendingHistoryJump();
-        return;
-      }
-      if (clamped === 0) {
-        cancelLiveTopJump();
-        cancelLiveScrollSettle();
-        cancelPendingHistoryJump();
-        void loadHistoryAtRow(clamped, metrics.totalRows);
-        return;
-      }
-      cancelLiveTopJump();
-      cancelLiveScrollSettle();
-      scheduleHistoryJump(clamped, metrics.totalRows);
-      return;
-    }
     const terminalId = useTerminalStore.getState().activeTerminalId;
     if (!terminalId) return;
     const target = Math.round(startFraction * metrics.totalRows);
     const clamped = Math.max(0, Math.min(metrics.totalRows - metrics.viewportRows, target));
     const delta = clamped - metrics.offsetRows;
     if (delta === 0) return;
-    if (delta < 0) controller.setLiveFollow(false);
-    if (controller.scrollBufferedToRow(clamped)) return;
-    pendingHistoryScrollTargetRowRef.current = clamped;
-    if (clamped === 0) {
-      cancelLiveTopJump();
-      cancelLiveScrollSettle();
-      cancelPendingHistoryJump();
-      void loadHistoryAtRow(clamped, metrics.totalRows);
+    if (clamped >= Math.max(0, metrics.totalRows - metrics.viewportRows)) {
+      followLiveTerminalOutput();
       return;
     }
-    cancelLiveTopJump();
-    cancelLiveScrollSettle();
-    scheduleHistoryJump(clamped, metrics.totalRows, { fallbackDeltaRows: delta });
+    if (delta < 0) controller.setLiveFollow(false);
+    controller.scrollBufferedToRow(clamped);
   }
 
   function followLiveTerminalOutput() {
-    invalidateHistoryRequests();
-    // "Jump to latest" also leaves the full-history view.
-    if (controller.isHistoryMode()) {
-      controller.exitHistory();
-      setHistoryViewing(false);
-      controller.paintCurrent(useNavigationStore.getState().selectedSessionId);
-    }
     controller.setLiveFollow(true);
     void sendTerminalViewportToBottom();
     requestAnimationFrame(() => {
       controller.scrollToTail();
       controller.focusCanvas();
     });
-  }
-
-  function targetHistoryRowForLiveScroll(deltaRows: number, surface: TerminalSurface) {
-    const metrics = useTerminalStore.getState().terminalScroll;
-    const totalRows = Math.max(metrics?.totalRows ?? controller.getRowCount(), surface.rows);
-    const maxStartRow = Math.max(0, totalRows - surface.rows);
-    const clampTarget = (row: number) =>
-      clampWheelTargetRow(row, deltaRows, maxStartRow, surface.rows);
-    if (pendingHistoryScrollTargetRowRef.current !== null) {
-      return clampTarget(pendingHistoryScrollTargetRowRef.current + deltaRows);
-    }
-    if (controller.isLiveFollow() && metrics?.mode === 'live') {
-      return clampTarget(metrics.offsetRows + deltaRows);
-    }
-    const viewport = controller.getViewport();
-    if (!viewport) {
-      return clampTarget((metrics?.offsetRows ?? maxStartRow) + deltaRows);
-    }
-    const inset = terminalInsetPx(surface);
-    const targetTop = viewport.scrollTop + deltaRows * surface.cellHeight;
-    return clampTarget(Math.floor((targetTop - inset.top) / surface.cellHeight));
-  }
-
-  function targetHistoryRowForHistoryScroll(deltaRows: number, surface: TerminalSurface) {
-    const metrics = useTerminalStore.getState().terminalScroll;
-    const totalRows = Math.max(metrics?.totalRows ?? controller.getRowCount(), surface.rows);
-    const maxStartRow = Math.max(0, totalRows - surface.rows);
-    const baseRow =
-      pendingHistoryScrollTargetRowRef.current ??
-      currentHistoryTopRow(surface, metrics?.offsetRows);
-    return clampWheelTargetRow(baseRow + deltaRows, deltaRows, maxStartRow, surface.rows);
-  }
-
-  function clampWheelTargetRow(
-    row: number,
-    deltaRows: number,
-    maxStartRow: number,
-    viewportRows: number,
-  ) {
-    const clamped = Math.max(0, Math.min(maxStartRow, row));
-    const boundarySnapRows = Math.max(1, viewportRows * 4);
-    if (deltaRows < 0 && clamped <= boundarySnapRows) return 0;
-    if (deltaRows > 0 && maxStartRow - clamped <= boundarySnapRows) return maxStartRow;
-    return clamped;
-  }
-
-  function currentHistoryTopRow(surface: TerminalSurface, fallbackRow = controller.getStartRow()) {
-    const viewport = controller.getViewport();
-    if (!viewport) return Math.max(0, fallbackRow);
-    const inset = terminalInsetPx(surface);
-    return Math.max(0, Math.floor((viewport.scrollTop - inset.top) / surface.cellHeight));
-  }
-
-  async function loadHistoryAtRow(targetRow: number, knownTotalRows?: number) {
-    const sessionId = useNavigationStore.getState().selectedSessionId;
-    if (!sessionId) return false;
-    if (!controller.isHistoryMode()) {
-      if (settlePendingLiveTargetFromCache()) return true;
-      schedulePendingTargetSettle();
-    }
-    const surface = controller.getSurface();
-    return historyJumpQueueRef.current.enqueue({
-      sessionId,
-      cols: surface.cols,
-      rows: surface.rows,
-      targetRow,
-      knownTotalRows,
-    });
-  }
-
-  function requestLiveRows(request: TerminalHistoryRowsRequest) {
-    if (controller.isHistoryMode()) return false;
-    const sessionId = useNavigationStore.getState().selectedSessionId;
-    if (!sessionId) return false;
-    const surface = controller.getSurface();
-    const key = `${sessionId}:${surface.cols}:${surface.rows}:${request.startRow}:${request.rowCount}:${request.totalRows}`;
-    const fillLiveTail = controller.isLiveFollow();
-    if (!fillLiveTail && pendingHistoryScrollTargetRowRef.current !== null) {
-      const targetRow = pendingHistoryScrollTargetRowRef.current;
-      if (targetRow === 0 && pendingLiveTopJumpRef.current) return true;
-      if (pendingLiveScrollTargetRowRef.current === targetRow) return true;
-      if (
-        pendingHistoryJumpRef.current?.targetRow !== targetRow &&
-        !historyJumpQueueRef.current.isBusy()
-      ) {
-        scheduleHistoryJump(targetRow, request.totalRows);
-      }
-      return true;
-    }
-    if (liveMissingRowsRequestKeyRef.current !== null) return true;
-    if (!fillLiveTail && historyJumpQueueRef.current.isBusy()) return true;
-    liveMissingRowsRequestKeyRef.current = key;
-    enqueueTerminalDiagnostic({
-      kind: fillLiveTail ? 'live_cache_miss_fill' : 'live_cache_miss_history_jump',
-      request,
-      surface,
-    });
-    if (fillLiveTail) {
-      void loadLiveTailRows(sessionId, surface, request, key);
-      return true;
-    }
-    scheduleHistoryJump(request.startRow, request.totalRows, { liveMissingRowsKey: key });
-    return true;
-  }
-  requestLiveRowsRef.current = requestLiveRows;
-
-  async function loadLiveTailRows(
-    sessionId: string,
-    surface: TerminalSurface,
-    request: TerminalHistoryRowsRequest,
-    key: string,
-  ) {
-    try {
-      const result = await terminalHistoryWindow(
-        sessionId,
-        request.startRow,
-        surface.cols,
-        surface.rows,
-        request.rowCount,
-      );
-      const currentSurface = controller.getSurface();
-      if (
-        controller.isHistoryMode() ||
-        liveMissingRowsRequestKeyRef.current !== key ||
-        currentSurface.cols !== surface.cols ||
-        currentSurface.rows !== surface.rows
-      ) {
-        // Abandoning this response (left live-tail, geometry changed mid-flight, or
-        // a newer fill superseded us). Release the in-flight guard if we still own
-        // it; otherwise no future live-tail fill can start and the live view stays
-        // frozen until an unrelated event (e.g. a resize) happens to clear it.
-        if (liveMissingRowsRequestKeyRef.current === key) {
-          liveMissingRowsRequestKeyRef.current = null;
-        }
-        return;
-      }
-      const totalRows = resolveHistoryTotalRows(
-        result.frame.scrollback?.totalRows,
-        request.totalRows,
-        surface.rows,
-      );
-      const merged = controller.mergeLiveRows(
-        result.frame,
-        result.startRow,
-        totalRows,
-        request.generation,
-      );
-      if (liveMissingRowsRequestKeyRef.current === key) liveMissingRowsRequestKeyRef.current = null;
-      enqueueTerminalDiagnostic({
-        kind: merged ? 'live_cache_miss_filled' : 'live_cache_miss_stale',
-        request,
-        returnedStartRow: result.startRow,
-        returnedRows: result.frame.rows.length,
-        totalRows,
-      });
-    } catch (error) {
-      const currentSurface = controller.getSurface();
-      if (
-        controller.isHistoryMode() ||
-        liveMissingRowsRequestKeyRef.current !== key ||
-        currentSurface.cols !== surface.cols ||
-        currentSurface.rows !== surface.rows
-      ) {
-        // Abandoning this response (left live-tail, geometry changed mid-flight, or
-        // a newer fill superseded us). Release the in-flight guard if we still own
-        // it; otherwise no future live-tail fill can start and the live view stays
-        // frozen until an unrelated event (e.g. a resize) happens to clear it.
-        if (liveMissingRowsRequestKeyRef.current === key) {
-          liveMissingRowsRequestKeyRef.current = null;
-        }
-        return;
-      }
-      liveMissingRowsRequestKeyRef.current = null;
-      enqueueTerminalDiagnostic({
-        kind: 'live_cache_miss_fill_failed',
-        request,
-        message: errorMessage(error),
-      });
-    }
-  }
-
-  async function runHistoryJump(request: HistoryJumpRequest) {
-    const currentSurface = controller.getSurface();
-    const requestSurface = {
-      ...currentSurface,
-      cols: request.cols,
-      rows: request.rows,
-    };
-    enqueueTerminalDiagnostic({
-      kind: 'history_jump_start',
-      request,
-      currentSurface,
-    });
-    const historyRequest = startHistoryRequest(request.sessionId, requestSurface, {
-      clearJumpQueue: false,
-      preserveLiveMissingRows: true,
-      preserveScrollTarget: true,
-    });
-    try {
-      if (controller.isLiveFollow()) {
-        liveMissingRowsRequestKeyRef.current = null;
-        pendingHistoryScrollTargetRowRef.current = null;
-        enqueueTerminalDiagnostic({
-          kind: 'history_jump_discarded_for_live_follow',
-          request,
-        });
-        return true;
-      }
-      const cacheKey = historyInfoCacheKey(request.sessionId, request.cols, request.rows);
-      let totalRows =
-        request.knownTotalRows === undefined
-          ? historyInfoCacheRef.current.get(cacheKey)
-          : request.knownTotalRows;
-      if (totalRows === undefined) {
-        totalRows = Math.max(
-          (await terminalHistoryInfo(request.sessionId, request.cols, request.rows)).totalRows,
-          request.rows,
-        );
-        historyInfoCacheRef.current.set(cacheKey, totalRows);
-      } else {
-        totalRows = Math.max(totalRows, request.rows);
-      }
-      if (!historyRequestIsCurrent(historyRequest)) {
-        enqueueTerminalDiagnostic({ kind: 'history_jump_stale_before_window', request });
-        return true;
-      }
-      const plan = planHistoryWindowForTargetRow(request.targetRow, request.rows, totalRows);
-      const windowResult = await terminalHistoryWindow(
-        request.sessionId,
-        plan.startRow,
-        request.cols,
-        request.rows,
-        plan.rowCount,
-      );
-      if (historyJumpQueueRef.current.hasPending()) {
-        enqueueTerminalDiagnostic({
-          kind: 'history_jump_discarded_for_newer_request',
-          request,
-          plan,
-        });
-        return true;
-      }
-      if (!historyRequestIsCurrent(historyRequest)) {
-        enqueueTerminalDiagnostic({ kind: 'history_jump_stale_after_window', request, plan });
-        return true;
-      }
-      const resolvedTotalRows = resolveHistoryTotalRows(
-        windowResult.frame.scrollback?.totalRows,
-        totalRows,
-        request.rows,
-      );
-      if (controller.isLiveFollow()) {
-        liveMissingRowsRequestKeyRef.current = null;
-        enqueueTerminalDiagnostic({
-          kind: 'history_jump_discarded_for_live_follow',
-          request,
-          plan,
-        });
-        return true;
-      }
-      historyInfoCacheRef.current.set(cacheKey, resolvedTotalRows);
-      controller.enterHistoryWindow(
-        windowResult.frame,
-        windowResult.startRow,
-        resolvedTotalRows,
-        false,
-        plan.targetRow,
-      );
-      if (
-        pendingHistoryScrollTargetRowRef.current === request.targetRow ||
-        pendingHistoryScrollTargetRowRef.current === plan.targetRow
-      ) {
-        pendingHistoryScrollTargetRowRef.current = null;
-      }
-      liveMissingRowsRequestKeyRef.current = null;
-      setHistoryViewing(true);
-      requestAnimationFrame(() => {
-        controller.focusCanvas();
-      });
-      enqueueTerminalDiagnostic({
-        kind: 'history_jump_merged',
-        request,
-        plan,
-        returnedStartRow: windowResult.startRow,
-        returnedRows: windowResult.frame.rows.length,
-        resolvedTotalRows,
-      });
-      return true;
-    } catch (error) {
-      if (
-        controller.isLiveFollow() ||
-        historyJumpQueueRef.current.hasPending() ||
-        !historyRequestIsCurrent(historyRequest)
-      ) {
-        enqueueTerminalDiagnostic({
-          kind: 'history_jump_stale_after_window',
-          request,
-        });
-        return true;
-      }
-      enqueueTerminalDiagnostic({
-        kind: 'history_jump_failed',
-        request,
-        message: errorMessage(error),
-      });
-      writeLog(`History jump failed: ${errorMessage(error)}`);
-      return false;
-    }
-  }
-  runHistoryJumpRef.current = runHistoryJump;
-
-  async function requestHistoryRows(request: TerminalHistoryRowsRequest) {
-    pendingHistoryRowsRequestRef.current = request;
-    if (loadingHistoryRowsRef.current) return;
-
-    loadingHistoryRowsRef.current = true;
-    try {
-      while (pendingHistoryRowsRequestRef.current) {
-        const next = pendingHistoryRowsRequestRef.current;
-        pendingHistoryRowsRequestRef.current = null;
-        await loadMissingHistoryRows(next);
-      }
-    } finally {
-      loadingHistoryRowsRef.current = false;
-    }
-  }
-
-  async function loadMissingHistoryRows(request: TerminalHistoryRowsRequest) {
-    const sessionId = useNavigationStore.getState().selectedSessionId;
-    if (!sessionId || !controller.isHistoryMode()) return;
-    const surface = controller.getSurface();
-    const historyRequest = currentHistoryRequest(sessionId, surface);
-    const plan = planHistoryWindowForMissingRows(
-      request.startRow,
-      request.rowCount,
-      surface.rows,
-      request.totalRows,
-    );
-    const key = `${request.generation}:${sessionId}:${surface.cols}:${surface.rows}:${plan.startRow}:${plan.rowCount}`;
-    if (historyWindowRequestsRef.current.has(key)) return;
-    historyWindowRequestsRef.current.add(key);
-    try {
-      const result = await terminalHistoryWindow(
-        sessionId,
-        plan.startRow,
-        surface.cols,
-        surface.rows,
-        plan.rowCount,
-      );
-      if (!controller.isHistoryMode() || !historyRequestIsCurrent(historyRequest)) return;
-      const totalRows = resolveHistoryTotalRows(
-        result.frame.scrollback?.totalRows,
-        request.totalRows,
-        surface.rows,
-      );
-      controller.mergeHistoryWindow(result.frame, result.startRow, totalRows, request.generation);
-    } catch (error) {
-      if (!controller.isHistoryMode() || !historyRequestIsCurrent(historyRequest)) return;
-      writeLog(`History rows failed: ${errorMessage(error)}`);
-    } finally {
-      historyWindowRequestsRef.current.delete(key);
-    }
-  }
-  requestHistoryRowsRef.current = requestHistoryRows;
-
-  // Fetch persisted transcript history replayed at `surface`'s width and hand it
-  // to the controller's history view. The initial view uses a bounded window and
-  // lazily fills missing rows as the user scrolls.
-  async function loadFullHistory(surface: TerminalSurface, scrollToBottom = true) {
-    const sessionId = useNavigationStore.getState().selectedSessionId;
-    if (!sessionId) return false;
-    const historyRequest = startHistoryRequest(sessionId, surface);
-    try {
-      const info = await terminalHistoryInfo(sessionId, surface.cols, surface.rows);
-      if (!historyRequestIsCurrent(historyRequest)) return false;
-      const totalRows = Math.max(info.totalRows, surface.rows);
-      const rowCount = historyWindowRows(surface.rows, totalRows);
-      const startRow = scrollToBottom ? Math.max(0, totalRows - rowCount) : 0;
-      const windowResult = await terminalHistoryWindow(
-        sessionId,
-        startRow,
-        surface.cols,
-        surface.rows,
-        rowCount,
-      );
-      if (!historyRequestIsCurrent(historyRequest)) return false;
-      const resolvedTotalRows = resolveHistoryTotalRows(
-        windowResult.frame.scrollback?.totalRows,
-        totalRows,
-        surface.rows,
-      );
-      controller.enterHistoryWindow(
-        windowResult.frame,
-        windowResult.startRow,
-        resolvedTotalRows,
-        scrollToBottom,
-        scrollToBottom ? undefined : 0,
-      );
-      return true;
-    } catch (error) {
-      writeLog(`View full history failed: ${errorMessage(error)}`);
-      return false;
-    }
-  }
-
-  // Load the full persisted transcript (deep history) and show it as a
-  // scrollable view, so the user can scroll back to the very beginning, beyond
-  // Ghostty's in-memory cap and across restarts.
-  async function viewFullHistory() {
-    if (await loadFullHistory(controller.getSurface())) setHistoryViewing(true);
   }
 
   // Newly-created sessions launch as soon as the terminal surface mounts.
@@ -2440,8 +1511,6 @@ export function useTerminalSession(params: {
     autostartSession,
     contextMenu,
     closeContextMenu: () => setContextMenu(null),
-    historyViewing,
-    viewFullHistory,
     forwardWheel,
     scrollbar: {
       metrics: terminalScroll,

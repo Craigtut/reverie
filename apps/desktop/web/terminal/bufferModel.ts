@@ -165,14 +165,6 @@ export function applyViewportFrameToBuffer(
   };
 }
 
-export function replaceBufferWithHistoryFrame(
-  previous: TerminalBufferState,
-  frame: TerminalFrame,
-  surface: { cols: number; rows: number },
-): TerminalBufferState {
-  return mergeHistoryWindowIntoBuffer(previous, frame, surface, 0, undefined, true);
-}
-
 export function mergeHistoryWindowIntoBuffer(
   previous: TerminalBufferState,
   frame: TerminalFrame,

@@ -9,7 +9,6 @@ import {
   frameFromBufferSnapshot,
   frameFromBufferWindow,
   mergeHistoryWindowIntoBuffer,
-  replaceBufferWithHistoryFrame,
   selectAllTerminalBufferRange,
   terminalBufferCachedRangeForRows,
   terminalBufferFullyCached,
@@ -593,21 +592,7 @@ describe('terminal buffer model', () => {
     expect(state.cachedRanges).toEqual([{ start: 8, end: 11 }]);
   });
 
-  it('can replace live cache with a replayed full-history frame', () => {
-    let state = createTerminalBuffer(surface);
-    state = replaceBufferWithHistoryFrame(
-      state,
-      frame([row(0, 'oldest'), row(1, 'middle'), row(2, 'newest')]),
-      surface,
-    );
-
-    expect(state.totalRows).toBe(3);
-    expect(state.cachedRanges).toEqual([{ start: 0, end: 3 }]);
-    expect(terminalBufferRowText(state, 0, true)).toBe('oldest');
-    expect(terminalBufferRowText(state, 2, true)).toBe('newest');
-  });
-
-  it('merges replayed history windows into absolute cached rows', () => {
+  it('merges windows into absolute cached rows', () => {
     let state = createTerminalBuffer(surface);
     state = mergeHistoryWindowIntoBuffer(
       state,

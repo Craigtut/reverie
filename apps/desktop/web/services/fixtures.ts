@@ -117,10 +117,6 @@ export async function invokeBrowserFixture<T>(
       // No backend terminal in the browser harness; the Canvas renderer applies
       // theme colors directly via the controller, so this is a no-op here.
       return undefined as T;
-    case 'terminal_history_info':
-      return historyInfoFixture(args) as T;
-    case 'terminal_history_window':
-      return historyWindowFixture(args) as T;
     case 'record_render_metrics':
       recordedRenderMetrics.push(clone(args?.metrics as RenderMetrics));
       return undefined as T;
@@ -471,68 +467,6 @@ function terminateFixtureSession(args?: Record<string, unknown>) {
   terminal.cancelled = true;
   finishFixtureTerminal(terminalId, false);
   return undefined;
-}
-
-// The fixture has no replay engine; it serves the last injected/streamed frame
-// as the whole "history" (keyed by session id in the harness via the active
-// terminal's frame). Good enough to exercise the history-view UI flow.
-function fixtureSessionFrame(): TerminalFrame | undefined {
-  // The harness drives a single active terminal; return its last frame.
-  const frames = [...lastFixtureFrames.values()];
-  return frames[frames.length - 1];
-}
-
-function historyInfoFixture(_args?: Record<string, unknown>) {
-  const frame = fixtureSessionFrame();
-  return { totalRows: frame ? frame.rows.length : 0 };
-}
-
-function historyWindowFixture(args?: Record<string, unknown>) {
-  const startRow = Number(args?.startRow ?? 0);
-  const rowCount = Number(args?.rowCount ?? args?.rows ?? 0);
-  const frame = fixtureSessionFrame() ?? { dirty: 'full', rows: [] };
-  return historyWindowFromFixtureFrame(frame, startRow, rowCount);
-}
-
-function historyWindowFromFixtureFrame(frame: TerminalFrame, startRow: number, rowCount: number) {
-  const sortedRows = [...frame.rows].sort((left, right) => left.index - right.index);
-  const totalRows = Math.max(sortedRows.at(-1)?.index ?? 0, sortedRows.length - 1) + 1;
-  const requestedCount = Math.max(1, Math.min(totalRows, Math.floor(rowCount || totalRows)));
-  const clampedStart = Math.max(
-    0,
-    Math.min(Math.floor(startRow || 0), Math.max(0, totalRows - requestedCount)),
-  );
-  const endRow = clampedStart + requestedCount;
-  const sourceRows = new Map(sortedRows.map(row => [row.index, row]));
-  const rows = Array.from({ length: requestedCount }, (_, index) => {
-    const absoluteRow = clampedStart + index;
-    const source = sourceRows.get(absoluteRow);
-    return source
-      ? {
-          ...source,
-          index,
-          dirty: true,
-          cells: source.cells.map(cell => ({ ...cell })),
-        }
-      : { index, dirty: true, cells: [] };
-  });
-
-  return {
-    startRow: clampedStart,
-    frame: {
-      ...frame,
-      dirty: 'full' as const,
-      rows,
-      scrollback: {
-        ...frame.scrollback,
-        totalRows,
-        scrollbackRows: Math.max(0, totalRows - requestedCount),
-        viewportOffset: clampedStart,
-        viewportRows: requestedCount,
-        atBottom: endRow >= totalRows,
-      },
-    },
-  };
 }
 
 function emitFixtureFrames(terminalId: string, cols: number, rows: number) {

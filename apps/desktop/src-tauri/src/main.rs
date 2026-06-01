@@ -14,7 +14,6 @@ mod terminal;
 
 use std::{env, fs::OpenOptions, io::Write};
 
-use reverie_core::TranscriptStore;
 use reverie_core::WorkspaceService;
 use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
 use reverie_core::session_log::start_session_log_watcher;
@@ -131,12 +130,6 @@ fn main() {
             // managed state so background threads can still hold an Arc to
             // it without going through a Tauri command boundary.
             app.manage(repository.clone());
-
-            // Wire the durable transcript sink into the terminal runtime so each
-            // product session's raw PTY output is persisted for full-history
-            // scrollback + search.
-            app.state::<TerminalSessionRuntime>()
-                .set_transcript_store(repository.clone() as std::sync::Arc<dyn TranscriptStore>);
 
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
@@ -307,8 +300,6 @@ fn main() {
             commands::scroll_terminal_viewport_to_bottom,
             commands::scroll_terminal_viewport_to_row,
             commands::set_terminal_frontend_active,
-            commands::terminal_history_info,
-            commands::terminal_history_window,
             commands::set_terminal_theme,
             commands::terminate_session,
             commands::confirm_quit,

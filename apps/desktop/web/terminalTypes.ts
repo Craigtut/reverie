@@ -137,7 +137,6 @@ export interface TerminalPaintSample {
   displayRows: number;
   fullPaint: boolean;
   bufferBacked: boolean;
-  historyMode: boolean;
   rowsPainted: number;
   cellsPainted: number;
   rendererStats?: TerminalRendererStats;

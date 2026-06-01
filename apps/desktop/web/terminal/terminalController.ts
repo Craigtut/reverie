@@ -32,10 +32,8 @@ import {
   frameFromBufferAbsoluteWindow,
   frameFromBufferWindow,
   mergeHistoryWindowIntoBuffer,
-  replaceBufferWithHistoryFrame,
   selectAllTerminalBufferRange,
   terminalBufferCachedRangeForRows,
-  terminalBufferFullyCached,
   terminalBufferHasRows,
   terminalBufferSelectionText,
   type TerminalBufferState,
@@ -79,21 +77,19 @@ export interface TerminalControllerOptions {
   // uses it to re-map match spans to the (possibly scrolled) viewport.
   onComposite?: () => void;
   // Fired (deduped) when the scroll position/extent changes, so the custom
-  // overlay scrollbar can reflect it in both the live and full-history views.
+  // overlay scrollbar can reflect it as the user scrolls back through the live
+  // buffer.
   onScrollMetrics?: (metrics: TerminalScrollMetrics) => void;
-  // Fired when the history viewport needs rows that are not in the frontend
-  // cache yet. The hook fetches a replayed transcript window and merges it.
-  onMissingHistoryRows?: (request: TerminalHistoryRowsRequest) => boolean | undefined;
-  // Fired when live scroll lands on rows the frontend cache does not have. The
-  // hook can swap into a transcript-backed history window instead of leaving a
-  // permanent blank hole in the live buffer.
+  // Fired when live scroll lands on rows the frontend cache does not have yet.
+  // The hook fetches that range from libghostty's live buffer and merges it.
   onMissingLiveRows?: (request: TerminalHistoryRowsRequest) => boolean | undefined;
   // Lightweight paint-loop instrumentation. The hook aggregates this into the
   // runtime metrics payload, so renderer tuning has real scroll/frame evidence.
   onPaintSample?: (sample: TerminalPaintSample) => void;
-  // Structured debug trace for renderer lifecycle, resize, paint, and history
-  // windowing. Kept optional so tests and local diagnostics can inspect churn
-  // without coupling production rendering to a visible debug surface.
+  // Structured debug trace for renderer lifecycle, resize, paint, and live
+  // scroll-back windowing. Kept optional so tests and local diagnostics can
+  // inspect churn without coupling production rendering to a visible debug
+  // surface.
   onTrace?: (event: TimedTerminalControllerTraceEvent) => void;
   // Injectable for tests; defaults to the WebGL2 renderer with Canvas fallback.
   createRenderer?: (
@@ -144,7 +140,6 @@ export type TerminalControllerTraceEvent =
       displayRows: number;
       fullPaint: boolean;
       bufferBacked: boolean;
-      historyMode: boolean;
       frameDirty?: TerminalFrame['dirty'];
       frameRows: number;
       rowsPainted: number;
@@ -159,16 +154,8 @@ export type TerminalControllerTraceEvent =
       generation: number;
     }
   | {
-      kind: 'history_window_merge';
-      startRow: number;
-      totalRows: number;
-      frameRows: number;
-      generation: number;
-      replace: boolean;
-    }
-  | {
       kind: 'buffer_cache_miss';
-      mode: 'live' | 'history';
+      mode: 'live';
       startRow: number;
       rowCount: number;
       displayRows: number;
@@ -203,7 +190,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
     onLiveFollow,
     onComposite,
     onScrollMetrics,
-    onMissingHistoryRows,
     onMissingLiveRows,
     onPaintSample,
     onTrace,
@@ -252,10 +238,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let selection: SelectionRange | null = null;
   let links: BufferLinkSpan[] = [];
   let hoverLink: BufferLinkSpan | null = null;
-  // History view: the frontend buffer owns a sparse cache of replayed transcript
-  // rows, virtualized by the scroll spacer so the user can scroll to row 0. Live
-  // frames are cached but not painted until the view is exited.
-  let historyMode = false;
+  // Generation counter that invalidates in-flight async live-row fills when the
+  // surface reflows (a width change renumbers libghostty's rows), so a stale
+  // fetch can never merge rows addressed against the old generation.
   let historyGeneration = 0;
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
@@ -611,7 +596,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
         Math.ceil(visibleHeight / forSurface.cellHeight),
       ),
     );
-    const cacheStatus = requestHistoryRowsForPaintWindow(
+    const cacheStatus = requestLiveRowsForPaintWindow(
       buffer,
       startRow,
       displayRows,
@@ -622,8 +607,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (!cacheStatus.cached) {
       if (cacheStatus.shapeStale) {
         const fallbackDisplayRows = Math.max(1, displayRows);
-        const canPaintPartialLiveTail =
-          !historyMode && (liveFollow || buffer.atBottom) && buffer.rowsById.size > 0;
+        const canPaintPartialLiveTail = (liveFollow || buffer.atBottom) && buffer.rowsById.size > 0;
         if (canPaintPartialLiveTail) {
           const tailWindow = cachedLiveTailPaintWindow(
             buffer,
@@ -711,7 +695,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
         });
         const windowFrame = frameFromBufferWindow(buffer, sourceStartRow, fallbackDisplayRows);
         if (
-          !historyMode &&
           liveFollow &&
           terminalBufferHasRenderableRows(buffer) &&
           !terminalFrameHasRenderableCells(windowFrame)
@@ -742,8 +725,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
         emitScrollMetrics(forSurface);
         return;
       } else {
-        const canPaintPartialLiveTail =
-          !historyMode && (liveFollow || buffer.atBottom) && buffer.rowsById.size > 0;
+        const canPaintPartialLiveTail = (liveFollow || buffer.atBottom) && buffer.rowsById.size > 0;
         if (cacheStatus.requested && liveFollow && canPaintPartialLiveTail) {
           const tailWindow = cachedLiveTailPaintWindow(
             buffer,
@@ -759,11 +741,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
           startRow = tailWindow.startRow;
           displayRows = tailWindow.displayRows;
         }
-        if (cacheStatus.requested && historyMode) {
-          emitScrollMetrics(forSurface);
-          return;
-        }
-        if (!canPaintPartialLiveTail && !historyMode && buffer.totalRows > buffer.viewportRows) {
+        if (!canPaintPartialLiveTail && buffer.totalRows > buffer.viewportRows) {
           const cachedWindow = cachedPaintWindowForMissingRows(buffer, startRow, displayRows);
           const cachedWindowOverlaps =
             cachedWindow !== null &&
@@ -783,7 +761,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
     const windowFrame = frameFromBufferWindow(buffer, startRow, displayRows);
     if (
       !cacheStatus.cached &&
-      !historyMode &&
       !liveFollow &&
       terminalBufferHasRenderableRows(buffer) &&
       !terminalFrameHasRenderableCells(windowFrame)
@@ -793,7 +770,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
     }
     if (
       !cacheStatus.cached &&
-      !historyMode &&
       liveFollow &&
       terminalBufferHasRenderableRows(buffer) &&
       !terminalFrameHasRenderableCells(windowFrame)
@@ -843,7 +819,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     return inset;
   }
 
-  function requestHistoryRowsForPaintWindow(
+  function requestLiveRowsForPaintWindow(
     buffer: TerminalBufferState,
     startRow: number,
     displayRows: number,
@@ -859,9 +835,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       Math.min(buffer.totalRows - visibleStartRow, visibleRowCount),
     );
     const detachedLiveVisibleRowsCached =
-      !historyMode &&
-      !liveFollow &&
-      terminalBufferHasRows(buffer, visibleStartRow, visibleRequiredRows);
+      !liveFollow && terminalBufferHasRows(buffer, visibleStartRow, visibleRequiredRows);
     if ((!cachedRange || shapeStale) && detachedLiveVisibleRowsCached) {
       lastBufferCacheMissTraceKey = '';
       lastHistoryRowsRequestTraceKey = '';
@@ -879,13 +853,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
         totalRows: buffer.totalRows,
         generation: historyGeneration,
       };
-      const mode = historyMode ? 'history' : 'live';
-      const missTraceKey = `${mode}:${historyGeneration}:${startRow}:${rowCount}:${buffer.totalRows}:${displayRows}`;
+      const missTraceKey = `live:${historyGeneration}:${startRow}:${rowCount}:${buffer.totalRows}:${displayRows}`;
       if (missTraceKey !== lastBufferCacheMissTraceKey) {
         lastBufferCacheMissTraceKey = missTraceKey;
         trace({
           kind: 'buffer_cache_miss',
-          mode,
+          mode: 'live',
           startRow,
           rowCount,
           displayRows,
@@ -894,9 +867,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
           cachedRange,
         });
       }
-      const requested = historyMode
-        ? requestMissingHistoryRows(request)
-        : requestMissingLiveRows(buffer, request);
+      const requested = requestMissingLiveRows(buffer, request);
       if (requested) {
         const requestTraceKey = `miss:${historyGeneration}:${startRow}:${rowCount}:${buffer.totalRows}`;
         if (requestTraceKey !== lastHistoryRowsRequestTraceKey) {
@@ -916,51 +887,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
 
     lastBufferCacheMissTraceKey = '';
     lastHistoryRowsRequestTraceKey = '';
-    if (!historyMode || !onMissingHistoryRows)
-      return { cached: true, requested: false, shapeStale: false, cachedRange };
-
-    const endRow = startRow + rowCount;
-    const prefetchThresholdRows = Math.max(forSurface.rows * 2, Math.ceil(displayRows / 2));
-    const prefetchRows = Math.max(forSurface.rows, forSurface.rows * 8);
-    if (endRow < buffer.totalRows && cachedRange.end - endRow <= prefetchThresholdRows) {
-      onMissingHistoryRows({
-        startRow: cachedRange.end,
-        rowCount: Math.min(prefetchRows, buffer.totalRows - cachedRange.end),
-        totalRows: buffer.totalRows,
-        generation: historyGeneration,
-      });
-      trace({
-        kind: 'history_rows_request',
-        source: 'prefetch_after',
-        startRow: cachedRange.end,
-        rowCount: Math.min(prefetchRows, buffer.totalRows - cachedRange.end),
-        totalRows: buffer.totalRows,
-        generation: historyGeneration,
-      });
-    }
-    if (cachedRange.start > 0 && startRow - cachedRange.start <= prefetchThresholdRows) {
-      const previousStart = Math.max(0, cachedRange.start - prefetchRows);
-      onMissingHistoryRows({
-        startRow: previousStart,
-        rowCount: cachedRange.start - previousStart,
-        totalRows: buffer.totalRows,
-        generation: historyGeneration,
-      });
-      trace({
-        kind: 'history_rows_request',
-        source: 'prefetch_before',
-        startRow: previousStart,
-        rowCount: cachedRange.start - previousStart,
-        totalRows: buffer.totalRows,
-        generation: historyGeneration,
-      });
-    }
     return { cached: true, requested: false, shapeStale: false, cachedRange };
-  }
-
-  function requestMissingHistoryRows(request: TerminalHistoryRowsRequest) {
-    if (!onMissingHistoryRows) return false;
-    return onMissingHistoryRows(request) !== false;
   }
 
   function requestMissingLiveRows(
@@ -1090,7 +1017,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
       displayRows,
       fullPaint: forceFullPaint,
       bufferBacked,
-      historyMode,
       rowsPainted: rendererStats?.rowsPainted ?? fallbackRows?.length ?? 0,
       cellsPainted: rendererStats?.cellsPainted ?? fallbackCells,
       rendererStats,
@@ -1103,7 +1029,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
       displayRows,
       fullPaint: forceFullPaint,
       bufferBacked,
-      historyMode,
       frameDirty: frame.dirty,
       frameRows: frame.rows.length,
       rowsPainted: rendererStats?.rowsPainted ?? fallbackRows?.length ?? 0,
@@ -1129,36 +1054,17 @@ export function createTerminalController(options: TerminalControllerOptions) {
   }
 
   // Compute + publish (deduped) the scroll position/extent for the overlay
-  // scrollbar. History uses the DOM scroller (the spacer grows past the
-  // viewport); live reads the backend's scrollback metadata, since live wheel
-  // scrolling is backend-virtual and never moves the DOM.
+  // scrollbar. When the user has scrolled back off the live tail we read the
+  // buffer's cached extent; while following live we read the backend's
+  // scrollback metadata, since live wheel scrolling is backend-virtual and never
+  // moves the DOM.
   let lastScrollMetricsKey = '';
   function emitScrollMetrics(forSurface: TerminalSurface) {
     if (!onScrollMetrics) return;
-    const cellHeight = forSurface.cellHeight;
     const viewport = els.viewport;
     let metrics: TerminalScrollMetrics;
-    if (activeBuffer && viewport && (historyMode || !liveFollow)) {
-      metrics = bufferedViewportScrollMetrics(
-        activeBuffer,
-        forSurface,
-        historyMode ? 'history' : 'live',
-      );
-    } else if (historyMode && viewport) {
-      const total = viewport.scrollHeight;
-      const view = viewport.clientHeight;
-      const top = viewport.scrollTop;
-      const scrollable = total > view + 1;
-      metrics = {
-        mode: 'history',
-        scrollable,
-        atBottom: top + view >= total - SCROLL_FOLLOW_EPSILON_PX,
-        totalRows: Math.max(1, Math.round(total / cellHeight)),
-        viewportRows: Math.max(1, Math.round(view / cellHeight)),
-        offsetRows: Math.max(0, Math.round(top / cellHeight)),
-        thumbFraction: scrollable ? Math.min(1, view / total) : 1,
-        startFraction: total > 0 ? Math.min(1, top / total) : 0,
-      };
+    if (activeBuffer && viewport && !liveFollow) {
+      metrics = bufferedViewportScrollMetrics(activeBuffer, forSurface, 'live');
     } else {
       const sb = lastComposite?.scrollback;
       const scrollbackRows = sb?.scrollbackRows ?? 0;
@@ -1373,7 +1279,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
 
   function alignLiveViewportToTail() {
     const viewport = els.viewport;
-    if (!viewport || historyMode || !shouldAutoFollow()) return false;
+    if (!viewport || !shouldAutoFollow()) return false;
     const target = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
     if (Math.abs(viewport.scrollTop - target) <= SCROLL_FOLLOW_EPSILON_PX) return false;
     viewport.scrollTop = target;
@@ -1676,18 +1582,16 @@ export function createTerminalController(options: TerminalControllerOptions) {
       }
       const preserveBlankRows = resizeReflowPendingSessions[sessionId] === true;
       const followIntent = followIntentForSession(sessionId);
-      const preserveShapeRows = isActive && !historyMode && followIntent === false;
+      const preserveShapeRows = isActive && followIntent === false;
       nextBuffer = applyViewportFrameToBuffer(nextBuffer, frame, surface, {
         preserveBlankRows,
         preserveShapeRows,
-        anchorPreservedRowsToViewport: isActive && !historyMode && followIntent === true,
+        anchorPreservedRowsToViewport: isActive && followIntent === true,
       });
     }
     sessionBuffers[sessionId] = nextBuffer;
 
-    // In history view we keep showing the replayed transcript; live frames are
-    // cached (so exiting resumes correctly) but do not repaint.
-    if (isActive && !historyMode) {
+    if (isActive) {
       activeSessionId = sessionId;
       liveFollow = followIntentForSession(sessionId);
       const latestFrame = acceptedFrames[acceptedFrames.length - 1] ?? null;
@@ -1731,141 +1635,13 @@ export function createTerminalController(options: TerminalControllerOptions) {
     return frame?.modes?.alternateScreen === true;
   }
 
-  // Legacy full-history entry point: replace the sparse buffer with one replayed
-  // frame and size the spacer from that frame. New history flows prefer
-  // enterHistoryWindow so large sessions can stay frontend-virtualized.
-  function enterHistory(frame: TerminalFrame, scrollToBottom = true) {
-    historyMode = true;
-    historyGeneration += 1;
-    clearInteractionState();
-    activeBuffer = replaceBufferWithHistoryFrame(
-      activeBuffer ?? createTerminalBuffer(surface),
-      frame,
-      surface,
-    );
-    const historyComposite = frameFromBufferWindow(
-      activeBuffer,
-      activeBuffer.viewportOffset,
-      Math.max(1, surface.rows),
-    );
-    lastComposite = historyComposite;
-    needsFullPaint = true;
-    lastStartRow = null;
-    lastDisplayRows = null;
-    setLiveFollow(false);
-    onScrollbackRowCount(Math.max(0, activeBuffer.totalRows - surface.rows));
-    updateSpacer(activeBuffer.totalRows, surface);
-    if (scrollToBottom) {
-      // "Full history": land at the most recent rows, continuous with the live
-      // tail; the user scrolls up toward row 0. Deferred so the grown spacer's
-      // scrollHeight is laid out before we read it.
-      requestAnimationFrame(() => {
-        const viewport = els.viewport;
-        if (viewport)
-          viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        paintWindow(historyComposite, surface, 'history');
-      });
-    } else {
-      // Find drives the scroll itself (to the active match), so paint in place
-      // now and skip the scroll-to-bottom that would otherwise override it.
-      paintWindow(historyComposite, surface, 'history');
-    }
-  }
-
-  function enterHistoryWindow(
-    frame: TerminalFrame,
-    startRow: number,
-    totalRows: number,
-    scrollToBottom = true,
-    initialTopRow?: number,
-  ) {
-    historyMode = true;
-    historyGeneration += 1;
-    clearInteractionState();
-    activeBuffer = mergeHistoryWindowIntoBuffer(
-      activeBuffer ?? createTerminalBuffer(surface),
-      frame,
-      surface,
-      startRow,
-      totalRows,
-      true,
-    );
-    trace({
-      kind: 'history_window_merge',
-      startRow,
-      totalRows,
-      frameRows: frame.rows.length,
-      generation: historyGeneration,
-      replace: true,
-    });
-    const historyComposite = frameFromBufferWindow(
-      activeBuffer,
-      activeBuffer.viewportOffset,
-      Math.max(1, surface.rows),
-    );
-    lastComposite = historyComposite;
-    needsFullPaint = true;
-    lastStartRow = null;
-    lastDisplayRows = null;
-    setLiveFollow(false);
-    onScrollbackRowCount(Math.max(0, activeBuffer.totalRows - surface.rows));
-    updateSpacer(activeBuffer.totalRows, surface);
-    if (scrollToBottom) {
-      requestAnimationFrame(() => {
-        const viewport = els.viewport;
-        if (viewport)
-          viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-        paintWindow(historyComposite, surface, 'history');
-      });
-    } else {
-      if (initialTopRow !== undefined) scrollHistoryViewportToTopRow(initialTopRow);
-      paintWindow(historyComposite, surface, 'history');
-    }
-  }
-
-  function mergeHistoryWindow(
-    frame: TerminalFrame,
-    startRow: number,
-    totalRows: number,
-    generation = historyGeneration,
-  ) {
-    if (!historyMode || generation !== historyGeneration) return false;
-    if (activeBuffer && totalRows !== activeBuffer.totalRows) return false;
-    activeBuffer = mergeHistoryWindowIntoBuffer(
-      activeBuffer ?? createTerminalBuffer(surface),
-      frame,
-      surface,
-      startRow,
-      totalRows,
-    );
-    trace({
-      kind: 'history_window_merge',
-      startRow,
-      totalRows,
-      frameRows: frame.rows.length,
-      generation,
-      replace: false,
-    });
-    lastComposite = frameFromBufferWindow(
-      activeBuffer,
-      activeBuffer.viewportOffset,
-      Math.max(1, surface.rows),
-    );
-    onScrollbackRowCount(Math.max(0, activeBuffer.totalRows - surface.rows));
-    updateSpacer(activeBuffer.totalRows, surface);
-    needsFullPaint = true;
-    paintWindow(lastComposite, surface, 'history');
-    onComposite?.();
-    return true;
-  }
-
   function mergeLiveRows(
     frame: TerminalFrame,
     startRow: number,
     totalRows: number,
     generation = historyGeneration,
   ) {
-    if (historyMode || generation !== historyGeneration || !activeSessionId) return false;
+    if (generation !== historyGeneration || !activeSessionId) return false;
     const previous =
       sessionBuffers[activeSessionId] ?? activeBuffer ?? createTerminalBuffer(surface);
     // A live session keeps appending rows while the fill round-trips, so the
@@ -1891,54 +1667,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
     return true;
   }
 
-  function exitHistory() {
-    historyMode = false;
-    historyGeneration += 1;
-    activeBuffer = null;
-    lastStartRow = null;
-    lastDisplayRows = null;
-    clearInteractionState();
-  }
-
-  // Scroll the frontend-virtualized history viewport so absolute `row` is
-  // visible, aimed about a third down from the top for context, then repaint
-  // that window. Find navigation uses this to land on a match anywhere in the
-  // session, including rows far above the live band.
-  function scrollToHistoryRow(row: number) {
-    scrollHistoryViewportToTopRow(Math.max(0, row - Math.floor(surface.rows / 3)));
-    needsFullPaint = true;
-    paintWindow(lastComposite, surface, 'scroll');
-  }
-
-  function scrollToHistoryTopRow(row: number) {
-    scrollHistoryViewportToTopRow(row);
-    needsFullPaint = true;
-    paintWindow(lastComposite, surface, 'scroll');
-  }
-
-  function scrollHistoryViewportToTopRow(row: number) {
-    const viewport = els.viewport;
-    if (!viewport) return;
-    const inset = terminalInsetPx(surface);
-    const target = row * surface.cellHeight + inset.top;
-    const totalRows = Math.max(activeBuffer?.totalRows ?? surface.rows, surface.rows);
-    const totalHeight = totalRows * surface.cellHeight + inset.top + inset.bottom;
-    const max = Math.max(0, totalHeight - viewport.clientHeight);
-    viewport.scrollTop = Math.max(0, Math.min(target, max));
-  }
-
   function scrollBufferedRows(deltaRows: number): boolean {
     const viewport = els.viewport;
     if (!viewport || deltaRows === 0) return false;
     return scrollBufferedToTop(viewport.scrollTop + deltaRows * surface.cellHeight);
-  }
-
-  function scrollHistoryBufferedRows(deltaRows: number): boolean {
-    const viewport = els.viewport;
-    if (!historyMode || !viewport || deltaRows === 0) return false;
-    return scrollBufferedToTop(viewport.scrollTop + deltaRows * surface.cellHeight, {
-      allowHistoryMode: true,
-    });
   }
 
   function scrollBufferedToRow(row: number): boolean {
@@ -1946,20 +1678,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
     return scrollBufferedToTop(row * surface.cellHeight + inset.top);
   }
 
-  function scrollHistoryBufferedToRow(row: number): boolean {
-    if (!historyMode) return false;
-    const inset = terminalInsetPx(surface);
-    return scrollBufferedToTop(row * surface.cellHeight + inset.top, { allowHistoryMode: true });
-  }
-
-  function scrollBufferedToTop(
-    scrollTop: number,
-    options: { allowHistoryMode?: boolean } = {},
-  ): boolean {
+  function scrollBufferedToTop(scrollTop: number): boolean {
     const buffer = activeBuffer;
     const viewport = els.viewport;
     if (!buffer || !viewport) return false;
-    if (historyMode && options.allowHistoryMode !== true) return false;
     if (buffer.totalRows <= buffer.viewportRows) return false;
     const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
     const targetTop = Math.max(0, Math.min(maxTop, scrollTop));
@@ -1981,11 +1703,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
     }
 
     viewport.scrollTop = targetTop;
-    if (historyMode) {
-      needsFullPaint = true;
-      schedulePaintWindow('scroll');
-      return true;
-    }
     const following =
       viewport.scrollTop + viewport.clientHeight >=
       viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
@@ -2293,23 +2010,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
       selection = range;
       repaintOverlay();
     },
-    enterHistory,
-    enterHistoryWindow,
-    mergeHistoryWindow,
     mergeLiveRows,
-    exitHistory,
     scrollBufferedRows,
-    scrollHistoryBufferedRows,
     scrollBufferedToRow,
-    scrollHistoryBufferedToRow,
-    scrollToHistoryRow,
-    scrollToHistoryTopRow,
-    isHistoryMode() {
-      return historyMode;
-    },
-    isHistoryFullyCached() {
-      return Boolean(activeBuffer && terminalBufferFullyCached(activeBuffer));
-    },
   };
 }
 

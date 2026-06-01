@@ -48,12 +48,6 @@ const allScenarios = [
     useGpu: true,
   },
   {
-    name: 'terminal-long-history-scroll',
-    query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-long-history-scroll',
-    profileGroup: 'terminal-long-history-scroll',
-    useGpu: true,
-  },
-  {
     name: 'terminal-render-performance',
     query: 'fixture=empty&resetFixture=1&harnessSmoke=terminal-render-performance',
     profileGroup: 'terminal-render-performance',

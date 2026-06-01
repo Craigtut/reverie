@@ -11,7 +11,6 @@ type HarnessScenario =
   | 'terminal-concurrent-sessions'
   | 'terminal-alternate-screen'
   | 'terminal-resize-storm'
-  | 'terminal-long-history-scroll'
   | 'terminal-render-performance';
 
 type HarnessResult = {
@@ -68,9 +67,6 @@ async function runHarnessSmokeScenario(scenario: HarnessScenario) {
       break;
     case 'terminal-resize-storm':
       await runTerminalResizeStormScenario();
-      break;
-    case 'terminal-long-history-scroll':
-      await runTerminalLongHistoryScrollScenario();
       break;
     case 'terminal-render-performance':
       await runTerminalRenderPerformanceScenario();
@@ -358,7 +354,6 @@ interface TerminalDebugHook {
   clear(): void;
   summary(): {
     surface?: { cols: number; rows: number; cellWidth: number; cellHeight: number };
-    historyMode?: boolean;
     liveFollow?: boolean;
     startRow?: number;
     rowCount?: number;
@@ -573,26 +568,6 @@ function assertCanvasGeometry(canvas: HTMLCanvasElement, label: string) {
   assertions.push(label);
 }
 
-async function runTerminalLongHistoryScrollScenario() {
-  const { terminalId, fixture, viewport, debug } = await createRunningTerminalSession(
-    'Long History Topic',
-    'long-history',
-  );
-  await setTerminalViewportRows(viewport, 24, 'long-history baseline surface rows');
-  const lines = Array.from({ length: 720 }, (_, index) => longHistoryLine(index));
-  fixture.emitRawTerminalFrame(terminalId, terminalFrameFromLines(lines), 50_000);
-  await flushDom();
-
-  await clickTestId('view-history-button');
-  await waitFor(() => debug.summary().historyMode === true, 'long-history enters full history');
-  assertions.push('long-history enters full history');
-
-  await waitForHistoryRow(viewport, 700, 'long-history starts near the transcript tail');
-  for (const row of [0, 96, 360, 719, 42, 600]) {
-    await scrollHistoryToRow(viewport, row, `long-history scrolls to row ${row}`);
-  }
-}
-
 async function setTerminalViewportRows(viewport: HTMLDivElement, rows: number, label: string) {
   await setTerminalViewportSize(viewport, TERMINAL_SURFACE.cols, rows, label);
 }
@@ -616,53 +591,6 @@ async function setTerminalViewportSize(
     return surface?.cols === cols && surface.rows === rows;
   }, label);
   assertions.push(label);
-}
-
-async function scrollHistoryToRow(viewport: HTMLDivElement, row: number, label: string) {
-  viewport.scrollTop = row * TERMINAL_SURFACE.cellHeight + TERMINAL_SURFACE.cellHeight;
-  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
-  await waitForHistoryRow(viewport, row, label);
-}
-
-async function waitForHistoryRow(viewport: HTMLDivElement, row: number, label: string) {
-  await waitFor(
-    () =>
-      terminalDebugHook()
-        .visibleRows()
-        .some(visible => historyRowMatches(visible, row)),
-    label,
-    8000,
-  );
-  assertVisibleHistoryRows(terminalDebugHook().visibleRows(), label);
-  assertCanvasGeometry(requireTestId<HTMLCanvasElement>('terminal-canvas'), `${label} canvas`);
-  assertions.push(label);
-  viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
-}
-
-function assertVisibleHistoryRows(rows: Array<{ index: number; text: string }>, label: string) {
-  const seen = new Set<string>();
-  const nonBlankRows = rows.filter(row => row.text.length > 0);
-  if (nonBlankRows.length === 0) throw new Error(`${label}: no visible history text`);
-  for (const row of nonBlankRows) {
-    const expected = longHistoryLine(row.index);
-    if (row.text !== expected) {
-      throw new Error(
-        `${label}: row ${row.index} rendered ${JSON.stringify(row.text)}, expected ${JSON.stringify(
-          expected,
-        )}`,
-      );
-    }
-    if (seen.has(row.text)) throw new Error(`${label}: repeated visible row text ${row.text}`);
-    seen.add(row.text);
-  }
-}
-
-function historyRowMatches(row: { index: number; text: string }, index: number) {
-  return row.index === index && row.text === longHistoryLine(index);
-}
-
-function longHistoryLine(index: number) {
-  return `history row ${String(index).padStart(4, '0')} ${index % 2 === 0 ? 'even' : 'odd'}`;
 }
 
 // Exercises the terminal interaction layer end-to-end against the browser

@@ -123,9 +123,10 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         Ok(scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total)
     }
 
-    /// Total rows currently held (scrollback + viewport). For a headless replay
-    /// terminal sized to hold the whole transcript, this is the session's full
-    /// rendered height at the replayed width.
+    /// Total rows currently held in libghostty's live buffer (scrollback +
+    /// viewport). Retained for the live-buffer scroll-back work that serves
+    /// history ranges straight from libghostty (see decisions.md D6/D7).
+    #[allow(dead_code)]
     pub fn total_rows(&self) -> Result<usize> {
         Ok(self.terminal.total_rows()?)
     }
@@ -149,8 +150,9 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
     }
 
     /// Scroll the viewport so `row` is the first rendered row, clamped to the
-    /// last valid viewport start. Unlike `scroll_to_row`, this is exact and is
-    /// used by windowed history replay.
+    /// last valid viewport start. Unlike `scroll_to_row`, this is exact.
+    /// Retained for the live-buffer scroll-back work (decisions.md D6/D7).
+    #[allow(dead_code)]
     pub fn scroll_to_row_start(&mut self, row: usize) -> Result<()> {
         let scrollbar = self.terminal.scrollbar()?;
         let total = scrollbar.total as usize;

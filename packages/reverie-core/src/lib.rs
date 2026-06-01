@@ -21,7 +21,6 @@ pub mod pty;
 pub mod repository;
 pub mod session_log;
 pub mod terminal;
-pub mod transcript;
 pub mod workspace_service;
 
 pub use activity::{
@@ -71,5 +70,4 @@ pub use terminal::{
     TerminalId, TerminalPosition, TerminalRow, TerminalSnapshot, TerminalSpawnSpec,
     TerminalUnderline,
 };
-pub use transcript::TranscriptStore;
 pub use workspace_service::WorkspaceService;

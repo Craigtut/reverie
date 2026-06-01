@@ -3,7 +3,6 @@ import type { TerminalFrame } from '../terminalTypes';
 import type { EventHandler, UnlistenFn } from './types';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:17777';
-const HISTORY_BRIDGE_TIMEOUT_MS = 8_000;
 const TERMINAL_BRIDGE_COMMANDS = new Set([
   'start_session',
   'terminate_session',
@@ -14,8 +13,6 @@ const TERMINAL_BRIDGE_COMMANDS = new Set([
   'scroll_terminal_viewport_to_bottom',
   'set_terminal_frontend_active',
   'set_terminal_theme',
-  'terminal_history_info',
-  'terminal_history_window',
 ]);
 const TERMINAL_BRIDGE_EVENTS = new Set([
   'terminal_stream_started',
@@ -67,15 +64,6 @@ export interface TerminalBridgeExitPayload {
 export interface TerminalBridgeFailedPayload {
   terminalId?: string | null;
   message: string;
-}
-
-export interface TerminalBridgeHistoryInfo {
-  totalRows: number;
-}
-
-export interface TerminalBridgeHistoryWindow {
-  startRow: number;
-  frame: TerminalFrame;
 }
 
 export function terminalBridgeEnabled() {
@@ -146,31 +134,9 @@ export async function invokeTerminalBridge<T = unknown>(
       });
     case 'set_terminal_theme':
       return bridgePost<T>('/theme', args ?? {});
-    case 'terminal_history_info':
-      return bridgePost<T>('/history_info', {
-        terminalId: terminalIdForHistoryArgs(args),
-        cols: args?.cols,
-        rows: args?.rows,
-      });
-    case 'terminal_history_window':
-      return bridgePost<T>('/history_window', {
-        terminalId: terminalIdForHistoryArgs(args),
-        startRow: args?.startRow,
-        cols: args?.cols,
-        surfaceRows: args?.surfaceRows,
-        rowCount: args?.rowCount,
-      });
     default:
       throw new Error(`Terminal bridge does not implement command: ${command}`);
   }
-}
-
-function terminalIdForHistoryArgs(args?: Record<string, unknown>) {
-  const terminalId = args?.terminalId;
-  if (typeof terminalId === 'string' && terminalId.length > 0) return terminalId;
-  const sessionId = args?.sessionId;
-  if (typeof sessionId === 'string') return sessionTerminalIds.get(sessionId) ?? sessionId;
-  return sessionId;
 }
 
 export function listenTerminalBridge<T>(eventName: string, handler: EventHandler<T>): UnlistenFn {
@@ -217,34 +183,6 @@ export function scrollTerminalBridgeViewportToTop(terminalId: string) {
 
 export function terminateTerminalBridgeSession(terminalId: string) {
   return bridgePost<null>('/terminate', { terminalId });
-}
-
-export function terminalBridgeHistoryInfo(terminalId: string, cols: number, rows: number) {
-  return bridgePost<TerminalBridgeHistoryInfo>(
-    '/history_info',
-    { terminalId, cols, rows },
-    { timeoutMs: HISTORY_BRIDGE_TIMEOUT_MS },
-  );
-}
-
-export function terminalBridgeHistoryWindow(
-  terminalId: string,
-  startRow: number,
-  cols: number,
-  surfaceRows: number,
-  rowCount: number,
-) {
-  return bridgePost<TerminalBridgeHistoryWindow>(
-    '/history_window',
-    {
-      terminalId,
-      startRow,
-      cols,
-      surfaceRows,
-      rowCount,
-    },
-    { timeoutMs: HISTORY_BRIDGE_TIMEOUT_MS },
-  );
 }
 
 export async function terminalBridgeHealth() {

@@ -300,7 +300,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 effectiveDangerousMode={effectiveDangerousMode}
                 dangerousToggleLocked={dangerousToggleLocked}
                 dropTargetSessionId={tabDropTargetId}
-                historyViewing={terminal.historyViewing}
                 onSelectSession={selectSessionTab}
                 onCloseSession={(event, session) => {
                   event.stopPropagation();
@@ -308,7 +307,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 }}
                 onCreateSession={() => openCreation('session')}
                 onToggleDangerousMode={() => void toggleSelectedSessionYolo()}
-                onViewFullHistory={terminal.viewFullHistory}
               />
             ) : null}
 

@@ -72,11 +72,9 @@ export interface RenderMetrics {
   rendererMountStarts?: number;
   rendererDisposes?: number;
   terminalSurfaceChanges?: number;
-  terminalHistoryRowRequests?: number;
-  terminalHistoryWindowMerges?: number;
+  terminalLiveRowRequests?: number;
   terminalBufferCacheMisses?: number;
   terminalLiveBufferCacheMisses?: number;
-  terminalHistoryBufferCacheMisses?: number;
   terminalFullPaints?: number;
   terminalPartialPaints?: number;
   maxRendererRows?: number;

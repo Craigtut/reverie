@@ -16,10 +16,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use reverie_core::{
     CommandSpec, TerminalSpawnSpec,
     pty::{PtyController, PtyProcess},
-    terminal::{
-        TerminalColor, TerminalColors, TerminalCursor, TerminalCursorStyle, TerminalDirtyState,
-        TerminalFrame, TerminalId, TerminalPosition, TerminalRow,
-    },
+    terminal::{TerminalFrame, TerminalId},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,8 +36,6 @@ const PTY_DRAIN_MAX_CHUNKS: usize = 64;
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const BACKGROUND_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const EVENT_REPLAY_LIMIT: usize = 240;
-const HISTORY_REPLAY_SCROLLBACK_BYTES: usize = 256 * 1024 * 1024;
-const HISTORY_REPLAY_CACHE_ENTRIES: usize = 4;
 
 fn main() -> Result<()> {
     let bind = env::var("REVERIE_TERMINAL_DEBUG_BRIDGE")
@@ -147,43 +142,11 @@ impl Broadcaster {
 }
 
 enum WorkerCommand {
-    Resize {
-        cols: u16,
-        rows: u16,
-    },
+    Resize { cols: u16, rows: u16 },
     ScrollDelta(isize),
     ScrollTop,
     ScrollBottom,
     SetFrontendActive(bool),
-    HistoryInfo {
-        cols: u16,
-        rows: u16,
-        reply: Sender<Result<TerminalHistoryInfoPayload, String>>,
-    },
-    HistoryWindow {
-        start_row: usize,
-        cols: u16,
-        surface_rows: u16,
-        row_count: u16,
-        reply: Sender<Result<TerminalHistoryWindowPayload, String>>,
-    },
-    Terminate,
-}
-
-enum HistoryWorkerCommand {
-    Append(Vec<u8>),
-    Info {
-        cols: u16,
-        rows: u16,
-        reply: Sender<Result<TerminalHistoryInfoPayload, String>>,
-    },
-    Window {
-        start_row: usize,
-        cols: u16,
-        surface_rows: u16,
-        row_count: u16,
-        reply: Sender<Result<TerminalHistoryWindowPayload, String>>,
-    },
     Terminate,
 }
 
@@ -261,26 +224,6 @@ struct ActiveBody {
     active: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HistoryInfoBody {
-    #[serde(default)]
-    terminal_id: Option<TerminalId>,
-    cols: u16,
-    rows: u16,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HistoryWindowBody {
-    #[serde(default)]
-    terminal_id: Option<TerminalId>,
-    start_row: usize,
-    cols: u16,
-    surface_rows: u16,
-    row_count: u16,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TerminalStreamStartedPayload {
@@ -320,19 +263,6 @@ struct TerminalExitPayload {
 struct TerminalFailedPayload {
     terminal_id: Option<TerminalId>,
     message: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalHistoryInfoPayload {
-    total_rows: usize,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalHistoryWindowPayload {
-    start_row: usize,
-    frame: TerminalFrame,
 }
 
 struct HttpRequest {
@@ -388,16 +318,6 @@ fn handle_connection(mut stream: TcpStream, server: Arc<BridgeServer>) -> Result
                 WorkerCommand::SetFrontendActive(body.active),
             )?;
             write_json_response(&mut stream, &json!(null))?;
-        }
-        ("POST", "/history_info") => {
-            let body: HistoryInfoBody = parse_json(&request.body)?;
-            let info = server.history_info(body)?;
-            write_json_response(&mut stream, &info)?;
-        }
-        ("POST", "/history_window") => {
-            let body: HistoryWindowBody = parse_json(&request.body)?;
-            let window = server.history_window(body)?;
-            write_json_response(&mut stream, &window)?;
         }
         ("POST", "/terminate") => {
             let body: TerminalIdBody = parse_json(&request.body)?;
@@ -485,36 +405,6 @@ impl BridgeServer {
         )
     }
 
-    fn history_info(&self, body: HistoryInfoBody) -> Result<TerminalHistoryInfoPayload> {
-        if body.cols == 0 || body.rows == 0 {
-            bail!("history info requires non-zero cols and rows");
-        }
-        let command_tx = self.command_tx_for(body.terminal_id)?;
-        let (reply, rx) = mpsc::channel();
-        command_tx.send(WorkerCommand::HistoryInfo {
-            cols: body.cols,
-            rows: body.rows,
-            reply,
-        })?;
-        bridge_worker_reply(rx)
-    }
-
-    fn history_window(&self, body: HistoryWindowBody) -> Result<TerminalHistoryWindowPayload> {
-        if body.cols == 0 || body.surface_rows == 0 || body.row_count == 0 {
-            bail!("history window requires non-zero cols, surfaceRows, and rowCount");
-        }
-        let command_tx = self.command_tx_for(body.terminal_id)?;
-        let (reply, rx) = mpsc::channel();
-        command_tx.send(WorkerCommand::HistoryWindow {
-            start_row: body.start_row,
-            cols: body.cols,
-            surface_rows: body.surface_rows,
-            row_count: body.row_count,
-            reply,
-        })?;
-        bridge_worker_reply(rx)
-    }
-
     fn command_for(&self, terminal_id: TerminalId, command: WorkerCommand) -> Result<()> {
         let session = self.current_session(terminal_id)?;
         session.command_tx.send(command)?;
@@ -566,22 +456,6 @@ impl BridgeServer {
             controller: session.controller.clone(),
             command_tx: session.command_tx.clone(),
         })
-    }
-
-    fn command_tx_for(&self, terminal_id: Option<TerminalId>) -> Result<Sender<WorkerCommand>> {
-        let guard = self
-            .session
-            .lock()
-            .expect("bridge session lock should not be poisoned");
-        let session = guard
-            .as_ref()
-            .ok_or_else(|| anyhow!("no active bridge terminal"))?;
-        if let Some(terminal_id) = terminal_id
-            && session.terminal_id != terminal_id
-        {
-            bail!("unknown terminal {terminal_id}");
-        }
-        Ok(session.command_tx.clone())
     }
 }
 
@@ -657,9 +531,6 @@ fn terminal_worker(
     let mut total_emit_ms = 0_f64;
     let mut max_emit_ms = 0_f64;
     let mut pending_frame = true;
-    let mut transcript = Vec::<u8>::new();
-    let (history_tx, history_rx) = mpsc::channel();
-    thread::spawn(move || bridge_history_worker(history_rx, max_scrollback));
     let mut last_frame_emit = Instant::now()
         .checked_sub(FRAME_INTERVAL)
         .unwrap_or_else(Instant::now);
@@ -693,24 +564,6 @@ fn terminal_worker(
                 WorkerCommand::SetFrontendActive(active) => {
                     frontend_active = active;
                     pending_frame = pending_frame || active;
-                }
-                WorkerCommand::HistoryInfo { cols, rows, reply } => {
-                    let _ = history_tx.send(HistoryWorkerCommand::Info { cols, rows, reply });
-                }
-                WorkerCommand::HistoryWindow {
-                    start_row,
-                    cols,
-                    surface_rows,
-                    row_count,
-                    reply,
-                } => {
-                    let _ = history_tx.send(HistoryWorkerCommand::Window {
-                        start_row,
-                        cols,
-                        surface_rows,
-                        row_count,
-                        reply,
-                    });
                 }
                 WorkerCommand::Terminate => {
                     terminating = true;
@@ -758,8 +611,6 @@ fn terminal_worker(
                 bytes_read += batch.bytes.len();
                 chunk_bytes += batch.bytes.len();
                 terminal.write(&batch.bytes);
-                transcript.extend_from_slice(&batch.bytes);
-                let _ = history_tx.send(HistoryWorkerCommand::Append(batch.bytes.clone()));
                 if follow_tail {
                     terminal.scroll_bottom();
                 }
@@ -796,7 +647,6 @@ fn terminal_worker(
         }
     }
 
-    let _ = history_tx.send(HistoryWorkerCommand::Terminate);
     broadcaster.emit(
         "terminal_exit",
         &TerminalExitPayload {
@@ -862,232 +712,6 @@ fn drain_bridge_pty_read_batch(
         chunks,
         deferred_event,
     })
-}
-
-fn bridge_worker_reply<T>(rx: Receiver<Result<T, String>>) -> Result<T> {
-    match rx.recv_timeout(Duration::from_secs(10)) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(message)) => Err(anyhow!(message)),
-        Err(error) => Err(anyhow!("bridge worker did not reply: {error}")),
-    }
-}
-
-fn bridge_history_worker(rx: Receiver<HistoryWorkerCommand>, max_scrollback: usize) {
-    let mut transcript = Vec::<u8>::new();
-    let mut cache = BridgeHistoryReplayCache::default();
-    while let Ok(command) = rx.recv() {
-        match command {
-            HistoryWorkerCommand::Append(bytes) => transcript.extend_from_slice(&bytes),
-            HistoryWorkerCommand::Info { cols, rows, reply } => {
-                let result =
-                    bridge_history_info(&mut cache, &transcript, cols, rows, max_scrollback)
-                        .map_err(|error| error.to_string());
-                let _ = reply.send(result);
-            }
-            HistoryWorkerCommand::Window {
-                start_row,
-                cols,
-                surface_rows,
-                row_count,
-                reply,
-            } => {
-                let result = bridge_history_window(
-                    &mut cache,
-                    &transcript,
-                    cols,
-                    surface_rows,
-                    start_row,
-                    row_count,
-                    max_scrollback,
-                )
-                .map_err(|error| error.to_string());
-                let _ = reply.send(result);
-            }
-            HistoryWorkerCommand::Terminate => break,
-        }
-    }
-}
-
-fn bridge_history_info(
-    cache: &mut BridgeHistoryReplayCache,
-    transcript: &[u8],
-    cols: u16,
-    rows: u16,
-    max_scrollback: usize,
-) -> Result<TerminalHistoryInfoPayload> {
-    let state = cache.state_for(transcript, cols, rows, max_scrollback)?;
-    Ok(TerminalHistoryInfoPayload {
-        total_rows: state.total_rows()?.max(1),
-    })
-}
-
-fn bridge_history_window(
-    cache: &mut BridgeHistoryReplayCache,
-    transcript: &[u8],
-    cols: u16,
-    surface_rows: u16,
-    start_row: usize,
-    row_count: u16,
-    max_scrollback: usize,
-) -> Result<TerminalHistoryWindowPayload> {
-    let state = cache.state_for(transcript, cols, surface_rows, max_scrollback)?;
-    let frame = collect_bridge_history_window(state, start_row, row_count)?;
-    Ok(TerminalHistoryWindowPayload {
-        start_row: frame.scrollback.viewport_offset,
-        frame,
-    })
-}
-
-#[derive(Default)]
-struct BridgeHistoryReplayCache {
-    entries: Vec<BridgeHistoryReplayEntry>,
-}
-
-struct BridgeHistoryReplayEntry {
-    cols: u16,
-    rows: u16,
-    max_scrollback: usize,
-    transcript_len: usize,
-    state: GhosttyTerminalState<'static, 'static>,
-}
-
-impl BridgeHistoryReplayCache {
-    fn state_for(
-        &mut self,
-        transcript: &[u8],
-        cols: u16,
-        rows: u16,
-        max_scrollback: usize,
-    ) -> Result<&mut GhosttyTerminalState<'static, 'static>> {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
-        let max_scrollback = max_scrollback.max(HISTORY_REPLAY_SCROLLBACK_BYTES);
-        if let Some(index) = self.entries.iter().position(|entry| {
-            entry.cols == cols
-                && entry.rows == rows
-                && entry.max_scrollback == max_scrollback
-                && entry.transcript_len <= transcript.len()
-        }) {
-            let entry = &mut self.entries[index];
-            if transcript.len() > entry.transcript_len {
-                entry.state.write(&transcript[entry.transcript_len..]);
-                entry.transcript_len = transcript.len();
-            }
-            return Ok(&mut entry.state);
-        }
-
-        while self.entries.len() >= HISTORY_REPLAY_CACHE_ENTRIES {
-            self.entries.remove(0);
-        }
-        let mut state = GhosttyTerminalState::new(cols, rows, max_scrollback)?;
-        if !transcript.is_empty() {
-            state.write(transcript);
-        }
-        self.entries.push(BridgeHistoryReplayEntry {
-            cols,
-            rows,
-            max_scrollback,
-            transcript_len: transcript.len(),
-            state,
-        });
-        let index = self.entries.len() - 1;
-        Ok(&mut self.entries[index].state)
-    }
-}
-
-fn collect_bridge_history_window(
-    state: &mut GhosttyTerminalState<'_, '_>,
-    start_row: usize,
-    row_count: u16,
-) -> Result<TerminalFrame> {
-    let total_rows = state.total_rows()?.max(1);
-    let requested_count = usize::from(row_count.max(1)).min(total_rows);
-    let requested_start = start_row.min(total_rows.saturating_sub(requested_count));
-    let requested_end = requested_start.saturating_add(requested_count);
-    let mut rows_by_absolute_id: BTreeMap<usize, TerminalRow> = BTreeMap::new();
-    let mut next_start = requested_start;
-    let mut base_frame: Option<TerminalFrame> = None;
-
-    while next_start < requested_end {
-        state.scroll_to_row_start(next_start)?;
-        let frame = state.frame()?;
-        let viewport_offset = frame.scrollback.viewport_offset;
-        let mut highest_seen = None;
-
-        for row in &frame.rows {
-            let absolute_id = viewport_offset.saturating_add(usize::from(row.index));
-            if absolute_id < requested_start || absolute_id >= requested_end {
-                continue;
-            }
-            let mut rebased = row.clone();
-            rebased.index = u16::try_from(absolute_id - requested_start).unwrap_or(u16::MAX);
-            rebased.dirty = true;
-            rows_by_absolute_id.insert(absolute_id, rebased);
-            highest_seen =
-                Some(highest_seen.map_or(absolute_id, |seen: usize| seen.max(absolute_id)));
-        }
-
-        if base_frame.is_none() {
-            base_frame = Some(frame);
-        }
-
-        match highest_seen {
-            Some(row) if row + 1 > next_start => next_start = row + 1,
-            _ => break,
-        }
-    }
-
-    let mut frame = base_frame.unwrap_or_else(blank_bridge_history_frame);
-    let surface_rows = frame.scrollback.viewport_rows;
-    frame.rows = (requested_start..requested_end)
-        .map(|absolute_id| {
-            rows_by_absolute_id
-                .remove(&absolute_id)
-                .unwrap_or_else(|| blank_bridge_history_row(absolute_id - requested_start))
-        })
-        .collect();
-    frame.dirty = TerminalDirtyState::Full;
-    frame.scrollback.total_rows = total_rows;
-    frame.scrollback.scrollback_rows = total_rows.saturating_sub(surface_rows);
-    frame.scrollback.viewport_offset = requested_start;
-    frame.scrollback.viewport_rows = requested_count;
-    frame.scrollback.at_bottom = requested_end >= total_rows;
-    frame.cursor.visible = false;
-    frame.cursor.position = None;
-    Ok(frame)
-}
-
-fn blank_bridge_history_frame() -> TerminalFrame {
-    TerminalFrame {
-        dirty: TerminalDirtyState::Full,
-        cols: 0,
-        colors: TerminalColors {
-            foreground: TerminalColor {
-                r: 0xff,
-                g: 0xff,
-                b: 0xff,
-            },
-            background: TerminalColor { r: 0, g: 0, b: 0 },
-            cursor: None,
-        },
-        cursor: TerminalCursor {
-            visible: false,
-            blinking: false,
-            style: TerminalCursorStyle::Block,
-            position: Some(TerminalPosition { col: 0, row: 0 }),
-        },
-        modes: Default::default(),
-        scrollback: Default::default(),
-        rows: Vec::new(),
-    }
-}
-
-fn blank_bridge_history_row(index: usize) -> TerminalRow {
-    TerminalRow {
-        index: u16::try_from(index).unwrap_or(u16::MAX),
-        dirty: true,
-        cells: Vec::new(),
-    }
 }
 
 fn terminal_spawn_spec(body: &BridgeStartBody) -> Result<TerminalSpawnSpec> {

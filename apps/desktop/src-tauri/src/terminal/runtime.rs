@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::{
@@ -18,10 +18,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::terminal::ghostty::GhosttyTerminalState;
-use crate::terminal::transcript::TranscriptWriter;
 use reverie_core::WorkspaceService;
 use reverie_core::session_log::SessionLogControl;
-use reverie_core::transcript::TranscriptStore;
 
 const READ_BUFFER_BYTES: usize = 4096;
 const PTY_DRAIN_MAX_BYTES: usize = 64 * 1024;
@@ -29,9 +27,6 @@ const PTY_DRAIN_MAX_CHUNKS: usize = 64;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const BACKGROUND_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const SYNC_OUTPUT_FRAME_TIMEOUT: Duration = Duration::from_millis(1000);
-const HISTORY_WINDOW_CACHE_ENTRIES: usize = 6;
-const HISTORY_SEGMENT_ROWS_CACHE_ENTRIES: usize = 12;
-const HISTORY_WINDOW_PREFETCH_ROWS: usize = 2_048;
 /// Shared grace period for batch shutdown: SIGTERM every session, wait this
 /// long once, then SIGKILL any stragglers.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
@@ -70,10 +65,6 @@ pub struct TerminalSessionRuntime {
     sessions: Arc<Mutex<HashMap<TerminalId, TerminalSessionRecord>>>,
     controllers: Arc<Mutex<HashMap<TerminalId, PtyController>>>,
     command_senders: Arc<Mutex<HashMap<TerminalId, Sender<TerminalRuntimeCommand>>>>,
-    // The durable transcript sink, injected during app setup (after the SQLite
-    // repository exists). When present, each session's raw PTY bytes are
-    // captured for full-history scrollback + search.
-    transcript_store: Arc<Mutex<Option<Arc<dyn TranscriptStore>>>>,
     // The active shell theme's default terminal colors, pushed from the
     // frontend. Applied to each terminal at spawn and re-broadcast on change.
     default_colors: Arc<Mutex<TerminalThemeColors>>,
@@ -81,41 +72,6 @@ pub struct TerminalSessionRuntime {
     // frontend's `set_frontend_active`. The idle-session reaper reads this so it
     // never reaps the session on screen, even when that session is idle.
     foreground_terminal: Arc<Mutex<Option<TerminalId>>>,
-    // Rendered deep-history windows, keyed by transcript shape and terminal
-    // dimensions. This does not replace the durable transcript as source of
-    // truth; it only avoids repeated Ghostty replays while the user scrolls
-    // around the same history neighborhood.
-    history_cache: Arc<Mutex<HistoryReplayCache>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct HistoryCacheKey {
-    session_id: SessionId,
-    cols: u16,
-    surface_rows: u16,
-    foreground: (u8, u8, u8),
-    background: (u8, u8, u8),
-    segment_lengths: Vec<usize>,
-}
-
-#[derive(Clone, Debug)]
-struct HistoryWindowCacheEntry {
-    key: HistoryCacheKey,
-    start_row: usize,
-    row_count: usize,
-    frame: TerminalFrame,
-}
-
-#[derive(Clone, Debug)]
-struct HistorySegmentRowsCacheEntry {
-    key: HistoryCacheKey,
-    rows: Vec<usize>,
-}
-
-#[derive(Default, Debug)]
-struct HistoryReplayCache {
-    windows: VecDeque<HistoryWindowCacheEntry>,
-    segment_rows: VecDeque<HistorySegmentRowsCacheEntry>,
 }
 
 enum TerminalRuntimeCommand {
@@ -230,97 +186,6 @@ struct TerminalFrameEvent {
     frame: TerminalFrame,
 }
 
-impl HistoryReplayCache {
-    fn get_segment_rows(&mut self, key: &HistoryCacheKey) -> Option<Vec<usize>> {
-        let index = self
-            .segment_rows
-            .iter()
-            .position(|entry| entry.key == *key)?;
-        let entry = self.segment_rows.remove(index)?;
-        let rows = entry.rows.clone();
-        self.segment_rows.push_back(entry);
-        Some(rows)
-    }
-
-    fn put_segment_rows(&mut self, key: HistoryCacheKey, rows: Vec<usize>) {
-        self.segment_rows.retain(|entry| entry.key != key);
-        self.segment_rows
-            .push_back(HistorySegmentRowsCacheEntry { key, rows });
-        while self.segment_rows.len() > HISTORY_SEGMENT_ROWS_CACHE_ENTRIES {
-            self.segment_rows.pop_front();
-        }
-    }
-
-    fn get_window(
-        &mut self,
-        key: &HistoryCacheKey,
-        start_row: usize,
-        row_count: u16,
-    ) -> Option<TerminalFrame> {
-        let index = self.windows.iter().position(|entry| {
-            entry.key == *key && entry_contains_request(entry, start_row, row_count)
-        })?;
-        let entry = self.windows.remove(index)?;
-        let frame = entry.frame.clone();
-        self.windows.push_back(entry);
-        Some(frame)
-    }
-
-    fn put_window(&mut self, key: HistoryCacheKey, frame: TerminalFrame) {
-        let start_row = frame.scrollback.viewport_offset;
-        let row_count = frame.rows.len();
-        if row_count == 0 {
-            return;
-        }
-        self.windows.retain(|entry| {
-            !(entry.key == key && entry.start_row == start_row && entry.row_count == row_count)
-        });
-        self.windows.push_back(HistoryWindowCacheEntry {
-            key,
-            start_row,
-            row_count,
-            frame,
-        });
-        while self.windows.len() > HISTORY_WINDOW_CACHE_ENTRIES {
-            self.windows.pop_front();
-        }
-    }
-}
-
-fn entry_contains_request(
-    entry: &HistoryWindowCacheEntry,
-    start_row: usize,
-    row_count: u16,
-) -> bool {
-    let total_rows = entry.frame.scrollback.total_rows.max(1);
-    let requested_count = usize::from(row_count.max(1)).min(total_rows);
-    let requested_start = start_row.min(total_rows.saturating_sub(requested_count));
-    let requested_end = requested_start.saturating_add(requested_count);
-    let entry_end = entry.start_row.saturating_add(entry.row_count);
-    entry.start_row <= requested_start && entry_end >= requested_end
-}
-
-fn history_cache_key(
-    session_id: SessionId,
-    transcripts: &[Vec<u8>],
-    cols: u16,
-    surface_rows: u16,
-    colors: TerminalThemeColors,
-) -> HistoryCacheKey {
-    HistoryCacheKey {
-        session_id,
-        cols,
-        surface_rows,
-        foreground: color_tuple(colors.foreground),
-        background: color_tuple(colors.background),
-        segment_lengths: transcripts.iter().map(Vec::len).collect(),
-    }
-}
-
-fn color_tuple(color: TerminalColor) -> (u8, u8, u8) {
-    (color.r, color.g, color.b)
-}
-
 /// Emitted when a session's normalized OSC title changes, so the frontend can
 /// update the session's live label without refetching the whole snapshot.
 #[derive(Clone, Debug, Serialize)]
@@ -357,7 +222,8 @@ struct TerminalFailedEvent {
 
 impl TerminalSessionRuntime {
     /// The active theme's default terminal colors (dark until the frontend
-    /// pushes the live theme). Read at spawn and by history replay.
+    /// pushes the live theme). Read at spawn so default-colored cells match the
+    /// shell.
     pub fn default_colors(&self) -> TerminalThemeColors {
         self.default_colors
             .lock()
@@ -365,81 +231,9 @@ impl TerminalSessionRuntime {
             .unwrap_or_default()
     }
 
-    pub fn history_prefetch_row_count(&self, surface_rows: u16, row_count: u16) -> u16 {
-        let requested = usize::from(row_count.max(1));
-        let surface_prefetch = usize::from(surface_rows.max(1)).saturating_mul(24);
-        let rows = requested
-            .max(surface_prefetch)
-            .min(HISTORY_WINDOW_PREFETCH_ROWS)
-            .min(usize::from(u16::MAX));
-        u16::try_from(rows).unwrap_or(u16::MAX).max(1)
-    }
-
-    pub fn cached_history_window(
-        &self,
-        session_id: SessionId,
-        transcripts: &[Vec<u8>],
-        cols: u16,
-        surface_rows: u16,
-        start_row: usize,
-        row_count: u16,
-        colors: TerminalThemeColors,
-    ) -> Option<TerminalFrame> {
-        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
-        self.history_cache
-            .lock()
-            .ok()
-            .and_then(|mut cache| cache.get_window(&key, start_row, row_count))
-    }
-
-    pub fn cached_history_segment_rows(
-        &self,
-        session_id: SessionId,
-        transcripts: &[Vec<u8>],
-        cols: u16,
-        surface_rows: u16,
-        colors: TerminalThemeColors,
-    ) -> Option<Vec<usize>> {
-        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
-        self.history_cache
-            .lock()
-            .ok()
-            .and_then(|mut cache| cache.get_segment_rows(&key))
-    }
-
-    pub fn remember_history_segment_rows(
-        &self,
-        session_id: SessionId,
-        transcripts: &[Vec<u8>],
-        cols: u16,
-        surface_rows: u16,
-        colors: TerminalThemeColors,
-        rows: Vec<usize>,
-    ) {
-        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
-        if let Ok(mut cache) = self.history_cache.lock() {
-            cache.put_segment_rows(key, rows);
-        }
-    }
-
-    pub fn remember_history_window(
-        &self,
-        session_id: SessionId,
-        transcripts: &[Vec<u8>],
-        cols: u16,
-        surface_rows: u16,
-        colors: TerminalThemeColors,
-        frame: TerminalFrame,
-    ) {
-        let key = history_cache_key(session_id, transcripts, cols, surface_rows, colors);
-        if let Ok(mut cache) = self.history_cache.lock() {
-            cache.put_window(key, frame);
-        }
-    }
-
     /// Set the default terminal colors for the active theme. Stored for
-    /// future spawns + history replay, and broadcast to every live terminal so
-    /// a theme switch repaints without respawning sessions.
+    /// future spawns and broadcast to every live terminal so a theme switch
+    /// repaints without respawning sessions.
     pub fn set_theme_colors(&self, foreground: TerminalColor, background: TerminalColor) {
         if let Ok(mut colors) = self.default_colors.lock() {
             *colors = TerminalThemeColors {
@@ -492,32 +286,6 @@ impl TerminalSessionRuntime {
         });
 
         Ok(terminal_id)
-    }
-
-    /// Inject the durable transcript sink. Called once during app setup after
-    /// the SQLite repository is constructed.
-    pub fn set_transcript_store(&self, store: Arc<dyn TranscriptStore>) {
-        if let Ok(mut guard) = self.transcript_store.lock() {
-            *guard = Some(store);
-        }
-    }
-
-    fn transcript_store(&self) -> Option<Arc<dyn TranscriptStore>> {
-        self.transcript_store
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
-    }
-
-    /// Read a session's durable transcript grouped by fresh PTY launch. Used by
-    /// replay so a resumed CLI starts from a clean terminal model.
-    pub fn read_transcript_segments(&self, session_id: SessionId) -> Result<Vec<Vec<u8>>> {
-        let Some(store) = self.transcript_store() else {
-            return Ok(Vec::new());
-        };
-        store
-            .read_transcript_segments(session_id)
-            .map_err(|err| anyhow::anyhow!(err.to_string()))
     }
 
     pub fn list_sessions(&self) -> Result<Vec<TerminalSessionRecord>> {
@@ -685,20 +453,6 @@ impl TerminalSessionRuntime {
         self.register_controller(request.terminal_id, controller)?;
         self.register_command_sender(request.terminal_id, command_tx)?;
 
-        // Durable transcript capture: only for real product sessions (the
-        // benchmark/proof path has no SessionId) and only when a store is wired.
-        // Best-effort: a capture failure never breaks the live terminal.
-        let transcript_writer = request.session_id.and_then(|session_id| {
-            let store = self.transcript_store()?;
-            match TranscriptWriter::spawn(store, session_id) {
-                Ok(writer) => Some(writer),
-                Err(err) => {
-                    eprintln!("[reverie] transcript capture disabled for session: {err:#}");
-                    None
-                }
-            }
-        });
-
         self.mark_running(request.terminal_id)?;
         persist_shell_session_running(&app, request.session_id);
         // Launch-time native-session capture: poll the adapter's on-disk state
@@ -819,11 +573,6 @@ impl TerminalSessionRuntime {
                             &mut last_raw_title,
                             &mut last_emitted_title,
                         );
-                    }
-                    // Capture the raw bytes durably (the chunk is no longer
-                    // needed after the VT write). Cheap: just a channel send.
-                    if let Some(writer) = &transcript_writer {
-                        writer.append(bytes);
                     }
                     if viewport_state.follow_tail {
                         terminal.scroll_bottom();
@@ -1641,31 +1390,6 @@ fn terminal_frame_segments(chunk: &[u8], max_segment_bytes: usize) -> Vec<&[u8]>
 mod tests {
     use super::*;
     use reverie_core::CommandSpec;
-    use reverie_core::terminal::{
-        TerminalColors, TerminalCursor, TerminalCursorStyle, TerminalDirtyState, TerminalPosition,
-        TerminalRow, TerminalScrollback,
-    };
-
-    fn blank_test_frame() -> TerminalFrame {
-        TerminalFrame {
-            dirty: TerminalDirtyState::Full,
-            cols: 0,
-            colors: TerminalColors {
-                foreground: TerminalColor { r: 0, g: 0, b: 0 },
-                background: TerminalColor { r: 0, g: 0, b: 0 },
-                cursor: None,
-            },
-            cursor: TerminalCursor {
-                visible: false,
-                blinking: false,
-                style: TerminalCursorStyle::Block,
-                position: Some(TerminalPosition { col: 0, row: 0 }),
-            },
-            modes: Default::default(),
-            scrollback: TerminalScrollback::default(),
-            rows: Vec::new(),
-        }
-    }
 
     #[test]
     fn runtime_registers_session_metadata_before_stream_starts() {
@@ -1800,53 +1524,6 @@ mod tests {
             terminal_frame_interval(&viewport_state),
             TERMINAL_FRAME_INTERVAL
         );
-    }
-
-    #[test]
-    fn history_window_cache_reuses_containing_prefetch_window() {
-        let session_id = SessionId::new_v4();
-        let key = HistoryCacheKey {
-            session_id,
-            cols: 80,
-            surface_rows: 24,
-            foreground: (1, 2, 3),
-            background: (4, 5, 6),
-            segment_lengths: vec![100],
-        };
-        let mut frame = blank_test_frame();
-        frame.scrollback.total_rows = 100;
-        frame.scrollback.viewport_offset = 20;
-        frame.rows = (0..50)
-            .map(|index| TerminalRow {
-                index,
-                dirty: true,
-                cells: Vec::new(),
-            })
-            .collect();
-
-        let mut cache = HistoryReplayCache::default();
-        cache.put_window(key.clone(), frame);
-
-        assert!(cache.get_window(&key, 30, 10).is_some());
-        assert!(cache.get_window(&key, 10, 10).is_none());
-    }
-
-    #[test]
-    fn history_segment_rows_cache_uses_lru_entry() {
-        let session_id = SessionId::new_v4();
-        let key = HistoryCacheKey {
-            session_id,
-            cols: 80,
-            surface_rows: 24,
-            foreground: (1, 2, 3),
-            background: (4, 5, 6),
-            segment_lengths: vec![100, 200],
-        };
-        let mut cache = HistoryReplayCache::default();
-
-        cache.put_segment_rows(key.clone(), vec![10, 20]);
-
-        assert_eq!(cache.get_segment_rows(&key), Some(vec![10, 20]));
     }
 
     #[test]

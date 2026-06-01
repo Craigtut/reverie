@@ -1,6 +1,5 @@
 import { invoke } from './runtime';
 import type { GhosttyFrameSequencePayload, RenderMetrics, StartSessionRequest } from '../domain';
-import type { TerminalFrame } from '../terminalTypes';
 
 // Typed wrappers over the terminal/session-runtime commands: launching and
 // terminating native sessions, writing input, resizing, scrolling the
@@ -55,37 +54,6 @@ export function setTerminalFrontendActive(terminalId: string, active: boolean) {
 // load-bearing.
 export function setTerminalTheme(foreground: string, background: string) {
   return invoke('set_terminal_theme', { foreground, background });
-}
-
-// Deep history (the full persisted transcript), keyed by SESSION id so it works
-// for live, exited, and restored sessions.
-export interface TerminalHistoryInfo {
-  totalRows: number;
-}
-
-export interface TerminalHistoryWindow {
-  startRow: number;
-  frame: TerminalFrame;
-}
-
-export function terminalHistoryInfo(sessionId: string, cols: number, rows: number) {
-  return invoke<TerminalHistoryInfo>('terminal_history_info', { sessionId, cols, rows });
-}
-
-export function terminalHistoryWindow(
-  sessionId: string,
-  startRow: number,
-  cols: number,
-  surfaceRows: number,
-  rowCount: number,
-) {
-  return invoke<TerminalHistoryWindow>('terminal_history_window', {
-    sessionId,
-    startRow,
-    cols,
-    surfaceRows,
-    rowCount,
-  });
 }
 
 export function fetchGhosttyFrameSequence() {

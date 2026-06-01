@@ -27,8 +27,6 @@ type TerminalSurfaceHandle = Pick<
   | 'followLiveTerminalOutput'
   | 'contextMenu'
   | 'closeContextMenu'
-  | 'historyViewing'
-  | 'viewFullHistory'
   | 'scrollbar'
 >;
 
@@ -170,9 +168,9 @@ export function TerminalSurface({
           ) : null}
         </div>
         {/* Floating "jump to latest": only present once the user has scrolled up
-          off the live tail (or is in the full-history view). Anchored to the
-          panel's bottom-right, it drops them back to the newest output. */}
-        {!terminalLiveFollow || terminal.historyViewing ? (
+          off the live tail. Anchored to the panel's bottom-right, it drops them
+          back to the newest output. */}
+        {!terminalLiveFollow ? (
           <button
             type="button"
             className={jumpToLatestButtonClass}
