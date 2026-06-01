@@ -1175,11 +1175,13 @@ export function useTerminalSession(params: {
   async function fetchHistoryRowBand(request: TerminalHistoryRowsRequest): Promise<void> {
     const terminalId = useTerminalStore.getState().activeTerminalId;
     if (!terminalId) return;
-    // `request.startRow` is the controller's fetch start. Today it is a buffer
-    // position; below the cap (oldest_id 0) position == stable id, so we send it
-    // as the start id. B2 will have the controller compute a true id.
-    const startId = Math.max(0, Math.floor(request.startRow));
+    // `request.startRow` is the controller's fetch start in buffer-position space.
+    // Address the fetch by stable id by adding the live floor (oldest_id); the
+    // backend maps the id back to a buffer position, and the band reply is
+    // converted back on merge. Below eviction the floor is 0 (decisions.md D8).
+    const startPosition = Math.max(0, Math.floor(request.startRow));
     const count = Math.max(1, Math.floor(request.rowCount));
+    const startId = startPosition + controller.getOldestId();
     const key = `${terminalId}:${request.generation}:${startId}:${count}`;
     const inFlight = inFlightRowFetchesRef.current;
     if (inFlight.has(key)) return;

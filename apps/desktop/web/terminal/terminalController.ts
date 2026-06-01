@@ -1537,6 +1537,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       : frames;
     if (acceptedFrames.length === 0) return;
     let nextBuffer = sessionBuffers[sessionId] ?? createTerminalBuffer(surface);
+    const oldestIdBefore = nextBuffer.oldestId;
     let nextAlternateView = sessionViews[sessionId];
     const alternateDirtyRows = new Set<number>();
     let alternateNeedsFullPaint = false;
@@ -1599,6 +1600,17 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (isActive) {
       activeSessionId = sessionId;
       liveFollow = followIntentForSession(sessionId);
+      // If the backend evicted rows off the top during this batch, the content the
+      // user is viewing moved up by that many rows. When scrolled up (not
+      // following), shift the scroll position to keep the view anchored to the same
+      // content instead of sliding toward the tail (best-effort; decisions.md D8).
+      const evictionShift = nextBuffer.oldestId - oldestIdBefore;
+      if (evictionShift > 0 && !liveFollow && els.viewport) {
+        els.viewport.scrollTop = Math.max(
+          0,
+          els.viewport.scrollTop - evictionShift * surface.cellHeight,
+        );
+      }
       const latestFrame = acceptedFrames[acceptedFrames.length - 1] ?? null;
       if (terminalFrameUsesAlternateScreen(latestFrame)) {
         if (!nextAlternateView && latestFrame?.dirty === 'clean') return;
@@ -1642,13 +1654,19 @@ export function createTerminalController(options: TerminalControllerOptions) {
 
   function mergeLiveRows(
     frame: TerminalFrame,
-    startRow: number,
+    startId: number,
     totalRows: number,
     generation = liveGeneration,
   ) {
     if (generation !== liveGeneration || !activeSessionId) return false;
     const previous =
       sessionBuffers[activeSessionId] ?? activeBuffer ?? createTerminalBuffer(surface);
+    // The band is addressed by stable id; convert to the buffer's current position
+    // by subtracting the live floor (oldest_id). If the band's rows were evicted
+    // since the fetch (its id is now below the floor), drop it. Below eviction the
+    // floor is 0, so id == position (decisions.md D8).
+    const startRow = startId - previous.oldestId;
+    if (startRow < 0) return false;
     // A live session keeps appending rows while the fill round-trips, so the
     // response's totalRows routinely lags the buffer's current total. The window's
     // rows are addressed by absolute id and stay valid regardless, so merge them but
@@ -1907,6 +1925,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
     // adds the window-local row to this to land in composite coordinates.
     getStartRow(): number {
       return lastStartRow ?? 0;
+    },
+    // The backend's stable-id floor (rows evicted so far). The hook adds this to a
+    // buffer position to address a history fetch by stable id, and the band reply
+    // is converted back through it on merge; see decisions.md D8.
+    getOldestId(): number {
+      return activeBuffer?.oldestId ?? 0;
     },
     getComposite(): TerminalFrame | null {
       if (activeBuffer) {
