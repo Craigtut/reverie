@@ -12,7 +12,6 @@ import {
   terminalCellWidth,
   terminalRowTextLayout,
   terminalRowTextSlice,
-  terminalTextRangeToCellSpan,
 } from './cellGeometry';
 
 export const DEFAULT_TERMINAL_BUFFER_ROW_LIMIT = 100_000;

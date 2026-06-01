@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -24,15 +22,6 @@ impl TerminalSpawnSpec {
             title: None,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TerminalSnapshot {
-    pub id: TerminalId,
-    pub cols: u16,
-    pub rows: u16,
-    pub cwd: PathBuf,
-    pub frame: TerminalFrame,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -185,41 +174,10 @@ pub enum TerminalUnderline {
     Dashed,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TerminalFramePatch {
-    pub dirty: TerminalDirtyState,
-    pub colors: Option<TerminalColors>,
-    pub cursor: TerminalCursor,
-    pub rows: Vec<TerminalRow>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TerminalEvent {
-    Output {
-        terminal_id: TerminalId,
-        bytes: Vec<u8>,
-    },
-    FrameChanged {
-        terminal_id: TerminalId,
-        patch: TerminalFramePatch,
-    },
-    SnapshotChanged {
-        terminal_id: TerminalId,
-    },
-    Resized {
-        terminal_id: TerminalId,
-        cols: u16,
-        rows: u16,
-    },
-    Exited {
-        terminal_id: TerminalId,
-        exit_code: Option<i32>,
-    },
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]

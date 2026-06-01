@@ -91,7 +91,6 @@ export interface StartSessionRequest {
   spawnSpec?: TerminalSpawnSpec;
   cols?: number;
   rows?: number;
-  maxScrollback?: number;
 }
 
 export interface TerminalSpawnSpec {

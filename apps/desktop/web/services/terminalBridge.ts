@@ -33,7 +33,6 @@ export interface TerminalBridgeStartOptions {
   terminalId: string;
   cols: number;
   rows: number;
-  maxScrollback?: number;
   commandOverride?: string;
   cwd?: string;
 }
@@ -206,7 +205,6 @@ export async function startTerminalBridgeSession(options: TerminalBridgeStartOpt
       terminalId: options.terminalId,
       cols: options.cols,
       rows: options.rows,
-      maxScrollback: options.maxScrollback,
     },
     commandOverride: options.commandOverride ?? bridgeCommandOverride(),
     cwd: options.cwd ?? bridgeWorkingDirectory(),

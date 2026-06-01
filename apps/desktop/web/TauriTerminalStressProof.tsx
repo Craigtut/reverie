@@ -320,7 +320,6 @@ async function runTauriTerminalStressProof({
           rows: TERMINAL_SURFACE.rows,
           title: `Reverie stress ${index + 1}`,
         },
-        maxScrollback: 4_000,
       },
       frameChannel,
     );

@@ -19,6 +19,3 @@ export function setUserHome(home: string | null | undefined): void {
 export function getUserHome(): string {
   return userHome;
 }
-
-// Default scrollback the backend is asked to retain for a session's terminal.
-export const DEFAULT_TERMINAL_SCROLLBACK_ROWS = 10_000;

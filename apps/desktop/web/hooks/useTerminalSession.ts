@@ -24,7 +24,6 @@ import {
   writeTerminalInput,
 } from '../services/terminalApi';
 import {
-  DEFAULT_TERMINAL_SCROLLBACK_ROWS,
   getUserHome,
   errorMessage,
   shortId,
@@ -1105,7 +1104,6 @@ export function useTerminalSession(params: {
         terminalId,
         cols: surface.cols,
         rows: surface.rows,
-        maxScrollback: DEFAULT_TERMINAL_SCROLLBACK_ROWS,
       };
       store.setSessionTerminalBindings(current => ({
         ...current,

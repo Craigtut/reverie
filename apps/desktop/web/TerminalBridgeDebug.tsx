@@ -38,7 +38,6 @@ const DEFAULT_SURFACE: TerminalSurface = {
   cellWidth: 9,
   cellHeight: 18,
 };
-const DEFAULT_SCROLLBACK_ROWS = 100_000;
 
 declare global {
   interface Window {
@@ -311,7 +310,6 @@ export function TerminalBridgeDebug() {
           terminalId,
           cols: next.cols,
           rows: next.rows,
-          maxScrollback: DEFAULT_SCROLLBACK_ROWS,
         });
         bridgeStartedRef.current = true;
       } catch (startError) {

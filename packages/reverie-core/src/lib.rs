@@ -66,8 +66,7 @@ pub use session_log::{
 };
 pub use terminal::{
     TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors, TerminalCursor,
-    TerminalCursorStyle, TerminalDirtyState, TerminalEvent, TerminalFrame, TerminalFramePatch,
-    TerminalId, TerminalPosition, TerminalRow, TerminalSnapshot, TerminalSpawnSpec,
-    TerminalUnderline,
+    TerminalCursorStyle, TerminalDirtyState, TerminalFrame, TerminalId, TerminalPosition,
+    TerminalRow, TerminalSpawnSpec, TerminalUnderline,
 };
 pub use workspace_service::WorkspaceService;
