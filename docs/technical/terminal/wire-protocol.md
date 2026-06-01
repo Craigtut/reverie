@@ -88,6 +88,24 @@ Do not use the JSON event system for frames or rows. Tauri documents events as J
 - The **generation marker** is the key to correctness across resize. A resize bumps the generation, because `libghostty` reflows scrollback and row numbering changes. The frontend discards any in-flight diff or history reply that predates the latest snapshot, and re-issues history-range requests against the new generation. It never merges rows from two different generations.
 - The frontend applies diffs onto its mirror; if it detects a gap it cannot reconcile, it asks for a fresh snapshot rather than guessing.
 
+## History-range request and reply
+
+When the user scrolls up and the frontend's mirror runs low on older rows, the frontend pulls a band of rows from the backend. This is a request/reply (a Tauri command that returns binary), not part of the frame Channel.
+
+The request (frontend to backend) is tiny and infrequent, so it travels as ordinary command arguments: the terminal id, the absolute `start_row`, the `count` of rows wanted, and the `generation` the frontend currently holds. The backend serves the rows from `libghostty`'s live buffer (see [`backend.md`](backend.md) for the mechanism) and replies with a binary row band:
+
+```
+Row band reply (little-endian)
+u8   kind            // 2 = row band
+u32  generation      // the generation the rows were read at
+u32  start_row       // absolute index of the first row in the band
+u32  row_count
+BandRow[] rows
+BandRow = u16 cell_count, Cell[] cells   // Cell encoded exactly as in a frame
+```
+
+Band rows are contiguous from `start_row`, so they carry no per-row index or dirty flag; the `Cell` encoding is identical to the frame encoding, shared by one encoder and one decoder. The frontend merges the rows at `start_row .. start_row + row_count` into its mirror only if `generation` still matches the latest it holds; a band a resize has invalidated is dropped and re-requested against the new generation. Reach is `libghostty`'s scrollback budget; a request past the oldest row it holds returns an empty band.
+
 ## Why this shape
 
 Minimal bytes on the wire, minimal decode on the frontend, no per-frame full grid, and no round-trip on the scroll hot path. The history-range request is the one place the frontend pulls from the backend, and it is deliberately a background top-up, not a synchronous step in scrolling. That combination is the difference between a smooth 60fps terminal and the scroll lag this design exists to avoid. The lesson is borrowed from Ghostty's own renderer, which abandoned per-frame full-grid copies because the copy time blocked output even in-process; across a serialized boundary the discipline matters more, not less.
