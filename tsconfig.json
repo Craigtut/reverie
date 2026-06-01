@@ -16,6 +16,11 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["apps/desktop/web/**/*.ts", "apps/desktop/web/**/*.tsx", "vite.config.ts", "panda.config.ts"],
+  "include": [
+    "apps/desktop/web/**/*.ts",
+    "apps/desktop/web/**/*.tsx",
+    "vite.config.ts",
+    "panda.config.ts"
+  ],
   "references": []
 }

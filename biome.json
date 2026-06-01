@@ -7,7 +7,12 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/package-lock.json", "!apps/desktop/web/terminal-canvas-renderer.js"]
+    "includes": [
+      "**",
+      "!**/package-lock.json",
+      "!apps/desktop/web/terminal-canvas-renderer.js",
+      "!**/src-tauri/gen"
+    ]
   },
   "formatter": {
     "enabled": true,
