@@ -2775,6 +2775,44 @@ describe('createTerminalController', () => {
     expect(merged).toBe(false);
   });
 
+  it('drops a history band whose rows evicted during the fetch round-trip (id below the floor)', () => {
+    // mergeLiveRows addresses the band by stable id and converts it to a buffer
+    // position via the live floor. If the backend evicted past the band's id while
+    // the fetch was in flight (its id is now below oldest_id), the band is stale and
+    // must be dropped, never merged at a negative position (D8, scenarios T / RC).
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    // A frame whose stable-id floor is 50 (the backend has evicted 50 rows).
+    const evicted: TerminalFrame = {
+      ...frame([row(0, 'a'), row(1, 'b'), row(2, 'c'), row(3, 'd')]),
+      scrollback: {
+        scrollbackRows: 100,
+        viewportOffset: 100,
+        viewportRows: surface.rows,
+        totalRows: 104,
+        atBottom: true,
+        oldestId: 50,
+      },
+    };
+    controller.ingestFrame('session-1', evicted, true);
+
+    // A band for stable id 30 is below the floor (50): its rows have evicted, so the
+    // merge drops it rather than placing it at a negative buffer position.
+    const merged = controller.mergeLiveRows(frame([row(0, 'gone')]), 30, 104);
+    expect(merged).toBe(false);
+  });
+
   it('paints cached stale-width rows while a shape-correct live cache fill is requested', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
