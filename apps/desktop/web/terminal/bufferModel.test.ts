@@ -457,7 +457,7 @@ describe('terminal buffer model', () => {
     expect(terminalBufferRowText(state, 23, true)).toBe('old-c');
   });
 
-  it('keeps prior scrollback rows as fallback through delayed shape-changing live frames', () => {
+  it('drops prior scrollback rows on a shape-changing live frame so they re-fetch reflowed', () => {
     let state = createTerminalBuffer(surface);
     state = applyViewportFrameToBuffer(
       state,
@@ -476,13 +476,15 @@ describe('terminal buffer model', () => {
       { preserveShapeRows: true },
     );
 
+    // The width change drops the scrolled-back rows (stale old width) so they
+    // re-fetch reflowed from the backend; only the live tail bridges the resize.
     expect(state.cachedRanges).toEqual([{ start: 15, end: 18 }]);
     expect(terminalBufferHasRows(state, 8, 3)).toBe(false);
-    expect(terminalBufferRowText(state, 8, true)).toBe('old-a');
+    expect(terminalBufferRowText(state, 8, true)).toBe('');
     expect(terminalBufferRowText(state, 15, true)).toBe('new-tail-a');
   });
 
-  it('does not recache fallback rows after a later live frame', () => {
+  it('keeps shape-changed scrollback dropped across later live frames', () => {
     let state = createTerminalBuffer(surface);
     state = applyViewportFrameToBuffer(
       state,
@@ -509,9 +511,11 @@ describe('terminal buffer model', () => {
       { ...surface, cols: 40 },
     );
 
+    // The shape change dropped rows 8..10; later same-width frames never resurrect
+    // them (they re-fetch reflowed on demand), they only extend the live tail.
     expect(state.cachedRanges).toEqual([{ start: 21, end: 25 }]);
     expect(terminalBufferHasRows(state, 8, 3)).toBe(false);
-    expect(terminalBufferRowText(state, 8, true)).toBe('old-a');
+    expect(terminalBufferRowText(state, 8, true)).toBe('');
     expect(terminalBufferHasRows(state, 22, 3)).toBe(true);
     expect(terminalBufferRowText(state, 22, true)).toBe('newer-tail-a');
   });

@@ -158,13 +158,19 @@ export function applyViewportFrameToBuffer(
     resetForTimelineReset;
   let rowsById = new Map(resetCache ? [] : previous.rowsById);
   let cachedRanges = resetCache || preserveRowsAsFallbackOnly ? [] : [...previous.cachedRanges];
-  if (
-    preserveRowsDuringResizeReflow &&
-    options.anchorPreservedRowsToViewport === true &&
-    previous.viewportOffset !== viewportOffset
-  ) {
+  if (resetForShapeChange && !resetCache) {
+    // Width change: libghostty reflows scrollback, so every cached scrollback row is
+    // stale (old width, shifted position). Keep ONLY the previous viewport rows as an
+    // anti-flicker bridge through reflow churn (re-keyed to the new offset, clipped to
+    // the new width) and drop the scrolled-back history plus its coverage, so scrolling
+    // back re-fetches reflowed rows from the backend instead of painting stale geometry
+    // (the Ink resize jumble). This is WezTerm's make_all_stale-on-resize discipline;
+    // see scrollback-coverage-design.md and decisions.md D8.
     rowsById = anchorPreviousViewportRows(previous, surface, viewportOffset);
-    cachedRanges = addCachedRange([], viewportOffset, viewportOffset + previous.viewportRows);
+    cachedRanges =
+      rowsById.size > 0
+        ? addCachedRange([], viewportOffset, viewportOffset + previous.viewportRows)
+        : [];
   }
   const cachedRowIds: number[] = [];
   let removedResizeBlankRows = false;
@@ -468,6 +474,10 @@ function anchorPreviousViewportRows(
   surface: { cols: number; rows: number },
   nextViewportOffset: number,
 ) {
+  // Keep ONLY the previous viewport rows, re-keyed to the new viewport offset and
+  // clipped to the new width, as an anti-flicker bridge. Scrolled-back history is
+  // intentionally dropped: after a width change libghostty has reflowed it, so the
+  // cached copy is stale (old width, shifted) and must re-fetch reflowed (D8).
   const rowsById = new Map<number, TerminalRow>();
   const previousStart = previous.viewportOffset;
   const previousEnd = previous.viewportOffset + previous.viewportRows;
@@ -475,9 +485,7 @@ function anchorPreviousViewportRows(
     if (rowId >= previousStart && rowId < previousEnd) {
       const nextRowId = nextViewportOffset + (rowId - previousStart);
       rowsById.set(nextRowId, rowWithId(filterRowToCols(row, surface.cols), nextRowId));
-      continue;
     }
-    rowsById.set(rowId, row);
   }
   return rowsById;
 }
