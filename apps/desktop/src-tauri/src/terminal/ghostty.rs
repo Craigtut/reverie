@@ -110,6 +110,9 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
     /// `first_id`; see decisions.md D8). A buffered row at `buffer_position` has
     /// stable id `buffer_position + oldest_id()`. Reported to the frontend so its
     /// cache and viewport anchor survive trim; below the cap it is always 0.
+    // Used by tests today; the runtime's read_rows id->position conversion
+    // consumes it in Phase B (the id cutover). Allowed dead until that lands.
+    #[allow(dead_code)]
     pub fn oldest_id(&self) -> u64 {
         self.lines_evicted
     }
