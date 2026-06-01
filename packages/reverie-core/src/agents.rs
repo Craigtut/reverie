@@ -109,9 +109,10 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     /// Discover the native session this CLI created for `ctx.cwd`, if any.
-    /// Defaults to no discovery: adapters that record sessions on disk (Cortex
-    /// today; Claude/Codex JSONL scanners are still TODO) override this. The
-    /// caller only persists the returned ref; it does not interpret it.
+    /// Defaults to no discovery: adapters that record sessions on disk override
+    /// this (Cortex via `meta.json`, Claude via its transcript scanner; Codex's
+    /// rollout reader lands with the Phase 2 watcher). The caller only persists
+    /// the returned ref; it does not interpret it.
     fn discover_native_session(&self, ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
         let _ = ctx;
         Ok(None)
@@ -490,6 +491,17 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn hook_config_args(&self, config_file: &Path) -> Vec<String> {
         vec!["--settings".to_owned(), config_file.display().to_string()]
     }
+
+    /// Hook-independent fallback capture: if the SessionStart hook never fired
+    /// (hooks misconfigured, an older CLI, etc.) so `native_session_ref` stays
+    /// empty after launch, find this launch's transcript under `~/.claude` and
+    /// capture its session id so `claude --resume <id>` still works.
+    fn discover_native_session(&self, ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
+        let Some(claude_home) = ctx.agent_home.as_ref() else {
+            return Ok(None);
+        };
+        discover_latest_claude_transcript_for_cwd(claude_home, &ctx.cwd, ctx.launched_after_ms)
+    }
     // Title normalization uses the default: Claude's `✳` idle mark and `⠂ ⠐ ...`
     // working spinner are both handled by `is_status_decoration`.
 }
@@ -572,6 +584,22 @@ impl AgentAdapter for CodexCliAdapter {
     fn dangerous_mode_arg(&self) -> Option<&'static str> {
         Some("--dangerously-bypass-approvals-and-sandbox")
     }
+
+    /// Capture the native session id from the rollout log so `codex resume <id>`
+    /// works. Codex writes append-only `session_meta` JSONL under
+    /// `$CODEX_HOME/sessions/YYYY/MM/DD/`; we read the first record, validated by
+    /// cwd + launch window. This is the capture half of the Codex phase; live
+    /// lifecycle state comes from the rollout watcher in the shell.
+    fn discover_native_session(&self, ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
+        let Some(codex_home) = ctx.agent_home.as_ref() else {
+            return Ok(None);
+        };
+        crate::codex_rollout::discover_latest_codex_rollout_for_cwd(
+            codex_home,
+            &ctx.cwd,
+            ctx.launched_after_ms,
+        )
+    }
     // Title normalization uses the default: Codex's `⠙ ⠹ ...` working spinner is
     // handled by `is_status_decoration`, and its folder-name-when-idle default is
     // suppressed by the folder_name check in `meaningful_title`.
@@ -639,11 +667,147 @@ pub fn build_spawn_spec(
     Ok(spec)
 }
 
-fn same_logical_path(left: &Path, right: &Path) -> bool {
+pub(crate) fn same_logical_path(left: &Path, right: &Path) -> bool {
     match (left.canonicalize(), right.canonicalize()) {
         (Ok(left), Ok(right)) => left == right,
         _ => left == right,
     }
+}
+
+/// Minimal identity fields Reverie reads from a Claude transcript record. The
+/// `.jsonl` lines carry far more (conversation content); we read only these and
+/// ignore the rest.
+#[derive(Debug, Deserialize)]
+struct ClaudeTranscriptEnvelope {
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default, alias = "sessionId")]
+    session_id: Option<String>,
+}
+
+/// Discover the newest Claude Code transcript for `cwd` written after the launch
+/// window, returned as a resume ref.
+///
+/// The on-disk project directory name (`~/.claude/projects/<encoded>`) is a
+/// lossy encoding of the cwd (both `/` and a literal `-` map to `-`), so we
+/// never trust it: every candidate is validated against the `cwd` field inside
+/// the transcript. The filename stem is the session id; we prefer the envelope's
+/// `sessionId` and fall back to the stem. Metadata-only: we read just the first
+/// lines until the identity fields appear and never parse conversation content.
+pub fn discover_latest_claude_transcript_for_cwd(
+    claude_home: impl AsRef<Path>,
+    cwd: impl AsRef<Path>,
+    launched_after_ms: Option<i64>,
+) -> Result<Option<NativeSessionRef>> {
+    let projects_dir = claude_home.as_ref().join("projects");
+    if !projects_dir.exists() {
+        return Ok(None);
+    }
+    let cwd = cwd.as_ref();
+
+    let mut best: Option<(i64, NativeSessionRef)> = None;
+    for project_entry in fs::read_dir(&projects_dir).with_context(|| {
+        format!(
+            "failed to read Claude projects directory at {}",
+            projects_dir.display()
+        )
+    })? {
+        let Ok(project_entry) = project_entry else {
+            continue;
+        };
+        let project_path = project_entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        let Ok(files) = fs::read_dir(&project_path) else {
+            continue;
+        };
+        for file_entry in files.flatten() {
+            let path = file_entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            // Bound to the launch window by mtime so we pick this launch's
+            // transcript, not an older session in the same project dir.
+            let Some(modified_ms) = file_modified_ms(&path) else {
+                continue;
+            };
+            if let Some(min) = launched_after_ms {
+                if modified_ms < min {
+                    continue;
+                }
+            }
+            let Some(envelope) = read_claude_transcript_envelope(&path) else {
+                continue;
+            };
+            // Validate the cwd from inside the file (the dir name is lossy).
+            let Some(file_cwd) = envelope.cwd else {
+                continue;
+            };
+            if !same_logical_path(Path::new(&file_cwd), cwd) {
+                continue;
+            }
+            let session_id = envelope
+                .session_id
+                .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned));
+            let Some(session_id) = session_id else {
+                continue;
+            };
+
+            let is_newer = best
+                .as_ref()
+                .map(|(ms, _)| modified_ms > *ms)
+                .unwrap_or(true);
+            if is_newer {
+                best = Some((
+                    modified_ms,
+                    NativeSessionRef::claude(session_id, Some(path)),
+                ));
+            }
+        }
+    }
+
+    Ok(best.map(|(_, reference)| reference))
+}
+
+pub(crate) fn file_modified_ms(path: &Path) -> Option<i64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let dur = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(dur.as_millis() as i64)
+}
+
+/// Read the first lines of a transcript until the `cwd` and `sessionId` identity
+/// fields are found (or a small line budget is exhausted). Returns `None` if
+/// neither appears; the caller treats that as "not a usable transcript".
+fn read_claude_transcript_envelope(path: &Path) -> Option<ClaudeTranscriptEnvelope> {
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(fs::File::open(path).ok()?);
+    let mut cwd: Option<String> = None;
+    let mut session_id: Option<String> = None;
+    for line in reader.lines().take(64) {
+        let Ok(line) = line else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(envelope) = serde_json::from_str::<ClaudeTranscriptEnvelope>(&line) else {
+            continue;
+        };
+        if cwd.is_none() {
+            cwd = envelope.cwd;
+        }
+        if session_id.is_none() {
+            session_id = envelope.session_id;
+        }
+        if cwd.is_some() && session_id.is_some() {
+            break;
+        }
+    }
+    if cwd.is_none() && session_id.is_none() {
+        return None;
+    }
+    Some(ClaudeTranscriptEnvelope { cwd, session_id })
 }
 
 fn program_or_default(ctx: &LaunchContext, fallback: &'static str) -> PathBuf {
@@ -783,6 +947,70 @@ mod tests {
                 "--model",
                 "sonnet"
             ]
+        );
+    }
+
+    #[test]
+    fn claude_transcript_scanner_captures_session_validated_by_cwd() {
+        use std::io::Write;
+        let home = tempfile::TempDir::new().unwrap();
+        let cwd = "/Users/dev/Code/proj";
+
+        // Lossy-encoded project dir for that cwd, with a transcript whose first
+        // line is a mode record (no cwd) and a later line carries the identity.
+        let project = home.path().join("projects").join("-Users-dev-Code-proj");
+        fs::create_dir_all(&project).unwrap();
+        let mut f = fs::File::create(project.join("sess-123.jsonl")).unwrap();
+        writeln!(f, r#"{{"type":"mode","mode":"default"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","sessionId":"sess-123","cwd":"{cwd}","timestamp":"t"}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        // Decoy under a different project/cwd: must be ignored even though it is
+        // also a transcript under projects/.
+        let other = home.path().join("projects").join("-Users-dev-Code-other");
+        fs::create_dir_all(&other).unwrap();
+        let mut g = fs::File::create(other.join("sess-999.jsonl")).unwrap();
+        writeln!(
+            g,
+            r#"{{"sessionId":"sess-999","cwd":"/Users/dev/Code/other"}}"#
+        )
+        .unwrap();
+        drop(g);
+
+        let found = discover_latest_claude_transcript_for_cwd(home.path(), cwd, None)
+            .unwrap()
+            .expect("cwd-matching transcript is found");
+        assert_eq!(found.kind, AgentKind::ClaudeCode);
+        assert_eq!(found.session_id.as_deref(), Some("sess-123"));
+    }
+
+    #[test]
+    fn claude_transcript_scanner_respects_launch_window() {
+        use std::io::Write;
+        let home = tempfile::TempDir::new().unwrap();
+        let cwd = "/tmp/proj";
+        let project = home.path().join("projects").join("-tmp-proj");
+        fs::create_dir_all(&project).unwrap();
+        let mut f = fs::File::create(project.join("s.jsonl")).unwrap();
+        writeln!(f, r#"{{"sessionId":"s","cwd":"{cwd}"}}"#).unwrap();
+        drop(f);
+
+        // A launch window in the far future filters out the just-written file.
+        let far_future_ms = 32_503_680_000_000; // ~year 3000
+        assert!(
+            discover_latest_claude_transcript_for_cwd(home.path(), cwd, Some(far_future_ms))
+                .unwrap()
+                .is_none()
+        );
+        // With no window it is captured.
+        assert!(
+            discover_latest_claude_transcript_for_cwd(home.path(), cwd, None)
+                .unwrap()
+                .is_some()
         );
     }
 

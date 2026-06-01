@@ -8,6 +8,11 @@
 //! the unified [`ActivityState`] shape so the dashboard cares only about state
 //! transitions, never about which CLI emitted them.
 //!
+//! This is the **push** transport of the ingestion spine: it emits the same
+//! [`ActivityUpdate`] every other source does, keyed by [`SessionKey::Reverie`]
+//! (the per-session token authenticates the owning Reverie session directly, so
+//! no reverse native-id lookup is needed) at [`Fidelity::Definitive`].
+//!
 //! Scope of this module: parse + translate + emit. It does **not** write
 //! Claude `settings.json` or Codex `config.toml` into each session's cwd, and
 //! it does not yet enforce per-session secrets; those concerns live alongside
@@ -30,38 +35,30 @@ use serde_json::Value;
 use tiny_http::{Method, Response, Server, StatusCode};
 
 use crate::activity::{
-    ActivityError, ActivityState, ActivityStatus, ErrorCategory, ExitReason, FinalExit,
+    ActiveTool, ActivityError, ActivityState, ActivityStatus, ErrorCategory, ExitReason, FinalExit,
     PermissionRequest,
 };
+use crate::activity_source::{ActivitySourceKind, ActivityUpdate, Fidelity, SessionKey};
 use crate::domain::SessionId;
 
 const ACTIVITY_VERSION: u32 = 1;
 
-/// Which CLI sourced a translated update. Reverie carries this through to the
-/// dashboard so adapter-specific copy and routing stay possible.
+/// Which CLI sourced a translated update. Used internally for URL-path routing
+/// and per-CLI token auth; the emitted [`ActivityUpdate`] carries the public
+/// [`ActivitySourceKind`] instead.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum HookSource {
     ClaudeCode,
     CodexCli,
 }
 
-/// One translated update from the hook stream. `reverie_session_id` is the
-/// Reverie-owned session that minted this token at launch; the Tauri shell
-/// uses it to update the right dashboard row even on the first hook (before
-/// the CLI's native session id is captured into `nativeSessionRef`).
-#[derive(Clone, Debug)]
-pub enum HookActivityUpdate {
-    State {
-        source: HookSource,
-        reverie_session_id: String,
-        native_session_id: String,
-        state: ActivityState,
-    },
-    Removed {
-        source: HookSource,
-        reverie_session_id: String,
-        native_session_id: String,
-    },
+impl HookSource {
+    fn activity_source_kind(self) -> ActivitySourceKind {
+        match self {
+            HookSource::ClaudeCode => ActivitySourceKind::ClaudeCode,
+            HookSource::CodexCli => ActivitySourceKind::CodexCli,
+        }
+    }
 }
 
 /// Shared, cheaply-cloned control surface for the running hook server. The
@@ -71,15 +68,20 @@ pub enum HookActivityUpdate {
 #[derive(Clone)]
 pub struct HookServerControl {
     pub port: u16,
-    auth: Arc<Mutex<HashMap<(HookSource, String), String>>>,
+    auth: Arc<Mutex<HashMap<(HookSource, String), SessionId>>>,
 }
 
 impl HookServerControl {
     /// Authorize a token for one CLI source and bind it to the Reverie session
     /// that's about to use it. Subsequent POSTs to `/hooks/<cli>/<token>` are
     /// accepted, translated, and tagged with the Reverie session id so the
-    /// drain can find the right row to update.
-    pub fn register_session(&self, source: HookSource, token: String, reverie_session_id: String) {
+    /// correlator can bind directly without a reverse native-id lookup.
+    pub fn register_session(
+        &self,
+        source: HookSource,
+        token: String,
+        reverie_session_id: SessionId,
+    ) {
         let mut auth = self.auth.lock().unwrap_or_else(|err| err.into_inner());
         auth.insert((source, token), reverie_session_id);
     }
@@ -108,7 +110,7 @@ pub trait HookPushSource: Send + Sync {
 /// updates. The server stops when the handle is dropped: tiny_http's accept
 /// loop is unblocked, the worker exits, and the bound socket closes.
 pub struct HookServerHandle {
-    pub events: Receiver<HookActivityUpdate>,
+    pub events: Receiver<ActivityUpdate>,
     pub control: HookServerControl,
     server: Arc<Server>,
     worker: Option<JoinHandle<()>>,
@@ -142,7 +144,7 @@ impl Drop for HookServerHandle {
 }
 
 /// Bind a localhost HTTP server on an OS-assigned port and start translating
-/// incoming hook POSTs into [`HookActivityUpdate`]s. The `push_source` is
+/// incoming hook POSTs into [`ActivityUpdate`]s. The `push_source` is
 /// consulted on `UserPromptSubmit` hooks to inject `additionalContext` into
 /// the reply so Claude / Codex agents see pending inter-agent messages at
 /// the top of their next turn. Pass `None` to keep the legacy 204 reply.
@@ -167,9 +169,9 @@ pub fn start_hook_server_with(
     };
     let port = local.port();
 
-    let (tx, rx) = mpsc::channel::<HookActivityUpdate>();
+    let (tx, rx) = mpsc::channel::<ActivityUpdate>();
     let sequences: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
-    let auth: Arc<Mutex<HashMap<(HookSource, String), String>>> =
+    let auth: Arc<Mutex<HashMap<(HookSource, String), SessionId>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     let worker_server = Arc::clone(&server);
@@ -205,8 +207,8 @@ const MAX_HOOK_BODY_BYTES: usize = 64 * 1024;
 fn run_request_loop(
     server: Arc<Server>,
     sequences: Arc<Mutex<HashMap<String, u64>>>,
-    auth: Arc<Mutex<HashMap<(HookSource, String), String>>>,
-    tx: Sender<HookActivityUpdate>,
+    auth: Arc<Mutex<HashMap<(HookSource, String), SessionId>>>,
+    tx: Sender<ActivityUpdate>,
     push_source: Option<Arc<dyn HookPushSource>>,
 ) {
     for mut request in server.incoming_requests() {
@@ -227,7 +229,7 @@ fn run_request_loop(
         // the session ends or is removed.
         let reverie_session_id = {
             let guard = auth.lock().unwrap_or_else(|err| err.into_inner());
-            guard.get(&(source, token.to_owned())).cloned()
+            guard.get(&(source, token.to_owned())).copied()
         };
         let Some(reverie_session_id) = reverie_session_id else {
             let _ = request.respond(simple_response(401, "unauthorized"));
@@ -268,7 +270,7 @@ fn run_request_loop(
         // Record activity translation for either source first; the response
         // body only matters for UserPromptSubmit, but other hook events
         // still drive the activity stream.
-        if let Some(update) = translate(source, reverie_session_id.clone(), &payload, &sequences) {
+        if let Some(update) = translate(source, reverie_session_id, &payload, &sequences) {
             let _ = tx.send(update);
         }
 
@@ -283,22 +285,20 @@ fn run_request_loop(
             .unwrap_or("");
         if event_name == "UserPromptSubmit" {
             if let Some(source) = push_source.as_ref() {
-                if let Ok(session_id) = SessionId::parse_str(&reverie_session_id) {
-                    let nudge = source.pre_turn_nudge_for(session_id);
-                    if !nudge.is_empty() {
-                        let body = build_user_prompt_submit_response(&nudge);
-                        let response = Response::from_string(body.to_string())
-                            .with_status_code(StatusCode(200))
-                            .with_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"Content-Type"[..],
-                                    &b"application/json"[..],
-                                )
-                                .expect("static header"),
-                            );
-                        let _ = request.respond(response);
-                        continue;
-                    }
+                let nudge = source.pre_turn_nudge_for(reverie_session_id);
+                if !nudge.is_empty() {
+                    let body = build_user_prompt_submit_response(&nudge);
+                    let response = Response::from_string(body.to_string())
+                        .with_status_code(StatusCode(200))
+                        .with_header(
+                            tiny_http::Header::from_bytes(
+                                &b"Content-Type"[..],
+                                &b"application/json"[..],
+                            )
+                            .expect("static header"),
+                        );
+                    let _ = request.respond(response);
+                    continue;
                 }
             }
         }
@@ -355,10 +355,10 @@ fn next_sequence(sequences: &Mutex<HashMap<String, u64>>, session_id: &str) -> u
 
 fn translate(
     source: HookSource,
-    reverie_session_id: String,
+    reverie_session_id: SessionId,
     payload: &Value,
     sequences: &Mutex<HashMap<String, u64>>,
-) -> Option<HookActivityUpdate> {
+) -> Option<ActivityUpdate> {
     match source {
         HookSource::ClaudeCode => translate_claude(reverie_session_id, payload, sequences),
         HookSource::CodexCli => translate_codex(reverie_session_id, payload, sequences),
@@ -392,11 +392,28 @@ fn parse_envelope(payload: &Value) -> Option<HookEnvelope> {
     serde_json::from_value(payload.clone()).ok()
 }
 
+/// Build the [`ActivityUpdate`] a translated hook event produces: keyed by the
+/// owning Reverie session (so it binds without a native-id lookup), tagged with
+/// the source CLI, and definitive (a push hook is a first-class lifecycle
+/// signal). The native CLI session id rides along in `state.session_id`.
+fn hook_state_update(
+    source: HookSource,
+    reverie_session_id: SessionId,
+    state: ActivityState,
+) -> ActivityUpdate {
+    ActivityUpdate::State {
+        source: source.activity_source_kind(),
+        key: SessionKey::Reverie(reverie_session_id),
+        fidelity: Fidelity::Definitive,
+        state,
+    }
+}
+
 fn translate_claude(
-    reverie_session_id: String,
+    reverie_session_id: SessionId,
     payload: &Value,
     sequences: &Mutex<HashMap<String, u64>>,
-) -> Option<HookActivityUpdate> {
+) -> Option<ActivityUpdate> {
     let envelope = parse_envelope(payload)?;
     let session_id = envelope.session_id.clone()?;
     let timestamp = envelope.timestamp.clone().unwrap_or_else(now_iso8601);
@@ -412,7 +429,19 @@ fn translate_claude(
             envelope.tool_name.as_deref().unwrap_or("tool"),
             envelope.tool_input.as_ref(),
         ),
-        "PostToolUse" | "PreToolUse" | "SessionStart" | "UserPromptSubmit" => build_simple_state(
+        // A tool is starting: surface it as the active tool so the dashboard can
+        // show "Run shell: npm test" instead of a bare "Working".
+        "PreToolUse" => build_state_working_tool(
+            &session_id,
+            timestamp,
+            sequence,
+            cwd,
+            envelope.tool_name.as_deref().unwrap_or("tool"),
+            envelope.tool_input.as_ref(),
+        ),
+        // The tool finished; clear the active tool but stay Working until the
+        // turn's Stop arrives.
+        "PostToolUse" | "SessionStart" | "UserPromptSubmit" => build_simple_state(
             &session_id,
             timestamp,
             sequence,
@@ -454,19 +483,18 @@ fn translate_claude(
         ),
     };
 
-    Some(HookActivityUpdate::State {
-        source: HookSource::ClaudeCode,
+    Some(hook_state_update(
+        HookSource::ClaudeCode,
         reverie_session_id,
-        native_session_id: session_id,
         state,
-    })
+    ))
 }
 
 fn translate_codex(
-    reverie_session_id: String,
+    reverie_session_id: SessionId,
     payload: &Value,
     sequences: &Mutex<HashMap<String, u64>>,
-) -> Option<HookActivityUpdate> {
+) -> Option<ActivityUpdate> {
     let envelope = parse_envelope(payload)?;
     let session_id = envelope.session_id.clone()?;
     let timestamp = envelope.timestamp.clone().unwrap_or_else(now_iso8601);
@@ -507,12 +535,11 @@ fn translate_codex(
         ),
     };
 
-    Some(HookActivityUpdate::State {
-        source: HookSource::CodexCli,
+    Some(hook_state_update(
+        HookSource::CodexCli,
         reverie_session_id,
-        native_session_id: session_id,
         state,
-    })
+    ))
 }
 
 fn build_simple_state(
@@ -537,15 +564,12 @@ fn build_simple_state(
     }
 }
 
-fn build_state_awaiting_permission(
-    session_id: &str,
-    timestamp: String,
-    sequence: u64,
-    cwd: String,
-    tool_name: &str,
-    tool_input: Option<&Value>,
-) -> ActivityState {
-    let display_summary = match tool_name {
+/// Human-readable one-liner for a tool call, used both for the permission
+/// prompt summary and the active-tool line. Keeps per-tool phrasing in one
+/// place so "Run shell: …" reads the same whether the tool is pending approval
+/// or already running.
+fn tool_display_summary(tool_name: &str, tool_input: Option<&Value>) -> String {
+    match tool_name {
         "Bash" => tool_input
             .and_then(|value| value.get("command").and_then(Value::as_str))
             .map(|cmd| format!("Run shell: {cmd}"))
@@ -559,7 +583,50 @@ fn build_state_awaiting_permission(
             .map(|path| format!("Read {path}"))
             .unwrap_or_else(|| "Read a file".to_owned()),
         other => format!("Use {other}"),
-    };
+    }
+}
+
+/// Working state carrying the single tool that just started, so the dashboard
+/// can render the active-tool line. The model is intentionally one-tool-deep:
+/// `PostToolUse` clears it back to a bare Working heartbeat.
+fn build_state_working_tool(
+    session_id: &str,
+    timestamp: String,
+    sequence: u64,
+    cwd: String,
+    tool_name: &str,
+    tool_input: Option<&Value>,
+) -> ActivityState {
+    ActivityState {
+        version: ACTIVITY_VERSION,
+        session_id: session_id.to_owned(),
+        status: ActivityStatus::Working,
+        updated_at: timestamp.clone(),
+        sequence,
+        cwd,
+        turn: None,
+        active_tools: vec![ActiveTool {
+            tool_call_id: format!("tool-{sequence}"),
+            tool_name: tool_name.to_owned(),
+            started_at: timestamp,
+            display_summary: Some(tool_display_summary(tool_name, tool_input)),
+            child_task_id: None,
+        }],
+        awaiting_permission: None,
+        last_error: None,
+        final_exit: None,
+    }
+}
+
+fn build_state_awaiting_permission(
+    session_id: &str,
+    timestamp: String,
+    sequence: u64,
+    cwd: String,
+    tool_name: &str,
+    tool_input: Option<&Value>,
+) -> ActivityState {
+    let display_summary = tool_display_summary(tool_name, tool_input);
 
     ActivityState {
         version: ACTIVITY_VERSION,
@@ -737,7 +804,7 @@ mod tests {
         response
     }
 
-    fn wait_for_update(handle: &HookServerHandle) -> HookActivityUpdate {
+    fn wait_for_update(handle: &HookServerHandle) -> ActivityUpdate {
         handle
             .events
             .recv_timeout(Duration::from_secs(3))
@@ -754,15 +821,17 @@ mod tests {
         format!("/hooks/codex/{TEST_TOKEN}")
     }
 
-    const TEST_REVERIE_SESSION_ID: &str = "reverie-test-session";
+    /// A stable, valid Reverie session id (a UUID) used across the tests. The
+    /// hook auth map stores `SessionId`, so registration takes one of these.
+    fn test_reverie_session_id() -> SessionId {
+        uuid::Uuid::from_bytes([0x11; 16])
+    }
 
     fn started_with_token(source: HookSource) -> HookServerHandle {
         let handle = start_hook_server().expect("server starts");
-        handle.control.register_session(
-            source,
-            TEST_TOKEN.to_owned(),
-            TEST_REVERIE_SESSION_ID.to_owned(),
-        );
+        handle
+            .control
+            .register_session(source, TEST_TOKEN.to_owned(), test_reverie_session_id());
         handle
     }
 
@@ -783,19 +852,75 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
 
         match wait_for_update(&handle) {
-            HookActivityUpdate::State {
+            ActivityUpdate::State {
                 source,
-                reverie_session_id,
-                native_session_id,
+                key,
+                fidelity,
                 state,
             } => {
-                assert_eq!(source, HookSource::ClaudeCode);
-                assert_eq!(reverie_session_id, TEST_REVERIE_SESSION_ID);
-                assert_eq!(native_session_id, "claude-sess-1");
+                assert_eq!(source, ActivitySourceKind::ClaudeCode);
+                assert_eq!(key, SessionKey::Reverie(test_reverie_session_id()));
+                assert_eq!(fidelity, Fidelity::Definitive);
+                assert_eq!(state.session_id, "claude-sess-1");
                 assert_eq!(state.status, ActivityStatus::AwaitingPermission);
                 let perm = state.awaiting_permission.expect("permission set");
                 assert_eq!(perm.tool_name, "Bash");
                 assert_eq!(perm.display_summary, "Run shell: rm -rf foo/");
+            }
+            other => panic!("expected State, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_pre_tool_use_surfaces_active_tool_with_summary() {
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "claude-sess-2",
+            "cwd": "/repo",
+            "tool_name": "Bash",
+            "tool_input": { "command": "npm test" }
+        })
+        .to_string();
+
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+
+        match wait_for_update(&handle) {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::Working);
+                assert_eq!(
+                    state.active_tools.len(),
+                    1,
+                    "PreToolUse should set one active tool"
+                );
+                let tool = &state.active_tools[0];
+                assert_eq!(tool.tool_name, "Bash");
+                assert_eq!(tool.display_summary.as_deref(), Some("Run shell: npm test"));
+            }
+            other => panic!("expected State, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_post_tool_use_clears_active_tool_but_stays_working() {
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "claude-sess-3",
+            "cwd": "/repo",
+            "tool_name": "Bash"
+        })
+        .to_string();
+
+        let _ = post_hook(handle.port(), &claude_path(), &body);
+        match wait_for_update(&handle) {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::Working);
+                assert!(
+                    state.active_tools.is_empty(),
+                    "PostToolUse should clear active tools"
+                );
             }
             other => panic!("expected State, got {other:?}"),
         }
@@ -816,15 +941,12 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
 
         match wait_for_update(&handle) {
-            HookActivityUpdate::State {
-                source,
-                reverie_session_id,
-                native_session_id,
-                state,
+            ActivityUpdate::State {
+                source, key, state, ..
             } => {
-                assert_eq!(source, HookSource::CodexCli);
-                assert_eq!(reverie_session_id, TEST_REVERIE_SESSION_ID);
-                assert_eq!(native_session_id, "codex-sess-1");
+                assert_eq!(source, ActivitySourceKind::CodexCli);
+                assert_eq!(key, SessionKey::Reverie(test_reverie_session_id()));
+                assert_eq!(state.session_id, "codex-sess-1");
                 assert_eq!(state.status, ActivityStatus::AwaitingInput);
                 assert_eq!(state.sequence, 1);
             }
@@ -856,7 +978,7 @@ mod tests {
         let seqs = [first, second]
             .into_iter()
             .map(|update| match update {
-                HookActivityUpdate::State { state, .. } => state.sequence,
+                ActivityUpdate::State { state, .. } => state.sequence,
                 other => panic!("unexpected update {other:?}"),
             })
             .collect::<Vec<_>>();
@@ -942,14 +1064,9 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
 
         match wait_for_update(&handle) {
-            HookActivityUpdate::State {
-                source,
-                native_session_id,
-                state,
-                ..
-            } => {
-                assert_eq!(source, HookSource::ClaudeCode);
-                assert_eq!(native_session_id, "claude-unknown");
+            ActivityUpdate::State { source, state, .. } => {
+                assert_eq!(source, ActivitySourceKind::ClaudeCode);
+                assert_eq!(state.session_id, "claude-unknown");
                 assert_eq!(state.status, ActivityStatus::Working);
             }
             other => panic!("expected State, got {other:?}"),
@@ -970,14 +1087,9 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
 
         match wait_for_update(&handle) {
-            HookActivityUpdate::State {
-                source,
-                native_session_id,
-                state,
-                ..
-            } => {
-                assert_eq!(source, HookSource::CodexCli);
-                assert_eq!(native_session_id, "codex-unknown");
+            ActivityUpdate::State { source, state, .. } => {
+                assert_eq!(source, ActivitySourceKind::CodexCli);
+                assert_eq!(state.session_id, "codex-unknown");
                 assert_eq!(state.status, ActivityStatus::Working);
             }
             other => panic!("expected State, got {other:?}"),
@@ -997,13 +1109,10 @@ mod tests {
     }
 
     fn started_with_push(source: HookSource, push: Arc<dyn HookPushSource>) -> HookServerHandle {
-        // Register a real Reverie session id (UUID) so the hook server can
-        // parse it before consulting the push source.
-        let session_uuid = uuid::Uuid::from_bytes([0xAB; 16]).to_string();
         let handle = start_hook_server_with(Some(push)).expect("server starts");
         handle
             .control
-            .register_session(source, TEST_TOKEN.to_owned(), session_uuid);
+            .register_session(source, TEST_TOKEN.to_owned(), test_reverie_session_id());
         handle
     }
 

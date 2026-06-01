@@ -1,16 +1,23 @@
-//! Per-session hook config writers for Claude Code and Codex CLI.
+//! Per-session hook config writers for Claude Code (and, later, Codex CLI).
 //!
-//! Each launched Claude or Codex session gets a private config directory
-//! (under Reverie's cache root, never the user's `~/.claude` or `~/.codex`)
-//! containing a file that points the CLI's lifecycle hooks at Reverie's
-//! localhost hook HTTP server. The session launch path sets
-//! `CLAUDE_CONFIG_DIR` / `CODEX_HOME` in the spawn env so the CLI reads our
-//! file in addition to (or instead of) the user's own config, depending on
-//! the CLI's resolution order.
+//! Each launched Claude session gets a private settings file (under Reverie's
+//! cache root, never the user's `~/.claude`) declaring HTTP lifecycle hooks
+//! that point at Reverie's localhost hook server. The launch path attaches it
+//! with `claude --settings <file>`, which merges additively on top of the
+//! user's own settings and leaves `~/.claude` (credentials/auth) untouched, so
+//! no credential-home redirect is needed and the CLI never re-prompts to sign
+//! in. We deliberately do NOT set `CLAUDE_CONFIG_DIR`: that would redirect the
+//! whole config + credential tree and force a fresh login.
+//!
+//! Codex is intentionally different: it has no HTTP hook type (command-only)
+//! and its command hooks are trust-gated, so Codex lifecycle state comes from a
+//! rollout-JSONL watcher plus an opt-in, user-trusted command hook (see the
+//! Codex phase). `write_codex_config` below is a placeholder slated for that
+//! rework and is not on the Claude launch path.
 //!
 //! This module only writes the files; minting tokens, registering them with
-//! the hook server, and wiring env vars onto the spawn live in the Tauri
-//! shell so this module stays trivially unit-testable against a tempdir.
+//! the hook server, and attaching them onto the spawn live in the Tauri shell
+//! so this module stays trivially unit-testable against a tempdir.
 
 use std::{
     fs::{self, OpenOptions},
@@ -31,6 +38,7 @@ use crate::hook_server::HookSource;
 /// should go together with a new arm in `translate_claude` / `translate_codex`.
 const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "PermissionRequest",
+    "PreToolUse",
     "PostToolUse",
     "Stop",
     "StopFailure",
@@ -38,6 +46,13 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "SessionEnd",
     "UserPromptSubmit",
 ];
+
+/// Claude hook events that key off a tool name and therefore take a `matcher`.
+/// Every other event uses the bare `{ hooks: [...] }` group with no matcher.
+/// `SessionStart` deliberately stays out of this list: giving it a matcher
+/// like `"startup"` would suppress the hook on `resume`, and Reverie resumes
+/// sessions constantly, so it must fire for every start source.
+const CLAUDE_TOOL_MATCHED_EVENTS: &[&str] = &["PermissionRequest", "PreToolUse", "PostToolUse"];
 
 const CODEX_HOOK_EVENTS: &[&str] = &[
     "PermissionRequest",
@@ -48,14 +63,14 @@ const CODEX_HOOK_EVENTS: &[&str] = &[
     "UserPromptSubmit",
 ];
 
-/// Outcome of a successful config write. The launch path uses the returned
-/// path to set the appropriate env var on the spawn (`CLAUDE_CONFIG_DIR` or
-/// `CODEX_HOME`).
+/// Outcome of a successful config write. The launch path attaches
+/// `config_file` to the spawn (Claude: `--settings <config_file>`). We do not
+/// return an env var to set: redirecting the credential home is exactly what
+/// this design avoids.
 #[derive(Clone, Debug)]
 pub struct WrittenHookConfig {
     pub config_dir: PathBuf,
     pub config_file: PathBuf,
-    pub env_var: &'static str,
 }
 
 /// Compose the URL that hook payloads should be POSTed to. Always
@@ -69,10 +84,12 @@ pub fn hook_url(source: HookSource, port: u16, token: &str) -> String {
     format!("http://127.0.0.1:{port}/hooks/{cli}/{token}")
 }
 
-/// Write the Claude Code config for one session into `config_dir`. The
+/// Write the Claude Code settings file for one session into `config_dir`. The
 /// directory is created (with restrictive permissions on Unix) if it doesn't
-/// exist. The resulting `settings.json` is what Claude Code will read when
-/// `CLAUDE_CONFIG_DIR` is set to `config_dir`.
+/// exist. The resulting `settings.json` is attached at launch with
+/// `claude --settings <config_file>`; Claude merges it on top of the user's
+/// own settings, so this only adds Reverie's hooks and never replaces or
+/// relocates the user's config or credentials.
 pub fn write_claude_settings(config_dir: &Path, hook_url: &str) -> Result<WrittenHookConfig> {
     ensure_private_dir(config_dir)?;
     let settings = build_claude_settings(hook_url);
@@ -84,14 +101,13 @@ pub fn write_claude_settings(config_dir: &Path, hook_url: &str) -> Result<Writte
     Ok(WrittenHookConfig {
         config_dir: config_dir.to_path_buf(),
         config_file: target,
-        env_var: "CLAUDE_CONFIG_DIR",
     })
 }
 
-/// Write the Codex CLI config for one session into `config_dir`. Codex reads
-/// `config.toml` under `CODEX_HOME`; we don't need to mirror the rest of the
-/// user's Codex config because the CLI will fall back to defaults for keys we
-/// don't set.
+/// Placeholder Codex config writer. Codex has no HTTP hook type and trust-gates
+/// command hooks, so this is slated to be reworked into a command-hook forwarder
+/// for the Codex phase and is not on any live launch path today. Kept compiling
+/// so the rework is a focused change rather than a new module.
 pub fn write_codex_config(config_dir: &Path, hook_url: &str) -> Result<WrittenHookConfig> {
     ensure_private_dir(config_dir)?;
     let toml = build_codex_config_toml(hook_url);
@@ -101,19 +117,22 @@ pub fn write_codex_config(config_dir: &Path, hook_url: &str) -> Result<WrittenHo
     Ok(WrittenHookConfig {
         config_dir: config_dir.to_path_buf(),
         config_file: target,
-        env_var: "CODEX_HOME",
     })
 }
 
 #[derive(Debug, Serialize)]
 struct ClaudeSettings<'a> {
-    hooks: ClaudeHookMap<'a>,
+    hooks: std::collections::BTreeMap<&'static str, Vec<ClaudeMatcherGroup<'a>>>,
 }
 
+/// One entry under an event in Claude's `hooks` map. Claude requires this
+/// `{ matcher?, hooks: [...] }` grouping; a flat list of hook entries is
+/// silently ignored. `matcher` is present only for tool-keyed events.
 #[derive(Debug, Serialize)]
-struct ClaudeHookMap<'a> {
-    #[serde(flatten)]
-    events: std::collections::BTreeMap<&'static str, Vec<ClaudeHookEntry<'a>>>,
+struct ClaudeMatcherGroup<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matcher: Option<&'static str>,
+    hooks: Vec<ClaudeHookEntry<'a>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,20 +142,26 @@ struct ClaudeHookEntry<'a> {
     url: &'a str,
 }
 
-fn build_claude_settings<'a>(hook_url: &'a str) -> ClaudeSettings<'a> {
-    let mut events = std::collections::BTreeMap::new();
+fn build_claude_settings(hook_url: &str) -> ClaudeSettings<'_> {
+    let mut hooks = std::collections::BTreeMap::new();
     for event in CLAUDE_HOOK_EVENTS {
-        events.insert(
+        let matcher = if CLAUDE_TOOL_MATCHED_EVENTS.contains(event) {
+            Some("*")
+        } else {
+            None
+        };
+        hooks.insert(
             *event,
-            vec![ClaudeHookEntry {
-                kind: "http",
-                url: hook_url,
+            vec![ClaudeMatcherGroup {
+                matcher,
+                hooks: vec![ClaudeHookEntry {
+                    kind: "http",
+                    url: hook_url,
+                }],
             }],
         );
     }
-    ClaudeSettings {
-        hooks: ClaudeHookMap { events },
-    }
+    ClaudeSettings { hooks }
 }
 
 fn build_codex_config_toml(hook_url: &str) -> String {
@@ -198,11 +223,10 @@ mod tests {
     }
 
     #[test]
-    fn write_claude_settings_produces_http_hooks_for_every_listed_event() {
+    fn write_claude_settings_produces_matcher_wrapped_http_hooks_for_every_event() {
         let dir = TempDir::new().unwrap();
         let url = "http://127.0.0.1:9000/hooks/claude/tok-1";
         let written = write_claude_settings(dir.path(), url).expect("writes");
-        assert_eq!(written.env_var, "CLAUDE_CONFIG_DIR");
         assert_eq!(written.config_file, dir.path().join("settings.json"));
 
         let body = fs::read_to_string(&written.config_file).expect("read settings.json");
@@ -212,14 +236,34 @@ mod tests {
             .and_then(|h| h.as_object())
             .expect("hooks object");
         for event in CLAUDE_HOOK_EVENTS {
-            let entries = hooks
+            let groups = hooks
                 .get(*event)
                 .and_then(|v| v.as_array())
-                .unwrap_or_else(|| panic!("missing hook entry for {event}"));
-            assert_eq!(entries.len(), 1, "{event} should have one HTTP hook");
-            let entry = &entries[0];
-            assert_eq!(entry["type"], "http");
-            assert_eq!(entry["url"], url);
+                .unwrap_or_else(|| panic!("missing hook group for {event}"));
+            assert_eq!(groups.len(), 1, "{event} should have one matcher group");
+            let group = &groups[0];
+
+            // The HTTP hook lives in the nested `hooks` array, NOT flat on the
+            // group: Claude ignores a flat hook entry.
+            let entries = group
+                .get("hooks")
+                .and_then(|v| v.as_array())
+                .unwrap_or_else(|| panic!("{event} group missing nested hooks array"));
+            assert_eq!(entries.len(), 1, "{event} should declare one HTTP hook");
+            assert_eq!(entries[0]["type"], "http");
+            assert_eq!(entries[0]["url"], url);
+
+            // Tool-keyed events carry a matcher; lifecycle events must not, and
+            // SessionStart in particular must stay matcher-free so it fires on
+            // resume as well as startup.
+            if CLAUDE_TOOL_MATCHED_EVENTS.contains(event) {
+                assert_eq!(group["matcher"], "*", "{event} should match all tools");
+            } else {
+                assert!(
+                    group.get("matcher").is_none(),
+                    "{event} must not carry a matcher (would suppress resume/lifecycle)"
+                );
+            }
         }
     }
 
@@ -228,7 +272,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let url = "http://127.0.0.1:9000/hooks/codex/tok-2";
         let written = write_codex_config(dir.path(), url).expect("writes");
-        assert_eq!(written.env_var, "CODEX_HOME");
         assert_eq!(written.config_file, dir.path().join("config.toml"));
 
         let body = fs::read_to_string(&written.config_file).expect("read config.toml");

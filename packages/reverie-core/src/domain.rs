@@ -218,6 +218,18 @@ impl NativeSessionRef {
             adapter_payload: serde_json::Value::Null,
         }
     }
+
+    /// A Codex CLI resume ref. `rollout_path` is the discovered
+    /// `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<id>.jsonl`, kept for
+    /// diagnostics; resume only needs `session_id` (`codex resume <id>`).
+    pub fn codex(session_id: impl Into<String>, rollout_path: Option<PathBuf>) -> Self {
+        Self {
+            kind: AgentKind::CodexCli,
+            session_id: Some(session_id.into()),
+            metadata_path: rollout_path,
+            adapter_payload: serde_json::Value::Null,
+        }
+    }
 }
 
 // No PartialEq: `latest_activity` holds an ActivityState, which is not PartialEq.
