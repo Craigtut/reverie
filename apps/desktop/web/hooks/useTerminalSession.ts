@@ -40,9 +40,11 @@ import type {
   SessionTerminalBinding,
   TerminalExitPayload,
   TerminalFailedPayload,
-  TerminalFramePayload,
   TerminalStreamStartedPayload,
 } from '../domain';
+import type { TerminalFrame } from '../terminalTypes';
+import { decodeTerminalFrame, type DecodedTerminalFrame } from '../terminal/wireDecode';
+import type { TerminalBridgeFramePayload } from '../services/terminalBridge';
 import { createSession } from '../services/shellApi';
 import { TERMINAL_SURFACE } from '../terminal-canvas-renderer';
 import {
@@ -770,17 +772,21 @@ export function useTerminalSession(params: {
   async function attachRuntimeSessionListeners(
     terminalId: string,
     session: ShellSession,
-  ): Promise<() => void> {
+  ): Promise<{ cleanup: () => void; onFrame: unknown }> {
     controller.tryMountRenderer();
     const interEventTimings = createTerminalMetricSamples();
     let cellsDrawn = 0;
     let framesReceived = 0;
     let droppedFrames = 0;
-    let expectedSeq = 0;
     let lastEventAt: number | null = null;
     let receiveStarted: number | null = null;
     let startedPayload: TerminalStreamStartedPayload | null = null;
-    let pendingTerminalFramePayloads: TerminalFramePayload[] = [];
+    // Latest backend generation this stream has accepted. A resize bumps the
+    // backend generation and is immediately followed by a Full frame; the
+    // frontend adopts that generation from the Full frame and drops any frame
+    // whose generation is older than the latest. See wire-protocol.md.
+    let latestGeneration = 0;
+    let pendingTerminalFramePayloads: { frame: TerminalFrame }[] = [];
     let terminalFrameRaf = 0;
     const renderAggregate = createTerminalRenderAggregate();
     const frameBatchAggregate = createTerminalFrameBatchAggregate();
@@ -865,30 +871,80 @@ export function useTerminalSession(params: {
       }),
     );
 
-    unlisteners.push(
-      await listen<TerminalFramePayload>('terminal_frame', event => {
-        const payload = event.payload;
-        terminalEventDebugRef.current.frameEventsSeen += 1;
-        terminalEventDebugRef.current.lastFrameTerminalId = payload.terminalId;
-        if (payload.terminalId !== terminalId) {
-          terminalEventDebugRef.current.frameEventsMismatched += 1;
-          return;
-        }
-        terminalEventDebugRef.current.frameEventsMatched += 1;
-        terminalEventDebugRef.current.lastMatchedFrameSeq = payload.seq;
+    // Apply the wire-protocol generation rules to one decoded frame, then queue
+    // it for the existing rAF-batched ingest path. Shared by both transports
+    // (Tauri Channel + harness SSE bridge) so they behave identically.
+    function handleDecodedFrame(decoded: DecodedTerminalFrame) {
+      terminalEventDebugRef.current.frameEventsSeen += 1;
+      terminalEventDebugRef.current.lastFrameTerminalId = terminalId;
 
-        const now = performance.now();
-        if (receiveStarted === null) receiveStarted = now;
-        if (lastEventAt !== null) interEventTimings.record(now - lastEventAt);
-        lastEventAt = now;
+      // Drop a frame older than the latest generation we have accepted. A Full
+      // frame adopts (resets to) its generation and rebuilds the mirror; a diff
+      // that runs ahead of the current baseline (no Full seen yet) is dropped,
+      // never merged across generations.
+      if (decoded.generation < latestGeneration) {
+        droppedFrames += 1;
+        return;
+      }
+      if (decoded.dirty === 'full') {
+        latestGeneration = decoded.generation;
+      } else if (decoded.generation > latestGeneration) {
+        droppedFrames += 1;
+        return;
+      }
 
-        if (payload.seq !== expectedSeq) droppedFrames += Math.max(0, payload.seq - expectedSeq);
-        expectedSeq = payload.seq + 1;
-        framesReceived += 1;
-        pendingTerminalFramePayloads.push(payload);
-        if (!terminalFrameRaf) terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrames);
-      }),
-    );
+      terminalEventDebugRef.current.frameEventsMatched += 1;
+      terminalEventDebugRef.current.lastMatchedFrameSeq = framesReceived;
+
+      const now = performance.now();
+      if (receiveStarted === null) receiveStarted = now;
+      if (lastEventAt !== null) interEventTimings.record(now - lastEventAt);
+      lastEventAt = now;
+
+      framesReceived += 1;
+      pendingTerminalFramePayloads.push({ frame: decoded.frame });
+      if (!terminalFrameRaf) terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrames);
+    }
+
+    // Frame transport. In the desktop app this is a per-session binary Tauri
+    // Channel: each `start_session` gets a `Channel<ArrayBuffer>` and the worker
+    // streams encoded frames over it (delivered here as ArrayBuffers). In the
+    // browser harness there is no Tauri Channel, so frames arrive over the SSE
+    // bridge as base64 of the same wire bytes; `terminalBridge` decodes them and
+    // hands us a `TerminalBridgeFramePayload` via the JSON-event listen shim.
+    let onFrame: unknown;
+    if (isTauriRuntime) {
+      const { Channel } = await import('@tauri-apps/api/core');
+      const frameChannel = new Channel<ArrayBuffer>();
+      frameChannel.onmessage = buffer => {
+        handleDecodedFrame(decodeTerminalFrame(buffer));
+      };
+      onFrame = frameChannel;
+    } else {
+      // Two non-Tauri sources can deliver `terminal_frame`: the SSE bridge
+      // (which decodes the binary wire format and sets `generation`/`dirty`),
+      // and the in-memory fixture service used by the default harness (which
+      // emits a synthetic frame with no generation). Derive both fields so the
+      // generation rules apply uniformly: fixtures have no resizes, so they sit
+      // at generation 1, and the frame carries its own dirty kind.
+      unlisteners.push(
+        await listen<Partial<TerminalBridgeFramePayload> & { frame: TerminalFrame }>(
+          'terminal_frame',
+          event => {
+            const payload = event.payload;
+            if (payload.terminalId && payload.terminalId !== terminalId) {
+              terminalEventDebugRef.current.frameEventsMismatched += 1;
+              return;
+            }
+            handleDecodedFrame({
+              generation: payload.generation ?? 1,
+              dirty: payload.dirty ?? payload.frame.dirty ?? 'full',
+              frame: payload.frame,
+            });
+          },
+        ),
+      );
+    }
 
     unlisteners.push(
       await listen<TerminalExitPayload>('terminal_exit', event => {
@@ -954,7 +1010,7 @@ export function useTerminalSession(params: {
       }),
     );
 
-    return cleanup;
+    return { cleanup, onFrame };
   }
 
   function activateSession(session: ShellSession): boolean {
@@ -1011,7 +1067,8 @@ export function useTerminalSession(params: {
     const terminalId = crypto.randomUUID();
     let cleanup: (() => void) | null = null;
     try {
-      cleanup = await attachRuntimeSessionListeners(terminalId, session);
+      const listeners = await attachRuntimeSessionListeners(terminalId, session);
+      cleanup = listeners.cleanup;
       const surface = controller.getSurface();
       const request: StartSessionRequest = {
         sessionId: session.id,
@@ -1028,7 +1085,9 @@ export function useTerminalSession(params: {
       store.setActiveTerminalId(terminalId);
       store.setRunningSessionId(session.id);
       writeLog(`Launching ${session.title} as its own terminal session.`);
-      await startSession(request);
+      // Pass the per-session binary frame Channel (desktop) to the backend; in
+      // the harness `onFrame` is undefined and frames arrive over the bridge.
+      await startSession(request, listeners.onFrame);
       void loadWorkspaceShell();
     } catch (error) {
       cleanup?.();

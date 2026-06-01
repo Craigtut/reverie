@@ -6,7 +6,6 @@ import type {
   RenderMetrics,
   TerminalExitPayload,
   TerminalFailedPayload,
-  TerminalFramePayload,
   TerminalStreamStartedPayload,
 } from './domain';
 import { listen, type UnlistenFn } from './services/runtime';
@@ -19,6 +18,7 @@ import {
 import { createTerminalGpuRenderer } from './terminal-gpu-renderer';
 import { percentile, TERMINAL_SURFACE } from './terminal-canvas-renderer';
 import type { TerminalFrame } from './terminalTypes';
+import { decodeTerminalFrame } from './terminal/wireDecode';
 
 const TERMINAL_COUNT = 3;
 const STRESS_LINES = 650;
@@ -37,7 +37,6 @@ interface StressTerminalState {
   childSuccess: boolean | null;
   renderSamples: number[];
   interEventSamples: number[];
-  lastSeq: number | null;
   lastEventAt: number | null;
   pendingFrame: TerminalFrame | null;
   raf: number;
@@ -212,28 +211,10 @@ async function runTauriTerminalStressProof({
   );
   if (await stopIfCancelled()) return () => {};
 
-  unlisteners.push(
-    await listen<TerminalFramePayload>('terminal_frame', event => {
-      if (isCancelled()) return;
-      const payload = event.payload;
-      const state = terminalStates.get(payload.terminalId);
-      if (!state) return;
-
-      const now = performance.now();
-      if (state.lastEventAt !== null) state.interEventSamples.push(now - state.lastEventAt);
-      state.lastEventAt = now;
-      if (state.lastSeq !== null && payload.seq !== state.lastSeq + 1) {
-        state.droppedFrames += Math.max(0, payload.seq - state.lastSeq - 1);
-      }
-      state.lastSeq = payload.seq;
-      state.framesReceived += 1;
-      state.bytesRead = payload.bytesRead;
-      state.chunksRead += 1;
-      state.pendingFrame = payload.frame;
-      if (!state.raf) state.raf = requestAnimationFrame(() => paintPendingFrame(state));
-    }),
-  );
-  if (await stopIfCancelled()) return () => {};
+  // Frames now arrive over a per-terminal binary Tauri Channel (created in the
+  // launch loop below), decoded with the shared `decodeTerminalFrame`; there is
+  // no global JSON `terminal_frame` event to listen for. Lifecycle events
+  // (started/exit/failed) stay JSON.
 
   unlisteners.push(
     await listen<TerminalExitPayload>('terminal_exit', event => {
@@ -279,7 +260,7 @@ async function runTauriTerminalStressProof({
       cellHeight: TERMINAL_SURFACE.cellHeight,
       preferredBackends: ['webgl2', 'canvas2d'],
     });
-    terminalStates.set(terminalId, {
+    const state: StressTerminalState = {
       terminalId,
       framesReceived: 0,
       framesRendered: 0,
@@ -290,29 +271,59 @@ async function runTauriTerminalStressProof({
       childSuccess: null,
       renderSamples: [],
       interEventSamples: [],
-      lastSeq: null,
       lastEventAt: null,
       pendingFrame: null,
       raf: 0,
       canvas,
       renderer,
-    });
+    };
+    terminalStates.set(terminalId, state);
 
-    await startSession({
-      terminalId,
-      spawnSpec: {
-        command: {
-          program: '/bin/sh',
-          args: ['-lc', stressScript(index)],
-          cwd: '/tmp',
-          env: {},
+    // Per-terminal binary frame Channel. Each frame is decoded with the same
+    // wire decoder the live app uses; a stale-generation drop is counted, the
+    // rest paint via the existing rAF path. The Channel is per-terminal, so no
+    // terminalId filtering is needed.
+    const { Channel } = await import('@tauri-apps/api/core');
+    const frameChannel = new Channel<ArrayBuffer>();
+    let lastGeneration = 0;
+    frameChannel.onmessage = buffer => {
+      if (isCancelled()) return;
+      const decoded = decodeTerminalFrame(buffer);
+      if (decoded.generation < lastGeneration) {
+        state.droppedFrames += 1;
+        return;
+      }
+      if (decoded.dirty === 'full') lastGeneration = decoded.generation;
+      else if (decoded.generation > lastGeneration) {
+        state.droppedFrames += 1;
+        return;
+      }
+      const now = performance.now();
+      if (state.lastEventAt !== null) state.interEventSamples.push(now - state.lastEventAt);
+      state.lastEventAt = now;
+      state.framesReceived += 1;
+      state.pendingFrame = decoded.frame;
+      if (!state.raf) state.raf = requestAnimationFrame(() => paintPendingFrame(state));
+    };
+
+    await startSession(
+      {
+        terminalId,
+        spawnSpec: {
+          command: {
+            program: '/bin/sh',
+            args: ['-lc', stressScript(index)],
+            cwd: '/tmp',
+            env: {},
+          },
+          cols: TERMINAL_SURFACE.cols,
+          rows: TERMINAL_SURFACE.rows,
+          title: `Reverie stress ${index + 1}`,
         },
-        cols: TERMINAL_SURFACE.cols,
-        rows: TERMINAL_SURFACE.rows,
-        title: `Reverie stress ${index + 1}`,
+        maxScrollback: 4_000,
       },
-      maxScrollback: 4_000,
-    });
+      frameChannel,
+    );
     if (await stopIfCancelled()) return () => {};
   }
 

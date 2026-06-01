@@ -16,16 +16,21 @@ use anyhow::{Context, Result, anyhow, bail};
 use reverie_core::{
     CommandSpec, TerminalSpawnSpec,
     pty::{PtyController, PtyProcess},
-    terminal::{TerminalFrame, TerminalId},
+    terminal::TerminalId,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[path = "../terminal/ghostty.rs"]
 #[allow(dead_code)]
 mod ghostty;
 
+#[path = "../terminal/wire.rs"]
+#[allow(dead_code)]
+mod wire;
+
 use ghostty::{GhosttyTerminalState, ghostty_scrollback_bytes_for_rows};
+use wire::encode_frame;
 
 const DEFAULT_BIND: &str = "127.0.0.1:17777";
 const DEFAULT_COLS: u16 = 120;
@@ -84,10 +89,14 @@ struct Broadcaster {
     replay: Mutex<VecDeque<BridgeEvent>>,
 }
 
+// A bridge event carries its already-serialized SSE `data:` body. JSON
+// lifecycle events store a JSON string; the binary frame stream stores the
+// base64 of the same wire bytes the Tauri Channel sends, so both transports
+// exercise one shared encoder + decoder.
 #[derive(Clone, Debug)]
 struct BridgeEvent {
     name: String,
-    payload: Value,
+    data: String,
 }
 
 impl Broadcaster {
@@ -111,18 +120,32 @@ impl Broadcaster {
         rx
     }
 
+    /// Emit a JSON lifecycle event (started/exit/failed). The payload is
+    /// serialized to a JSON string for the SSE `data:` field.
     fn emit<T: Serialize>(&self, name: &str, payload: &T) {
-        let payload = match serde_json::to_value(payload) {
-            Ok(payload) => payload,
+        let data = match serde_json::to_string(payload) {
+            Ok(data) => data,
             Err(error) => {
                 eprintln!("failed to serialize bridge event {name}: {error}");
                 return;
             }
         };
-        let event = BridgeEvent {
+        self.dispatch(BridgeEvent {
             name: name.to_owned(),
-            payload,
-        };
+            data,
+        });
+    }
+
+    /// Emit a pre-serialized event body verbatim (the binary frame stream, sent
+    /// as base64 of the wire bytes).
+    fn emit_data(&self, name: &str, data: String) {
+        self.dispatch(BridgeEvent {
+            name: name.to_owned(),
+            data,
+        });
+    }
+
+    fn dispatch(&self, event: BridgeEvent) {
         let mut replay = self
             .replay
             .lock()
@@ -231,17 +254,6 @@ struct TerminalStreamStartedPayload {
     target_frames: Option<usize>,
     cols: u16,
     rows: u16,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalFramePayload {
-    terminal_id: TerminalId,
-    seq: usize,
-    bytes_read: usize,
-    chunk_bytes: usize,
-    rust_elapsed_ms: f64,
-    frame: TerminalFrame,
 }
 
 #[derive(Serialize)]
@@ -523,9 +535,10 @@ fn terminal_worker(
     let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows, max_scrollback)?;
     let mut follow_tail = true;
     let mut frontend_active = true;
-    let mut seq = 0_usize;
+    // Per-session frame generation, bumped on resize, stamped into every encoded
+    // frame, exactly as the Tauri runtime worker does. See wire-protocol.md.
+    let mut generation: u32 = 1;
     let mut bytes_read = 0_usize;
-    let mut chunk_bytes = 0_usize;
     let mut chunks_read = 0_usize;
     let mut frames_emitted = 0_usize;
     let mut total_emit_ms = 0_f64;
@@ -544,6 +557,7 @@ fn terminal_worker(
                     if follow_tail {
                         terminal.scroll_bottom();
                     }
+                    generation = generation.saturating_add(1);
                     pending_frame = true;
                 }
                 WorkerCommand::ScrollDelta(rows) => {
@@ -583,23 +597,14 @@ fn terminal_worker(
         ) {
             let emit_started = Instant::now();
             let frame = terminal.frame()?;
-            broadcaster.emit(
-                "terminal_frame",
-                &TerminalFramePayload {
-                    terminal_id,
-                    seq,
-                    bytes_read,
-                    chunk_bytes,
-                    rust_elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-                    frame,
-                },
-            );
+            // Same wire bytes the Tauri Channel sends, base64'd for the SSE
+            // `data:` field. The frontend decodes both with `decodeTerminalFrame`.
+            let encoded = base64_encode(&encode_frame(&frame, generation));
+            broadcaster.emit_data("terminal_frame", encoded);
             let emit_ms = emit_started.elapsed().as_secs_f64() * 1000.0;
             total_emit_ms += emit_ms;
             max_emit_ms = max_emit_ms.max(emit_ms);
             frames_emitted += 1;
-            seq += 1;
-            chunk_bytes = 0;
             pending_frame = false;
             last_frame_emit = Instant::now();
         }
@@ -609,7 +614,6 @@ fn terminal_worker(
                 let batch = drain_bridge_pty_read_batch(bytes, &read_rx)?;
                 chunks_read += batch.chunks;
                 bytes_read += batch.bytes.len();
-                chunk_bytes += batch.bytes.len();
                 terminal.write(&batch.bytes);
                 if follow_tail {
                     terminal.scroll_bottom();
@@ -766,6 +770,35 @@ fn terminal_spawn_spec(body: &BridgeStartBody) -> Result<TerminalSpawnSpec> {
     })
 }
 
+/// Standard base64 (RFC 4648, with `=` padding). Encode-only: the binary frame
+/// bytes go into the SSE `data:` field as base64 because SSE is line-oriented
+/// text. The frontend bridge decodes it with the browser's `atob` and feeds the
+/// bytes to the same `decodeTerminalFrame` the Tauri Channel path uses. Hand
+/// rolled to avoid adding a base64 crate dependency for one call site.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[((triple >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[(triple & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 fn read_http_request(stream: &TcpStream) -> Result<HttpRequest> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut first_line = String::new();
@@ -822,8 +855,9 @@ fn stream_events(mut stream: TcpStream, rx: Receiver<BridgeEvent>) -> Result<()>
     stream.flush()?;
 
     for event in rx {
-        let payload = serde_json::to_string(&event.payload)?;
-        write!(stream, "event: {}\ndata: {}\n\n", event.name, payload)?;
+        // `event.data` is already the SSE data body: a JSON string for lifecycle
+        // events, base64 of the wire bytes for the binary frame stream.
+        write!(stream, "event: {}\ndata: {}\n\n", event.name, event.data)?;
         if stream.flush().is_err() {
             break;
         }

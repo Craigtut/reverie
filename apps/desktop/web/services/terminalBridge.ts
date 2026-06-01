@@ -1,4 +1,5 @@
 import { invokeBrowserFixture } from './fixtures';
+import { decodeTerminalFrameBase64 } from '../terminal/wireDecode';
 import type { TerminalFrame } from '../terminalTypes';
 import type { EventHandler, UnlistenFn } from './types';
 
@@ -23,6 +24,12 @@ const TERMINAL_BRIDGE_EVENTS = new Set([
 
 let bridgeEventSource: EventSource | null = null;
 const sessionTerminalIds = new Map<string, string>();
+// The bridge serves exactly one session at a time (each /start terminates the
+// previous), so the most recent `terminal_stream_started` identifies which
+// terminal the (terminalId-less) binary frame stream belongs to. We also count
+// frames per stream to give the dev debug surface a `seq`, resetting on start.
+let currentBridgeTerminalId: string | null = null;
+let currentBridgeFrameSeq = 0;
 
 export interface TerminalBridgeStartOptions {
   terminalId: string;
@@ -36,10 +43,17 @@ export interface TerminalBridgeStartOptions {
 export interface TerminalBridgeFramePayload {
   terminalId: string;
   seq: number;
+  // Per-session generation marker decoded from the binary frame (bumped on
+  // resize, adopted by a Full frame). Mirrors the Tauri Channel path.
+  generation: number;
+  dirty: 'clean' | 'partial' | 'full';
+  frame: TerminalFrame;
+  // Retained for the dev bridge-debug surface. The binary frame stream no
+  // longer carries per-frame byte/timing metadata (that was JSON-payload only),
+  // so these are 0 over the bridge now; lifecycle metrics still come via JSON.
   bytesRead: number;
   chunkBytes: number;
   rustElapsedMs: number;
-  frame: TerminalFrame;
 }
 
 export interface TerminalBridgeStartedPayload {
@@ -99,6 +113,10 @@ export async function invokeTerminalBridge<T = unknown>(
       const request = args?.request as Record<string, unknown> | undefined;
       const sessionId = typeof request?.sessionId === 'string' ? request.sessionId : null;
       if (sessionId) sessionTerminalIds.set(sessionId, terminalId);
+      // The binary frame stream carries no terminalId; bind it now, before any
+      // frame SSE can arrive, so the per-session frame guard is never inert.
+      currentBridgeTerminalId = terminalId;
+      currentBridgeFrameSeq = 0;
       return terminalId as T;
     }
     case 'terminate_session': {
@@ -141,8 +159,41 @@ export async function invokeTerminalBridge<T = unknown>(
 
 export function listenTerminalBridge<T>(eventName: string, handler: EventHandler<T>): UnlistenFn {
   const source = terminalBridgeSource();
+
+  // The frame stream is binary: the bridge base64s the SAME wire bytes the
+  // Tauri Channel sends, and we decode them with the SAME `decodeTerminalFrame`.
+  // We attach the terminalId from the current stream (the frame bytes carry
+  // none) and a local seq, so the payload matches `TerminalBridgeFramePayload`.
+  if (eventName === 'terminal_frame') {
+    const listener = (event: Event) => {
+      const decoded = decodeTerminalFrameBase64((event as MessageEvent<string>).data);
+      const payload: TerminalBridgeFramePayload = {
+        terminalId: currentBridgeTerminalId ?? '',
+        seq: currentBridgeFrameSeq,
+        generation: decoded.generation,
+        dirty: decoded.dirty,
+        frame: decoded.frame,
+        bytesRead: 0,
+        chunkBytes: 0,
+        rustElapsedMs: 0,
+      };
+      currentBridgeFrameSeq += 1;
+      handler({ payload: payload as T });
+    };
+    source.addEventListener(eventName, listener);
+    return () => source.removeEventListener(eventName, listener);
+  }
+
   const listener = (event: Event) => {
-    handler({ payload: JSON.parse((event as MessageEvent<string>).data) as T });
+    const payload = JSON.parse((event as MessageEvent<string>).data) as T;
+    // Track which terminal the binary frame stream belongs to, and reset the
+    // per-stream frame counter, whenever a new stream starts.
+    if (eventName === 'terminal_stream_started') {
+      const started = payload as { terminalId?: string };
+      currentBridgeTerminalId = started.terminalId ?? null;
+      currentBridgeFrameSeq = 0;
+    }
+    handler({ payload });
   };
   source.addEventListener(eventName, listener);
   return () => source.removeEventListener(eventName, listener);

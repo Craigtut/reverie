@@ -13,11 +13,13 @@ use reverie_core::TerminalSpawnSpec;
 use reverie_core::agents::derive_session_title;
 use reverie_core::domain::{AgentKind, NativeSessionRef, SessionId};
 use reverie_core::pty::{PtyController, PtyProcess};
-use reverie_core::terminal::{TerminalColor, TerminalFrame, TerminalId};
+use reverie_core::terminal::{TerminalColor, TerminalId};
 use serde::Serialize;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::terminal::ghostty::GhosttyTerminalState;
+use crate::terminal::wire::encode_frame;
 use reverie_core::WorkspaceService;
 use reverie_core::session_log::SessionLogControl;
 
@@ -115,7 +117,10 @@ struct TerminalViewportState {
     frontend_active: bool,
 }
 
-#[derive(Clone, Debug)]
+// No `Debug` derive: `tauri::ipc::Channel` is not `Debug`, and the request is
+// never formatted. It stays `Clone` because `spawn_session_stream` clones it
+// into the worker thread (the Channel is cheaply `Arc`-cloned).
+#[derive(Clone)]
 pub struct TerminalStreamRequest {
     pub session_id: Option<SessionId>,
     pub terminal_id: TerminalId,
@@ -128,6 +133,10 @@ pub struct TerminalStreamRequest {
     /// The session working-folder basename, used to suppress CLIs that default
     /// their title to the folder name. `None` for the bench/proof path.
     pub folder_name: Option<String>,
+    /// Per-session binary frame transport. Each encoded `TerminalFrame` is sent
+    /// over this Channel as raw bytes (an `ArrayBuffer` on the JS side). `None`
+    /// only in tests that register a session without driving the stream.
+    pub frame_channel: Option<Channel<InvokeResponseBody>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -172,18 +181,6 @@ struct TerminalStreamStarted {
     cols: u16,
     rows: u16,
     target_frames: Option<usize>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalFrameEvent {
-    session_id: Option<SessionId>,
-    terminal_id: TerminalId,
-    seq: usize,
-    bytes_read: usize,
-    chunk_bytes: usize,
-    rust_elapsed_ms: f64,
-    frame: TerminalFrame,
 }
 
 /// Emitted when a session's normalized OSC title changes, so the frontend can
@@ -484,7 +481,6 @@ impl TerminalSessionRuntime {
         let mut last_output_at = Instant::now();
         let mut bytes_read = 0_usize;
         let mut bytes_rendered = 0_usize;
-        let mut bytes_since_last_frame = 0_usize;
         let mut chunks_read = 0_usize;
         let mut frames_emitted = 0_usize;
         let mut total_emit_ms = 0_f64;
@@ -512,8 +508,16 @@ impl TerminalSessionRuntime {
         };
         let mut last_raw_title: Option<String> = None;
         let mut last_emitted_title: Option<String> = None;
+        // Per-session frame generation, starting at 1. A resize bumps it (the
+        // VT then reflows scrollback and renumbers rows); the very next frame is
+        // a Full snapshot carrying the new generation, which the frontend adopts
+        // and rebuilds from. See `wire-protocol.md` (generation rules).
+        let mut generation: u32 = 1;
+        let frame_channel = request.frame_channel.as_ref();
         let child_success = loop {
-            if apply_terminal_commands(&command_rx, &mut terminal, &mut viewport_state)? {
+            let applied = apply_terminal_commands(&command_rx, &mut terminal, &mut viewport_state)?;
+            generation = generation.saturating_add(applied.resizes);
+            if applied.needs_frame {
                 pending_frame = true;
             }
 
@@ -525,16 +529,7 @@ impl TerminalSessionRuntime {
                 &mut sync_output_started_at,
                 Instant::now(),
             )? {
-                let emit_ms = emit_terminal_frame_event(
-                    &app,
-                    request.session_id,
-                    request.terminal_id,
-                    frames_emitted,
-                    bytes_rendered,
-                    bytes_since_last_frame,
-                    started,
-                    &mut terminal,
-                )?;
+                let emit_ms = send_terminal_frame(frame_channel, generation, &mut terminal)?;
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
                 frames_emitted += 1;
@@ -544,7 +539,6 @@ impl TerminalSessionRuntime {
                     bytes_rendered,
                     last_output_at,
                 )?;
-                bytes_since_last_frame = 0;
                 pending_frame = false;
                 last_frame_emit = Instant::now();
             }
@@ -559,7 +553,6 @@ impl TerminalSessionRuntime {
                     chunks_read += chunks;
                     bytes_read += bytes.len();
                     bytes_rendered += bytes.len();
-                    bytes_since_last_frame += bytes.len();
                     last_output_at = Instant::now();
 
                     terminal.write(&bytes);
@@ -606,16 +599,7 @@ impl TerminalSessionRuntime {
                 &mut sync_output_started_at,
                 Instant::now(),
             )? {
-                let emit_ms = emit_terminal_frame_event(
-                    &app,
-                    request.session_id,
-                    request.terminal_id,
-                    frames_emitted,
-                    bytes_rendered,
-                    bytes_since_last_frame,
-                    started,
-                    &mut terminal,
-                )?;
+                let emit_ms = send_terminal_frame(frame_channel, generation, &mut terminal)?;
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
                 frames_emitted += 1;
@@ -625,23 +609,13 @@ impl TerminalSessionRuntime {
                     bytes_rendered,
                     last_output_at,
                 )?;
-                bytes_since_last_frame = 0;
                 pending_frame = false;
                 last_frame_emit = Instant::now();
             }
         };
 
         if pending_frame {
-            let emit_ms = emit_terminal_frame_event(
-                &app,
-                request.session_id,
-                request.terminal_id,
-                frames_emitted,
-                bytes_rendered,
-                bytes_since_last_frame,
-                started,
-                &mut terminal,
-            )?;
+            let emit_ms = send_terminal_frame(frame_channel, generation, &mut terminal)?;
             total_emit_ms += emit_ms;
             max_emit_ms = max_emit_ms.max(emit_ms);
             frames_emitted += 1;
@@ -836,29 +810,26 @@ impl TerminalSessionRuntime {
     }
 }
 
-fn emit_terminal_frame_event(
-    app: &AppHandle,
-    session_id: Option<SessionId>,
-    terminal_id: TerminalId,
-    seq: usize,
-    bytes_read: usize,
-    chunk_bytes: usize,
-    started: Instant,
+/// Encode the terminal's current frame as binary (stamped with the session's
+/// `generation`) and push it over the per-session frame Channel. Returns the
+/// time spent encoding + sending, for the worker's emit-timing diagnostics.
+///
+/// The Channel preserves message boundaries and order, so each call delivers
+/// exactly one frame message to the WebView as an `ArrayBuffer`. Lifecycle and
+/// control events stay JSON `app.emit`; only the frame stream is binary here.
+fn send_terminal_frame(
+    frame_channel: Option<&Channel<InvokeResponseBody>>,
+    generation: u32,
     terminal: &mut GhosttyTerminalState<'_, '_>,
 ) -> Result<f64> {
-    let event = TerminalFrameEvent {
-        session_id,
-        terminal_id,
-        seq,
-        bytes_read,
-        chunk_bytes,
-        rust_elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-        frame: terminal.frame()?,
-    };
-
+    let frame = terminal.frame()?;
     let emit_started = Instant::now();
-    app.emit("terminal_frame", event)?;
-
+    if let Some(channel) = frame_channel {
+        let bytes = encode_frame(&frame, generation);
+        channel
+            .send(InvokeResponseBody::Raw(bytes))
+            .context("failed to send terminal frame over channel")?;
+    }
     Ok(emit_started.elapsed().as_secs_f64() * 1000.0)
 }
 
@@ -936,12 +907,21 @@ fn spawn_pty_reader_thread(
     Ok(())
 }
 
+/// Result of draining the worker's command queue for one loop iteration:
+/// whether a frame should be emitted, and how many resizes were applied (each
+/// bumps the session generation, per the wire protocol's generation rules).
+#[derive(Clone, Copy, Debug, Default)]
+struct AppliedCommands {
+    needs_frame: bool,
+    resizes: u32,
+}
+
 fn apply_terminal_commands(
     receiver: &Receiver<TerminalRuntimeCommand>,
     terminal: &mut GhosttyTerminalState<'_, '_>,
     viewport_state: &mut TerminalViewportState,
-) -> Result<bool> {
-    let mut needs_frame = false;
+) -> Result<AppliedCommands> {
+    let mut applied = AppliedCommands::default();
 
     while let Ok(command) = receiver.try_recv() {
         match command {
@@ -950,34 +930,35 @@ fn apply_terminal_commands(
                 if viewport_state.follow_tail {
                     terminal.scroll_bottom();
                 }
-                needs_frame = true;
+                applied.needs_frame = true;
+                applied.resizes += 1;
             }
             TerminalRuntimeCommand::ScrollDelta(rows) => {
                 terminal.scroll_delta(rows);
                 viewport_state.follow_tail = terminal.is_viewport_at_bottom()?;
-                needs_frame = true;
+                applied.needs_frame = true;
             }
             TerminalRuntimeCommand::ScrollTop => {
                 terminal.scroll_top();
                 viewport_state.follow_tail = false;
-                needs_frame = true;
+                applied.needs_frame = true;
             }
             TerminalRuntimeCommand::ScrollBottom => {
                 terminal.scroll_bottom();
                 viewport_state.follow_tail = true;
-                needs_frame = true;
+                applied.needs_frame = true;
             }
             TerminalRuntimeCommand::ScrollToRow(row) => {
                 terminal.scroll_to_row(row)?;
                 viewport_state.follow_tail = false;
-                needs_frame = true;
+                applied.needs_frame = true;
             }
             TerminalRuntimeCommand::SetDefaultColors {
                 foreground,
                 background,
             } => {
                 terminal.set_default_colors(foreground, background);
-                needs_frame = true;
+                applied.needs_frame = true;
             }
             TerminalRuntimeCommand::SetFrontendActive(active) => {
                 viewport_state.frontend_active = active;
@@ -985,7 +966,7 @@ fn apply_terminal_commands(
         }
     }
 
-    Ok(needs_frame)
+    Ok(applied)
 }
 
 fn terminal_frame_interval(state: &TerminalViewportState) -> Duration {
@@ -1409,6 +1390,7 @@ mod tests {
             target_frames: Some(1),
             agent_kind: None,
             folder_name: None,
+            frame_channel: None,
         };
 
         runtime.register_starting(&request).unwrap();
@@ -1478,17 +1460,60 @@ mod tests {
         terminal.scroll_bottom();
 
         sender.send(TerminalRuntimeCommand::ScrollTop).unwrap();
-        assert!(apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        assert!(
+            apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
+                .unwrap()
+                .needs_frame
+        );
         let top = terminal.frame().unwrap();
         assert!(!viewport_state.follow_tail);
         assert!(!top.scrollback.at_bottom);
         assert_eq!(top.rows[0].plain_text().trim_end(), "L01");
 
         sender.send(TerminalRuntimeCommand::ScrollBottom).unwrap();
-        assert!(apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        assert!(
+            apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
+                .unwrap()
+                .needs_frame
+        );
         let bottom = terminal.frame().unwrap();
         assert!(viewport_state.follow_tail);
         assert!(bottom.scrollback.at_bottom);
+    }
+
+    #[test]
+    fn resize_command_reports_a_generation_bump_and_forces_a_full_frame() {
+        // The worker bumps the per-session generation by `applied.resizes` and
+        // the post-resize frame is Full, which the frontend adopts as the new
+        // generation. This pins both halves of that contract.
+        let (sender, receiver) = mpsc::channel();
+        let mut terminal = GhosttyTerminalState::new(10, 3, 100).unwrap();
+        let mut viewport_state = TerminalViewportState {
+            follow_tail: true,
+            frontend_active: true,
+        };
+
+        // Drain the initial forced-full frame so the next frame reflects only
+        // the resize.
+        let _ = terminal.frame().unwrap();
+
+        sender
+            .send(TerminalRuntimeCommand::Resize { cols: 20, rows: 5 })
+            .unwrap();
+        sender
+            .send(TerminalRuntimeCommand::Resize { cols: 24, rows: 6 })
+            .unwrap();
+        let applied =
+            apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap();
+        assert!(applied.needs_frame);
+        assert_eq!(applied.resizes, 2);
+
+        let frame = terminal.frame().unwrap();
+        assert_eq!(
+            frame.dirty,
+            reverie_core::terminal::TerminalDirtyState::Full
+        );
+        assert_eq!(frame.cols, 24);
     }
 
     #[test]
@@ -1508,7 +1533,11 @@ mod tests {
         sender
             .send(TerminalRuntimeCommand::SetFrontendActive(false))
             .unwrap();
-        assert!(!apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        assert!(
+            !apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
+                .unwrap()
+                .needs_frame
+        );
         assert!(!viewport_state.frontend_active);
         assert_eq!(
             terminal_frame_interval(&viewport_state),
@@ -1518,7 +1547,11 @@ mod tests {
         sender
             .send(TerminalRuntimeCommand::SetFrontendActive(true))
             .unwrap();
-        assert!(!apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state).unwrap());
+        assert!(
+            !apply_terminal_commands(&receiver, &mut terminal, &mut viewport_state)
+                .unwrap()
+                .needs_frame
+        );
         assert!(viewport_state.frontend_active);
         assert_eq!(
             terminal_frame_interval(&viewport_state),

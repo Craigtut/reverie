@@ -6,8 +6,14 @@ import type { GhosttyFrameSequencePayload, RenderMetrics, StartSessionRequest } 
 // viewport, and the synthetic benchmark frame sequence. The event side
 // (terminal_frame, terminal_exit, ...) is subscribed via runtime.listen.
 
-export function startSession(request: StartSessionRequest) {
-  return invoke<string>('start_session', { request });
+// `onFrame` is a Tauri `Channel<ArrayBuffer>` (typed `unknown` here so this
+// module stays free of a static `@tauri-apps/api` import; the hook constructs
+// it lazily). The backend `start_session` command receives it as a binary
+// Channel and streams each encoded `TerminalFrame` over it as an ArrayBuffer.
+// In the browser harness there is no Tauri Channel, so `onFrame` is omitted and
+// frames arrive over the SSE bridge instead.
+export function startSession(request: StartSessionRequest, onFrame?: unknown) {
+  return invoke<string>('start_session', { request, onFrame });
 }
 
 export function terminateSession(terminalId: string) {

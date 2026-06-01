@@ -115,15 +115,6 @@ export interface TerminalStreamStartedPayload {
   rows: number;
 }
 
-export interface TerminalFramePayload {
-  terminalId: string;
-  seq: number;
-  bytesRead: number;
-  chunkBytes: number;
-  rustElapsedMs: number;
-  frame: TerminalFrame;
-}
-
 export interface TerminalExitPayload {
   terminalId: string;
   framesEmitted: number;

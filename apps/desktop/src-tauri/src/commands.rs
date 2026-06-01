@@ -19,6 +19,7 @@ use reverie_core::{
     WorkspaceService, WorkspaceSnapshot,
 };
 use serde::{Deserialize, Serialize};
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -767,6 +768,12 @@ pub(crate) fn start_session(
     service: State<'_, WorkspaceService>,
     runtime: State<'_, TerminalSessionRuntime>,
     request: StartSessionRequest,
+    // Per-session binary frame transport. The JS side passes a `Channel`
+    // (`new Channel<ArrayBuffer>()`) as `onFrame`; Tauri delivers each
+    // `InvokeResponseBody::Raw(bytes)` we send as an `ArrayBuffer`. Lifecycle
+    // and control events stay JSON `app.emit` (terminal_stream_started, exit,
+    // failed, title, bell). See docs/technical/terminal/wire-protocol.md.
+    on_frame: Channel<InvokeResponseBody>,
 ) -> Result<TerminalId, String> {
     let terminal_id = request.terminal_id.unwrap_or_else(TerminalId::new_v4);
     let session_id = request.session_id;
@@ -833,6 +840,7 @@ pub(crate) fn start_session(
                 target_frames: None,
                 agent_kind,
                 folder_name,
+                frame_channel: Some(on_frame),
             },
         )
         .map_err(|err| err.to_string())
