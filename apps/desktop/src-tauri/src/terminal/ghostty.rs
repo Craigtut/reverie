@@ -1204,6 +1204,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn oldest_id_absorbs_a_scrollback_clear_consistently() {
+        // Accumulate scrollback well below the cap (no real eviction), then send
+        // ED 3 (erase saved lines / clear scrollback). It shrinks total_rows, which
+        // the best-effort observer folds into oldest_id as if it were eviction.
+        // That over-count is harmless because it is SYMMETRIC: the floor advances
+        // by exactly the rows that left, so the frontend (which realigns by the
+        // same reported oldest_id) stays internally consistent (D8, scenario C).
+        let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
+        for index in 1..=200 {
+            terminal.write(format!("L{index:03}\r\n").as_bytes());
+        }
+        let total_before = terminal.total_rows().unwrap();
+        assert!(total_before > 4, "scrollback should have accumulated");
+        assert_eq!(terminal.oldest_id(), 0, "no real eviction below the cap");
+
+        terminal.write(b"\x1b[3J");
+        let total_after = terminal.total_rows().unwrap();
+        let oldest_after = terminal.oldest_id();
+
+        // total_rows never grows from ED 3, and whatever rows it removed are folded
+        // into oldest_id one-for-one (floor + remaining stays conserved).
+        assert!(total_after <= total_before);
+        assert_eq!(
+            oldest_after,
+            (total_before - total_after) as u64,
+            "the scrollback-clear drop is absorbed into oldest_id symmetrically"
+        );
+    }
+
     fn count_non_empty_rows(frame: &TerminalFrame) -> usize {
         frame
             .rows
