@@ -4,13 +4,14 @@
   "version": "0.1.0",
   "identifier": "com.animus.reverie",
   "build": {
-    "beforeDevCommand": "npm --prefix ../.. run dev:web",
-    "beforeBuildCommand": "npm --prefix ../.. run build:web",
+    "beforeDevCommand": "npm --prefix ../.. run stage:bridge -- --profile debug && npm --prefix ../.. run dev:web",
+    "beforeBuildCommand": "npm --prefix ../.. run build:web && npm --prefix ../.. run stage:bridge -- --profile release --triple aarch64-apple-darwin",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../web/dist"
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/reverie-bridge", "binaries/reverie-bridge-preturn-hook"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
