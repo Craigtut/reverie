@@ -52,7 +52,7 @@ Keep the checks in [`docs/technical/implementation-queue.md`](docs/technical/imp
 
 ### Build constraints you must know
 
-- **Zig `0.15.x` must be on `PATH`** for any build that links `libghostty-vt`. The npm scripts prepend the Homebrew `zig@0.15` keg path when present; if a build fails on the Ghostty link step, this is the usual cause.
+- **Zig `0.15.x` is required** to build anything that links `libghostty-vt`. The npm build/run scripts route `cargo`/`tauri` through `scripts/run-with-zig.mjs`, which resolves a 0.15.x toolchain (the Homebrew `zig@0.15` keg via `brew --prefix`, or a 0.15.x already on `PATH` such as CI's) and fails with install guidance otherwise. The version is pinned deliberately: a machine's default `zig` is often newer (0.16+) and mis-links. If a build fails on the Ghostty link step, a missing or wrong-version Zig is the usual cause (`brew install zig@0.15`).
 - The terminal core links `libghostty-vt.dylib`, but **nothing needs `DYLD_LIBRARY_PATH` at runtime**. For development, `npm run dev` / `dev:desktop` / `run:release` go through `cargo run`, which injects the library search path automatically. For distribution, `npm run bundle` ships the dylib inside the app (`Contents/Frameworks`) resolved by a baked rpath. Prefer those scripts over launching the raw built binary directly. See [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md).
 - macOS desktop WebDriver can't drive WKWebView, so **use `npm run dev:harness` for UI iteration and screenshots**. Rust/Tauri tests remain the source of truth for persistence, commands, CLI detection, and native session launch.
 
