@@ -14,6 +14,9 @@ apps/desktop/src-tauri/target/
 # Staged native libraries copied in for bundling (beforeBundleCommand output)
 apps/desktop/src-tauri/frameworks/
 
+# Staged reverie-bridge helper binaries (externalBin staging, scripts/stage-bridge.mjs)
+apps/desktop/src-tauri/binaries/
+
 # Frontend build output
 apps/desktop/web/dist/
 dist/
@@ -56,6 +59,7 @@ recordings/
 *.mov
 *.mp4
 *.webm
+.playwright-mcp/
 
 # Temporary files
 .tmp/

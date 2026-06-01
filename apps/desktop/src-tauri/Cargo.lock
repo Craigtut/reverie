@@ -3143,6 +3143,7 @@ name = "reverie-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "portable-pty",
@@ -3158,6 +3159,7 @@ name = "reverie-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "libghostty-vt",
  "objc",
  "portable-pty",

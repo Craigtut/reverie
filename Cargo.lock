@@ -513,6 +513,7 @@ name = "reverie-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "portable-pty",

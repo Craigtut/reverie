@@ -31,7 +31,59 @@ fn main() {
         }
     }
 
+    // Guarantee the reverie-bridge helper sidecars exist where `externalBin`
+    // expects them. `tauri_build::build()` validates configured `externalBin`
+    // files at COMPILE time (same as `frameworks`), so a bare `cargo check`,
+    // rust-analyzer, or `npm run check` would fail without this. The real,
+    // signed binaries are produced by `scripts/stage-bridge.mjs`, which runs
+    // ahead of the bundle via `beforeBuildCommand`; here we only ensure a file
+    // is present (copying the freshly built helper from the root workspace
+    // target dir when available, otherwise a placeholder the bundle overwrites).
+    if let Err(err) = ensure_bridge_external_bins() {
+        println!("cargo:warning=failed to stage reverie-bridge sidecars: {err}");
+    }
+
     tauri_build::build();
+}
+
+/// Ensure `binaries/<name>-<target-triple>` exists for each bridge helper so
+/// Tauri's compile-time `externalBin` validation passes for any desktop build.
+fn ensure_bridge_external_bins() -> std::io::Result<()> {
+    const NAMES: [&str; 2] = ["reverie-bridge", "reverie-bridge-preturn-hook"];
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let triple = env::var("TARGET").expect("TARGET must be set in build scripts");
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let binaries_dir = manifest.join("binaries");
+    fs::create_dir_all(&binaries_dir)?;
+
+    // manifest = <root>/apps/desktop/src-tauri; the helper crate is a root
+    // workspace member that builds into <root>/target/<profile>/.
+    let workspace_root = manifest
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| io_error("unexpected CARGO_MANIFEST_DIR layout"))?;
+    let built_dir = workspace_root.join("target").join(&profile);
+
+    for name in NAMES {
+        let dest = binaries_dir.join(format!("{name}-{triple}"));
+        // A non-empty file is a real binary (staged here or by stage-bridge.mjs).
+        if fs::metadata(&dest).map(|m| m.len() > 0).unwrap_or(false) {
+            continue;
+        }
+        let src = built_dir.join(name);
+        if src.exists() {
+            fs::copy(&src, &dest)?;
+            println!("cargo:rerun-if-changed={}", src.display());
+        } else {
+            // Placeholder satisfies only the compile-time externalBin check;
+            // the bundle overwrites it via scripts/stage-bridge.mjs first.
+            fs::write(&dest, b"")?;
+            println!(
+                "cargo:warning=staged placeholder for {name}; run `npm run stage:bridge` before bundling"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Copy the freshest built `libghostty-vt.dylib` (resolving its symlink chain to
