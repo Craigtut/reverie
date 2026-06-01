@@ -73,6 +73,13 @@ pub struct TerminalScrollback {
     pub viewport_offset: usize,
     pub viewport_rows: usize,
     pub at_bottom: bool,
+    /// Stable id of the oldest row still buffered (the count of rows evicted off
+    /// the top so far). A buffered row at absolute position `p` has stable id
+    /// `oldest_id + p`, so the frontend can key its cache and viewport anchor by
+    /// an id that survives trim. 0 until the scrollback cap first evicts. See
+    /// decisions.md D8 and scrollback-coverage-design.md.
+    #[serde(default)]
+    pub oldest_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

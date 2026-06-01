@@ -58,6 +58,11 @@ export interface TerminalScrollback {
   viewportOffset?: number;
   viewportRows?: number;
   atBottom?: boolean;
+  // Stable id of the oldest buffered row (rows evicted off the top so far). A
+  // buffered row at absolute position `p` has stable id `oldestId + p`, so the
+  // frontend keys its cache and viewport anchor by an id that survives trim.
+  // 0 until the scrollback cap first evicts. See decisions.md D8.
+  oldestId?: number;
 }
 
 export interface TerminalFrame {

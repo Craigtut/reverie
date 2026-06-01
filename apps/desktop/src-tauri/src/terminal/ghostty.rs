@@ -222,7 +222,12 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
 
     pub fn frame(&mut self) -> Result<TerminalFrame> {
         let force_full_frame = std::mem::take(&mut self.force_next_full_frame);
-        let frame = extract_frame(&mut self.render_state, &self.terminal)?;
+        let mut frame = extract_frame(&mut self.render_state, &self.terminal)?;
+        // Stamp the stable-id floor onto the frame so the frontend can derive a
+        // stable id for every row (`oldest_id + absolute_position`) and keep its
+        // cache coherent across trim (D8). `extract_frame` has no `self`, so it
+        // leaves `oldest_id` at 0 and we set the live value here.
+        frame.scrollback.oldest_id = self.lines_evicted;
         Ok(self.diff_frame(frame, force_full_frame))
     }
 
@@ -499,6 +504,9 @@ fn extract_frame<'alloc, 'cb>(
             viewport_offset: scrollbar_offset,
             viewport_rows: scrollbar_len,
             at_bottom: scrollbar.offset.saturating_add(scrollbar.len) >= scrollbar.total,
+            // Set by `frame()`, which has the `lines_evicted` count; this free
+            // function cannot see it, so it leaves the floor at 0.
+            oldest_id: 0,
         },
         rows,
     })

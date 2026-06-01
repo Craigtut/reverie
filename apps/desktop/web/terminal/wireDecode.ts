@@ -122,6 +122,14 @@ class FrameReader {
     return value;
   }
 
+  u64(): number {
+    // Stable ids fit comfortably in a JS number (< 2^53) for any real session;
+    // a u64 wire field just future-proofs the monotonic counter.
+    const value = this.view.getBigUint64(this.pos, true);
+    this.pos += 8;
+    return Number(value);
+  }
+
   color(): TerminalColor {
     const r = this.view.getUint8(this.pos);
     const g = this.view.getUint8(this.pos + 1);
@@ -244,7 +252,8 @@ function decodeScrollback(reader: FrameReader): TerminalScrollback {
   const viewportOffset = reader.u32();
   const viewportRows = reader.u32();
   const atBottom = reader.u8() !== 0;
-  return { totalRows, scrollbackRows, viewportOffset, viewportRows, atBottom };
+  const oldestId = reader.u64();
+  return { totalRows, scrollbackRows, viewportOffset, viewportRows, atBottom, oldestId };
 }
 
 function decodeRow(reader: FrameReader): TerminalRow {

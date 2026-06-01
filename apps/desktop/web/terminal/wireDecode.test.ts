@@ -40,6 +40,8 @@ const GOLDEN_BYTES = new Uint8Array([
   // viewport_rows=1, at_bottom=1
   0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
   0x01,
+  // scrollback.oldest_id (u64 = 0)
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   // row_count (u32 = 1)
   0x01, 0x00, 0x00, 0x00,
   // row[0]: index (u16 = 0), dirty (1), cell_count (u16 = 2)
@@ -91,6 +93,7 @@ describe('decodeTerminalFrame (golden cross-check with Rust encoder)', () => {
         viewportOffset: 0,
         viewportRows: 1,
         atBottom: true,
+        oldestId: 0,
       },
       rows: [
         {

@@ -269,6 +269,9 @@ fn encode_scrollback(out: &mut Vec<u8>, scrollback: &TerminalScrollback) {
     out.extend_from_slice(&(scrollback.viewport_offset as u32).to_le_bytes());
     out.extend_from_slice(&(scrollback.viewport_rows as u32).to_le_bytes());
     out.push(u8::from(scrollback.at_bottom));
+    // Stable-id floor (D8): u64 because it grows monotonically over a long
+    // session, beyond what the u32 row counts can hold.
+    out.extend_from_slice(&scrollback.oldest_id.to_le_bytes());
 }
 
 fn encode_row(out: &mut Vec<u8>, row: &TerminalRow) {
@@ -454,6 +457,13 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    fn u64(&mut self, field: &'static str) -> Result<u64, WireDecodeError> {
+        let bytes = self.take(8, field)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
     fn color(&mut self, field: &'static str) -> Result<TerminalColor, WireDecodeError> {
         let bytes = self.take(3, field)?;
         Ok(TerminalColor {
@@ -600,12 +610,14 @@ fn decode_scrollback(reader: &mut Reader<'_>) -> Result<TerminalScrollback, Wire
     let viewport_offset = reader.u32("scrollback.viewport_offset")? as usize;
     let viewport_rows = reader.u32("scrollback.viewport_rows")? as usize;
     let at_bottom = reader.u8("scrollback.at_bottom")? != 0;
+    let oldest_id = reader.u64("scrollback.oldest_id")?;
     Ok(TerminalScrollback {
         total_rows,
         scrollback_rows,
         viewport_offset,
         viewport_rows,
         at_bottom,
+        oldest_id,
     })
 }
 
@@ -823,6 +835,7 @@ mod tests {
                 viewport_offset: 1170,
                 viewport_rows: 24,
                 at_bottom: false,
+                oldest_id: 9_000,
             },
             rows,
         }
@@ -903,6 +916,7 @@ mod tests {
                 viewport_offset: 0,
                 viewport_rows: 1,
                 at_bottom: true,
+                oldest_id: 0,
             },
             rows: vec![TerminalRow {
                 index: 0,
@@ -979,6 +993,8 @@ mod tests {
         0x00, 0x00, 0x00, 0x00, //
         0x01, 0x00, 0x00, 0x00, //
         0x01, //
+        // scrollback.oldest_id (u64 = 0)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
         // row_count (u32 = 1)
         0x01, 0x00, 0x00, 0x00, //
         // row[0]: index (u16 = 0), dirty (1), cell_count (u16 = 2)
