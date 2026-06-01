@@ -49,7 +49,8 @@ Modes                 // u16 flags (bit0 cursor_key_app,1 keypad_app,2 bracketed
                       //   3 sync_output,4 mouse_tracking,5 alternate_screen), u8 kitty_flags
 Colors                // Color fg, Color bg, u8 has_cursor, Color cursor (if has_cursor)
 Scrollback            // u32 total_rows, u32 scrollback_rows, u32 viewport_offset,
-                      //   u32 viewport_rows, u8 at_bottom
+                      //   u32 viewport_rows, u8 at_bottom, u64 oldest_id
+                      //   (oldest_id = stable-id floor / rows evicted; D8)
 u32   row_count
 Row[] rows
 
