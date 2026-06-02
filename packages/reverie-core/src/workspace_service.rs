@@ -27,6 +27,15 @@ use crate::terminal::TerminalSpawnSpec;
 /// regardless of which backend seeded it.
 const SEED_WORKSPACE_ID: &str = "0f70f21f-55c0-4e2a-923e-73360342db80";
 
+/// Default terminal font size (CSS px) for a freshly seeded workspace, matching
+/// the renderer's default. The frontend clamps to its supported range.
+const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
+
+/// Bounds the persisted terminal font size to the renderer's supported range so
+/// a hand-edited or out-of-range request can never store a degenerate cell.
+const MIN_TERMINAL_FONT_SIZE: u16 = 9;
+const MAX_TERMINAL_FONT_SIZE: u16 = 24;
+
 #[derive(Clone)]
 pub struct WorkspaceService {
     repo: Arc<dyn WorkspaceRepository>,
@@ -60,6 +69,7 @@ impl WorkspaceService {
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
             default_agent_kind: AgentKind::CortexCode,
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             nav_state: None,
         };
         self.repo.ensure_seeded(&seed)?;
@@ -261,6 +271,17 @@ impl WorkspaceService {
     pub fn set_workspace_default_agent_kind(&self, kind: AgentKind) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.default_agent_kind = kind;
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Persist the terminal font size (CSS px), clamped to the renderer's
+    /// supported range so an out-of-range value can never store a degenerate
+    /// cell. The renderer reads it back on load and re-derives the terminal cell.
+    pub fn set_terminal_font_size(&self, font_size: u16) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.terminal_font_size =
+            font_size.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE);
         self.repo.save_workspace(&workspace)?;
         Ok(self.repo.load_snapshot()?)
     }
@@ -1004,6 +1025,37 @@ mod tests {
         let snapshot = service.set_workspace_theme(ThemeMode::Dark).unwrap();
         assert_eq!(snapshot.workspace.theme, ThemeMode::Dark);
         assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::ClaudeCode);
+    }
+
+    #[test]
+    fn set_terminal_font_size_persists_and_clamps() {
+        let (_repo, service) = service();
+        // Fresh workspaces start at the default font size.
+        assert_eq!(service.snapshot().unwrap().workspace.terminal_font_size, 14);
+
+        // An in-range size persists and round-trips.
+        let snapshot = service.set_terminal_font_size(18).unwrap();
+        assert_eq!(snapshot.workspace.terminal_font_size, 18);
+        assert_eq!(service.snapshot().unwrap().workspace.terminal_font_size, 18);
+
+        // Out-of-range requests are clamped to the supported range rather than
+        // stored as-is, so a bad value can never produce a degenerate cell.
+        assert_eq!(
+            service
+                .set_terminal_font_size(2)
+                .unwrap()
+                .workspace
+                .terminal_font_size,
+            9
+        );
+        assert_eq!(
+            service
+                .set_terminal_font_size(99)
+                .unwrap()
+                .workspace
+                .terminal_font_size,
+            24
+        );
     }
 
     #[test]

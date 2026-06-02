@@ -157,6 +157,12 @@ pub(crate) struct SetWorkspaceDefaultAgentKindRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetTerminalFontSizeRequest {
+    terminal_font_size: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceNavStateRequest {
     /// Opaque, frontend-owned JSON describing the last view (selection, surface,
     /// sidebar accordion). `None` clears it. The backend stores it verbatim.
@@ -670,6 +676,16 @@ pub(crate) fn set_workspace_default_agent_kind(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .set_workspace_default_agent_kind(request.default_agent_kind)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_terminal_font_size(
+    service: State<'_, WorkspaceService>,
+    request: SetTerminalFontSizeRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_terminal_font_size(request.terminal_font_size)
         .map_err(|err| err.to_string())
 }
 

@@ -155,6 +155,10 @@ export interface ShellWorkspace {
   // Persisted default agent kind seeded into the new-session composer. Only a
   // starting value for the form; it does not affect existing sessions.
   defaultAgentKind: AgentKind;
+  // Persisted terminal font size (CSS px). The renderer measures the cell from
+  // this (and the configured monospace font) so cell size tracks the setting.
+  // Absent (pre-migration / fresh) falls back to the default font size.
+  terminalFontSize?: number;
   // Opaque, frontend-owned UI view state (last selection, surface, sidebar
   // accordion) serialized as JSON, so the workspace reopens where the user left
   // it. Absent/null means "never saved" (seed the default view). See

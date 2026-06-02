@@ -167,6 +167,10 @@ const MIGRATIONS: &[&str] = &[
     "DROP INDEX IF EXISTS idx_session_transcript_chunk_offset;
      DROP INDEX IF EXISTS idx_session_transcript_chunk_run_seq;
      DROP TABLE IF EXISTS session_transcript_chunk;",
+    // v12 -> v13: persisted terminal font size (CSS px). The renderer measures
+    // the cell from this and the configured monospace font, so cell size tracks
+    // the setting. Defaults to 14 so existing workspaces upgrade unchanged.
+    "ALTER TABLE workspace ADD COLUMN terminal_font_size INTEGER NOT NULL DEFAULT 14;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -276,8 +280,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 "INSERT INTO workspace
                     (id, name, general_label, default_dangerous_mode,
                      default_new_session_dangerous, disabled_agent_kinds,
-                     theme, default_agent_kind, nav_state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     theme, default_agent_kind, nav_state, terminal_font_size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -288,6 +292,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     theme_mode_to_db(seed.theme)?,
                     agent_kind_to_db(seed.default_agent_kind)?,
                     seed.nav_state,
+                    i64::from(seed.terminal_font_size),
                 ],
             )
             .map_err(backend)?;
@@ -301,8 +306,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
             "INSERT INTO workspace
                 (id, name, general_label, default_dangerous_mode,
                  default_new_session_dangerous, disabled_agent_kinds,
-                 theme, default_agent_kind, nav_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 theme, default_agent_kind, nav_state, terminal_font_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -311,7 +316,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 disabled_agent_kinds = excluded.disabled_agent_kinds,
                 theme = excluded.theme,
                 default_agent_kind = excluded.default_agent_kind,
-                nav_state = excluded.nav_state",
+                nav_state = excluded.nav_state,
+                terminal_font_size = excluded.terminal_font_size",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -322,6 +328,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 theme_mode_to_db(workspace.theme)?,
                 agent_kind_to_db(workspace.default_agent_kind)?,
                 workspace.nav_state,
+                i64::from(workspace.terminal_font_size),
             ],
         )
         .map_err(backend)?;
@@ -750,7 +757,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
     conn.query_row(
         "SELECT id, name, general_label, default_dangerous_mode,
                 default_new_session_dangerous, disabled_agent_kinds,
-                theme, default_agent_kind, nav_state
+                theme, default_agent_kind, nav_state, terminal_font_size
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -764,6 +771,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 theme: theme_mode_from_db(&row.get::<_, String>(6)?)?,
                 default_agent_kind: agent_kind_from_db(&row.get::<_, String>(7)?)?,
                 nav_state: row.get::<_, Option<String>>(8)?,
+                terminal_font_size: terminal_font_size_from_db(row.get::<_, i64>(9)?),
             })
         },
     )
@@ -890,6 +898,13 @@ fn theme_mode_to_db(value: ThemeMode) -> RepoResult<String> {
 
 fn theme_mode_from_db(value: &str) -> rusqlite::Result<ThemeMode> {
     serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(conversion_failure)
+}
+
+/// Read the stored terminal font size, clamping any out-of-range or overflowing
+/// value (e.g. a hand-edited row) into the renderer's supported range so it can
+/// never produce a degenerate cell.
+fn terminal_font_size_from_db(value: i64) -> u16 {
+    value.clamp(9, 24) as u16
 }
 
 fn launch_mode_to_db(value: LaunchMode) -> RepoResult<String> {
@@ -1179,6 +1194,36 @@ mod tests {
         let loaded = repo.load_snapshot().unwrap().workspace;
         assert_eq!(loaded.default_agent_kind, AgentKind::ClaudeCode);
         assert_eq!(loaded.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn save_workspace_round_trips_terminal_font_size() {
+        let repo = seeded();
+        // A fresh workspace defaults to the renderer's default font size.
+        assert_eq!(
+            repo.load_snapshot().unwrap().workspace.terminal_font_size,
+            14
+        );
+
+        // A new size persists and round-trips.
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.terminal_font_size = 18;
+        repo.save_workspace(&workspace).unwrap();
+        assert_eq!(
+            repo.load_snapshot().unwrap().workspace.terminal_font_size,
+            18
+        );
+
+        // An out-of-range stored value is clamped on load so it can never produce
+        // a degenerate cell.
+        repo.conn()
+            .unwrap()
+            .execute("UPDATE workspace SET terminal_font_size = 999", [])
+            .unwrap();
+        assert_eq!(
+            repo.load_snapshot().unwrap().workspace.terminal_font_size,
+            24
+        );
     }
 
     #[test]

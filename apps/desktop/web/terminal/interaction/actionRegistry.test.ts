@@ -14,7 +14,15 @@ import type { TerminalSurface } from '../../terminalScrollback';
 
 registerDefaultInteractions();
 
-const surface: TerminalSurface = { cols: 20, rows: 10, cellWidth: 9, cellHeight: 18 };
+const surface: TerminalSurface = {
+  cols: 20,
+  rows: 10,
+  cellWidth: 9,
+  cellHeight: 18,
+  fontSize: 14,
+  baseline: 14,
+  fontFamily: 'monospace',
+};
 const frame: TerminalFrame = { dirty: 'full', rows: [] };
 
 function fakeCtx(overrides: Partial<ActionContext> = {}): ActionContext {

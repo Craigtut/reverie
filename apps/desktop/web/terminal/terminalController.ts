@@ -1887,9 +1887,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
         next.cols !== surface.cols ||
         next.rows !== surface.rows ||
         next.cellWidth !== surface.cellWidth ||
-        next.cellHeight !== surface.cellHeight;
+        next.cellHeight !== surface.cellHeight ||
+        next.fontSize !== surface.fontSize ||
+        next.baseline !== surface.baseline;
       if (geometryChanged) {
         invalidatePendingRendererMount();
+        needsFullPaint = true;
       }
       if (geometryChanged) {
         trace({
@@ -2282,7 +2285,18 @@ function rendererMountKey(
   displayRows: number,
   dpr = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1,
 ) {
-  return [surface.cols, displayRows, surface.cellWidth, surface.cellHeight, dpr].join(':');
+  // Include the font size + baseline so a font-size change always remounts the
+  // renderer (and rebuilds the glyph atlas), even in the rare case two sizes
+  // round to the same cell box.
+  return [
+    surface.cols,
+    displayRows,
+    surface.cellWidth,
+    surface.cellHeight,
+    surface.fontSize,
+    surface.baseline,
+    dpr,
+  ].join(':');
 }
 
 function projectLiveBufferToSurface(
