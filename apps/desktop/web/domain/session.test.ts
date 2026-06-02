@@ -60,7 +60,6 @@ function makeShell(overrides: Partial<WorkspaceShellSnapshot> = {}): WorkspaceSh
       name: 'Local',
       generalLabel: 'General',
       defaultDangerousMode: false,
-      defaultNewSessionDangerous: false,
       theme: 'dark',
       defaultAgentKind: 'cortex_code',
     },

@@ -748,7 +748,6 @@ function makeFixtureShellSnapshot(): WorkspaceShellSnapshot {
     name: 'Browser fixture workspace',
     generalLabel: 'General',
     defaultDangerousMode: false,
-    defaultNewSessionDangerous: false,
     theme: 'dark',
     defaultAgentKind: 'cortex_code',
     terminalFontSize: 14,

@@ -55,9 +55,10 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
   );
   // The per-session auto-approve shown in the session composer's Options. Seeded
   // to the inherited default, so leaving it untouched inherits and changing it
-  // sends an explicit override.
+  // sends an explicit override. (Re-seeded from the selected topic on every
+  // composer open; this initial value covers the first render before then.)
   const [newSessionDangerousMode, setNewSessionDangerousMode] = useState(
-    model.shell.workspace.defaultNewSessionDangerous,
+    model.shell.workspace.defaultDangerousMode,
   );
 
   const setShell = useShellStore(s => s.setShell);

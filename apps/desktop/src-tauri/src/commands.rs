@@ -148,12 +148,6 @@ pub(crate) struct SetWorkspaceDefaultDangerousModeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SetWorkspaceDefaultNewSessionDangerousRequest {
-    default_new_session_dangerous: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceThemeRequest {
     theme: ThemeMode,
 }
@@ -665,16 +659,6 @@ pub(crate) fn set_workspace_default_dangerous_mode(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .set_workspace_default_dangerous_mode(request.default_dangerous_mode)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub(crate) fn set_workspace_default_new_session_dangerous(
-    service: State<'_, WorkspaceService>,
-    request: SetWorkspaceDefaultNewSessionDangerousRequest,
-) -> Result<WorkspaceSnapshot, String> {
-    service
-        .set_workspace_default_new_session_dangerous(request.default_new_session_dangerous)
         .map_err(|err| err.to_string())
 }
 

@@ -18,13 +18,10 @@ pub struct Workspace {
     pub id: WorkspaceId,
     pub name: String,
     pub general_label: String,
+    /// The single workspace-wide auto-approve (YOLO) default. Topics inherit it
+    /// and a session falls back to it when its `dangerous_mode_override` is unset.
+    /// Surfaced by both the dashboard/empty-state control and the settings toggle.
     pub default_dangerous_mode: bool,
-    /// Default YOLO (dangerous-mode) state seeded into the new-session composer.
-    /// This is only a starting value for the form; it does not change existing
-    /// sessions and is independent of `default_dangerous_mode` (the fallback for
-    /// sessions whose `dangerous_mode_override` is unset).
-    #[serde(default)]
-    pub default_new_session_dangerous: bool,
     /// Agent CLIs the user has explicitly switched off in settings. Absence
     /// means enabled, so a fresh workspace has every detected CLI available.
     /// A disabled CLI is never offered as a session agent and never has its
@@ -35,9 +32,8 @@ pub struct Workspace {
     /// this on load to seed the live theme; it survives restarts.
     #[serde(default)]
     pub theme: ThemeMode,
-    /// Default agent kind seeded into the new-session composer. Like
-    /// `default_new_session_dangerous`, this is only a starting value for the
-    /// form and does not change any existing session.
+    /// Default agent kind seeded into the new-session composer. Only a starting
+    /// value for the form; it does not change any existing session.
     #[serde(default = "default_agent_kind")]
     pub default_agent_kind: AgentKind,
     /// Terminal font size in CSS px. The renderer measures the terminal cell
@@ -63,7 +59,6 @@ impl Workspace {
             name: name.into(),
             general_label: general_label.into(),
             default_dangerous_mode: false,
-            default_new_session_dangerous: false,
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
             default_agent_kind: AgentKind::CortexCode,
@@ -442,12 +437,10 @@ mod tests {
         let encoded = serde_json::to_value(&workspace).expect("workspace serializes");
         assert!(encoded.get("generalLabel").is_some());
         assert!(encoded.get("defaultDangerousMode").is_some());
-        assert!(encoded.get("defaultNewSessionDangerous").is_some());
         assert!(encoded.get("disabledAgentKinds").is_some());
         assert!(encoded.get("defaultAgentKind").is_some());
         assert!(encoded.get("general_label").is_none());
         assert!(encoded.get("default_dangerous_mode").is_none());
-        assert!(encoded.get("default_new_session_dangerous").is_none());
         assert!(encoded.get("disabled_agent_kinds").is_none());
         assert!(encoded.get("default_agent_kind").is_none());
         // The theme enum serializes to its lowercase wire value.

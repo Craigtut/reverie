@@ -126,10 +126,12 @@ const MIGRATIONS: &[&str] = &[
     // archived list, restorable anytime. Defaults to 0 so existing sessions
     // surface as active (non-archived) after upgrade.
     "ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;",
-    // v5 -> v6: persisted default YOLO state for new sessions. This only seeds
-    // the new-session composer's starting value; it is independent of
-    // default_dangerous_mode (the per-session fallback) and never changes an
-    // existing session. Defaults to 0 so existing workspaces upgrade unchanged.
+    // v5 -> v6: a separate "default YOLO for new sessions" workspace flag.
+    // Retired: it duplicated default_dangerous_mode (the single workspace
+    // auto-approve default) and only ever seeded the composer's initial value,
+    // so the settings toggle now reads/writes default_dangerous_mode directly
+    // and the domain no longer maps this column. The migration stays (never edit
+    // a shipped entry); the column lives on dormant. Defaults to 0.
     "ALTER TABLE workspace ADD COLUMN default_new_session_dangerous INTEGER NOT NULL DEFAULT 0;",
     // v6 -> v7: persisted workspace appearance and default new-session agent.
     // `theme` stores the light/dark wire string the renderer seeds on load;
@@ -287,15 +289,14 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
             conn.execute(
                 "INSERT INTO workspace
                     (id, name, general_label, default_dangerous_mode,
-                     default_new_session_dangerous, disabled_agent_kinds,
+                     disabled_agent_kinds,
                      theme, default_agent_kind, nav_state, terminal_font_size)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     seed.id.to_string(),
                     seed.name,
                     seed.general_label,
                     bool_to_int(seed.default_dangerous_mode),
-                    bool_to_int(seed.default_new_session_dangerous),
                     disabled_kinds_to_db(&seed.disabled_agent_kinds)?,
                     theme_mode_to_db(seed.theme)?,
                     agent_kind_to_db(seed.default_agent_kind)?,
@@ -313,14 +314,13 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         conn.execute(
             "INSERT INTO workspace
                 (id, name, general_label, default_dangerous_mode,
-                 default_new_session_dangerous, disabled_agent_kinds,
+                 disabled_agent_kinds,
                  theme, default_agent_kind, nav_state, terminal_font_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
                 default_dangerous_mode = excluded.default_dangerous_mode,
-                default_new_session_dangerous = excluded.default_new_session_dangerous,
                 disabled_agent_kinds = excluded.disabled_agent_kinds,
                 theme = excluded.theme,
                 default_agent_kind = excluded.default_agent_kind,
@@ -331,7 +331,6 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 workspace.name,
                 workspace.general_label,
                 bool_to_int(workspace.default_dangerous_mode),
-                bool_to_int(workspace.default_new_session_dangerous),
                 disabled_kinds_to_db(&workspace.disabled_agent_kinds)?,
                 theme_mode_to_db(workspace.theme)?,
                 agent_kind_to_db(workspace.default_agent_kind)?,
@@ -766,7 +765,7 @@ fn read_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionMessa
 fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
     conn.query_row(
         "SELECT id, name, general_label, default_dangerous_mode,
-                default_new_session_dangerous, disabled_agent_kinds,
+                disabled_agent_kinds,
                 theme, default_agent_kind, nav_state, terminal_font_size
          FROM workspace LIMIT 1",
         [],
@@ -776,12 +775,11 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 name: row.get(1)?,
                 general_label: row.get(2)?,
                 default_dangerous_mode: int_to_bool(row.get::<_, i64>(3)?),
-                default_new_session_dangerous: int_to_bool(row.get::<_, i64>(4)?),
-                disabled_agent_kinds: disabled_kinds_from_db(&row.get::<_, String>(5)?),
-                theme: theme_mode_from_db(&row.get::<_, String>(6)?)?,
-                default_agent_kind: agent_kind_from_db(&row.get::<_, String>(7)?)?,
-                nav_state: row.get::<_, Option<String>>(8)?,
-                terminal_font_size: terminal_font_size_from_db(row.get::<_, i64>(9)?),
+                disabled_agent_kinds: disabled_kinds_from_db(&row.get::<_, String>(4)?),
+                theme: theme_mode_from_db(&row.get::<_, String>(5)?)?,
+                default_agent_kind: agent_kind_from_db(&row.get::<_, String>(6)?)?,
+                nav_state: row.get::<_, Option<String>>(7)?,
+                terminal_font_size: terminal_font_size_from_db(row.get::<_, i64>(8)?),
             })
         },
     )
@@ -1162,24 +1160,6 @@ mod tests {
                 .workspace
                 .default_dangerous_mode
         );
-    }
-
-    #[test]
-    fn save_workspace_round_trips_new_session_dangerous_default() {
-        let repo = seeded();
-        // Fresh workspaces default off, independent of default_dangerous_mode.
-        let workspace = repo.load_snapshot().unwrap().workspace;
-        assert!(!workspace.default_new_session_dangerous);
-        assert!(!workspace.default_dangerous_mode);
-
-        let mut workspace = repo.load_snapshot().unwrap().workspace;
-        workspace.default_new_session_dangerous = true;
-        repo.save_workspace(&workspace).unwrap();
-
-        let loaded = repo.load_snapshot().unwrap().workspace;
-        assert!(loaded.default_new_session_dangerous);
-        // Persisting the new-session default must not flip the fallback.
-        assert!(!loaded.default_dangerous_mode);
     }
 
     #[test]

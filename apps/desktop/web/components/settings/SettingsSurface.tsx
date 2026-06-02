@@ -11,6 +11,7 @@ import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
 import { useShellStore } from '../../store';
 import { MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE } from '../../terminal/terminalMetrics';
 import { SegmentedTabs, type SegmentedTabItem } from '../primitives/SegmentedTabs';
+import { Switch } from '../primitives/Switch';
 import { Typography } from '../primitives/Typography';
 import { AgentsSection } from './AgentsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
@@ -32,8 +33,8 @@ export function SettingsSurface({
   onSetTheme,
   defaultAgentKind,
   onSetDefaultAgentKind,
-  defaultNewSessionDangerous,
-  onSetDefaultNewSessionDangerous,
+  defaultDangerousMode,
+  onSetDefaultDangerousMode,
   terminalFontSize,
   onSetTerminalFontSize,
 }: {
@@ -44,10 +45,12 @@ export function SettingsSurface({
   // reflects and writes this, then seeds the live composer.
   defaultAgentKind: CreateSessionRecordRequest['agentKind'];
   onSetDefaultAgentKind: (value: CreateSessionRecordRequest['agentKind']) => void;
-  // The persisted workspace default that seeds new sessions. The toggle reflects
-  // and writes this, not the ephemeral composer state.
-  defaultNewSessionDangerous: boolean;
-  onSetDefaultNewSessionDangerous: (value: boolean) => void;
+  // The persisted workspace auto-approve (YOLO) default. This is the single
+  // workspace-wide dangerous-mode default that topics inherit and sessions fall
+  // back to, so the toggle here reflects and controls the same value the
+  // dashboard and topic/session composers use.
+  defaultDangerousMode: boolean;
+  onSetDefaultDangerousMode: (value: boolean) => void;
   // The persisted terminal font size (CSS px). The stepper reflects and writes
   // this; the terminal hook re-derives the cell so it live-applies to open
   // terminals.
@@ -293,7 +296,7 @@ export function SettingsSurface({
                       tone="default"
                       style={{ letterSpacing: '-0.005em' }}
                     >
-                      Enable YOLO for new sessions
+                      Auto-approve new sessions (YOLO)
                     </Typography>
                     <Typography
                       as="span"
@@ -301,21 +304,17 @@ export function SettingsSurface({
                       tone="faint"
                       style={{ lineHeight: 1.5 }}
                     >
-                      Skip per-tool approvals when launching a new session.
+                      New topics and sessions skip per-tool approvals by default. Override any topic
+                      or session.
                     </Typography>
                   </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={defaultNewSessionDangerous}
-                    aria-label="Enable YOLO for new sessions"
-                    data-state={defaultNewSessionDangerous ? 'on' : 'off'}
-                    data-testid="settings-yolo-toggle"
-                    className={settingsSwitchClass}
-                    onClick={() => onSetDefaultNewSessionDangerous(!defaultNewSessionDangerous)}
-                  >
-                    <span className={settingsSwitchKnobClass} />
-                  </button>
+                  <Switch
+                    checked={defaultDangerousMode}
+                    onChange={onSetDefaultDangerousMode}
+                    tone="warn"
+                    ariaLabel="Auto-approve new sessions"
+                    testId="settings-yolo-toggle"
+                  />
                 </li>
               </ul>
             </section>
@@ -502,41 +501,6 @@ const settingsSelectClass = css({
   _focusVisible: {
     borderColor: 'var(--line-strong)',
     boxShadow: '0 0 0 3px color-mix(in srgb, var(--text) 8%, transparent)',
-  },
-});
-
-const settingsSwitchClass = css({
-  position: 'relative',
-  width: '38px',
-  height: '22px',
-  borderRadius: '999px',
-  border: '1px solid var(--line)',
-  background: 'var(--surface-2)',
-  cursor: 'pointer',
-  padding: 0,
-  flexShrink: 0,
-  transition: 'background 160ms ease, border-color 160ms ease',
-  _hover: { borderColor: 'var(--line-strong)' },
-  '&[data-state="on"]': {
-    background: 'color-mix(in srgb, var(--warn) 78%, transparent)',
-    borderColor: 'color-mix(in srgb, var(--warn) 60%, var(--line-strong))',
-  },
-});
-
-const settingsSwitchKnobClass = css({
-  position: 'absolute',
-  top: '50%',
-  left: '2px',
-  width: '16px',
-  height: '16px',
-  borderRadius: '50%',
-  background: 'var(--text)',
-  transform: 'translateY(-50%)',
-  transition: 'left 160ms ease, background 160ms ease',
-  boxShadow: '0 1px 2px rgba(0,0,0,0.25)',
-  '[data-state="on"] &': {
-    left: '18px',
-    background: '#FFFFFF',
   },
 });
 

@@ -127,7 +127,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   } = creation;
   const {
     setWorkspaceDefaultDangerousMode,
-    setWorkspaceDefaultNewSessionDangerous,
     setWorkspaceTheme,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
@@ -253,11 +252,12 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             onSetTheme={onSetTheme}
             defaultAgentKind={shell.workspace.defaultAgentKind}
             onSetDefaultAgentKind={onSetDefaultAgentKind}
-            defaultNewSessionDangerous={shell.workspace.defaultNewSessionDangerous}
-            onSetDefaultNewSessionDangerous={next => {
-              // Persist the workspace default and reflect it in the live composer
-              // state immediately so the new-session form picks it up at once.
-              void setWorkspaceDefaultNewSessionDangerous(next);
+            defaultDangerousMode={shell.workspace.defaultDangerousMode}
+            onSetDefaultDangerousMode={next => {
+              // Persist the single workspace auto-approve default and reflect it
+              // in the live composer immediately so an open new-session form
+              // picks it up at once.
+              void setWorkspaceDefaultDangerousMode(next);
               setNewSessionDangerousMode(next);
             }}
             terminalFontSize={shell.workspace.terminalFontSize ?? DEFAULT_TERMINAL_FONT_SIZE}

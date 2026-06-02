@@ -142,11 +142,9 @@ export interface ShellWorkspace {
   id: string;
   name: string;
   generalLabel: string;
+  // The single workspace-wide auto-approve (YOLO) default: topics inherit it
+  // and sessions fall back to it when they carry no override of their own.
   defaultDangerousMode: boolean;
-  // Persisted default YOLO state seeded into the new-session composer. Only a
-  // starting value for the form; it does not affect existing sessions and is
-  // independent of defaultDangerousMode (the per-session fallback).
-  defaultNewSessionDangerous: boolean;
   // Agent CLIs the user has switched off. Absent/empty means all enabled.
   disabledAgentKinds?: AgentKind[];
   // Persisted light/dark appearance. The renderer seeds the live uiStore theme

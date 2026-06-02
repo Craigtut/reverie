@@ -70,26 +70,6 @@ export function useWorkspaceMutations({
     }
   }
 
-  // Persist the default YOLO state seeded into the new-session composer. This
-  // only changes the starting value of future new-session forms; it does not
-  // touch any existing session and is independent of the workspace
-  // auto-approve default (setWorkspaceDefaultDangerousMode).
-  async function setWorkspaceDefaultNewSessionDangerous(next: boolean) {
-    if (shell.workspace.defaultNewSessionDangerous === next) return;
-    try {
-      const snapshot = await invoke<WorkspaceShellSnapshot>(
-        'set_workspace_default_new_session_dangerous',
-        {
-          request: { defaultNewSessionDangerous: next },
-        },
-      );
-      setShell(snapshot);
-      appendLog(`Default YOLO for new sessions set to ${next ? 'on' : 'off'}.`);
-    } catch (error) {
-      appendLog(`Update default YOLO for new sessions failed: ${errorMessage(error)}`);
-    }
-  }
-
   // Persist the workspace appearance (light/dark). The caller also flips the
   // live uiStore theme so the UI changes immediately; this write makes the
   // choice survive restarts by seeding it back on the next shell load.
@@ -393,7 +373,6 @@ export function useWorkspaceMutations({
 
   return {
     setWorkspaceDefaultDangerousMode,
-    setWorkspaceDefaultNewSessionDangerous,
     setWorkspaceTheme,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,

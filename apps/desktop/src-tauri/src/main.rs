@@ -280,7 +280,6 @@ fn main() {
             commands::set_session_dangerous_mode,
             commands::mark_session_viewed,
             commands::set_workspace_default_dangerous_mode,
-            commands::set_workspace_default_new_session_dangerous,
             commands::set_workspace_theme,
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,

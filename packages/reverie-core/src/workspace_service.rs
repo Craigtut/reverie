@@ -65,7 +65,6 @@ impl WorkspaceService {
             name: "Local workspace".to_owned(),
             general_label: "General".to_owned(),
             default_dangerous_mode: false,
-            default_new_session_dangerous: false,
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
             default_agent_kind: AgentKind::CortexCode,
@@ -253,20 +252,6 @@ impl WorkspaceService {
     ) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.default_dangerous_mode = default_dangerous_mode;
-        self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
-    }
-
-    /// Persist the default YOLO state seeded into the new-session composer. This
-    /// only affects the starting value of future new-session forms; it does not
-    /// touch any existing session and is independent of the workspace
-    /// `default_dangerous_mode` fallback.
-    pub fn set_workspace_default_new_session_dangerous(
-        &self,
-        default_new_session_dangerous: bool,
-    ) -> Result<WorkspaceSnapshot> {
-        let mut workspace = self.repo.load_snapshot()?.workspace;
-        workspace.default_new_session_dangerous = default_new_session_dangerous;
         self.repo.save_workspace(&workspace)?;
         Ok(self.repo.load_snapshot()?)
     }
@@ -976,40 +961,20 @@ mod tests {
     }
 
     #[test]
-    fn set_workspace_default_new_session_dangerous_persists_and_is_independent() {
+    fn set_workspace_default_dangerous_mode_persists_and_round_trips() {
         let (_repo, service) = service();
-        // Defaults to off and starts independent of the dangerous-mode fallback.
-        let workspace = service.snapshot().unwrap().workspace;
-        assert!(!workspace.default_new_session_dangerous);
-        assert!(!workspace.default_dangerous_mode);
+        // Fresh workspaces default the single auto-approve default to off.
+        assert!(!service.snapshot().unwrap().workspace.default_dangerous_mode);
 
-        // Turning it on persists and round-trips.
-        let snapshot = service
-            .set_workspace_default_new_session_dangerous(true)
-            .unwrap();
-        assert!(snapshot.workspace.default_new_session_dangerous);
-        // It must not flip the dangerous-mode fallback.
-        assert!(!snapshot.workspace.default_dangerous_mode);
-        // A fresh load sees the persisted value.
-        assert!(
-            service
-                .snapshot()
-                .unwrap()
-                .workspace
-                .default_new_session_dangerous
-        );
-
-        // Setting the dangerous-mode fallback does not touch the new-session
-        // default, and vice versa.
+        // Turning it on persists and a fresh load sees it.
         let snapshot = service.set_workspace_default_dangerous_mode(true).unwrap();
         assert!(snapshot.workspace.default_dangerous_mode);
-        assert!(snapshot.workspace.default_new_session_dangerous);
+        assert!(service.snapshot().unwrap().workspace.default_dangerous_mode);
 
-        let snapshot = service
-            .set_workspace_default_new_session_dangerous(false)
-            .unwrap();
-        assert!(!snapshot.workspace.default_new_session_dangerous);
-        assert!(snapshot.workspace.default_dangerous_mode);
+        // Turning it back off round-trips too.
+        let snapshot = service.set_workspace_default_dangerous_mode(false).unwrap();
+        assert!(!snapshot.workspace.default_dangerous_mode);
+        assert!(!service.snapshot().unwrap().workspace.default_dangerous_mode);
     }
 
     #[test]
@@ -1074,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn new_session_default_does_not_change_session_overrides() {
+    fn workspace_default_does_not_change_session_overrides() {
         let (_repo, service) = service();
         let focus = make_focus(&service);
         // A session created with an explicit override keeps it.
@@ -1090,9 +1055,9 @@ mod tests {
             .sessions[0]
             .id;
 
-        service
-            .set_workspace_default_new_session_dangerous(true)
-            .unwrap();
+        // Moving the workspace auto-approve default the other way leaves the
+        // session's explicit override untouched.
+        service.set_workspace_default_dangerous_mode(false).unwrap();
         let session = service
             .snapshot()
             .unwrap()
