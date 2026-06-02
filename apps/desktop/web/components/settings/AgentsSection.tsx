@@ -6,6 +6,7 @@ import type {
   BridgeStatusReport,
 } from '../../domain';
 import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
+import { Switch } from '../primitives/Switch';
 import { Typography } from '../primitives/Typography';
 
 // The "Agents" settings block: one row per supported CLI showing whether it
@@ -143,19 +144,13 @@ function AgentRow({
         </Typography>
 
         {available ? (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            aria-label={`Enable ${displayName}`}
-            data-state={enabled ? 'on' : 'off'}
-            data-testid={`agent-cli-toggle-${kind}`}
-            className={switchClass}
+          <Switch
+            checked={enabled}
+            onChange={next => onToggle(kind, next)}
             disabled={busy}
-            onClick={() => onToggle(kind, !enabled)}
-          >
-            <span className={switchKnobClass} />
-          </button>
+            ariaLabel={`Enable ${displayName}`}
+            testId={`agent-cli-toggle-${kind}`}
+          />
         ) : (
           // Nothing to enable until it is installed; hold the column so
           // detected and not-detected rows stay aligned.
@@ -276,40 +271,6 @@ const statusClass = css({
   '&[data-tone="on"]': { color: 'var(--status-ok, #2f7a3f)' },
 });
 
-// Neutral on/off switch. Unlike the YOLO switch (warn-toned because it is
-// dangerous) this is a plain monochrome toggle: a filled track when on.
-const switchClass = css({
-  position: 'relative',
-  width: '38px',
-  height: '22px',
-  borderRadius: '999px',
-  border: '1px solid var(--line)',
-  background: 'var(--surface-2)',
-  cursor: 'pointer',
-  padding: 0,
-  flexShrink: 0,
-  transition: 'background 160ms ease, border-color 160ms ease',
-  _hover: { borderColor: 'var(--line-strong)' },
-  '&[data-state="on"]': {
-    background: 'var(--text)',
-    borderColor: 'var(--text)',
-  },
-  '&:disabled': { opacity: 0.5, cursor: 'not-allowed' },
-});
-const switchKnobClass = css({
-  position: 'absolute',
-  top: '50%',
-  left: '2px',
-  width: '16px',
-  height: '16px',
-  borderRadius: '50%',
-  background: 'var(--text)',
-  transform: 'translateY(-50%)',
-  transition: 'left 160ms ease, background 160ms ease',
-  boxShadow: '0 1px 2px rgba(0,0,0,0.25)',
-  '[data-state="on"] &': {
-    left: '18px',
-    background: 'var(--surface-1)',
-  },
-});
+// Holds the switch column on not-detected rows so detected and not-detected
+// rows stay aligned (the switch itself lives in the shared Switch primitive).
 const switchPlaceholderClass = css({ width: '38px', height: '22px', flexShrink: 0 });
