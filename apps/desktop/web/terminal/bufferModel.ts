@@ -132,10 +132,22 @@ export function applyViewportFrameToBuffer(
   const preserveRowsForShapeChange =
     resetForShapeChange &&
     (options.preserveBlankRows === true || options.preserveShapeRows === true);
+  // A frame reporting fewer rows resets the mirror ONLY when the buffer has
+  // genuinely collapsed to (at most) a single screen (no scroll-back left, i.e. a
+  // clear / fresh viewport), or for a metadata-less full frame. A real backend
+  // frame that dips total_rows while scroll-back still exists is a redraw of the
+  // live area, NOT a loss of history: Ink/Claude clear and redraw their bottom
+  // region every frame, which makes libghostty's total_rows oscillate. The live
+  // frame overwrites the active rows and the scroll-back above is immutable, so we
+  // KEEP the whole mirror. Wiping (or trimming) on those dips caused an
+  // Ink-specific re-fetch flap: fetched scroll-back rows were dropped and
+  // re-requested as total_rows bounced, which read as blank / looping scroll-back.
+  const collapsedToSingleScreen =
+    explicitTotalRows !== undefined &&
+    explicitTotalRows < previous.totalRows &&
+    explicitTotalRows <= viewportRows;
   const resetForTimelineReset =
-    (!preserveRowsForShapeChange &&
-      explicitTotalRows !== undefined &&
-      explicitTotalRows < previous.totalRows) ||
+    (!preserveRowsForShapeChange && collapsedToSingleScreen) ||
     (!hasScrollbackMetadata && frame.dirty !== 'partial' && totalRows < previous.totalRows);
   const normalizedRows = normalizeViewportRows(frame, surface);
   const skipResizeBlankRows =

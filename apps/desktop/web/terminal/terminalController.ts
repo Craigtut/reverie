@@ -193,7 +193,17 @@ export type TerminalControllerTraceEvent =
 
 export type TimedTerminalControllerTraceEvent = TerminalControllerTraceEvent & {
   timestampMs: number;
+  // Optional build marker, stamped by `trace` only when TERMINAL_TRACE_FRESH_PROBE
+  // is set. Lets the diagnostics log prove a fresh WebView bundle is loaded.
+  freshProbe?: string;
 };
+
+// Diagnostic flag, off by default. Set this to a unique per-build string to stamp
+// every emitted trace event with that marker, so terminal-diagnostics.jsonl can
+// prove the running WebView is the fresh bundle and not stale cached JS (the
+// stale-bundle gotcha that masks whether a fix actually loaded). Flip it and
+// rebuild only while chasing "is this stale JS?"; leave it null in normal use.
+const TERMINAL_TRACE_FRESH_PROBE: string | null = null;
 
 // The imperative terminal island: owns the renderer, the DOM elements,
 // the live frame buffers, scroll/follow state, and the per-session view caches.
@@ -271,7 +281,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
   const resizeReflowGuardTimers: Record<string, number> = {};
 
   function trace(event: TerminalControllerTraceEvent) {
-    onTrace?.({ ...event, timestampMs: nowMs() });
+    const timed: TimedTerminalControllerTraceEvent = { ...event, timestampMs: nowMs() };
+    if (TERMINAL_TRACE_FRESH_PROBE !== null) timed.freshProbe = TERMINAL_TRACE_FRESH_PROBE;
+    onTrace?.(timed);
   }
 
   const handleRendererContextLost = (event: Event) => {
@@ -589,16 +601,23 @@ export function createTerminalController(options: TerminalControllerOptions) {
     );
     const scrollTop = viewport?.scrollTop ?? 0;
     const inset = terminalInsetPx(forSurface);
+    // Overscan ~one viewport above and below the visible area (not a fixed handful
+    // of rows), so a fast scroll paints into already-warm rows instead of flashing
+    // placeholders before the next frame catches up. The painted window is the
+    // visible rows plus an overscan screen on each side (~3 screens total), which
+    // the GPU renderer handles comfortably and which keeps scroll-back smooth.
+    const visibleRowsForWindow = Math.ceil(viewportHeight / forSurface.cellHeight);
+    const overscanRows = Math.max(OVERSCAN_ROWS, visibleRowsForWindow);
     const targetDisplayRows = Math.max(
       forSurface.rows,
-      Math.ceil(viewportHeight / forSurface.cellHeight) + OVERSCAN_ROWS * 2,
+      visibleRowsForWindow + overscanRows * 2,
       renderer?.rows ?? 0,
     );
     let displayRows = Math.max(1, targetDisplayRows);
     const maxStartRow = Math.max(0, buffer.totalRows - displayRows);
     let startRow = Math.min(
       maxStartRow,
-      Math.max(0, Math.floor((scrollTop - inset.top) / forSurface.cellHeight) - OVERSCAN_ROWS),
+      Math.max(0, Math.floor((scrollTop - inset.top) / forSurface.cellHeight) - overscanRows),
     );
     const visibleStart = Math.max(
       0,
@@ -845,7 +864,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (!withLead) return { startRow, rowCount };
     const align = Math.max(1, HISTORY_PREFETCH_ALIGN_ROWS);
     const desiredStart = Math.max(0, startRow - HISTORY_PREFETCH_LEAD_ROWS);
-    const desiredEnd = Math.min(buffer.totalRows, startRow + rowCount);
+    // Lead both directions: above (the scroll-up direction) and below the window,
+    // so reversing scroll direction also lands on warm cache. One round-trip warms
+    // several screens; the serve is bounded by MAX_READ_ROWS.
+    const desiredEnd = Math.min(buffer.totalRows, startRow + rowCount + HISTORY_PREFETCH_LEAD_ROWS);
     const bandStart = Math.floor(desiredStart / align) * align;
     const bandEnd = Math.min(
       buffer.totalRows,
@@ -1781,23 +1803,13 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (buffer.totalRows <= buffer.viewportRows) return false;
     const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
     const targetTop = Math.max(0, Math.min(maxTop, scrollTop));
-    const inset = terminalInsetPx(surface);
-    const visibleStart = Math.max(0, Math.floor((targetTop - inset.top) / surface.cellHeight));
-    const visibleHeight = Math.max(
-      surface.cellHeight,
-      viewport.clientHeight - inset.top - inset.bottom,
-    );
-    const visibleRows = Math.max(1, Math.ceil(visibleHeight / surface.cellHeight));
-    const cachedStart = Math.max(0, visibleStart - OVERSCAN_ROWS);
-    const cachedRows = Math.min(buffer.totalRows - cachedStart, visibleRows + OVERSCAN_ROWS * 2);
-    const visibleCachedRows = Math.min(buffer.totalRows - visibleStart, visibleRows);
-    if (
-      !terminalBufferHasRows(buffer, cachedStart, cachedRows) &&
-      !terminalBufferHasRows(buffer, visibleStart, visibleCachedRows)
-    ) {
-      return false;
-    }
-
+    // Scrolling is free over the virtualized history. Move the viewport now and
+    // paint from the mirror; where rows are not cached yet the paint draws blank
+    // placeholders and the paint-window prefetch pulls that band from libghostty
+    // (decisions.md D6/D7), filling them in when it lands. We never refuse to move
+    // just because a row is uncached, which is what capped scroll-back a few rows
+    // above the tail. This is the react-window/TanStack model: a stable-height
+    // spacer the user scrolls freely, with rows virtualized in behind the gesture.
     viewport.scrollTop = targetTop;
     const following =
       viewport.scrollTop + viewport.clientHeight >=

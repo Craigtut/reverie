@@ -339,6 +339,43 @@ describe('terminal buffer model', () => {
     expect(terminalBufferRowText(state, 0, true)).toBe('new');
   });
 
+  it('keeps scroll-back rows when a redraw dips total_rows but scroll-back remains', () => {
+    // Ink/Claude clear and redraw their bottom region every frame, which makes
+    // libghostty's total_rows oscillate. A dip that still leaves scroll-back
+    // (totalRows > viewportRows) is a redraw, not a loss of history: the fetched
+    // scroll-back below the live area must survive it. Wiping/trimming here caused
+    // the Ink-only re-fetch flap that read as blank / looping scroll-back.
+    let state = createTerminalBuffer(surface);
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'tail-a'), row(1, 'tail-b'), row(2, 'tail-c')], {
+        scrollback: { totalRows: 30, viewportOffset: 27, viewportRows: 3, atBottom: true },
+      }),
+      surface,
+    );
+    // Scroll up and fetch an older band into the mirror (positions 10..19).
+    state = mergeHistoryWindowIntoBuffer(
+      state,
+      frame(Array.from({ length: 10 }, (_, i) => row(i, `h${10 + i}`))),
+      surface,
+      10,
+      30,
+    );
+    expect(terminalBufferRowsPresent(state, 10, 10)).toBe(true);
+
+    // total_rows dips to 20 (still well above the 3-row viewport): a live-area
+    // redraw, not eviction. The fetched scroll-back below it must stay put.
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'redraw-a'), row(1, 'redraw-b'), row(2, 'redraw-c')], {
+        scrollback: { totalRows: 20, viewportOffset: 17, viewportRows: 3, atBottom: true },
+      }),
+      surface,
+    );
+
+    expect(terminalBufferRowsPresent(state, 10, 7)).toBe(true);
+  });
+
   it('treats a full frame without scrollback metadata as a fresh viewport', () => {
     let state = createTerminalBuffer(surface);
     state = applyViewportFrameToBuffer(

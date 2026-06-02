@@ -472,9 +472,22 @@ describe('createTerminalController', () => {
     expect(createRenderer).toHaveBeenCalledTimes(2);
     expect(paintFrames[1]).toHaveBeenCalledTimes(1);
     const painted = paintFrames[1]?.mock.calls[0]?.[0] as TerminalFrame;
-    expect(painted.rows).toHaveLength(10);
+    expect(painted.rows).toHaveLength(12);
     expect(painted.rows[0]?.index).toBe(0);
-    expect(painted.rows.map(rowText)).toEqual(['8', '9', '0', '1', '2', '3', '4', '5', '6', '7']);
+    expect(painted.rows.map(rowText)).toEqual([
+      '7',
+      '8',
+      '9',
+      '0',
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      '8',
+    ]);
   });
 
   it('accepts an async renderer factory and repaints the latest composite when it resolves', async () => {
@@ -1050,7 +1063,7 @@ describe('createTerminalController', () => {
 
     expect(paintFrame).toHaveBeenCalledTimes(1);
     const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
-    expect(painted.rows).toHaveLength(10);
+    expect(painted.rows).toHaveLength(12);
     expect(painted.rows.slice(0, 4).map(rowText)).toEqual(['one', 'two', '', '']);
   });
 
@@ -1379,9 +1392,10 @@ describe('createTerminalController', () => {
 
     expect(onMissingLiveRows).not.toHaveBeenCalled();
     expect(paintFrame).toHaveBeenCalledTimes(1);
-    expect(controller.getStartRow()).toBe(77);
-    expect(canvas.style.top).toBe('780px');
+    expect(controller.getStartRow()).toBe(76);
+    expect(canvas.style.top).toBe('770px');
     expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      'abs-76',
       'abs-77',
       'abs-78',
       'abs-79',
@@ -1392,6 +1406,7 @@ describe('createTerminalController', () => {
       'abs-84',
       'abs-85',
       'abs-86',
+      'abs-87',
     ]);
   });
 
@@ -2067,6 +2082,12 @@ describe('createTerminalController', () => {
 
     expect(viewport.scrollTop).toBe(250);
     expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
       '18',
       '19',
       '20',
@@ -2381,7 +2402,7 @@ describe('createTerminalController', () => {
     expect(onLiveFollow).toHaveBeenLastCalledWith(true);
   });
 
-  it('reports a live buffered scroll miss when target rows are not cached', () => {
+  it('scrolls freely into uncached rows instead of refusing the gesture', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
     const controller = createTerminalController({
@@ -2412,8 +2433,12 @@ describe('createTerminalController', () => {
     };
     controller.applyView(view, surface, buffer);
 
-    expect(controller.scrollBufferedToRow(100)).toBe(false);
-    expect(viewport.scrollTop).toBe(0);
+    // The target rows are not cached yet, but scrolling must still move the
+    // viewport: placeholders paint and the paint-window prefetch fills the rows in
+    // when the band lands. Refusing to move (the old gate) is what capped
+    // scroll-back a few rows above the tail.
+    expect(controller.scrollBufferedToRow(100)).toBe(true);
+    expect(viewport.scrollTop).toBe(1010);
   });
 
   it('requests a history jump when live painting lands on uncached buffer rows', () => {
@@ -2454,7 +2479,7 @@ describe('createTerminalController', () => {
     // so one round-trip warms the next stretch of scroll-up.
     expect(onMissingLiveRows).toHaveBeenCalledWith({
       startRow: 0,
-      rowCount: 128,
+      rowCount: 250,
       totalRows: 250,
       generation: 0,
     });
@@ -2645,8 +2670,8 @@ describe('createTerminalController', () => {
 
     const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
     expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 8,
-      rowCount: 12,
+      startRow: 2,
+      rowCount: 18,
       totalRows: 20,
       generation: 0,
     });
@@ -2895,8 +2920,8 @@ describe('createTerminalController', () => {
     // generation on a column change (the backend bumps on resize and re-seeds
     // with a Full frame that the hook adopts via `setLiveGeneration`).
     expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 6,
-      rowCount: 14,
+      startRow: 0,
+      rowCount: 20,
       totalRows: 20,
       generation: 0,
     });
@@ -2988,7 +3013,7 @@ describe('createTerminalController', () => {
     });
     expect(createRenderer).toHaveBeenCalledTimes(1);
     expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 100 }));
-    expect(canvas.style.top).toBe('640px');
+    expect(canvas.style.top).toBe('570px');
     expect((paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
       '0',
       '1',
@@ -3002,6 +3027,16 @@ describe('createTerminalController', () => {
       '9',
       '0',
       '1',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
       '',
       '',
     ]);
@@ -3080,8 +3115,8 @@ describe('createTerminalController', () => {
     // Generation is the un-synced default 0: a column-change resize no longer
     // bumps a frontend-only generation.
     expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 114,
-      rowCount: 47,
+      startRow: 38,
+      rowCount: 123,
       totalRows: 161,
       generation: 0,
     });
@@ -3128,9 +3163,28 @@ describe('createTerminalController', () => {
     controller.applyView(view, surface, buffer);
 
     const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
-    expect(painted.rows.map(rowText)).toEqual(['', '', '', '', '', '', '', '', '6', '7', '8', '9']);
-    expect(createRenderer).toHaveBeenLastCalledWith(canvas, surface, 12);
-    expect(canvas.style.top).toBe('90px');
+    expect(painted.rows.map(rowText)).toEqual([
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '6',
+      '7',
+      '8',
+      '9',
+    ]);
+    expect(createRenderer).toHaveBeenLastCalledWith(canvas, surface, 18);
+    expect(canvas.style.top).toBe('30px');
     expect(canvas.style.transform).toBe('none');
   });
 
@@ -3197,8 +3251,8 @@ describe('createTerminalController', () => {
     controller.applyView(view, surface, buffer);
 
     expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 240,
-      rowCount: 10,
+      startRow: 238,
+      rowCount: 12,
       totalRows: 250,
       generation: 0,
     });
@@ -3401,7 +3455,7 @@ describe('createTerminalController', () => {
     controller.applyView(viewForBuffer(firstBuffer), surface, firstBuffer);
 
     expect(createRenderer).toHaveBeenCalledTimes(1);
-    expect(createRenderer.mock.calls[0]?.[2]).toBe(10);
+    expect(createRenderer.mock.calls[0]?.[2]).toBe(12);
 
     const secondBuffer = bufferForRows(5);
     controller.applyView(viewForBuffer(secondBuffer), surface, secondBuffer, {
@@ -3435,7 +3489,7 @@ describe('createTerminalController', () => {
     );
 
     expect(createRenderer).toHaveBeenCalledTimes(1);
-    expect(createRenderer.mock.calls[0]?.[2]).toBe(10);
+    expect(createRenderer.mock.calls[0]?.[2]).toBe(12);
 
     Object.assign(viewport, { clientHeight: 50 });
     const fiveRows = { ...surface, rows: 5 };
@@ -3448,8 +3502,8 @@ describe('createTerminalController', () => {
     controller.paintCurrent('session-1', nineRows);
 
     expect(createRenderer).toHaveBeenCalledTimes(3);
-    expect(createRenderer.mock.calls[1]?.[2]).toBe(11);
-    expect(createRenderer.mock.calls[2]?.[2]).toBe(15);
+    expect(createRenderer.mock.calls[1]?.[2]).toBe(15);
+    expect(createRenderer.mock.calls[2]?.[2]).toBe(27);
 
     Object.assign(viewport, { clientHeight: 110 });
     const elevenRows = { ...surface, rows: 11 };
@@ -3457,7 +3511,7 @@ describe('createTerminalController', () => {
     controller.paintCurrent('session-1', elevenRows);
 
     expect(createRenderer).toHaveBeenCalledTimes(4);
-    expect(createRenderer.mock.calls[3]?.[2]).toBe(17);
+    expect(createRenderer.mock.calls[3]?.[2]).toBe(33);
     expect(
       traces.filter(
         event =>
@@ -3585,9 +3639,9 @@ describe('createTerminalController', () => {
     controller.applyView(view, surface, buffer);
 
     const composite = controller.getComposite();
-    expect(composite?.rows).toHaveLength(10);
-    expect(composite?.rows[0]?.index).toBe(117);
-    expect(composite?.rows.at(-1)?.index).toBe(126);
+    expect(composite?.rows).toHaveLength(12);
+    expect(composite?.rows[0]?.index).toBe(116);
+    expect(composite?.rows.at(-1)?.index).toBe(127);
     expect(controller.getRowCount()).toBe(1_000);
   });
 
