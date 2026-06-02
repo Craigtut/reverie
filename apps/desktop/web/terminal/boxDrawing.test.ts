@@ -20,6 +20,20 @@ function bounds(rects: { x: number; y: number; width: number; height: number }[]
   };
 }
 
+function maxPairwiseOverlap(rects: { x: number; y: number; width: number; height: number }[]) {
+  let worst = 0;
+  for (let i = 0; i < rects.length; i += 1) {
+    for (let j = i + 1; j < rects.length; j += 1) {
+      const a = rects[i];
+      const b = rects[j];
+      const ox = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+      const oy = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+      if (ox > 0 && oy > 0) worst = Math.max(worst, ox * oy);
+    }
+  }
+  return worst;
+}
+
 describe('boxDrawingRects', () => {
   it('returns null for non-box characters so they fall back to the font atlas', () => {
     expect(boxDrawingRects('a', 0, 0, CELL_W, CELL_H, 2)).toBeNull();
@@ -27,6 +41,21 @@ describe('boxDrawingRects', () => {
     expect(boxDrawingRects('█', 0, 0, CELL_W, CELL_H, 2)).toBeNull();
     expect(isBoxDrawingGlyph('a')).toBe(false);
     expect(isBoxDrawingGlyph('─')).toBe(true);
+  });
+
+  it('draws a straight line as a single rect (no center overlap to double-blend)', () => {
+    // A faint border double-blends wherever rects overlap, which shows as a bright
+    // dot. Straight runs must be one rect; junctions must stay disjoint.
+    expect(rectsFor('─', 0)).toHaveLength(1);
+    expect(rectsFor('│', 0)).toHaveLength(1);
+    for (const glyph of ['─', '│', '┼', '┌', '┐', '└', '┘', '├', '┬', '╭', '╰', '═', '║', '╬']) {
+      for (const dpr of [1, 1.5, 2, 3]) {
+        const rects = boxDrawingRects(glyph, 0, 0, CELL_W, CELL_H, dpr);
+        if (!rects) throw new Error(`expected rects for ${glyph}`);
+        // Effectively zero; allow sub-pixel float residue from the CSS conversion.
+        expect(maxPairwiseOverlap(rects)).toBeLessThan(1e-6);
+      }
+    }
   });
 
   it('draws a light horizontal rule that spans the full cell width', () => {
