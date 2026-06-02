@@ -167,6 +167,19 @@ export type TerminalControllerTraceEvent =
       cachedRange?: { start: number; end: number } | null;
     }
   | {
+      // Diagnostic: what libghostty reports per frame (logged on change), to tell
+      // whether scroll-back collapse is an alt-screen toggle, a shrinking
+      // total_rows, or scrollback_rows being large while total_rows reads small.
+      kind: 'frame_scrollback';
+      alternateScreen: boolean;
+      dirty: TerminalFrame['dirty'];
+      totalRows: number | null;
+      scrollbackRows: number | null;
+      viewportRows: number | null;
+      viewportOffset: number | null;
+      atBottom: boolean | null;
+    }
+  | {
       kind: 'shape_stale_fallback_paint';
       startRow: number;
       sourceStartRow: number | null;
@@ -231,6 +244,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let scheduledPostRemountPaint: number | null = null;
   let lastBufferCacheMissTraceKey = '';
   let lastHistoryRowsRequestTraceKey = '';
+  let lastFrameScrollbackTraceKey = '';
   let activeSessionId: string | null = null;
   let liveFollow = true;
   const sessionFollowIntents: Record<string, boolean> = {};
@@ -1573,6 +1587,28 @@ export function createTerminalController(options: TerminalControllerOptions) {
       ? frames.filter(frame => terminalFrameMatchesSurface(frame, surface))
       : frames;
     if (acceptedFrames.length === 0) return;
+    // Diagnostic: record what libghostty reports per batch (on change) so we can
+    // see whether scroll-back collapse coincides with the alt-screen flag, a
+    // shrinking total_rows, or scrollback_rows being large while total_rows is small.
+    const fsFrame = acceptedFrames[acceptedFrames.length - 1];
+    if (fsFrame) {
+      const sb = fsFrame.scrollback;
+      const alt = fsFrame.modes?.alternateScreen === true;
+      const fsKey = `${alt ? 'alt' : 'pri'}:${sb?.totalRows ?? -1}:${sb?.scrollbackRows ?? -1}:${sb?.viewportRows ?? -1}:${fsFrame.dirty}`;
+      if (fsKey !== lastFrameScrollbackTraceKey) {
+        lastFrameScrollbackTraceKey = fsKey;
+        trace({
+          kind: 'frame_scrollback',
+          alternateScreen: alt,
+          dirty: fsFrame.dirty,
+          totalRows: sb?.totalRows ?? null,
+          scrollbackRows: sb?.scrollbackRows ?? null,
+          viewportRows: sb?.viewportRows ?? null,
+          viewportOffset: sb?.viewportOffset ?? null,
+          atBottom: sb?.atBottom ?? null,
+        });
+      }
+    }
     let nextBuffer = sessionBuffers[sessionId] ?? createTerminalBuffer(surface);
     const oldestIdBefore = nextBuffer.oldestId;
     let nextAlternateView = sessionViews[sessionId];
