@@ -37,6 +37,7 @@ import {
   selectAllTerminalBufferRange,
   terminalBufferCachedRangeForRows,
   terminalBufferHasRows,
+  terminalBufferRowsPresent,
   terminalBufferSelectionText,
   type TerminalBufferState,
 } from './bufferModel';
@@ -871,40 +872,58 @@ export function createTerminalController(options: TerminalControllerOptions) {
       // so one round-trip warms the next stretch of scroll-up instead of stalling
       // per screen. The band reduces to the paint window at the live tail.
       const band = historyPrefetchBand(buffer, startRow, rowCount, !liveFollow);
-      const request = {
-        startRow: band.startRow,
-        rowCount: band.rowCount,
-        totalRows: buffer.totalRows,
-        generation: liveGeneration,
-      };
-      const missTraceKey = `live:${liveGeneration}:${band.startRow}:${band.rowCount}:${buffer.totalRows}:${displayRows}`;
-      if (missTraceKey !== lastBufferCacheMissTraceKey) {
-        lastBufferCacheMissTraceKey = missTraceKey;
-        trace({
-          kind: 'buffer_cache_miss',
-          mode: 'live',
+      // When scrolled back, fetch only if the band is not already PRESENT by
+      // provenance (rows in the mirror), not merely "uncached" by content. The paint
+      // window can read uncached purely because it holds blank output lines, which the
+      // content-filtered `cachedRanges` excludes; without this guard those blanks
+      // re-request every frame, an infinite fetch loop that saturates the worker and
+      // wedges scrolling (observed with long Cortex/Claude sessions). Following the
+      // live tail keeps the original request behavior (its `requested` flag gates the
+      // partial-tail paint), and a width change always re-fetches reflowed rows.
+      const needsFetch =
+        liveFollow ||
+        shapeStale ||
+        !terminalBufferRowsPresent(buffer, band.startRow, band.rowCount);
+      let requested = false;
+      if (needsFetch) {
+        const request = {
           startRow: band.startRow,
           rowCount: band.rowCount,
-          displayRows,
           totalRows: buffer.totalRows,
           generation: liveGeneration,
-          cachedRange,
-        });
-      }
-      const requested = requestMissingLiveRows(buffer, request);
-      if (requested) {
-        const requestTraceKey = `miss:${liveGeneration}:${band.startRow}:${band.rowCount}:${buffer.totalRows}`;
-        if (requestTraceKey !== lastHistoryRowsRequestTraceKey) {
-          lastHistoryRowsRequestTraceKey = requestTraceKey;
+        };
+        const missTraceKey = `live:${liveGeneration}:${band.startRow}:${band.rowCount}:${buffer.totalRows}:${displayRows}`;
+        if (missTraceKey !== lastBufferCacheMissTraceKey) {
+          lastBufferCacheMissTraceKey = missTraceKey;
           trace({
-            kind: 'history_rows_request',
-            source: 'miss',
+            kind: 'buffer_cache_miss',
+            mode: 'live',
             startRow: band.startRow,
             rowCount: band.rowCount,
+            displayRows,
             totalRows: buffer.totalRows,
             generation: liveGeneration,
+            cachedRange,
           });
         }
+        requested = requestMissingLiveRows(buffer, request);
+        if (requested) {
+          const requestTraceKey = `miss:${liveGeneration}:${band.startRow}:${band.rowCount}:${buffer.totalRows}`;
+          if (requestTraceKey !== lastHistoryRowsRequestTraceKey) {
+            lastHistoryRowsRequestTraceKey = requestTraceKey;
+            trace({
+              kind: 'history_rows_request',
+              source: 'miss',
+              startRow: band.startRow,
+              rowCount: band.rowCount,
+              totalRows: buffer.totalRows,
+              generation: liveGeneration,
+            });
+          }
+        }
+      } else {
+        lastBufferCacheMissTraceKey = '';
+        lastHistoryRowsRequestTraceKey = '';
       }
       return { cached: false, requested, shapeStale, cachedRange };
     }

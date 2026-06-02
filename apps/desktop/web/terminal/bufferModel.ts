@@ -355,6 +355,28 @@ export function terminalBufferHasRows(
   return terminalBufferCachedRangeForRows(state, startRow, rowCount) !== null;
 }
 
+// Provenance check: are all rows in [startRow, startRow+rowCount) PRESENT in the
+// mirror (fetched), regardless of whether they hold cells? Unlike
+// `terminalBufferHasRows` (which keys off the content-filtered `cachedRanges`, where
+// blank rows read as missing), a fetched blank row counts as present here. The
+// prefetch gates on this so genuine empty output lines (every blank line in a
+// conversation) cannot read as "uncached" and trigger an endless re-fetch loop.
+// Clamped to `totalRows` so a band reaching past the buffer end is not treated as
+// permanently missing.
+export function terminalBufferRowsPresent(
+  state: TerminalBufferState,
+  startRow: number,
+  rowCount: number,
+): boolean {
+  const start = Math.max(0, Math.floor(startRow));
+  const end = Math.min(state.totalRows, start + Math.max(0, Math.floor(rowCount)));
+  if (end <= start) return false;
+  for (let rowId = start; rowId < end; rowId += 1) {
+    if (!state.rowsById.has(rowId)) return false;
+  }
+  return true;
+}
+
 export function terminalBufferCachedRangeForRows(
   state: TerminalBufferState,
   startRow: number,

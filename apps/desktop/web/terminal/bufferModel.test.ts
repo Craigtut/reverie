@@ -14,6 +14,7 @@ import {
   terminalBufferFullyCached,
   terminalBufferHasRows,
   terminalBufferRowText,
+  terminalBufferRowsPresent,
   terminalBufferSelectionText,
 } from './bufferModel';
 
@@ -48,6 +49,37 @@ describe('terminal buffer model', () => {
     expect(state.cachedRanges).toEqual([{ start: 7, end: 10 }]);
     expect(terminalBufferRowText(state, 7, true)).toBe('alpha');
     expect(state.cursor?.position?.row).toBe(7);
+  });
+
+  it('counts a present blank row as present by provenance, unlike content coverage', () => {
+    // The prefetch gates fetches on provenance (rows in the mirror), not content
+    // coverage. A genuine blank output line is a real fetched row but is excluded
+    // from the content-filtered cachedRanges; a content-only check would read it as
+    // "missing" and re-request the band every frame (the scroll fetch loop that
+    // saturated the worker on long Cortex/Claude sessions). Provenance counts the
+    // fetched blank as present, so the loop cannot start.
+    // Blank row 2 sits in scrollback (below the live viewport [3,5)), so the
+    // viewport-union in the coverage model does not cover it.
+    const state = {
+      ...createTerminalBuffer(surface),
+      totalRows: 5,
+      viewportOffset: 3,
+      viewportRows: 2,
+      rowsById: new Map([
+        [0, row(0, 'a')],
+        [1, row(1, 'b')],
+        [2, row(2, '')],
+        [3, row(3, 'c')],
+        [4, row(4, 'd')],
+      ]),
+      cachedRanges: [
+        { start: 0, end: 2 },
+        { start: 3, end: 5 },
+      ],
+    };
+
+    expect(terminalBufferHasRows(state, 0, 5)).toBe(false);
+    expect(terminalBufferRowsPresent(state, 0, 5)).toBe(true);
   });
 
   it('preserves wide cell widths and clips cells at the surface edge', () => {
