@@ -38,6 +38,12 @@ export interface TypographyProps extends Omit<HTMLAttributes<HTMLElement>, 'colo
   align?: CSSProperties['textAlign'];
   truncate?: boolean;
   uppercase?: boolean;
+  // Whether the user can click-drag to highlight and copy this text. Off by
+  // default so the shell feels app-native: most text is chrome (labels, titles,
+  // status, headings) where accidental selection while clicking around is noise.
+  // Opt in only for genuine content a user may want to copy (paths, IDs, error
+  // prose). The terminal manages its own selection and is out of scope here.
+  selectable?: boolean;
   children?: ReactNode;
 }
 
@@ -48,6 +54,7 @@ export function Typography({
   align,
   truncate = false,
   uppercase = false,
+  selectable = false,
   className,
   style,
   children,
@@ -67,7 +74,12 @@ export function Typography({
     ...style,
   };
 
-  const composedClass = [baseClass, truncate ? truncateClass : '', className]
+  const composedClass = [
+    baseClass,
+    selectable ? selectableClass : nonSelectableClass,
+    truncate ? truncateClass : '',
+    className,
+  ]
     .filter(Boolean)
     .join(' ');
 
@@ -82,6 +94,21 @@ const baseClass = css({
   margin: 0,
   padding: 0,
   fontFamily: 'inherit',
+});
+
+// Default: text is inert chrome. The arrow cursor and `user-select: none` stop a
+// stray click-drag from highlighting labels and titles as the user navigates.
+const nonSelectableClass = css({
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
+});
+
+// Opt-in: behaves like normal selectable web text (text cursor, drag highlights,
+// copy works). Selection highlight color comes from the theme via `::selection`.
+const selectableClass = css({
+  userSelect: 'text',
+  WebkitUserSelect: 'text',
+  cursor: 'text',
 });
 
 const truncateClass = css({

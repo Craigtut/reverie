@@ -6,6 +6,15 @@ body,
   background: transparent;
 }
 
+/* Text-selection highlight. Warm, translucent neutral from the active theme
+ * (see --selection in appShell.ts) so it honors the monochrome palette instead
+ * of the browser's default blue. Unlayered, so it wins over Panda's preflight
+ * ::selection reset. Only the few `selectable` Typography surfaces ever show it.
+ * The fallback matches the dark theme value for the brief pre-mount frame. */
+::selection {
+  background-color: var(--selection, rgba(231, 222, 206, 0.22));
+}
+
 .terminal-canvas {
   position: absolute;
   top: 0;

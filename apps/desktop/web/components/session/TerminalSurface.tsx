@@ -95,6 +95,7 @@ export function TerminalSurface({
                 as="span"
                 variant="caption"
                 tone="muted"
+                selectable
                 data-testid="session-permission-banner-summary"
                 className={permissionBannerSummaryClass}
                 style={{

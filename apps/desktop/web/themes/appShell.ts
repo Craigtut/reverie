@@ -36,6 +36,11 @@ export const appShellClass = css({
   '--good': '#6FB87A',
   '--warn': '#E5A24E',
   '--bad': '#D96B5C',
+  // Text-selection highlight. A warm, translucent neutral (no hue) so it honors
+  // the monochrome palette and keeps selected text readable. Consumed by the
+  // global `::selection` rule in main.css; only the few `selectable` Typography
+  // surfaces ever show it.
+  '--selection': 'rgba(231, 222, 206, 0.22)',
   // Mirrors TERMINAL_THEME in themes/terminalTheme.ts (the canvas renderer reads
   // the colors from there, not this var); kept in sync as the surface the
   // terminal panel matches.
@@ -106,6 +111,7 @@ export const appShellClass = css({
     '--good': '#4A8F58',
     '--warn': '#B07A1E',
     '--bad': '#B14738',
+    '--selection': 'rgba(40, 28, 14, 0.14)',
     '--terminal-bg': '#F4F1EB',
     '--shadow':
       '0 30px 60px -22px rgba(60, 40, 20, 0.18), 0 12px 28px -14px rgba(60, 40, 20, 0.18)',

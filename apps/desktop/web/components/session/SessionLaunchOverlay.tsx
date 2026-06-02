@@ -48,6 +48,7 @@ export function SessionLaunchOverlay({
             as="span"
             variant="caption"
             tone="faint"
+            selectable
             className={launchCardMetaClass}
             style={{
               fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
@@ -72,6 +73,7 @@ export function SessionLaunchOverlay({
           as="span"
           variant="caption"
           tone="faint"
+          selectable
           className={launchCardMetaClass}
           style={{
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',

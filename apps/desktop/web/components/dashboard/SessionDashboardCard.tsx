@@ -100,6 +100,7 @@ export function SessionDashboardCard({
           as="div"
           variant="caption"
           tone="warn"
+          selectable
           className={dashboardCardPermissionClass}
           style={{
             fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
