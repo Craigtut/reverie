@@ -872,18 +872,17 @@ export function createTerminalController(options: TerminalControllerOptions) {
       // so one round-trip warms the next stretch of scroll-up instead of stalling
       // per screen. The band reduces to the paint window at the live tail.
       const band = historyPrefetchBand(buffer, startRow, rowCount, !liveFollow);
-      // When scrolled back, fetch only if the band is not already PRESENT by
-      // provenance (rows in the mirror), not merely "uncached" by content. The paint
-      // window can read uncached purely because it holds blank output lines, which the
-      // content-filtered `cachedRanges` excludes; without this guard those blanks
-      // re-request every frame, an infinite fetch loop that saturates the worker and
-      // wedges scrolling (observed with long Cortex/Claude sessions). Following the
-      // live tail keeps the original request behavior (its `requested` flag gates the
-      // partial-tail paint), and a width change always re-fetches reflowed rows.
+      // Fetch only if the band is not already PRESENT by provenance (rows in the
+      // mirror), not merely "uncached" by content. A window can read uncached purely
+      // because it holds blank output lines, which the content-filtered `cachedRanges`
+      // excludes; without this guard those blanks re-request every frame, an infinite
+      // fetch loop that saturates the worker and wedges scrolling. This holds at the
+      // live tail too: blank lines at the bottom of a Cortex/Claude conversation would
+      // otherwise loop a viewport-band fetch every frame (each one a blocking
+      // main-thread round-trip, so the loop eats scroll input). A width change still
+      // re-fetches reflowed rows.
       const needsFetch =
-        liveFollow ||
-        shapeStale ||
-        !terminalBufferRowsPresent(buffer, band.startRow, band.rowCount);
+        shapeStale || !terminalBufferRowsPresent(buffer, band.startRow, band.rowCount);
       let requested = false;
       if (needsFetch) {
         const request = {
