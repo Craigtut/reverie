@@ -61,12 +61,16 @@ const BOX_ARMS: Readonly<Record<string, Arms>> = {
   '╦': [NONE, DOUBLE, DOUBLE, DOUBLE],
   '╩': [DOUBLE, DOUBLE, NONE, DOUBLE],
   '╬': [DOUBLE, DOUBLE, DOUBLE, DOUBLE],
-  // Rounded corners (approximated as light square corners)
-  '╭': [NONE, LIGHT, LIGHT, NONE],
-  '╮': [NONE, NONE, LIGHT, LIGHT],
-  '╰': [LIGHT, LIGHT, NONE, NONE],
-  '╯': [LIGHT, NONE, NONE, LIGHT],
+  // Rounded corners (╭╮╰╯) are NOT here: a curve can't be made from axis-aligned
+  // rects. They are stroked as anti-aliased arc sprites instead (see boxArcPath /
+  // strokeBoxArc), the way Ghostty draws them, so the corner actually rounds.
 };
+
+// Light arc corners. A single stroked path (straight stub → quarter arc → straight
+// stub) keeps a faint border one even tone (no overlapping rects to double-blend)
+// and anti-aliases the curve. The stubs land on the cell edge at the same center
+// line and thickness as the straight light rules, so corners join their lines.
+const BOX_ARC_CHARS = new Set(['╭', '╮', '╰', '╯']);
 
 export interface BoxDrawingRect {
   /** CSS-pixel coordinates (already device-grid aligned via the dpr). */
@@ -77,7 +81,115 @@ export interface BoxDrawingRect {
 }
 
 export function isBoxDrawingGlyph(text: string): boolean {
-  return text.length === 1 && text in BOX_ARMS;
+  return text.length === 1 && (text in BOX_ARMS || BOX_ARC_CHARS.has(text));
+}
+
+export function isBoxArcGlyph(text: string): boolean {
+  return BOX_ARC_CHARS.has(text);
+}
+
+/** Light-rule thickness in the same units the cell box is given in. */
+export function boxArcThickness(dpr: number): number {
+  return Math.max(1, Math.round(dpr > 0 ? dpr : 1));
+}
+
+export type BoxArcCommand =
+  | ['M', number, number]
+  | ['L', number, number]
+  | ['A', number, number, number, number, number, boolean];
+
+/**
+ * Path for a rounded corner glyph as moveTo/lineTo/arc commands, in the caller's
+ * coordinate space (device pixels for the GPU atlas sprite, CSS pixels for the 2D
+ * fallback). The corner is a straight stub from one cell edge, a quarter-circle
+ * arc, and a straight stub to the adjacent edge; the radius is half the cell's
+ * smaller dimension. Returns null for non-arc characters.
+ */
+export function boxArcPath(
+  text: string,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): BoxArcCommand[] | null {
+  if (!BOX_ARC_CHARS.has(text)) return null;
+  const midX = (x0 + x1) / 2;
+  const midY = (y0 + y1) / 2;
+  const r = Math.min((x1 - x0) / 2, (y1 - y0) / 2);
+  const HALF = Math.PI / 2;
+  const PI = Math.PI;
+  const TAU = Math.PI * 2;
+  switch (text) {
+    case '╭': // arc down and right: stub to the right edge, curve, stub to bottom
+      return [
+        ['M', x1, midY],
+        ['L', midX + r, midY],
+        ['A', midX + r, midY + r, r, 1.5 * PI, PI, true],
+        ['L', midX, y1],
+      ];
+    case '╮': // arc down and left: stub to the left edge, curve, stub to bottom
+      return [
+        ['M', x0, midY],
+        ['L', midX - r, midY],
+        ['A', midX - r, midY + r, r, 1.5 * PI, TAU, false],
+        ['L', midX, y1],
+      ];
+    case '╰': // arc up and right: stub to the top, curve, stub to the right edge
+      return [
+        ['M', midX, y0],
+        ['L', midX, midY - r],
+        ['A', midX + r, midY - r, r, PI, HALF, true],
+        ['L', x1, midY],
+      ];
+    case '╯': // arc up and left: stub to the top, curve, stub to the left edge
+      return [
+        ['M', midX, y0],
+        ['L', midX, midY - r],
+        ['A', midX - r, midY - r, r, 0, HALF, false],
+        ['L', x0, midY],
+      ];
+    default:
+      return null;
+  }
+}
+
+interface ArcContext {
+  lineWidth: number;
+  lineCap: CanvasLineCap;
+  lineJoin: CanvasLineJoin;
+  beginPath(): void;
+  moveTo(x: number, y: number): void;
+  lineTo(x: number, y: number): void;
+  arc(x: number, y: number, radius: number, start: number, end: number, ccw?: boolean): void;
+  stroke(): void;
+}
+
+/**
+ * Stroke a rounded corner glyph onto a 2D context (strokeStyle set by the caller).
+ * Returns false for non-arc characters so the caller can fall back.
+ */
+export function strokeBoxArc(
+  ctx: ArcContext,
+  text: string,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  thickness: number,
+): boolean {
+  const path = boxArcPath(text, x0, y0, x1, y1);
+  if (!path) return false;
+  ctx.lineWidth = thickness;
+  ctx.lineCap = 'butt';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (const command of path) {
+    if (command[0] === 'M') ctx.moveTo(command[1], command[2]);
+    else if (command[0] === 'L') ctx.lineTo(command[1], command[2]);
+    else ctx.arc(command[1], command[2], command[3], command[4], command[5], command[6]);
+  }
+  ctx.stroke();
+  return true;
 }
 
 interface Rail {

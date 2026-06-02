@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { boxDrawingRects, isBoxDrawingGlyph } from './boxDrawing';
+import { boxArcPath, boxDrawingRects, isBoxArcGlyph, isBoxDrawingGlyph } from './boxDrawing';
 
 const CELL_W = 9;
 const CELL_H = 18;
@@ -43,12 +43,39 @@ describe('boxDrawingRects', () => {
     expect(isBoxDrawingGlyph('─')).toBe(true);
   });
 
+  it('routes rounded corners to the arc path, not the rect path', () => {
+    for (const corner of ['╭', '╮', '╰', '╯']) {
+      // Curves can't be rects, so the rect decomposition declines them...
+      expect(boxDrawingRects(corner, 0, 0, CELL_W, CELL_H, 2)).toBeNull();
+      // ...but they're still box-drawing glyphs, handled as arc sprites.
+      expect(isBoxDrawingGlyph(corner)).toBe(true);
+      expect(isBoxArcGlyph(corner)).toBe(true);
+      const path = boxArcPath(corner, 0, 0, CELL_W, CELL_H);
+      expect(path).not.toBeNull();
+      // A corner is: straight stub, a single quarter arc, straight stub.
+      const arcs = path?.filter(cmd => cmd[0] === 'A') ?? [];
+      expect(arcs).toHaveLength(1);
+    }
+    expect(isBoxArcGlyph('─')).toBe(false);
+    expect(boxArcPath('a', 0, 0, CELL_W, CELL_H)).toBeNull();
+  });
+
+  it('lands the ╭ arc stubs on the cell edges so it joins its neighbours', () => {
+    // ╭ joins a `─` to its right (cell edge, vertical center) and a `│` below it
+    // (bottom edge, horizontal center).
+    const path = boxArcPath('╭', 0, 0, CELL_W, CELL_H);
+    if (!path) throw new Error('expected arc path');
+    expect(path[0]).toEqual(['M', CELL_W, CELL_H / 2]); // start at right edge, mid height
+    const last = path[path.length - 1];
+    expect(last).toEqual(['L', CELL_W / 2, CELL_H]); // end at bottom edge, mid width
+  });
+
   it('draws a straight line as a single rect (no center overlap to double-blend)', () => {
     // A faint border double-blends wherever rects overlap, which shows as a bright
     // dot. Straight runs must be one rect; junctions must stay disjoint.
     expect(rectsFor('─', 0)).toHaveLength(1);
     expect(rectsFor('│', 0)).toHaveLength(1);
-    for (const glyph of ['─', '│', '┼', '┌', '┐', '└', '┘', '├', '┬', '╭', '╰', '═', '║', '╬']) {
+    for (const glyph of ['─', '│', '┼', '┌', '┐', '└', '┘', '├', '┬', '═', '║', '╬']) {
       for (const dpr of [1, 1.5, 2, 3]) {
         const rects = boxDrawingRects(glyph, 0, 0, CELL_W, CELL_H, dpr);
         if (!rects) throw new Error(`expected rects for ${glyph}`);

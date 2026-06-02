@@ -11,7 +11,12 @@ import type {
   TerminalRow,
   TerminalUnderlineStyle,
 } from './terminalTypes';
-import { boxDrawingRects } from './terminal/boxDrawing';
+import {
+  boxArcThickness,
+  boxDrawingRects,
+  isBoxArcGlyph,
+  strokeBoxArc,
+} from './terminal/boxDrawing';
 import { terminalCellAtColumn, terminalCellWidth } from './terminal/cellGeometry';
 
 const DEFAULT_CELL_WIDTH = 9;
@@ -250,6 +255,15 @@ export function createTerminalCanvasRenderer(
     return true;
   }
 
+  // Rounded corners are stroked as anti-aliased arcs, not taken from the font.
+  function paintBoxArc(text: string, x: number, y: number, width: number, color: string) {
+    if (!isBoxArcGlyph(text)) return false;
+    ctx.strokeStyle = color;
+    strokeBoxArc(ctx, text, x, y, x + width, y + cellHeight, boxArcThickness(dpr) / dpr);
+    stats.blockGlyphsPainted += 1;
+    return true;
+  }
+
   function paintCellUnderline(
     x: number,
     y: number,
@@ -429,7 +443,8 @@ export function createTerminalCanvasRenderer(
 
           if (
             !paintBlockGlyph(cell.text, x, y, drawWidth, fg) &&
-            !paintBoxGlyph(cell.text, x, y, drawWidth, fg)
+            !paintBoxGlyph(cell.text, x, y, drawWidth, fg) &&
+            !paintBoxArc(cell.text, x, y, drawWidth, fg)
           ) {
             ctx.fillStyle = fg;
             setFont(cellBold(cell), cellItalic(cell));

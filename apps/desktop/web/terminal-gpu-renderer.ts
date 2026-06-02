@@ -15,7 +15,12 @@ import type {
   TerminalRow,
   TerminalUnderlineStyle,
 } from './terminalTypes';
-import { boxDrawingRects } from './terminal/boxDrawing';
+import {
+  boxArcThickness,
+  boxDrawingRects,
+  isBoxArcGlyph,
+  strokeBoxArc,
+} from './terminal/boxDrawing';
 import { terminalCellAtColumn, terminalCellWidth } from './terminal/cellGeometry';
 
 const DEFAULT_FONT_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
@@ -935,10 +940,25 @@ function createGlyphAtlas(
 
     ensureScratchSize(glyphWidth);
     scratchCtx.clearRect(0, 0, glyphWidth, uploadGlyphHeight);
-    scratchCtx.font = `${italic ? 'italic ' : ''}${bold ? '700' : '400'} ${
-      options.fontSize * options.dpr
-    }px ${options.fontFamily}`;
-    scratchCtx.fillText(text, 0, Math.max(0, Math.round(options.dpr)));
+    if (isBoxArcGlyph(text)) {
+      // Rounded corners are stroked procedurally (a single anti-aliased path that
+      // tiles into the straight rules), not taken from the text font.
+      scratchCtx.strokeStyle = '#ffffff';
+      strokeBoxArc(
+        scratchCtx,
+        text,
+        0,
+        0,
+        glyphWidth,
+        uploadGlyphHeight,
+        boxArcThickness(options.dpr),
+      );
+    } else {
+      scratchCtx.font = `${italic ? 'italic ' : ''}${bold ? '700' : '400'} ${
+        options.fontSize * options.dpr
+      }px ${options.fontFamily}`;
+      scratchCtx.fillText(text, 0, Math.max(0, Math.round(options.dpr)));
+    }
     gl.bindTexture(gl.TEXTURE_2D, page.texture);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, page.nextX, page.nextY, gl.RGBA, gl.UNSIGNED_BYTE, scratch);
     statsRef().glyphAtlasUploads += 1;
