@@ -151,6 +151,22 @@ describe('boxDrawingRects', () => {
     expect(bounds(rects).left).toBe(0);
     expect(bounds(rects).right).toBe(CELL_W);
   });
+
+  it('renders dashed lines as the right number of evenly spaced dashes', () => {
+    // Triple / quadruple / double dashes, horizontal and vertical.
+    expect(rectsFor('┄', 0)).toHaveLength(3);
+    expect(rectsFor('┈', 0)).toHaveLength(4);
+    expect(rectsFor('╌', 0)).toHaveLength(2);
+    expect(rectsFor('┆', 0)).toHaveLength(3);
+    // Horizontal dashes sit on the vertical center; gaps separate them.
+    const dashes = rectsFor('┄', 0).sort((a, b) => a.x - b.x);
+    for (let i = 1; i < dashes.length; i += 1) {
+      const gap = dashes[i].x - (dashes[i - 1].x + dashes[i - 1].width);
+      expect(gap).toBeGreaterThan(0); // a real gap between dashes
+    }
+    expect(maxPairwiseOverlap(rectsFor('┄', 0))).toBeLessThan(1e-6);
+    expect(isBoxDrawingGlyph('┄')).toBe(true);
+  });
 });
 
 describe('blockElementGlyph', () => {

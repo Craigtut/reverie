@@ -80,8 +80,25 @@ export interface BoxDrawingRect {
   height: number;
 }
 
+// Dashed rules: [axis, dash count, weight]. Drawn as evenly spaced rects at the
+// cell's center line so a run of cells reads as one even dash rhythm.
+const DASHED_LINES: Readonly<Record<string, readonly ['h' | 'v', number, number]>> = {
+  '╌': ['h', 2, LIGHT],
+  '╍': ['h', 2, HEAVY],
+  '┄': ['h', 3, LIGHT],
+  '┅': ['h', 3, HEAVY],
+  '┈': ['h', 4, LIGHT],
+  '┉': ['h', 4, HEAVY],
+  '╎': ['v', 2, LIGHT],
+  '╏': ['v', 2, HEAVY],
+  '┆': ['v', 3, LIGHT],
+  '┇': ['v', 3, HEAVY],
+  '┊': ['v', 4, LIGHT],
+  '┋': ['v', 4, HEAVY],
+};
+
 export function isBoxDrawingGlyph(text: string): boolean {
-  return text.length === 1 && (text in BOX_ARMS || BOX_ARC_CHARS.has(text));
+  return text.length === 1 && (text in BOX_ARMS || BOX_ARC_CHARS.has(text) || text in DASHED_LINES);
 }
 
 export function isBoxArcGlyph(text: string): boolean {
@@ -229,6 +246,9 @@ export function boxDrawingRects(
   cellHeight: number,
   dpr: number,
 ): BoxDrawingRect[] | null {
+  const dashed = DASHED_LINES[text];
+  if (dashed) return dashedLineRects(dashed, cellX, cellY, cellWidth, cellHeight, dpr);
+
   const arms = BOX_ARMS[text];
   if (!arms) return null;
   const [up, right, down, left] = arms;
@@ -326,6 +346,51 @@ export function boxDrawingRects(
     }
   }
 
+  return rects;
+}
+
+// Even dash pattern: each of the N cells-of-the-line is split into `count` slices,
+// and the dash fills the middle ~60% of each slice. The leftover at the slice ends
+// makes the gaps, sized so the rhythm stays even across the cell boundary too.
+function dashedLineRects(
+  [axis, count, weight]: readonly ['h' | 'v', number, number],
+  cellX: number,
+  cellY: number,
+  cellWidth: number,
+  cellHeight: number,
+  dpr: number,
+): BoxDrawingRect[] {
+  const scale = dpr > 0 ? dpr : 1;
+  const toCss = (device: number) => device / scale;
+  const left = Math.round(cellX * scale);
+  const top = Math.round(cellY * scale);
+  const right = Math.round((cellX + cellWidth) * scale);
+  const bottom = Math.round((cellY + cellHeight) * scale);
+  const light = Math.max(1, Math.round(scale));
+  const thickness = weight === HEAVY ? Math.max(light + 1, light * 2) : light;
+
+  const rects: BoxDrawingRect[] = [];
+  if (axis === 'h') {
+    const center = Math.round((top + bottom) / 2);
+    const t0 = Math.round(center - thickness / 2);
+    const span = right - left;
+    for (let i = 0; i < count; i += 1) {
+      const a = left + Math.round(((i + 0.2) / count) * span);
+      const b = left + Math.round(((i + 0.8) / count) * span);
+      if (b > a)
+        rects.push({ x: toCss(a), y: toCss(t0), width: toCss(b - a), height: toCss(thickness) });
+    }
+  } else {
+    const center = Math.round((left + right) / 2);
+    const x0 = Math.round(center - thickness / 2);
+    const span = bottom - top;
+    for (let i = 0; i < count; i += 1) {
+      const a = top + Math.round(((i + 0.2) / count) * span);
+      const b = top + Math.round(((i + 0.8) / count) * span);
+      if (b > a)
+        rects.push({ x: toCss(x0), y: toCss(a), width: toCss(thickness), height: toCss(b - a) });
+    }
+  }
   return rects;
 }
 
