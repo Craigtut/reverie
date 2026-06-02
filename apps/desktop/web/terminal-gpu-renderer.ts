@@ -15,6 +15,7 @@ import type {
   TerminalRow,
   TerminalUnderlineStyle,
 } from './terminalTypes';
+import { boxDrawingRects } from './terminal/boxDrawing';
 import { terminalCellAtColumn, terminalCellWidth } from './terminal/cellGeometry';
 
 const DEFAULT_FONT_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
@@ -467,7 +468,8 @@ export function createTerminalWebGl2Renderer(
       if (
         cell.text &&
         cell.text !== ' ' &&
-        !paintBlockGlyph(cell.text, x, y, drawWidth, foreground, underlayRects)
+        !paintBlockGlyph(cell.text, x, y, drawWidth, foreground, underlayRects) &&
+        !paintBoxGlyph(cell.text, x, y, drawWidth, foreground, underlayRects)
       ) {
         stats.glyphsPainted += 1;
         const glyph = atlas.glyph(cell.text, cellBold(cell), cellItalic(cell), widthCells);
@@ -546,6 +548,27 @@ export function createTerminalWebGl2Renderer(
       default:
         return false;
     }
+  }
+
+  // Draw box-drawing lines/junctions (─ │ ┌ ┼ ━ ═ …) as solid rects so they tile
+  // edge to edge. Painting them from the font atlas leaves a sub-pixel gap at each
+  // cell seam (the cell is wider than the glyph advance), which shows up as evenly
+  // spaced dots along a straight rule.
+  function paintBoxGlyph(
+    text: string,
+    x: number,
+    y: number,
+    width: number,
+    color: Rgba,
+    rects: VertexBatch,
+  ) {
+    const boxRects = boxDrawingRects(text, x, y, width, cellHeight, dpr);
+    if (!boxRects) return false;
+    for (const rect of boxRects) {
+      pushRect(rects, rect.x, rect.y, rect.width, rect.height, color);
+    }
+    stats.blockGlyphsPainted += 1;
+    return true;
   }
 
   function paintOverlay(

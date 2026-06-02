@@ -11,6 +11,7 @@ import type {
   TerminalRow,
   TerminalUnderlineStyle,
 } from './terminalTypes';
+import { boxDrawingRects } from './terminal/boxDrawing';
 import { terminalCellAtColumn, terminalCellWidth } from './terminal/cellGeometry';
 
 const DEFAULT_CELL_WIDTH = 9;
@@ -236,6 +237,19 @@ export function createTerminalCanvasRenderer(
     }
   }
 
+  // See the GPU renderer: box-drawing lines must be solid rects so they tile edge
+  // to edge instead of leaving a sub-pixel gap (dots) at each cell seam.
+  function paintBoxGlyph(text: string, x: number, y: number, width: number, color: string) {
+    const boxRects = boxDrawingRects(text, x, y, width, cellHeight, dpr);
+    if (!boxRects) return false;
+    ctx.fillStyle = color;
+    for (const rect of boxRects) {
+      ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+    }
+    stats.blockGlyphsPainted += 1;
+    return true;
+  }
+
   function paintCellUnderline(
     x: number,
     y: number,
@@ -413,7 +427,10 @@ export function createTerminalCanvasRenderer(
           const previousAlpha = ctx.globalAlpha;
           ctx.globalAlpha = previousAlpha * cellForegroundAlpha(cell);
 
-          if (!paintBlockGlyph(cell.text, x, y, drawWidth, fg)) {
+          if (
+            !paintBlockGlyph(cell.text, x, y, drawWidth, fg) &&
+            !paintBoxGlyph(cell.text, x, y, drawWidth, fg)
+          ) {
             ctx.fillStyle = fg;
             setFont(cellBold(cell), cellItalic(cell));
             stats.glyphsPainted += 1;
