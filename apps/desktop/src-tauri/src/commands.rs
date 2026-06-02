@@ -133,6 +133,15 @@ pub(crate) struct SetSessionDangerousModeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct MarkSessionViewedRequest {
+    shell_session_id: SessionId,
+    /// Frontend-clock ISO 8601 timestamp of the view, stored verbatim so the
+    /// persisted seen-marker matches the value the renderer already applied.
+    viewed_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceDefaultDangerousModeRequest {
     default_dangerous_mode: bool,
 }
@@ -636,6 +645,16 @@ pub(crate) fn set_session_dangerous_mode(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .set_session_dangerous_mode(request.session_id, request.dangerous_mode_override)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn mark_session_viewed(
+    service: State<'_, WorkspaceService>,
+    request: MarkSessionViewedRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .mark_session_viewed(request.shell_session_id, request.viewed_at)
         .map_err(|err| err.to_string())
 }
 
