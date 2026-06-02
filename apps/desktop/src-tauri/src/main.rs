@@ -282,6 +282,7 @@ fn main() {
             commands::set_workspace_default_new_session_dangerous,
             commands::set_workspace_theme,
             commands::set_workspace_default_agent_kind,
+            commands::set_terminal_font_size,
             commands::set_workspace_nav_state,
             commands::hook_server_port,
             commands::archive_focus,
