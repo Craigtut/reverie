@@ -16,6 +16,7 @@ import type {
   TerminalUnderlineStyle,
 } from './terminalTypes';
 import {
+  blockElementGlyph,
   boxArcThickness,
   boxDrawingRects,
   isBoxArcGlyph,
@@ -509,50 +510,14 @@ export function createTerminalWebGl2Renderer(
     color: Rgba,
     rects: VertexBatch,
   ) {
-    const halfWidth = Math.ceil(width / 2);
-    const halfHeight = Math.ceil(cellHeight / 2);
-    const rightHalfX = x + Math.floor(width / 2);
-
-    switch (text) {
-      case '█':
-        pushRect(rects, x, y, width, cellHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▀':
-        pushRect(rects, x, y, width, halfHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▄':
-        pushRect(rects, x, y + Math.floor(cellHeight / 2), width, halfHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▌':
-        pushRect(rects, x, y, halfWidth, cellHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▐':
-        pushRect(rects, rightHalfX, y, halfWidth, cellHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▖':
-        pushRect(rects, x, y + Math.floor(cellHeight / 2), halfWidth, halfHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▗':
-        pushRect(rects, rightHalfX, y + Math.floor(cellHeight / 2), halfWidth, halfHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▘':
-        pushRect(rects, x, y, halfWidth, halfHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▝':
-        pushRect(rects, rightHalfX, y, halfWidth, halfHeight, color);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      default:
-        return false;
+    const block = blockElementGlyph(text, x, y, width, cellHeight, dpr);
+    if (!block) return false;
+    const fill = block.alpha < 1 ? { ...color, a: color.a * block.alpha } : color;
+    for (const rect of block.rects) {
+      pushRect(rects, rect.x, rect.y, rect.width, rect.height, fill);
     }
+    stats.blockGlyphsPainted += 1;
+    return true;
   }
 
   // Draw box-drawing lines/junctions (─ │ ┌ ┼ ━ ═ …) as solid rects so they tile

@@ -328,3 +328,127 @@ export function boxDrawingRects(
 
   return rects;
 }
+
+export interface BlockElementGlyph {
+  /** Disjoint, device-aligned fill rects (CSS pixels). */
+  rects: BoxDrawingRect[];
+  /** Opacity multiplier for the foreground; < 1 only for shade blocks (░▒▓). */
+  alpha: number;
+}
+
+// Block elements (U+2580-259F) are solid partial-cell fills: halves, eighth bars
+// (▁..▇ ▏..▉ ▔ ▕, used for progress bars and sparklines), quadrants and their
+// combinations, and shades (░▒▓). Like the line rules they must tile edge to edge,
+// so we draw them as device-aligned rects instead of from the font. Shades are a
+// full-cell fill at reduced opacity (a clean, seamlessly tiling stand-in for the
+// font's stipple). Returns null for anything that is not a block element.
+export function blockElementGlyph(
+  text: string,
+  cellX: number,
+  cellY: number,
+  cellWidth: number,
+  cellHeight: number,
+  dpr: number,
+): BlockElementGlyph | null {
+  const scale = dpr > 0 ? dpr : 1;
+  const toCss = (device: number) => device / scale;
+  const left = Math.round(cellX * scale);
+  const top = Math.round(cellY * scale);
+  const right = Math.round((cellX + cellWidth) * scale);
+  const bottom = Math.round((cellY + cellHeight) * scale);
+  const width = right - left;
+  const height = bottom - top;
+  const midX = Math.round((left + right) / 2);
+  const midY = Math.round((top + bottom) / 2);
+
+  const rect = (x0: number, y0: number, x1: number, y1: number): BoxDrawingRect => ({
+    x: toCss(x0),
+    y: toCss(y0),
+    width: toCss(x1 - x0),
+    height: toCss(y1 - y0),
+  });
+  // Eighth bars fill from one edge; the cut is rounded to the device grid so equal
+  // bars in adjacent cells line up (e.g. a flat run in a bar chart).
+  const eighth = (n: number, size: number) => Math.round((n / 8) * size);
+  const lower = (n: number) => [rect(left, bottom - eighth(n, height), right, bottom)];
+  const upper = (n: number) => [rect(left, top, right, top + eighth(n, height))];
+  const fromLeft = (n: number) => [rect(left, top, left + eighth(n, width), bottom)];
+  const fromRight = (n: number) => [rect(right - eighth(n, width), top, right, bottom)];
+  const ul = rect(left, top, midX, midY);
+  const ur = rect(midX, top, right, midY);
+  const ll = rect(left, midY, midX, bottom);
+  const lr = rect(midX, midY, right, bottom);
+
+  switch (text) {
+    case '█':
+      return { rects: [rect(left, top, right, bottom)], alpha: 1 };
+    // Lower eighths (▁▂▃▄▅▆▇) and upper half/eighth.
+    case '▁':
+      return { rects: lower(1), alpha: 1 };
+    case '▂':
+      return { rects: lower(2), alpha: 1 };
+    case '▃':
+      return { rects: lower(3), alpha: 1 };
+    case '▄':
+      return { rects: lower(4), alpha: 1 };
+    case '▅':
+      return { rects: lower(5), alpha: 1 };
+    case '▆':
+      return { rects: lower(6), alpha: 1 };
+    case '▇':
+      return { rects: lower(7), alpha: 1 };
+    case '▀':
+      return { rects: upper(4), alpha: 1 };
+    case '▔':
+      return { rects: upper(1), alpha: 1 };
+    // Left eighths (▏▎▍▌▋▊▉) and right half/eighth.
+    case '▏':
+      return { rects: fromLeft(1), alpha: 1 };
+    case '▎':
+      return { rects: fromLeft(2), alpha: 1 };
+    case '▍':
+      return { rects: fromLeft(3), alpha: 1 };
+    case '▌':
+      return { rects: fromLeft(4), alpha: 1 };
+    case '▋':
+      return { rects: fromLeft(5), alpha: 1 };
+    case '▊':
+      return { rects: fromLeft(6), alpha: 1 };
+    case '▉':
+      return { rects: fromLeft(7), alpha: 1 };
+    case '▐':
+      return { rects: fromRight(4), alpha: 1 };
+    case '▕':
+      return { rects: fromRight(1), alpha: 1 };
+    // Shades: a full-cell fill at reduced opacity.
+    case '░':
+      return { rects: [rect(left, top, right, bottom)], alpha: 0.25 };
+    case '▒':
+      return { rects: [rect(left, top, right, bottom)], alpha: 0.5 };
+    case '▓':
+      return { rects: [rect(left, top, right, bottom)], alpha: 0.75 };
+    // Quadrants and their combinations.
+    case '▖':
+      return { rects: [ll], alpha: 1 };
+    case '▗':
+      return { rects: [lr], alpha: 1 };
+    case '▘':
+      return { rects: [ul], alpha: 1 };
+    case '▝':
+      return { rects: [ur], alpha: 1 };
+    case '▙':
+      return { rects: [ul, ll, lr], alpha: 1 };
+    case '▚':
+      return { rects: [ul, lr], alpha: 1 };
+    case '▛':
+      return { rects: [ul, ur, ll], alpha: 1 };
+    case '▜':
+      return { rects: [ul, ur, lr], alpha: 1 };
+    case '▞':
+      return { rects: [ur, ll], alpha: 1 };
+    case '▟':
+      return { rects: [ur, ll, lr], alpha: 1 };
+    default:
+      return null;
+  }
+}

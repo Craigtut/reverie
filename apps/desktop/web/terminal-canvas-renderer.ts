@@ -12,6 +12,7 @@ import type {
   TerminalUnderlineStyle,
 } from './terminalTypes';
 import {
+  blockElementGlyph,
   boxArcThickness,
   boxDrawingRects,
   isBoxArcGlyph,
@@ -195,51 +196,17 @@ export function createTerminalCanvasRenderer(
   }
 
   function paintBlockGlyph(text: string, x: number, y: number, width: number, color: string) {
-    const halfWidth = Math.ceil(width / 2);
-    const halfHeight = Math.ceil(cellHeight / 2);
-    const rightHalfX = x + Math.floor(width / 2);
+    const block = blockElementGlyph(text, x, y, width, cellHeight, dpr);
+    if (!block) return false;
+    const previousAlpha = ctx.globalAlpha;
+    if (block.alpha < 1) ctx.globalAlpha = previousAlpha * block.alpha;
     ctx.fillStyle = color;
-
-    switch (text) {
-      case '█':
-        ctx.fillRect(x, y, width, cellHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▀':
-        ctx.fillRect(x, y, width, halfHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▄':
-        ctx.fillRect(x, y + Math.floor(cellHeight / 2), width, halfHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▌':
-        ctx.fillRect(x, y, halfWidth, cellHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▐':
-        ctx.fillRect(rightHalfX, y, halfWidth, cellHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▖':
-        ctx.fillRect(x, y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▗':
-        ctx.fillRect(rightHalfX, y + Math.floor(cellHeight / 2), halfWidth, halfHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▘':
-        ctx.fillRect(x, y, halfWidth, halfHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      case '▝':
-        ctx.fillRect(rightHalfX, y, halfWidth, halfHeight);
-        stats.blockGlyphsPainted += 1;
-        return true;
-      default:
-        return false;
+    for (const rect of block.rects) {
+      ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
     }
+    ctx.globalAlpha = previousAlpha;
+    stats.blockGlyphsPainted += 1;
+    return true;
   }
 
   // See the GPU renderer: box-drawing lines must be solid rects so they tile edge
