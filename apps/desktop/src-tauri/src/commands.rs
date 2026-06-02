@@ -886,17 +886,27 @@ pub(crate) fn resize_terminal(
 /// one place the frontend pulls rows from the backend; scrolling itself is fully
 /// frontend-local with no round-trip. The bytes are returned to the WebView as
 /// an `ArrayBuffer` (a Tauri `Vec<u8>` response).
+///
+/// Async + `spawn_blocking`: the inner call blocks on the session worker's reply
+/// (the `read_rows` pin walk, which can queue behind live extracts). A synchronous
+/// command would run that wait on the Tauri main thread and freeze the whole window
+/// during scroll-back. Running it on the blocking pool keeps the main thread free,
+/// so a slow fetch never beachballs the app. The runtime is a cheap `Arc` clone.
 #[tauri::command]
-pub(crate) fn read_terminal_rows(
+pub(crate) async fn read_terminal_rows(
     runtime: State<'_, TerminalSessionRuntime>,
     terminal_id: TerminalId,
     start_id: u64,
     count: usize,
     generation: u32,
 ) -> Result<Vec<u8>, String> {
-    runtime
-        .read_terminal_rows(terminal_id, start_id, count, generation)
-        .map_err(|err| err.to_string())
+    let runtime = runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runtime.read_terminal_rows(terminal_id, start_id, count, generation)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
