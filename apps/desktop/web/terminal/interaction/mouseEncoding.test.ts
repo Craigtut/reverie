@@ -36,7 +36,15 @@ describe('encodeSgrWheelEvent', () => {
 });
 
 describe('terminal mouse hit-testing', () => {
-  const surface: TerminalSurface = { cols: 10, rows: 5, cellWidth: 8, cellHeight: 16 };
+  const surface: TerminalSurface = {
+    cols: 10,
+    rows: 5,
+    cellWidth: 8,
+    cellHeight: 16,
+    fontSize: 14,
+    baseline: 12,
+    fontFamily: 'monospace',
+  };
   const canvas = {
     getBoundingClientRect: () => ({
       x: 100,

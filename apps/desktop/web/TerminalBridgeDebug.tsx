@@ -37,6 +37,9 @@ const DEFAULT_SURFACE: TerminalSurface = {
   rows: 32,
   cellWidth: 9,
   cellHeight: 18,
+  fontSize: 14,
+  baseline: 14,
+  fontFamily: 'monospace',
 };
 
 declare global {

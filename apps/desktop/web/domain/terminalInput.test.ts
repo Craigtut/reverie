@@ -29,7 +29,16 @@ function wheelEvent(parts: { deltaY: number; deltaMode?: number }): WheelEvent<H
 }
 
 function surface(overrides: Partial<TerminalSurface> = {}): TerminalSurface {
-  return { cols: 80, rows: 24, cellWidth: 8, cellHeight: 16, ...overrides };
+  return {
+    cols: 80,
+    rows: 24,
+    cellWidth: 8,
+    cellHeight: 16,
+    fontSize: 14,
+    baseline: 12,
+    fontFamily: 'monospace',
+    ...overrides,
+  };
 }
 
 const appModes: TerminalModes = { cursorKeyApplication: true };

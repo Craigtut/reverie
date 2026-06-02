@@ -10,7 +10,15 @@ import {
   emptyTerminalView,
 } from './frameModel';
 
-const surface: TerminalSurface = { cols: 80, rows: 4, cellWidth: 8, cellHeight: 10 };
+const surface: TerminalSurface = {
+  cols: 80,
+  rows: 4,
+  cellWidth: 8,
+  cellHeight: 10,
+  fontSize: 14,
+  baseline: 8,
+  fontFamily: 'monospace',
+};
 
 function row(index: number, dirty = true, text = ''): TerminalRow {
   return { index, dirty, cells: text ? [{ col: 0, text }] : [] };

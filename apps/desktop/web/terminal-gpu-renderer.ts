@@ -183,6 +183,7 @@ export function createTerminalWebGl2Renderer(
   const cellHeight = options.cellHeight ?? TERMINAL_SURFACE.cellHeight;
   const fontSize = options.fontSize ?? DEFAULT_FONT_SIZE;
   const fontFamily = options.fontFamily ?? DEFAULT_FONT_FAMILY;
+  const baseline = options.baseline ?? TERMINAL_SURFACE.baseline;
   const defaultForeground = colorToRgba(options.foreground, DEFAULT_FOREGROUND);
   const defaultBackground = colorToRgba(options.background, DEFAULT_BACKGROUND);
   defaultBackground.a = Math.min(
@@ -250,6 +251,7 @@ export function createTerminalWebGl2Renderer(
       dpr,
       fontFamily,
       fontSize,
+      baseline,
     },
     () => stats,
   );
@@ -829,11 +831,17 @@ function createGlyphAtlas(
     dpr: number;
     fontFamily: string;
     fontSize: number;
+    // Device-px baseline offset from the cell top. Glyphs rasterize on the
+    // alphabetic baseline at this y so they sit centered in the cell.
+    baseline: number;
   },
   statsRef: () => TerminalRendererStats,
 ) {
   const baseGlyphWidth = Math.ceil(options.cellWidth * options.dpr);
   const glyphHeight = Math.ceil(options.cellHeight * options.dpr);
+  // Clamp the rasterization baseline into the (possibly atlas-clamped) glyph
+  // slot so a tall cell never draws above or below its texture row.
+  const glyphBaseline = Math.max(1, Math.min(glyphHeight, Math.round(options.baseline)));
   const uploadGlyphHeight = Math.min(glyphHeight, ATLAS_SIZE);
   const scratch = document.createElement('canvas');
   scratch.width = baseGlyphWidth;
@@ -893,7 +901,10 @@ function createGlyphAtlas(
   }
 
   function configureScratchContext() {
-    scratchCtx.textBaseline = 'top';
+    // Glyphs rasterize on the alphabetic baseline (placed at glyphBaseline) so
+    // they sit centered in the cell, matching the cell metrics; box-arc strokes
+    // draw in absolute coordinates and ignore the text baseline.
+    scratchCtx.textBaseline = 'alphabetic';
     scratchCtx.fillStyle = '#ffffff';
   }
 
@@ -957,7 +968,17 @@ function createGlyphAtlas(
       scratchCtx.font = `${italic ? 'italic ' : ''}${bold ? '700' : '400'} ${
         options.fontSize * options.dpr
       }px ${options.fontFamily}`;
-      scratchCtx.fillText(text, 0, Math.max(0, Math.round(options.dpr)));
+      // Center the glyph horizontally when the cell is narrower than the glyph's
+      // advance (Ghostty's subpixel alignment for our SF Mono case): offset by
+      // half the slack rather than clipping. For a full-width cell the slack is
+      // ~0, so this is a no-op there. measureText is guarded for headless test
+      // contexts that stub the 2D context without it.
+      const advance =
+        typeof scratchCtx.measureText === 'function'
+          ? scratchCtx.measureText(text).width
+          : glyphWidth;
+      const offsetX = advance < glyphWidth ? (glyphWidth - advance) / 2 : 0;
+      scratchCtx.fillText(text, offsetX, glyphBaseline);
     }
     gl.bindTexture(gl.TEXTURE_2D, page.texture);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, page.nextX, page.nextY, gl.RGBA, gl.UNSIGNED_BYTE, scratch);

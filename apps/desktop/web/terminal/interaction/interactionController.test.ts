@@ -4,7 +4,15 @@ import type { TerminalSurface } from '../../terminalScrollback';
 import { createTerminalInteraction, type ContextMenuContext } from './interactionController';
 import type { BufferCell, BufferLinkSpan, SelectionRange } from './types';
 
-const surface: TerminalSurface = { cols: 10, rows: 5, cellWidth: 10, cellHeight: 20 };
+const surface: TerminalSurface = {
+  cols: 10,
+  rows: 5,
+  cellWidth: 10,
+  cellHeight: 20,
+  fontSize: 14,
+  baseline: 16,
+  fontFamily: 'monospace',
+};
 
 function frame(): TerminalFrame {
   return {

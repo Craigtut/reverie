@@ -2,7 +2,15 @@ import { describe, it, expect } from 'vitest';
 import { clamp, pointToCell, cellRectInWindow } from './geometry';
 import type { TerminalSurface } from '../../terminalScrollback';
 
-const surface: TerminalSurface = { cols: 20, rows: 10, cellWidth: 9, cellHeight: 18 };
+const surface: TerminalSurface = {
+  cols: 20,
+  rows: 10,
+  cellWidth: 9,
+  cellHeight: 18,
+  fontSize: 14,
+  baseline: 14,
+  fontFamily: 'monospace',
+};
 
 describe('clamp', () => {
   it('bounds a value to the range', () => {

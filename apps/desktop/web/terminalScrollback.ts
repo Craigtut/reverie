@@ -4,6 +4,11 @@ import {
   terminalCellWidth,
   terminalRowTextLayout,
 } from './terminal/cellGeometry';
+import {
+  DEFAULT_TERMINAL_FONT_FAMILY,
+  DEFAULT_TERMINAL_FONT_SIZE,
+  measureTerminalCell,
+} from './terminal/terminalMetrics';
 
 // Frontend scrollback is a rendered-history foothold, not the final source of terminal truth.
 // The backend/Ghostty snapshot still owns authoritative terminal state; this module only keeps
@@ -43,6 +48,56 @@ export interface TerminalSurface {
   rows: number;
   cellWidth: number;
   cellHeight: number;
+  // The configured terminal font size (CSS px) the cell was measured from. The
+  // renderers rasterize glyphs at this size; `cellWidth`/`cellHeight` are the
+  // device-aligned cell derived from it (see terminalMetrics).
+  fontSize: number;
+  // Device-px baseline offset from the cell top, so the renderers place glyphs
+  // centered in the cell rather than at a fixed top inset.
+  baseline: number;
+  // The monospace font stack the cell + glyphs use. Kept on the surface so a
+  // single source of truth flows to both renderers and the measurement.
+  fontFamily: string;
+}
+
+// Derive the base surface (cell + metrics) for a font size at a given DPR,
+// keeping the default 120x36 grid. The grid is then re-fit to the live viewport
+// by `terminalSurfaceForBounds`. Re-deriving on a font-size OR dpr change keeps
+// the cell crisp and the grid honest. `dpr` defaults to the current device
+// pixel ratio so callers in the app can omit it; tests pass it explicitly.
+export function terminalSurfaceForFontSize(
+  fontSize: number,
+  fallback: TerminalSurface,
+  dpr: number = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1,
+): TerminalSurface {
+  const fontFamily = fallback.fontFamily ?? DEFAULT_TERMINAL_FONT_FAMILY;
+  const cell = measureTerminalCell(fontSize, fontFamily, dpr);
+  return {
+    ...fallback,
+    cellWidth: cell.cellWidth,
+    cellHeight: cell.cellHeight,
+    baseline: cell.baseline,
+    fontSize: cell.fontSize,
+    fontFamily,
+  };
+}
+
+// The default surface: a 120x36 grid measured from the default font size at the
+// current DPR. Used to seed the store/controller before the live viewport is
+// measured.
+export function defaultTerminalSurface(
+  dpr: number = typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1,
+): TerminalSurface {
+  const cell = measureTerminalCell(DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY, dpr);
+  return {
+    cols: 120,
+    rows: 36,
+    cellWidth: cell.cellWidth,
+    cellHeight: cell.cellHeight,
+    baseline: cell.baseline,
+    fontSize: cell.fontSize,
+    fontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
+  };
 }
 
 // What the custom overlay scrollbar needs to draw + drive itself, derived once

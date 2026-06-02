@@ -18,11 +18,26 @@ import {
   strokeBoxArc,
 } from './terminal/boxDrawing';
 import { terminalCellAtColumn, terminalCellWidth } from './terminal/cellGeometry';
+import {
+  DEFAULT_TERMINAL_FONT_FAMILY,
+  DEFAULT_TERMINAL_FONT_SIZE,
+  measureTerminalCell,
+} from './terminal/terminalMetrics';
 
-const DEFAULT_CELL_WIDTH = 9;
-const DEFAULT_CELL_HEIGHT = 18;
-const DEFAULT_FONT_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-const DEFAULT_FONT_SIZE = 14;
+// The default cell is measured from the default font (not hardcoded). A dpr=1
+// seed keeps the frozen constant deterministic at module load; the controller
+// re-measures with the real device pixel ratio (and the configured font size)
+// when it mounts, so the live grid is always font-derived and device-aligned.
+const DEFAULT_CELL = measureTerminalCell(
+  DEFAULT_TERMINAL_FONT_SIZE,
+  DEFAULT_TERMINAL_FONT_FAMILY,
+  1,
+);
+const DEFAULT_CELL_WIDTH = DEFAULT_CELL.cellWidth;
+const DEFAULT_CELL_HEIGHT = DEFAULT_CELL.cellHeight;
+const DEFAULT_BASELINE = DEFAULT_CELL.baseline;
+const DEFAULT_FONT_FAMILY = DEFAULT_TERMINAL_FONT_FAMILY;
+const DEFAULT_FONT_SIZE = DEFAULT_TERMINAL_FONT_SIZE;
 const DEFAULT_FOREGROUND = '#e8e1d7';
 const DEFAULT_BACKGROUND = '#060605';
 // How opaque the terminal's *default* (unstyled) background is painted.
@@ -54,6 +69,9 @@ export const TERMINAL_SURFACE = Object.freeze({
   rows: 36,
   cellWidth: DEFAULT_CELL_WIDTH,
   cellHeight: DEFAULT_CELL_HEIGHT,
+  fontSize: DEFAULT_FONT_SIZE,
+  baseline: DEFAULT_BASELINE,
+  fontFamily: DEFAULT_FONT_FAMILY,
 });
 
 export interface TerminalCanvasOptions {
@@ -63,6 +81,10 @@ export interface TerminalCanvasOptions {
   cellHeight?: number;
   fontSize?: number;
   fontFamily?: string;
+  // Device-px baseline offset from the cell top. When provided, glyphs are drawn
+  // alphabetic-baseline-aligned at this y so they sit centered in the cell;
+  // absent, the renderer derives it from the font size (back-compat).
+  baseline?: number;
   foreground?: string;
   background?: string;
   cursor?: string;
@@ -106,8 +128,15 @@ export function createTerminalCanvasRenderer(
   canvas.style.width = `${cols * cellWidth}px`;
   canvas.style.height = `${rows * cellHeight}px`;
 
+  // Place glyphs on the centered alphabetic baseline (Ghostty's cell_baseline)
+  // instead of jamming them to the cell top. The metrics baseline is in DEVICE
+  // px; the context is dpr-scaled, so convert to CSS px. When no baseline is
+  // supplied (older callers), approximate the classic top-inset placement so the
+  // glyph still lands inside the cell.
+  const baselineCss =
+    options.baseline !== undefined ? options.baseline / dpr : Math.min(cellHeight - 1, fontSize);
   ctx.scale(dpr, dpr);
-  ctx.textBaseline = 'top';
+  ctx.textBaseline = 'alphabetic';
   setFont(false);
   ctx.textRendering = 'geometricPrecision';
 
@@ -355,7 +384,7 @@ export function createTerminalCanvasRenderer(
       ctx.fillStyle = background === cursorColor ? foreground : background;
       setFont(cellBold(cell), cellItalic(cell));
       stats.glyphsPainted += 1;
-      ctx.fillText(cell.text, x, y + 1);
+      ctx.fillText(cell.text, x, y + baselineCss);
     }
   }
 
@@ -449,7 +478,7 @@ export function createTerminalCanvasRenderer(
             ctx.fillStyle = fg;
             setFont(cellBold(cell), cellItalic(cell));
             stats.glyphsPainted += 1;
-            ctx.fillText(cell.text, x, y + 1);
+            ctx.fillText(cell.text, x, y + baselineCss);
           }
 
           const underline = underlineStyle(cell);
