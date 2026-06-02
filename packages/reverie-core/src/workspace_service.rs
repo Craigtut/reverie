@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::activity::ActivityState;
+use crate::activity::{ActivityState, ActivityStatus, TurnStatus};
 use crate::agents::{
     CortexSessionMetadata, DiscoveryContext, build_spawn_spec, built_in_adapters, require_detected,
 };
@@ -837,7 +837,42 @@ fn normalize_session(session: &mut Session) -> bool {
         changed = true;
     }
 
+    if let Some(activity) = session.latest_activity.as_mut() {
+        if normalize_stale_activity(activity) {
+            changed = true;
+        }
+    }
+
     changed
+}
+
+/// Reconcile a persisted activity snapshot left mid-flight by an unclean
+/// shutdown. Quitting Reverie kills every agent process, so on the next boot no
+/// session can still be `Working` or `AwaitingPermission`: those are live-process
+/// states. Resuming a CLI only restores the conversation history, it does not
+/// re-raise the permission prompt or pick the turn back up, so a persisted
+/// "needs your approval" or "working" snapshot is stale and would mislead the
+/// dashboard into showing attention/active for a session that is really just
+/// waiting for you. Reset those two statuses to the at-rest `AwaitingInput` and
+/// drop the now-meaningless pending permission, running turn, and active tools.
+/// Other statuses (`AwaitingInput`, `Done`, `Error`) describe an outcome, not a
+/// live process, so they are left untouched. Returns whether anything changed.
+fn normalize_stale_activity(activity: &mut ActivityState) -> bool {
+    if !matches!(
+        activity.status,
+        ActivityStatus::Working | ActivityStatus::AwaitingPermission
+    ) {
+        return false;
+    }
+    activity.status = ActivityStatus::AwaitingInput;
+    activity.awaiting_permission = None;
+    activity.active_tools.clear();
+    if let Some(turn) = activity.turn.as_mut() {
+        if turn.status == TurnStatus::Running {
+            turn.status = TurnStatus::Aborted;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1255,6 +1290,87 @@ mod tests {
             .find(|s| s.id == resume_without_ref.id)
             .unwrap();
         assert_eq!(resume.launch_mode, LaunchMode::New);
+    }
+
+    #[test]
+    fn boot_normalization_resets_stale_working_and_permission_activity() {
+        let (repo, service) = service();
+        let focus = Focus::general("General", 0);
+        repo.upsert_focus(&focus).unwrap();
+
+        // A session quit while the agent was awaiting a permission prompt. On
+        // resume the CLI only restores history, so the pending prompt is gone;
+        // the snapshot must read as at-rest, not "needs your approval".
+        let mut awaiting = Session::new(focus.id, "Perm", AgentKind::CortexCode, "/a".into());
+        awaiting.native_session_ref = Some(NativeSessionRef::cortex("native-perm", None));
+        awaiting.latest_activity = Some(
+            crate::activity::parse_state(
+                r#"{"version":1,"sessionId":"native-perm","status":"awaiting_permission","updatedAt":"t","sequence":4,"cwd":"/a","turn":{"id":"turn-1","status":"running","startedAt":"t"},"activeTools":[{"toolCallId":"tc","toolName":"Bash","startedAt":"t"}],"awaitingPermission":{"id":"p","toolName":"Bash","displaySummary":"rm","requestedAt":"t"}}"#,
+            )
+            .unwrap(),
+        );
+        repo.upsert_session(&awaiting).unwrap();
+
+        // A session quit mid-turn (working). Its process is dead on boot, so it
+        // is no longer working.
+        let mut working = Session::new(focus.id, "Work", AgentKind::CortexCode, "/b".into());
+        working.native_session_ref = Some(NativeSessionRef::cortex("native-work", None));
+        working.latest_activity = Some(
+            crate::activity::parse_state(
+                r#"{"version":1,"sessionId":"native-work","status":"working","updatedAt":"t","sequence":2,"cwd":"/b","turn":{"id":"turn-9","status":"running","startedAt":"t"},"activeTools":[{"toolCallId":"tc","toolName":"Edit","startedAt":"t"}]}"#,
+            )
+            .unwrap(),
+        );
+        repo.upsert_session(&working).unwrap();
+
+        // A done session is a real outcome, not a live-process state: untouched.
+        let mut done = Session::new(focus.id, "Done", AgentKind::CortexCode, "/c".into());
+        done.native_session_ref = Some(NativeSessionRef::cortex("native-done", None));
+        done.latest_activity = Some(
+            crate::activity::parse_state(
+                r#"{"version":1,"sessionId":"native-done","status":"done","updatedAt":"t","sequence":7,"cwd":"/c"}"#,
+            )
+            .unwrap(),
+        );
+        repo.upsert_session(&done).unwrap();
+
+        service.ensure_seeded().unwrap();
+        let snapshot = service.snapshot().unwrap();
+
+        let perm = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == awaiting.id)
+            .unwrap()
+            .latest_activity
+            .as_ref()
+            .unwrap();
+        assert_eq!(perm.status, ActivityStatus::AwaitingInput);
+        assert!(perm.awaiting_permission.is_none());
+        assert!(perm.active_tools.is_empty());
+        assert_eq!(perm.turn.as_ref().unwrap().status, TurnStatus::Aborted);
+
+        let work = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == working.id)
+            .unwrap()
+            .latest_activity
+            .as_ref()
+            .unwrap();
+        assert_eq!(work.status, ActivityStatus::AwaitingInput);
+        assert!(work.active_tools.is_empty());
+        assert_eq!(work.turn.as_ref().unwrap().status, TurnStatus::Aborted);
+
+        let rest = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == done.id)
+            .unwrap()
+            .latest_activity
+            .as_ref()
+            .unwrap();
+        assert_eq!(rest.status, ActivityStatus::Done);
     }
 
     #[test]
