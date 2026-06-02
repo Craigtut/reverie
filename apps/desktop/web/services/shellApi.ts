@@ -76,3 +76,15 @@ export function setSessionDangerousMode(sessionId: string, dangerousModeOverride
     request: { sessionId, dangerousModeOverride },
   });
 }
+
+// Persist that the user viewed a session, clearing its "finished" / unseen
+// marker. `viewedAt` is this machine's ISO 8601 timestamp, sent so the stored
+// value matches the optimistic one the renderer already applied. Fire-and-forget:
+// callers apply the optimistic store update for instant feedback and do not need
+// the returned snapshot, so the durability write can fail quietly (e.g. in the
+// browser harness, which has no backend).
+export function markSessionViewed(shellSessionId: string, viewedAt: string) {
+  return invoke<WorkspaceShellSnapshot>('mark_session_viewed', {
+    request: { shellSessionId, viewedAt },
+  });
+}

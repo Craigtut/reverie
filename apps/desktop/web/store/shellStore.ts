@@ -19,6 +19,12 @@ interface ShellStoreState {
   // Patch a single session's title in place (driven by live OSC title events)
   // so every display site re-renders without refetching the whole snapshot.
   patchSessionTitle: (sessionId: string, title: string) => void;
+  // Optimistically record that a session was viewed (ISO timestamp), clearing
+  // its "finished" / unseen marker immediately. The backend persists the same
+  // value via shellApi.markSessionViewed; this in-place patch avoids a snapshot
+  // round-trip so the badge clears the instant the user opens the session. See
+  // useSessionViewed.
+  markSessionViewed: (sessionId: string, viewedAt: string) => void;
 }
 
 export const useShellStore = create<ShellStoreState>(set => ({
@@ -39,6 +45,21 @@ export const useShellStore = create<ShellStoreState>(set => ({
           ...s.shell,
           sessions: s.shell.sessions.map(session =>
             session.id === sessionId ? { ...session, title } : session,
+          ),
+        },
+      };
+    }),
+  markSessionViewed: (sessionId, viewedAt) =>
+    set(s => {
+      const current = s.shell.sessions.find(session => session.id === sessionId);
+      // No-op if unchanged so the snapshot reference is preserved and no
+      // subscriber re-renders unnecessarily.
+      if (!current || current.lastViewedAt === viewedAt) return s;
+      return {
+        shell: {
+          ...s.shell,
+          sessions: s.shell.sessions.map(session =>
+            session.id === sessionId ? { ...session, lastViewedAt: viewedAt } : session,
           ),
         },
       };

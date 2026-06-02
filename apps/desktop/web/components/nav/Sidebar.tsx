@@ -2,6 +2,8 @@ import type { MouseEvent } from 'react';
 import { Folder, FolderOpen, GearSix, House, MagnifyingGlass, Plus } from '@phosphor-icons/react';
 import { css, cx } from '../../styled-system/css';
 import { rimLitPanelClass } from '../../themes/surfaces';
+import { scrollFadeClass } from '../../themes/scrollbars';
+import { useScrollbarFade } from '../../hooks/useScrollbarFade';
 import {
   activeGeneralSessions,
   activeSessionsInFocus,
@@ -92,6 +94,11 @@ export function Sidebar({
   const toggleProjectCollapsed = useNavigationStore(s => s.toggleProjectCollapsed);
   const toggleFocusExpanded = useNavigationStore(s => s.toggleFocusExpanded);
   const toggleGeneralCollapsed = useNavigationStore(s => s.toggleGeneralCollapsed);
+  const navScrollRef = useScrollbarFade<HTMLElement>();
+  // The session whose terminal is on screen: never badged "finished" (you are
+  // looking at it). Only the terminal surface counts as viewing; on other
+  // surfaces nothing is being viewed, so a finished result still shows.
+  const viewedSessionId = surfaceMode === 'terminal' ? selectedSessionId : null;
 
   // One topic's (or General's) sessions, each a sortable row, wrapped in the
   // topic's drop zone, with the "New session" button inside so an empty topic
@@ -103,7 +110,12 @@ export function Sidebar({
         {sorted.map(session => {
           const isBound = Boolean(sessionTerminalBindings[session.id]);
           const activity = activityForSession(session, cortexActivity);
-          const cellState = cellStateFor(session, isBound, activity);
+          const cellState = cellStateFor(
+            session,
+            isBound,
+            activity,
+            session.id === viewedSessionId,
+          );
           return (
             <SortableRow
               key={session.id}
@@ -151,6 +163,7 @@ export function Sidebar({
     generalSessions,
     sessionTerminalBindings,
     cortexActivity,
+    viewedSessionId,
   );
   const sortedProjects = shell.projects
     .filter(project => !project.archived)
@@ -184,7 +197,7 @@ export function Sidebar({
         </Typography>
       </button>
 
-      <nav className={navClass} data-testid="workspace-nav">
+      <nav ref={navScrollRef} className={cx(navClass, scrollFadeClass)} data-testid="workspace-nav">
         <NavDndProvider shell={shell}>
           <button
             type="button"
@@ -214,6 +227,7 @@ export function Sidebar({
             title={shell.workspace.generalLabel}
             count={generalRollup.total}
             attention={generalRollup.attention}
+            finished={generalRollup.finished}
             expanded={!generalCollapsed}
             onToggle={toggleGeneralCollapsed}
             testId="general-group-toggle"
@@ -258,6 +272,7 @@ export function Sidebar({
                 projectSessions,
                 sessionTerminalBindings,
                 cortexActivity,
+                viewedSessionId,
               );
               const expanded = !collapsedProjectIds.has(project.id);
               return (
@@ -271,6 +286,7 @@ export function Sidebar({
                     title={project.name}
                     count={projectRollup.total}
                     attention={projectRollup.attention}
+                    finished={projectRollup.finished}
                     expanded={expanded}
                     onToggle={() => toggleProjectCollapsed(project.id)}
                     onRemove={(event: MouseEvent<HTMLElement>) => {
@@ -289,6 +305,7 @@ export function Sidebar({
                           focusSessions,
                           sessionTerminalBindings,
                           cortexActivity,
+                          viewedSessionId,
                         );
                         return (
                           <SortableRow
@@ -418,12 +435,6 @@ const navClass = css({
   padding: '4px 8px 12px',
   position: 'relative',
   zIndex: 2,
-  '&::-webkit-scrollbar': { width: '8px' },
-  '&::-webkit-scrollbar-thumb': {
-    background: 'var(--line)',
-    borderRadius: '8px',
-    border: '2px solid var(--surface-1)',
-  },
 });
 
 function homeRowClass({ active }: { active: boolean }) {

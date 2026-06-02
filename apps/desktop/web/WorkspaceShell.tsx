@@ -8,6 +8,7 @@ import {
   useCreationForm,
   useNavPersistence,
   useSessionActivity,
+  useSessionViewed,
   useSessionTitle,
   useShellNavigation,
   useTerminalSession,
@@ -59,6 +60,7 @@ export function WorkspaceShell() {
   useCommandPalette();
   useAppQuit(writeLog);
   useSessionActivity(writeLog, model.loadWorkspaceShell);
+  useSessionViewed();
   useSessionTitle(writeLog);
   useAgentClis(creation.newSessionAgentKind, creation.setNewSessionAgentKind, writeLog);
   useAppFocus();

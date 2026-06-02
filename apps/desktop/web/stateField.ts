@@ -159,15 +159,17 @@ void field(vec2 g, out float s, out float b){
     float m = max(coreLit, ring);
     s = clamp(0.30 + 0.70*m, 0.0, 1.0);
     b = clamp((0.50 + 0.50*m) * pulse, 0.20, 1.0);
-  } else if (uState == 4) {     // finished: bloom once, settle to even lattice
+  } else if (uState == 4) {     // finished: bloom once, settle to a present, even lattice
     float settle = smoothstep(0.0, 1.1, uAge);
     float bloomR = uAge * 1.35;
     float bloom = pow(0.5 + 0.5*sin((r - bloomR)*6.0), 6.0) * (1.0 - settle);
-    // Flat, settled, with the four corners dimmed so it reads as a dot cluster
-    // rather than a perfect square.
-    float even = 0.24 + 0.44 * smoothstep(1.45, 0.0, r);
-    s = clamp(mix(0.22, even, settle) + bloom*0.5, 0.0, 1.0);
-    b = clamp(mix(0.24, even * 0.96, settle) + bloom*0.5, 0.0, 1.0);
+    // The settled rest state is a full, evenly-lit constellation that holds
+    // until the session is seen: brighter and fuller than idle's dim center dot
+    // so "ready for you" reads as present and invitational, not at-rest. The
+    // four corners stay a touch dimmer so it is a dot cluster, not a square.
+    float even = 0.32 + 0.50 * smoothstep(1.5, 0.0, r);
+    s = clamp(mix(0.24, even, settle) + bloom*0.5, 0.0, 1.0);
+    b = clamp(mix(0.26, even, settle) + bloom*0.5, 0.0, 1.0);
   } else {                      // idle (5): alive, resting, waiting on you
     // A still, center-weighted presence: brighter than fresh/finished and
     // clearly concentrated at the core (not the green drift of "working").
@@ -247,7 +249,9 @@ let colors: Record<CellState, [number, number, number]> = {
   idle: [0.62, 0.66, 0.72],
   attention: [0.85, 0.65, 0.3],
   error: [0.85, 0.4, 0.4],
-  finished: [0.55, 0.55, 0.58],
+  // Same neutral family as idle (no status hue); the brighter, fuller lattice in
+  // the shader is what sets "finished" apart, so it reads as present, not alarming.
+  finished: [0.72, 0.74, 0.8],
 };
 
 function ensureGl(): GlProgram | null {
@@ -545,7 +549,9 @@ export function refreshStateFieldColors() {
     idle: read('--text-2', colors.idle),
     attention: read('--warn', colors.attention),
     error: read('--bad', colors.error),
-    finished: read('--text-3', colors.finished),
+    // Neutral, same family as idle (--text-2); the shader's brighter lattice, not
+    // a distinct hue, is what marks it present. Monochrome guardrail.
+    finished: read('--text-2', colors.finished),
   };
   const now = performance.now();
   for (const cell of cells.values()) renderCell(cell, now);

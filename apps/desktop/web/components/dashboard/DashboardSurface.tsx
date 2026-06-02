@@ -1,7 +1,9 @@
 import { motion } from 'motion/react';
 import { CheckCircle, Plus, Warning } from '@phosphor-icons/react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
+import { useScrollbarFade } from '../../hooks/useScrollbarFade';
+import { scrollFadeClass } from '../../themes/scrollbars';
 import { groupSessionsByState } from '../../domain';
 import type {
   ActivityState,
@@ -20,6 +22,7 @@ import { DashboardRail } from './DashboardRail';
 const SECTIONS: { key: SessionState; title: string; tone: DashboardStatus; attention?: boolean }[] =
   [
     { key: 'attention', title: 'Needs your attention', tone: 'attention', attention: true },
+    { key: 'finished', title: 'Ready for you', tone: 'recent' },
     { key: 'active', title: 'Working', tone: 'live' },
     { key: 'idle', title: 'Idle', tone: 'recent' },
     { key: 'fresh', title: 'Fresh', tone: 'recent' },
@@ -48,6 +51,7 @@ export function DashboardSurface({
   onOpenSettings: () => void;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
+  const scrollRef = useScrollbarFade<HTMLDivElement>();
   const active = shell.sessions.filter(s => !s.archived);
   const groups = groupSessionsByState(active, sessionTerminalBindings, cortexActivity);
 
@@ -99,7 +103,8 @@ export function DashboardSurface({
   return (
     <div className={dashboardSurfaceClass} data-testid="dashboard-surface">
       <motion.div
-        className={dashboardContentClass}
+        ref={scrollRef}
+        className={cx(dashboardContentClass, scrollFadeClass)}
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
@@ -145,6 +150,20 @@ export function DashboardSurface({
                 }}
               />
               {groups.attention.length} need attention
+            </Typography>
+            <Typography
+              as="span"
+              variant="caption"
+              tone="muted"
+              data-tone="recent"
+              data-testid="dashboard-ready-count"
+            >
+              <i
+                style={{
+                  background: groups.finished.length > 0 ? 'var(--text-2)' : 'var(--text-4)',
+                }}
+              />
+              {groups.finished.length} ready
             </Typography>
             <Typography
               as="span"
@@ -199,13 +218,6 @@ const dashboardContentClass = css({
   display: 'flex',
   flexDirection: 'column',
   gap: '28px',
-  '&::-webkit-scrollbar': { width: '10px' },
-  '&::-webkit-scrollbar-thumb': {
-    background: 'var(--line)',
-    borderRadius: '8px',
-    border: '2px solid transparent',
-    backgroundClip: 'padding-box',
-  },
 });
 
 const dashboardHeaderClass = css({

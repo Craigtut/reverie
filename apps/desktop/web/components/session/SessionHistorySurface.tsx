@@ -1,7 +1,9 @@
 import { motion } from 'motion/react';
 import { Archive, Plus, Warning } from '@phosphor-icons/react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
+import { scrollFadeClass } from '../../themes/scrollbars';
+import { useScrollbarFade } from '../../hooks/useScrollbarFade';
 import { agentLabel, groupSessionsByState, shortId } from '../../domain';
 import type {
   ActivityState,
@@ -23,6 +25,7 @@ import { Typography } from '../primitives/Typography';
 const SECTIONS: { key: SessionState; title: string; tone: DashboardStatus; attention?: boolean }[] =
   [
     { key: 'attention', title: 'Needs your attention', tone: 'attention', attention: true },
+    { key: 'finished', title: 'Ready for you', tone: 'recent' },
     { key: 'active', title: 'Working', tone: 'live' },
     { key: 'idle', title: 'Idle', tone: 'recent' },
     { key: 'fresh', title: 'Fresh', tone: 'recent' },
@@ -57,6 +60,7 @@ export function SessionHistorySurface({
   onCreateSession: () => void;
   busy: boolean;
 }) {
+  const scrollRef = useScrollbarFade<HTMLDivElement>();
   const project = focus?.projectId
     ? (shell.projects.find(p => p.id === focus.projectId) ?? null)
     : null;
@@ -67,7 +71,8 @@ export function SessionHistorySurface({
   return (
     <div className={focusSurfaceClass} data-testid="session-history-surface">
       <motion.div
-        className={focusContentClass}
+        ref={scrollRef}
+        className={cx(focusContentClass, scrollFadeClass)}
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
@@ -169,6 +174,7 @@ export function SessionHistorySurface({
                       as="small"
                       variant="caption"
                       tone="faint"
+                      selectable
                       className={archivedPathClass}
                     >
                       {session.cwd}
@@ -228,13 +234,6 @@ const focusContentClass = css({
   display: 'flex',
   flexDirection: 'column',
   gap: '28px',
-  '&::-webkit-scrollbar': { width: '10px' },
-  '&::-webkit-scrollbar-thumb': {
-    background: 'var(--line)',
-    borderRadius: '8px',
-    border: '2px solid transparent',
-    backgroundClip: 'padding-box',
-  },
 });
 
 const focusHeaderClass = css({

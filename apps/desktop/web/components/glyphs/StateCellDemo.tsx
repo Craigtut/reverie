@@ -17,7 +17,7 @@ const STATES: { state: CellState; label: string; note: string }[] = [
   {
     state: 'finished',
     label: 'Finished',
-    note: 'bloom-and-settle primitive (not a session state)',
+    note: 'finished a turn off-screen, unseen: blooms then rests bright ("Ready for you")',
   },
 ];
 

@@ -40,31 +40,70 @@ export function classifyForDashboard(
   return 'recent';
 }
 
+// The moment an agent last came to rest after working: a turn finished (`done`)
+// or it paused for your input (`awaiting_input`). Returned as epoch ms, or null
+// when there is no such moment (working / blocked / never had a feed). Prefer the
+// turn's own end time; fall back to when the activity state last changed. A
+// recoverable error is deliberately excluded: it is not a "come look, I made you
+// something" moment, so it stays plain idle.
+export function lastTurnCompletedAtMs(activity: ActivityState | null): number | null {
+  if (!activity) return null;
+  if (activity.status !== 'done' && activity.status !== 'awaiting_input') return null;
+  const stamp = activity.turn?.endedAt ?? activity.updatedAt;
+  const ms = Date.parse(stamp);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+// Whether a session has a turn-completion the user has not seen yet: it came to
+// rest after `session.lastViewedAt` and is not the session currently on screen.
+// Viewing is the acknowledgement, so the session you are looking at is never
+// "unseen" (handled by `isViewed`), and once you open it `lastViewedAt` advances
+// past the completion. A missing `lastViewedAt` reads as the epoch (unseen).
+function hasUnseenCompletion(
+  session: ShellSession,
+  activity: ActivityState | null,
+  isViewed: boolean,
+): boolean {
+  if (isViewed) return false;
+  const completedMs = lastTurnCompletedAtMs(activity);
+  if (completedMs == null) return false;
+  const seenMs = session.lastViewedAt ? Date.parse(session.lastViewedAt) : 0;
+  return completedMs > (Number.isNaN(seenMs) ? 0 : seenMs);
+}
+
 // Group a session into one of the user-facing states the dashboard and focus
 // view partition by. Live activity wins; the persisted record status is the
 // fallback. Key distinctions:
-//   - active  = a positive "working" signal (the agent is mid-turn).
-//   - idle    = the session is at rest, waiting for you. This covers both a live
-//               process (turn done / awaiting your next prompt / running with no
-//               activity feed) AND an exited-but-resumable session: opening
-//               either reopens the same conversation, so we deliberately do not
-//               split them. We also do NOT call a bare running process "active":
-//               without a working signal we cannot know it is working, and
-//               showing every live CLI as active misrepresents an agent that is
-//               just waiting for you.
+//   - active   = a positive "working" signal (the agent is mid-turn).
+//   - finished = the agent came to rest (turn done / paused for input) while you
+//                were NOT viewing it, and you have not opened it since: an unseen
+//                result. The quieter, invitational counterpart to attention.
+//   - idle     = the session is at rest and already seen. This covers both a live
+//                process (turn done / awaiting your next prompt / running with no
+//                activity feed) AND an exited-but-resumable session: opening
+//                either reopens the same conversation, so we deliberately do not
+//                split them. We also do NOT call a bare running process "active":
+//                without a working signal we cannot know it is working, and
+//                showing every live CLI as active misrepresents an agent that is
+//                just waiting for you.
 //   - attention only means a blocking ask (permission) or a hard failure, not
-//               the everyday "waiting for input" rest state.
-//   - fresh   = never launched, so there is no conversation to reopen yet.
+//                the everyday "waiting for input" rest state.
+//   - fresh    = never launched, so there is no conversation to reopen yet.
+// `isViewed` is true when this session is the one currently on screen (the
+// selected terminal); a viewed session is never `finished`.
 export function deriveSessionState(
   session: ShellSession,
   isBound: boolean,
   activity: ActivityState | null,
+  isViewed = false,
 ): SessionState {
   if (activity) {
     if (activity.status === 'awaiting_permission') return 'attention';
     if (activity.lastError && !activity.lastError.recoverable) return 'attention';
     if (activity.status === 'working') return 'active';
-    // awaiting_input | done | recoverable error: alive, waiting on you.
+    // awaiting_input | done | recoverable error: alive, waiting on you. If the
+    // rest happened off-screen and is unseen, surface it as finished.
+    if (hasUnseenCompletion(session, activity, isViewed)) return 'finished';
     return 'idle';
   }
   if (session.status === 'restore_failed') return 'attention';
@@ -78,11 +117,13 @@ export function deriveSessionState(
 }
 
 // Map a session state onto the existing card/rail tone so the card's color
-// matches the section it sits under.
+// matches the section it sits under. `finished` carries no status hue of its own
+// (the design is monochrome plus amber/green only); it reads as a neutral
+// "recent" tone and is distinguished by the StateCell's brighter resting look.
 export function dashboardToneForState(state: SessionState): DashboardStatus {
   if (state === 'attention') return 'attention';
   if (state === 'active') return 'live';
-  return 'recent'; // idle | fresh
+  return 'recent'; // finished | idle | fresh
 }
 
 // What the left nav surfaces about a group of sessions (a focus, a project, or
@@ -93,27 +134,36 @@ export interface SessionRollup {
   total: number;
   attention: number;
   active: number;
+  // Sessions that finished a turn off-screen and are unseen ("Ready for you").
+  // Lets a row say "2 ready"; does not raise the rollup tone (it is invitational,
+  // not blocking), so it never reads as the amber attention alarm.
+  finished: number;
   // The highest-priority tone among the sessions: 'attention' wins over 'live'
-  // wins over 'recent' (idle / fresh / empty).
+  // wins over 'recent' (finished / idle / fresh / empty).
   tone: DashboardStatus;
 }
 
+// `viewedSessionId` is the session currently on screen (selected terminal); it is
+// never counted as finished. Pass null when no terminal is in view.
 export function rollupSessionStates(
   sessions: ShellSession[],
   bindings: Record<string, SessionTerminalBinding>,
   cortexActivity: Record<string, ActivityState>,
+  viewedSessionId: string | null = null,
 ): SessionRollup {
   let attention = 0;
   let active = 0;
+  let finished = 0;
   for (const session of sessions) {
     const isBound = Boolean(bindings[session.id]);
     const activity = activityForSession(session, cortexActivity);
-    const state = deriveSessionState(session, isBound, activity);
+    const state = deriveSessionState(session, isBound, activity, session.id === viewedSessionId);
     if (state === 'attention') attention += 1;
     else if (state === 'active') active += 1;
+    else if (state === 'finished') finished += 1;
   }
   const tone: DashboardStatus = attention > 0 ? 'attention' : active > 0 ? 'live' : 'recent';
-  return { total: sessions.length, attention, active, tone };
+  return { total: sessions.length, attention, active, finished, tone };
 }
 
 // The state the live WebGL StateCell renders. A superset of SessionState that
@@ -124,9 +174,10 @@ export function cellStateFor(
   session: ShellSession,
   isBound: boolean,
   activity: ActivityState | null,
+  isViewed = false,
 ): CellSessionState {
   if (activity?.lastError && !activity.lastError.recoverable) return 'error';
-  return deriveSessionState(session, isBound, activity);
+  return deriveSessionState(session, isBound, activity, isViewed);
 }
 
 export type GroupedSessions = Record<SessionState, ShellSession[]>;
@@ -134,21 +185,27 @@ export type GroupedSessions = Record<SessionState, ShellSession[]>;
 // Partition a set of sessions into the user-facing state buckets the Home
 // dashboard and focus view render as sections. Shared so both surfaces classify
 // identically.
+// `viewedSessionId` is the session currently on screen (selected terminal); it
+// never lands in the `finished` bucket. Pass null when no terminal is in view.
 export function groupSessionsByState(
   sessions: ShellSession[],
   bindings: Record<string, SessionTerminalBinding>,
   cortexActivity: Record<string, ActivityState>,
+  viewedSessionId: string | null = null,
 ): GroupedSessions {
   const groups: GroupedSessions = {
     attention: [],
     active: [],
+    finished: [],
     idle: [],
     fresh: [],
   };
   for (const session of sessions) {
     const isBound = Boolean(bindings[session.id]);
     const activity = activityForSession(session, cortexActivity);
-    groups[deriveSessionState(session, isBound, activity)].push(session);
+    groups[deriveSessionState(session, isBound, activity, session.id === viewedSessionId)].push(
+      session,
+    );
   }
   return groups;
 }
@@ -163,6 +220,7 @@ export function plainLanguageStatus(
   session: ShellSession,
   isBound: boolean,
   activity: ActivityState | null,
+  isViewed = false,
 ): string {
   if (activity) {
     switch (activity.status) {
@@ -176,7 +234,11 @@ export function plainLanguageStatus(
       }
       case 'awaiting_input':
       case 'done':
-        return 'Waiting for you';
+        // A turn that came to rest off-screen and unseen reads as an invitation,
+        // distinct from idle's "you already looked" rest state.
+        return hasUnseenCompletion(session, activity, isViewed)
+          ? 'Ready for you'
+          : 'Waiting for you';
       case 'error':
         return activity.lastError?.recoverable ? 'Recovered from error' : 'Errored';
     }

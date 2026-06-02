@@ -2,12 +2,15 @@ import { describe, it, expect } from 'vitest';
 
 import {
   activityForSession,
+  cellStateFor,
   classifyForDashboard,
   dashboardToneForState,
   deriveSessionState,
   glyphStateFor,
   groupSessionsByState,
+  lastTurnCompletedAtMs,
   plainLanguageStatus,
+  rollupSessionStates,
   statusDotColor,
 } from './activity';
 import type { ActivityError, ActivityState, SessionTerminalBinding, ShellSession } from './types';
@@ -178,11 +181,22 @@ describe('deriveSessionState', () => {
     );
   });
 
-  it('routes awaiting-input, done, and recoverable errors to idle', () => {
-    expect(
-      deriveSessionState(makeSession(), true, makeActivity({ status: 'awaiting_input' })),
-    ).toBe('idle');
-    expect(deriveSessionState(makeSession(), false, makeActivity({ status: 'done' }))).toBe('idle');
+  // A turn that came to rest is `idle` only once it has been seen: the session
+  // was viewed after it completed (lastViewedAt > completion) or is the one on
+  // screen now (isViewed). A recoverable error never counts as a completion.
+  it('routes a seen awaiting-input or done turn to idle', () => {
+    const seen = makeSession({ lastViewedAt: '2026-06-01T00:00:00.000Z' }); // after the 2026-05-28 feed
+    expect(deriveSessionState(seen, true, makeActivity({ status: 'awaiting_input' }))).toBe('idle');
+    expect(deriveSessionState(seen, false, makeActivity({ status: 'done' }))).toBe('idle');
+  });
+
+  it('routes a turn you are currently viewing to idle, even if unseen-by-timestamp', () => {
+    expect(deriveSessionState(makeSession(), false, makeActivity({ status: 'done' }), true)).toBe(
+      'idle',
+    );
+  });
+
+  it('routes a recoverable error to idle, never finished', () => {
     expect(
       deriveSessionState(
         makeSession(),
@@ -190,6 +204,33 @@ describe('deriveSessionState', () => {
         makeActivity({ status: 'error', lastError: recoverableError() }),
       ),
     ).toBe('idle');
+  });
+
+  describe('finished (a turn finished off-screen, unseen)', () => {
+    it('routes an unseen done/awaiting-input turn to finished when not viewed', () => {
+      // No lastViewedAt (epoch) -> the 2026 completion is unseen.
+      expect(deriveSessionState(makeSession(), false, makeActivity({ status: 'done' }))).toBe(
+        'finished',
+      );
+      expect(
+        deriveSessionState(makeSession(), false, makeActivity({ status: 'awaiting_input' })),
+      ).toBe('finished');
+    });
+
+    it('routes a turn that completed after the last view to finished', () => {
+      const session = makeSession({ lastViewedAt: '2026-05-01T00:00:00.000Z' }); // before the feed
+      expect(deriveSessionState(session, false, makeActivity({ status: 'done' }))).toBe('finished');
+    });
+
+    it('uses turn.endedAt over updatedAt when present', () => {
+      const seenBetween = makeSession({ lastViewedAt: '2026-05-28T12:00:00.000Z' });
+      // updatedAt is 2026-05-28T00:00 (before the view) but the turn ended after it.
+      const activity = makeActivity({
+        status: 'done',
+        turn: { id: 't', status: 'completed', startedAt: 'x', endedAt: '2026-05-28T18:00:00.000Z' },
+      });
+      expect(deriveSessionState(seenBetween, false, activity)).toBe('finished');
+    });
   });
 
   describe('without activity (record fallback)', () => {
@@ -219,8 +260,31 @@ describe('dashboardToneForState', () => {
   it('maps states to card tones', () => {
     expect(dashboardToneForState('attention')).toBe('attention');
     expect(dashboardToneForState('active')).toBe('live');
+    expect(dashboardToneForState('finished')).toBe('recent'); // no status hue; distinguished by the cell
     expect(dashboardToneForState('idle')).toBe('recent');
     expect(dashboardToneForState('fresh')).toBe('recent');
+  });
+});
+
+describe('lastTurnCompletedAtMs', () => {
+  it('is null when there is no activity or the agent has not come to rest', () => {
+    expect(lastTurnCompletedAtMs(null)).toBeNull();
+    expect(lastTurnCompletedAtMs(makeActivity({ status: 'working' }))).toBeNull();
+    expect(lastTurnCompletedAtMs(makeActivity({ status: 'awaiting_permission' }))).toBeNull();
+    expect(
+      lastTurnCompletedAtMs(makeActivity({ status: 'error', lastError: recoverableError() })),
+    ).toBeNull();
+  });
+
+  it('returns the rest time for done / awaiting_input, preferring turn.endedAt', () => {
+    expect(lastTurnCompletedAtMs(makeActivity({ status: 'done' }))).toBe(
+      Date.parse('2026-05-28T00:00:00.000Z'),
+    );
+    const withTurn = makeActivity({
+      status: 'awaiting_input',
+      turn: { id: 't', status: 'completed', startedAt: 'x', endedAt: '2026-05-28T18:00:00.000Z' },
+    });
+    expect(lastTurnCompletedAtMs(withTurn)).toBe(Date.parse('2026-05-28T18:00:00.000Z'));
   });
 });
 
@@ -246,6 +310,84 @@ describe('groupSessionsByState', () => {
     const groups = groupSessionsByState([session], {}, { n1: makeActivity({ status: 'working' }) });
     expect(groups.active.map(s => s.id)).toEqual(['x']);
     expect(groups.idle).toHaveLength(0);
+  });
+
+  it('puts an unseen finished turn in finished, but not the session being viewed', () => {
+    const done = makeActivity({ status: 'done' });
+    const a = makeSession({ id: 'a', nativeSessionRef: { kind: 'claude_code', sessionId: 'na' } });
+    const b = makeSession({ id: 'b', nativeSessionRef: { kind: 'claude_code', sessionId: 'nb' } });
+    const activity = { na: done, nb: done };
+    // Nothing viewed: both unseen completions land in finished.
+    let groups = groupSessionsByState([a, b], {}, activity);
+    expect(groups.finished.map(s => s.id)).toEqual(['a', 'b']);
+    // Viewing 'a' keeps it out of finished (it falls back to idle).
+    groups = groupSessionsByState([a, b], {}, activity, 'a');
+    expect(groups.finished.map(s => s.id)).toEqual(['b']);
+    expect(groups.idle.map(s => s.id)).toEqual(['a']);
+  });
+});
+
+describe('rollupSessionStates', () => {
+  it('counts attention/active/finished and never lets finished raise the tone', () => {
+    const working = makeSession({
+      id: 'w',
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'nw' },
+    });
+    const finished = makeSession({
+      id: 'f',
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'nf' },
+    });
+    const rollup = rollupSessionStates(
+      [working, finished],
+      {},
+      {
+        nw: makeActivity({ status: 'working' }),
+        nf: makeActivity({ status: 'done' }),
+      },
+    );
+    expect(rollup).toMatchObject({ total: 2, active: 1, finished: 1, attention: 0 });
+    expect(rollup.tone).toBe('live'); // active wins; finished is invitational, not a tone
+
+    const onlyFinished = rollupSessionStates(
+      [finished],
+      {},
+      { nf: makeActivity({ status: 'done' }) },
+    );
+    expect(onlyFinished).toMatchObject({ finished: 1, tone: 'recent' });
+  });
+
+  it('does not count the viewed session as finished', () => {
+    const finished = makeSession({
+      id: 'f',
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'nf' },
+    });
+    const rollup = rollupSessionStates(
+      [finished],
+      {},
+      { nf: makeActivity({ status: 'done' }) },
+      'f',
+    );
+    expect(rollup.finished).toBe(0);
+  });
+});
+
+describe('cellStateFor', () => {
+  it('maps an unseen completion to the finished cell', () => {
+    expect(cellStateFor(makeSession(), false, makeActivity({ status: 'done' }))).toBe('finished');
+  });
+
+  it('keeps a non-recoverable error as the error cell, not finished', () => {
+    expect(
+      cellStateFor(
+        makeSession(),
+        false,
+        makeActivity({ status: 'error', lastError: nonRecoverableError() }),
+      ),
+    ).toBe('error');
+  });
+
+  it('does not show finished for the session being viewed', () => {
+    expect(cellStateFor(makeSession(), false, makeActivity({ status: 'done' }), true)).toBe('idle');
   });
 });
 
@@ -290,19 +432,31 @@ describe('plainLanguageStatus', () => {
       );
     });
 
-    it('reports awaiting_input as waiting, regardless of bound state', () => {
-      expect(
-        plainLanguageStatus(makeSession(), true, makeActivity({ status: 'awaiting_input' })),
-      ).toBe('Waiting for you');
-      expect(
-        plainLanguageStatus(makeSession(), false, makeActivity({ status: 'awaiting_input' })),
-      ).toBe('Waiting for you');
-    });
-
-    it('reports done as waiting for you, never "Ended"', () => {
-      expect(plainLanguageStatus(makeSession(), true, makeActivity({ status: 'done' }))).toBe(
+    it('reports a seen awaiting_input/done turn as waiting, regardless of bound state', () => {
+      const seen = makeSession({ lastViewedAt: '2026-06-01T00:00:00.000Z' });
+      expect(plainLanguageStatus(seen, true, makeActivity({ status: 'awaiting_input' }))).toBe(
         'Waiting for you',
       );
+      expect(plainLanguageStatus(seen, false, makeActivity({ status: 'awaiting_input' }))).toBe(
+        'Waiting for you',
+      );
+      expect(plainLanguageStatus(seen, true, makeActivity({ status: 'done' }))).toBe(
+        'Waiting for you',
+      );
+    });
+
+    it('reports an unseen, off-screen completion as "Ready for you"', () => {
+      // No lastViewedAt -> the completion is unseen; not currently viewed.
+      expect(plainLanguageStatus(makeSession(), false, makeActivity({ status: 'done' }))).toBe(
+        'Ready for you',
+      );
+      expect(
+        plainLanguageStatus(makeSession(), false, makeActivity({ status: 'awaiting_input' })),
+      ).toBe('Ready for you');
+      // The one on screen is never "Ready for you" (you are looking at it).
+      expect(
+        plainLanguageStatus(makeSession(), false, makeActivity({ status: 'done' }), true),
+      ).toBe('Waiting for you');
     });
 
     it('distinguishes recovered and unrecovered errors', () => {

@@ -14,6 +14,7 @@ import {
   rowLabelClass,
   rowMetaClass,
   rowPrimaryClass,
+  rowReadyBadgeClass,
   rowShellClass,
   rowTrailingCapClass,
   rowTrailingClass,
@@ -88,6 +89,18 @@ export function FocusRow({
               title={`${rollup.attention} need${rollup.attention === 1 ? 's' : ''} you`}
             >
               {rollup.attention}
+            </Typography>
+          ) : null}
+          {rollup.finished > 0 ? (
+            <Typography
+              as="span"
+              variant="caption"
+              tone="muted"
+              className={rowReadyBadgeClass}
+              data-row-meta="true"
+              title={`${rollup.finished} ready for you`}
+            >
+              {rollup.finished}
             </Typography>
           ) : null}
           <span className={rowTrailingCapClass}>

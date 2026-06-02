@@ -234,6 +234,13 @@ export interface ShellSession {
   // filesystem watcher, eventually also Claude/Codex hooks). Seeds the
   // dashboard cortexActivity map on app start so state is visible immediately.
   latestActivity?: ActivityState | null;
+  // When the user last viewed this session (ISO 8601, frontend clock). Compared
+  // against the activity feed's last turn-completion time to derive the
+  // `finished` ("Ready for you") state: a turn that completed after this, while
+  // the session was off-screen, is unseen. Absent/null means never recorded
+  // (treated as the epoch); the backend backfills existing rows on upgrade so a
+  // fresh launch does not mass-badge long-finished sessions. See deriveSessionState.
+  lastViewedAt?: string | null;
 }
 
 // Mirrors reverie-core's ActivityStatus enum (snake_case wire format).
@@ -370,11 +377,15 @@ export type DashboardStatus = 'attention' | 'live' | 'recent';
 // record status otherwise. `archived` is handled separately (a filter, not a
 // group), so it is not part of this set.
 //   active   = the agent is mid-turn, actively working
-//   idle     = the session is waiting for you. Whether its process is still
-//              alive or has exited is deliberately not surfaced: opening it
-//              re-attaches if live and resumes if not, so both read the same to
-//              a user. `fresh` (never launched) stays separate because there is
-//              no conversation to reopen yet.
-export type SessionState = 'attention' | 'active' | 'idle' | 'fresh';
+//   finished = the agent finished a turn (or paused for input) while you were
+//              NOT looking at it: "Ready for you, come take a look." The unseen
+//              variant of idle, cleared by viewing the session. Reads quieter
+//              than attention (which means blocked, act now); this is invitational.
+//   idle     = the session is waiting for you and you have already seen the
+//              latest. Whether its process is still alive or has exited is
+//              deliberately not surfaced: opening it re-attaches if live and
+//              resumes if not, so both read the same to a user. `fresh` (never
+//              launched) stays separate because there is no conversation to reopen yet.
+export type SessionState = 'attention' | 'active' | 'finished' | 'idle' | 'fresh';
 
 export type GlyphState = 'working' | 'attention' | 'error' | 'idle';

@@ -67,6 +67,8 @@ export async function invokeBrowserFixture<T>(
       return updateFixtureSessionTabVisibility(args) as T;
     case 'set_session_archived':
       return updateFixtureSessionArchived(args) as T;
+    case 'mark_session_viewed':
+      return markFixtureSessionViewed(args) as T;
     case 'remove_session':
       return removeFixtureSession(args) as T;
     case 'archive_focus':
@@ -266,6 +268,15 @@ function updateFixtureSessionArchived(args?: Record<string, unknown>) {
   if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
   session.archived = request.archived;
   session.tabVisible = !request.archived;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function markFixtureSessionViewed(args?: Record<string, unknown>) {
+  const request = readRequest<{ shellSessionId: string; viewedAt: string }>(args);
+  const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
+  if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
+  session.lastViewedAt = request.viewedAt;
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
@@ -814,6 +825,42 @@ function makePopulatedFixtureSnapshot(
     ...overrides,
   });
 
+  // A live activity-feed snapshot so the populated fixture exercises the
+  // activity-driven dashboard states (Working / Ready for you), not just the
+  // record-status fallbacks. `done` sessions carry no lastViewedAt, so they read
+  // as the unseen `finished` state ("Ready for you").
+  const activity = (
+    nativeId: string,
+    status: 'working' | 'done',
+  ): WorkspaceShellSnapshot['sessions'][number]['latestActivity'] => ({
+    version: 1,
+    sessionId: nativeId,
+    status,
+    updatedAt: '2026-06-02T09:00:00.000Z',
+    sequence: 1,
+    cwd: project.path,
+    turn:
+      status === 'done'
+        ? {
+            id: `${nativeId}-turn`,
+            status: 'completed',
+            startedAt: '2026-06-02T08:55:00.000Z',
+            endedAt: '2026-06-02T09:00:00.000Z',
+          }
+        : { id: `${nativeId}-turn`, status: 'running', startedAt: '2026-06-02T09:00:00.000Z' },
+    activeTools:
+      status === 'working'
+        ? [
+            {
+              toolCallId: 't1',
+              toolName: 'bash',
+              startedAt: '2026-06-02T09:00:00.000Z',
+              displaySummary: 'Running the auth test suite',
+            },
+          ]
+        : [],
+  });
+
   return {
     workspace,
     projects: [project],
@@ -825,6 +872,8 @@ function makePopulatedFixtureSnapshot(
         title: 'OAuth refactor',
         agentKind: 'claude_code',
         status: 'running',
+        nativeSessionRef: { kind: 'claude_code', sessionId: 'native-auth-running' },
+        latestActivity: activity('native-auth-running', 'working'),
       }),
       session({
         id: 'session-auth-failed',
@@ -862,6 +911,8 @@ function makePopulatedFixtureSnapshot(
         title: 'Logo explorations',
         agentKind: 'codex_cli',
         status: 'running',
+        nativeSessionRef: { kind: 'codex_cli', sessionId: 'native-branding-done' },
+        latestActivity: activity('native-branding-done', 'done'),
       }),
       session({
         id: 'session-general-fresh',
@@ -878,6 +929,8 @@ function makePopulatedFixtureSnapshot(
         agentKind: 'claude_code',
         cwd: '/Users/user',
         status: 'restorable',
+        nativeSessionRef: { kind: 'claude_code', sessionId: 'native-general-done' },
+        latestActivity: activity('native-general-done', 'done'),
       }),
     ],
   };

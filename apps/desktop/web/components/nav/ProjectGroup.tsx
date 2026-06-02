@@ -12,6 +12,7 @@ import {
   rowLabelClass,
   rowMetaClass,
   rowPrimaryClass,
+  rowReadyBadgeClass,
   rowShellClass,
   rowTrailingCapClass,
   rowTrailingClass,
@@ -27,6 +28,7 @@ export function ProjectGroup({
   title,
   count,
   attention = 0,
+  finished = 0,
   expanded,
   onToggle,
   onRemove,
@@ -39,6 +41,7 @@ export function ProjectGroup({
   title: string;
   count: number;
   attention?: number;
+  finished?: number;
   expanded: boolean;
   onToggle: () => void;
   onRemove?: (event: MouseEvent<HTMLElement>) => void;
@@ -85,6 +88,18 @@ export function ProjectGroup({
               title={`${attention} need${attention === 1 ? 's' : ''} you`}
             >
               {attention}
+            </Typography>
+          ) : null}
+          {finished > 0 ? (
+            <Typography
+              as="span"
+              variant="caption"
+              tone="muted"
+              className={rowReadyBadgeClass}
+              data-row-meta={onRemove ? 'true' : undefined}
+              title={`${finished} ready for you`}
+            >
+              {finished}
             </Typography>
           ) : null}
           <span className={rowTrailingCapClass}>

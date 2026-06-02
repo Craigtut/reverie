@@ -6,6 +6,7 @@ export { useAppQuit } from './useAppQuit';
 export { useCommandPalette } from './useCommandPalette';
 export { useSessionTabShortcuts } from './useSessionTabShortcuts';
 export { useSessionActivity } from './useSessionActivity';
+export { useSessionViewed } from './useSessionViewed';
 export { useSessionTitle } from './useSessionTitle';
 export { useAgentClis } from './useAgentClis';
 export { useTerminalSession } from './useTerminalSession';
@@ -19,6 +20,7 @@ export { useCreationForm } from './useCreationForm';
 export type { CreationForm } from './useCreationForm';
 export { useWorkspaceMutations } from './useWorkspaceMutations';
 export type { WorkspaceMutations } from './useWorkspaceMutations';
+export { useScrollbarFade } from './useScrollbarFade';
 export { useFileDrop } from './useFileDrop';
 export type {
   FileDropModel,

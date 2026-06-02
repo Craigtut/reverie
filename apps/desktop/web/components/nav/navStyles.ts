@@ -147,6 +147,27 @@ export const rowAttentionBadgeClass = css({
   },
 });
 
+// The "ready" (finished/unseen) rollup badge: "2 ready" worth of sessions that
+// came to rest off-screen. Mirrors the attention badge's shape but carries no
+// status hue (the design is monochrome plus amber/green only); it reads as a
+// present-but-calm neutral dot, distinguishing "look when you can" from the
+// amber "act now" without inventing a third color. Tabular figures keep the
+// count from jittering as it changes.
+export const rowReadyBadgeClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '4px',
+  fontVariantNumeric: 'tabular-nums',
+  transition: 'opacity 120ms ease',
+  '&::before': {
+    content: '""',
+    width: '5px',
+    height: '5px',
+    borderRadius: '50%',
+    background: 'var(--text-2)',
+  },
+});
+
 // A fixed square at the right end of the trailing slot. The rightmost status
 // indicator (a session's state cell, or a group's count) sits centered inside it,
 // and the hover close/remove action overlays it edge-to-edge, so the revealed X
