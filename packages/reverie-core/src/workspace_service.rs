@@ -232,6 +232,21 @@ impl WorkspaceService {
         })
     }
 
+    /// Record that the user viewed a session, clearing its `finished`
+    /// ("Ready for you") marker. `viewed_at` is the frontend clock's ISO 8601
+    /// timestamp, stored verbatim so the persisted value matches the optimistic
+    /// one the renderer already applied; it is compared against the activity
+    /// feed's last turn-completion time to decide whether a later turn is unseen.
+    pub fn mark_session_viewed(
+        &self,
+        session_id: SessionId,
+        viewed_at: String,
+    ) -> Result<WorkspaceSnapshot> {
+        self.update_session(session_id, |session| {
+            session.last_viewed_at = Some(viewed_at);
+        })
+    }
+
     pub fn set_workspace_default_dangerous_mode(
         &self,
         default_dangerous_mode: bool,

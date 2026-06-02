@@ -171,6 +171,14 @@ const MIGRATIONS: &[&str] = &[
     // the cell from this and the configured monospace font, so cell size tracks
     // the setting. Defaults to 14 so existing workspaces upgrade unchanged.
     "ALTER TABLE workspace ADD COLUMN terminal_font_size INTEGER NOT NULL DEFAULT 14;",
+    // v13 -> v14: per-session last-viewed timestamp (ISO 8601), the seen-marker
+    // behind the `finished` ("Ready for you") state. A turn that completes after
+    // this, while the session is off-screen, is unseen. Backfill existing rows to
+    // upgrade time so a fresh launch does not mass-badge sessions that finished
+    // before this shipped; new rows insert NULL (treated as the epoch) and get
+    // stamped the first time the user views them.
+    "ALTER TABLE sessions ADD COLUMN last_viewed_at TEXT;
+     UPDATE sessions SET last_viewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -182,7 +190,7 @@ const CONNECTION_MESSAGE_COLUMNS: &str =
 
 const SESSION_COLUMNS: &str = "id, focus_id, title, agent_kind, cwd, native_session_ref_json, \
      launch_mode, dangerous_mode_override, status, last_exit_code, tab_visible, \
-     latest_activity_json, archived, sort_order";
+     latest_activity_json, archived, sort_order, last_viewed_at";
 
 pub struct SqliteWorkspaceRepository {
     conn: Mutex<Connection>,
@@ -392,8 +400,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
             "INSERT INTO sessions (
                 id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
                 dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json,
-                archived, sort_order
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                archived, sort_order, last_viewed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET
                 focus_id = excluded.focus_id, title = excluded.title,
                 agent_kind = excluded.agent_kind, cwd = excluded.cwd,
@@ -404,7 +412,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 tab_visible = excluded.tab_visible,
                 latest_activity_json = excluded.latest_activity_json,
                 archived = excluded.archived,
-                sort_order = excluded.sort_order",
+                sort_order = excluded.sort_order,
+                last_viewed_at = excluded.last_viewed_at",
             params![
                 session.id.to_string(),
                 session.focus_id.to_string(),
@@ -420,6 +429,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 latest_activity_json,
                 bool_to_int(session.archived),
                 session.sort_order,
+                session.last_viewed_at,
             ],
         )
         .map_err(backend)?;
@@ -855,6 +865,7 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         latest_activity: activity_state_from_db(row.get::<_, Option<String>>(11)?)?,
         archived: int_to_bool(row.get::<_, i64>(12)?),
         sort_order: row.get(13)?,
+        last_viewed_at: row.get::<_, Option<String>>(14)?,
     })
 }
 

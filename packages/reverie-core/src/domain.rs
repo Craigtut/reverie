@@ -279,6 +279,14 @@ pub struct Session {
     /// create so neighbors leave room; defaults to 0 for pre-reorder sessions.
     #[serde(default)]
     pub sort_order: i64,
+    /// When the user last viewed this session (ISO 8601 / RFC 3339, frontend
+    /// clock). Compared against the activity feed's last turn-completion time to
+    /// derive the `finished` ("Ready for you") state: a turn that completed after
+    /// this, while the session was off-screen, is unseen. `None` means never
+    /// recorded; the migration backfills existing rows to upgrade time so a fresh
+    /// launch does not mass-badge sessions that finished long ago.
+    #[serde(default)]
+    pub last_viewed_at: Option<String>,
 }
 
 impl Session {
@@ -303,6 +311,7 @@ impl Session {
             archived: false,
             latest_activity: None,
             sort_order: 0,
+            last_viewed_at: None,
         }
     }
 
