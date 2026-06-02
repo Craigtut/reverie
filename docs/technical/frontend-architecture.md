@@ -81,7 +81,7 @@ The scroll-back path is frontend-owned for the viewport and backend-owned for te
 2. Expand the local persistence-backed shell store toward real repository/service APIs and durable session status updates.
 3. Grow the first-run intent strip into proper create-focus/create-session forms while keeping Project selection optional and General sessions intentional.
 4. Keep Motion animations outside the terminal hot path.
-5. Use render/scroll instrumentation around the WebGL2 terminal path to tune glyph batching, overlay invalidation, and history-range prefetch sizing (the open scroll-performance work; see [`implementation-queue.md`](implementation-queue.md)).
+5. Use render/scroll instrumentation around the WebGL2 terminal path to tune glyph batching, overlay invalidation, and history-range prefetch sizing. The scroll-back-collapse work that prompted this is fixed (free scroll with placeholders, no cache-wipe on a `total_rows` dip, viewport-sized bidirectional prefetch); see [`implementation-queue.md`](implementation-queue.md) and [`terminal/scrollback-coverage-design.md`](terminal/scrollback-coverage-design.md).
 6. Keep WebGPU behind the renderer backend interface until Tauri's WebView runtime supports it reliably.
 
 ## Guardrails

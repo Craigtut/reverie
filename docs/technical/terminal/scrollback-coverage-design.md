@@ -33,7 +33,7 @@ Definition and rules:
 - **Below the cap, `lines_evicted == 0`, so `id == buffer_position`** exactly. The id machinery is inert until the buffer first evicts; the common session never exercises it.
 - **Trim:** `lines_evicted += N`. Every surviving row keeps its id; the frontend only learns `oldest_id` advanced and drops the rows below it. **No re-seed.** (This is the decisive win over position-keying, which re-seeds or desyncs on every trim.)
 - **Append:** new rows take the next ids; `newest_id` advances; nothing existing is renumbered.
-- **Reflow (resize):** rewraps rows, so the *content behind* ids changes even though the id space stays monotonic. We do not remap ids one-to-one (neither does WezTerm); we **re-seed**: bump the generation, drop the cache, re-fetch, and re-anchor the viewport to the content at the top of the prior view (best-effort). So trim is handled by the id (no re-seed); reflow is handled by re-seed. Together they cover all churn.
+- **Reflow (resize):** rewraps rows, so the *content behind* ids changes even though the id space stays monotonic. We do not remap ids one-to-one (neither does WezTerm); we **re-seed**: bump the generation, drop the cache, and re-fetch. Two honest caveats on the scrolled-back case, both analyzed in [`resize-reflow-anchoring.md`](resize-reflow-anchoring.md) (D9): we do NOT currently re-anchor the scroll *position* across reflow (the viewport keeps its pixel offset, which now maps to different content, so the view jumps); and reflowing a redraw-heavy TUI's hard-wrapped scroll-back is inherently lossy regardless of anchoring. So trim is handled by the id (no re-seed); reflow is handled by re-seed. Together they cover all churn.
 
 **The one honest residual.** Keeping `lines_evicted` exact requires knowing how many rows libghostty evicted, and 0.1.1 emits no eviction signal; eviction happens silently inside the core, and coalesced append+prune within one write batch can mask the count in `total_rows` deltas. So `lines_evicted` is **exact below the cap (zero)** and **best-effort at the cap**. The only user-visible effect is in one corner: scrolled back *while* output is actively flooding past the dial, the anchor can **drift** (content stays correct; the scroll position slides) until it re-anchors. This is graceful, never wrong content and never a livelock, far smaller than position-keying's desync-on-every-trim, the same case WezTerm re-anchors for, and it becomes **exact for free, with no architecture change**, the moment libghostty ships an eviction/pin signal in a release (we swap our estimate for its exact value). Accepted as the price of staying on the official library with no fork (D8).
 
@@ -51,11 +51,13 @@ A blank row that has **drifted** out of the viewport is in neither set, so a scr
 Derived rules:
 
 1. **Trim is not a generation bump.** `oldest_id` advances, the mirror + settled ranges realign, evicted rows drop; survivors keep their place. No re-seed.
-2. **Live-wins-in-overlap.** A live frame overwrites a row's mirror entry at its position, so the live tail wins over an older fetched value wherever they overlap.
-3. **Reflow re-seeds; clear and alt do not.** Only a reflow (resize) bumps the generation and re-seeds. Clear and alt-screen need no bump (see scenarios A and C in section 6 for why).
-4. **Drift self-heals.** At the cap `oldest_id` is best-effort (D8). A stale anchor is corrected the moment the affected window is re-fetched, because the fetch round-trips through the *live* `oldest_id` (the merge converts `start_id - oldest_id` and drops a band whose rows have since evicted).
-5. **Prefetch lead, not a hysteresis state machine.** Smooth scroll-up comes from prefetching a band ahead of the viewport edge (the controller's overscan) plus in-flight dedup. There is no Confirmed/Provisional state to flip, so there is nothing to thrash.
-6. **Cache bound.** The mirror is bounded by a row limit; rows farthest from the viewport are pruned.
+2. **A `total_rows` dip is not a reset.** A redraw-heavy TUI (Ink) shrinks and regrows its live area every frame, so the backend's `total_rows` oscillates below the cap with no eviction. A dip does NOT wipe or trim the mirror: the live frame overwrites the active rows and the immutable scroll-back below is kept; the extent follows `total_rows`. Only a genuine collapse to a single screen (`totalRows <= viewportRows`), a reflow, or a metadata-less fresh frame resets the mirror (`applyViewportFrameToBuffer`). Wiping on every dip caused an Ink-only re-fetch flap that read as blank / looping scroll-back.
+3. **Live-wins-in-overlap.** A live frame overwrites a row's mirror entry at its position, so the live tail wins over an older fetched value wherever they overlap.
+4. **Reflow re-seeds; clear and alt do not.** Only a reflow (resize) bumps the generation and re-seeds. Clear and alt-screen need no bump (see scenarios A and C in section 6 for why).
+5. **Drift self-heals.** At the cap `oldest_id` is best-effort (D8). A stale anchor is corrected the moment the affected window is re-fetched, because the fetch round-trips through the *live* `oldest_id` (the merge converts `start_id - oldest_id` and drops a band whose rows have since evicted).
+6. **Coverage decides fetch-vs-render, never the scroll gesture.** Coverage answers "can I paint this row without a fetch?" It does NOT gate scrolling: the viewport always moves to wherever the user scrolls and paints blank placeholders for not-yet-fetched rows, which the prefetch fills async (`scrollBufferedToTop`). A coverage-gated scroll once hard-capped scroll-back at the cached tail; that is fixed.
+7. **Prefetch lead, not a hysteresis state machine.** Smooth scroll-up comes from prefetching a band ahead of the viewport edge (the controller's viewport-sized overscan, led in both directions) plus in-flight dedup. There is no Confirmed/Provisional state to flip, so there is nothing to thrash.
+8. **Cache bound.** The mirror is bounded by a row limit; rows farthest from the viewport are pruned.
 
 ## 5. Data flow and per-component changes
 
@@ -76,7 +78,7 @@ Derived rules:
 
 ## 6. Scenario analysis
 
-(B = the bug we are fixing; the rest is the foundation.)
+(B = the bug we are fixing; the rest is the foundation.) Note: a few scenarios below call a row "Confirmed"; that is legacy shorthand from the original plan. The model is now stateless (section 4), so read "Confirmed" as "covered by provenance" (present in a settled range or the live viewport). There is no Confirmed/Provisional state to flip.
 
 - **N. Normal output, small session.** `lines_evicted == 0`, `id == position`. Live frames mark ids Confirmed; scrolling is local. No fetch until past the mirror.
 - **B1. Ink/TUI blank-padded tail.** The tail window's top row is blank but in the current viewport -> Confirmed -> covered -> no perpetual miss. **Fixes the reported bug.**

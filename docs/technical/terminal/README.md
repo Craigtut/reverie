@@ -26,6 +26,7 @@ See [`decisions.md`](decisions.md) (D2) for why, and the Non-goals section in [`
 - [`frontend.md`](frontend.md) — the WebView side: the row mirror, the viewport, driving scrolling and topping up rows, the WebGL2 glyph-atlas renderer, and input.
 - [`scrollback-coverage-design.md`](scrollback-coverage-design.md) — the scroll-back rework: how the frontend decides render-vs-fetch per row (coverage by provenance, the fix for the Ink scroll-stops bug) and how rows keep a stable id across trim and reflow (the backend-computed StableRowIndex model, D8).
 - [`libghostty-history-limits.md`](libghostty-history-limits.md) — how far back `libghostty`'s buffer reaches, how it stores and serves rows, row identity across trim and reflow, and the caveats.
+- [`resize-reflow-anchoring.md`](resize-reflow-anchoring.md) — why resizing while scrolled back reflows cleanly for line-oriented CLIs but jumbles a TUI's (Ink/Claude) hard-wrapped history, why that is inherent (even Ghostty's app does it), the viewport-pin position re-anchor we found but deferred, and the v0 decision to accept it (D9).
 - [`performance-and-acceptance.md`](performance-and-acceptance.md) — the budgets and the acceptance checklist: the yardstick for "is the implementation faithful to this architecture".
 - [`decisions.md`](decisions.md) — the log of pivotal decisions and why.
 

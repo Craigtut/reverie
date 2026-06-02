@@ -105,3 +105,15 @@ A log of pivotal, hard-to-reverse terminal decisions: the choice, why, the alter
 **Consequence (the one residual).** Keeping `lines_evicted` exact needs an eviction count the released ABI does not emit, so at the cap while actively flooding *and* scrolled back, the anchor can drift (content stays correct, it self-re-anchors). Never wrong content, never a livelock. It is exact for free, with no architecture change, once `libghostty` ships an eviction/pin signal in a release.
 
 **Revisit when** `libghostty-vt` publishes a release exposing tracked pins, a page serial, or an eviction/line counter: adopt it to make `lines_evicted` exact and retire the residual.
+
+## D9: Reflowing a TUI's hard-wrapped scroll-back across a resize is an accepted limitation, not a bug
+
+**Status:** Accepted, 2026-06-02. Full findings in [`resize-reflow-anchoring.md`](resize-reflow-anchoring.md).
+
+**Context.** Resizing width while scrolled back into history reflows cleanly for line-oriented CLIs (Codex, Cortex, shells) but looks jumbled for redraw-heavy TUIs (Claude Code / Ink): widening does not refill the space, narrowing overflow-wraps to new lines. A terminal can only re-wrap *soft-wrapped* content (a long logical line it wrapped itself, flagged as continuation); it cannot rejoin an app's *hard-wrapped* lines (pre-broken with explicit newlines), because the logical-break information is gone. Ink hard-wraps and positions its output, so its scroll-back is frozen at the render-time width. Verified: Ghostty's own macOS terminal app reflows scrolled-back TUI history with the identical imperfect result, confirming the limit is inherent to the content, not our implementation.
+
+**Decision.** Do not attempt to make a TUI's scrolled-back history reflow cleanly. The live tail is correct (the CLI re-renders it), line-oriented CLIs reflow correctly, and only a TUI's scrolled-back history reflows imperfectly. Treat this as a documented known limitation.
+
+**What we explicitly separated.** Position (the scroll anchor) and content (reflow quality) are different problems. Position is fixable: libghostty preserves the viewport pin across reflow and our released binding exposes it (`scroll_viewport` + `scrollbar`), so a future re-anchor needs no fork (refines D8). It is deferred because it fixes only the position jump, not the content jumble that is the actual complaint, and Ghostty's app does not bother to anchor the scrolled-back position either.
+
+**Revisit if** we want to remove the position jump on resize (cheap, exact, helps every CLI; see the findings doc), or if a product need justifies a frozen/letterboxed historical layer to make TUI history look clean (heavy; contradicts D5/D7).
