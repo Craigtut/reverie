@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { CaretRight, Minus, Moon, Plus, Sun } from '@phosphor-icons/react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
+import { scrollFadeClass } from '../../themes/scrollbars';
+import { useScrollbarFade } from '../../hooks/useScrollbarFade';
 import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
 import type { CreateSessionRecordRequest } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
@@ -64,9 +66,14 @@ export function SettingsSurface({
   const enablement = useAgentCliEnablement(() => void bridge.refresh());
 
   const [tab, setTab] = useState<SettingsTab>('general');
+  const scrollRef = useScrollbarFade<HTMLDivElement>();
 
   return (
-    <div className={settingsSurfaceClass} data-testid="settings-surface">
+    <div
+      ref={scrollRef}
+      className={cx(settingsSurfaceClass, scrollFadeClass)}
+      data-testid="settings-surface"
+    >
       <div className={settingsScrollClass}>
         <header className={settingsHeaderClass}>
           <Typography

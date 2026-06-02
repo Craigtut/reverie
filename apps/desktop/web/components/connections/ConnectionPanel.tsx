@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { X } from '@phosphor-icons/react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
+import { scrollFadeClass } from '../../themes/scrollbars';
+import { useScrollbarFade } from '../../hooks/useScrollbarFade';
 import {
   closeConnection,
   fetchConnectionTranscript,
@@ -31,6 +33,7 @@ export function ConnectionPanel({
   const [transcripts, setTranscripts] = useState<Record<string, ConnectionMessage[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const scrollRef = useScrollbarFade<HTMLUListElement>();
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
@@ -116,6 +119,7 @@ export function ConnectionPanel({
             as="p"
             variant="smallBody"
             tone="inherit"
+            selectable
             className={errorClass}
             role="alert"
             style={{ color: 'var(--status-warning, #b03f1f)' }}
@@ -128,7 +132,7 @@ export function ConnectionPanel({
             No connections yet for this session.
           </Typography>
         ) : (
-          <ul className={listClass}>
+          <ul ref={scrollRef} className={cx(listClass, scrollFadeClass)}>
             {ordered.map(connection => (
               <li key={connection.id} className={connectionRowClass}>
                 <ConnectionHeader connection={connection} />

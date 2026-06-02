@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { motion } from 'motion/react';
 import { CircleDashed, MagnifyingGlass } from '@phosphor-icons/react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
+import { scrollFadeClass } from '../../themes/scrollbars';
+import { useScrollbarFade } from '../../hooks/useScrollbarFade';
 import { buildPaletteEntries, filterPalette } from '../../domain';
 import type { ShellSession } from '../../domain';
 import { useActivityStore, usePaletteStore, useShellStore } from '../../store';
@@ -34,6 +36,7 @@ export function CommandPalette({
   );
   const filtered = useMemo(() => filterPalette(entries, query), [entries, query]);
   const [highlight, setHighlight] = useState(0);
+  const scrollRef = useScrollbarFade<HTMLUListElement>();
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -90,7 +93,11 @@ export function CommandPalette({
           />
           <Kbd keys={['⌘', 'K']} />
         </div>
-        <ul className={paletteListClass} data-testid="command-palette-results">
+        <ul
+          ref={scrollRef}
+          className={cx(paletteListClass, scrollFadeClass)}
+          data-testid="command-palette-results"
+        >
           {filtered.length === 0 ? (
             <Typography
               as="li"
