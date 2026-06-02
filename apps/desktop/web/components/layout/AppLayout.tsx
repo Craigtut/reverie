@@ -24,6 +24,7 @@ import {
   useUiStore,
 } from '../../store';
 import { css } from '../../styled-system/css';
+import { DEFAULT_TERMINAL_FONT_SIZE } from '../../terminal/terminalMetrics';
 import { appShellClass } from '../../themes/appShell';
 import { DotField } from '../chrome';
 import { Sidebar } from '../nav';
@@ -129,6 +130,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceDefaultNewSessionDangerous,
     setWorkspaceTheme,
     setWorkspaceDefaultAgentKind,
+    setWorkspaceTerminalFontSize,
     toggleSelectedSessionYolo,
     archiveSession,
     restoreSessionTab,
@@ -258,6 +260,8 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
               void setWorkspaceDefaultNewSessionDangerous(next);
               setNewSessionDangerousMode(next);
             }}
+            terminalFontSize={shell.workspace.terminalFontSize ?? DEFAULT_TERMINAL_FONT_SIZE}
+            onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
           />
         ) : surfaceMode === 'session-history' ? (
           <SessionHistorySurface

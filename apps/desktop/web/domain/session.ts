@@ -14,6 +14,7 @@ export function fallbackShellSnapshot(): WorkspaceShellSnapshot {
       defaultNewSessionDangerous: false,
       theme: 'dark',
       defaultAgentKind: 'cortex_code',
+      terminalFontSize: 14,
     },
     projects: [],
     focuses: [],

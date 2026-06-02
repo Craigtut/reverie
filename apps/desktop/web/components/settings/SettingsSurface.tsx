@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CaretRight, Moon, Sun } from '@phosphor-icons/react';
+import { CaretRight, Minus, Moon, Plus, Sun } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
@@ -7,6 +7,7 @@ import type { CreateSessionRecordRequest } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
 import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
 import { useShellStore } from '../../store';
+import { MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE } from '../../terminal/terminalMetrics';
 import { SegmentedTabs, type SegmentedTabItem } from '../primitives/SegmentedTabs';
 import { Typography } from '../primitives/Typography';
 import { AgentsSection } from './AgentsSection';
@@ -31,6 +32,8 @@ export function SettingsSurface({
   onSetDefaultAgentKind,
   defaultNewSessionDangerous,
   onSetDefaultNewSessionDangerous,
+  terminalFontSize,
+  onSetTerminalFontSize,
 }: {
   // The persisted workspace theme; the handler flips the live UI and persists.
   theme: 'light' | 'dark';
@@ -43,7 +46,16 @@ export function SettingsSurface({
   // and writes this, not the ephemeral composer state.
   defaultNewSessionDangerous: boolean;
   onSetDefaultNewSessionDangerous: (value: boolean) => void;
+  // The persisted terminal font size (CSS px). The stepper reflects and writes
+  // this; the terminal hook re-derives the cell so it live-applies to open
+  // terminals.
+  terminalFontSize: number;
+  onSetTerminalFontSize: (value: number) => void;
 }) {
+  const clampedFontSize = Math.min(
+    MAX_TERMINAL_FONT_SIZE,
+    Math.max(MIN_TERMINAL_FONT_SIZE, Math.round(terminalFontSize)),
+  );
   const detections = useShellStore(s => s.agentCliDetections);
 
   // The bridge status lives here, not inside the bridge section, so disabling a
@@ -147,6 +159,59 @@ export function SettingsSurface({
                       onClick={() => onSetTheme('dark')}
                     >
                       <Moon size={15} />
+                    </button>
+                  </div>
+                </li>
+                <li className={settingsRowClass}>
+                  <div className={settingsRowTextClass}>
+                    <Typography
+                      as="span"
+                      variant="smallBody"
+                      tone="default"
+                      style={{ letterSpacing: '-0.005em' }}
+                    >
+                      Terminal font size
+                    </Typography>
+                    <Typography
+                      as="span"
+                      variant="caption"
+                      tone="faint"
+                      style={{ lineHeight: 1.5 }}
+                    >
+                      Sizes every terminal's cell from the font. Applies to open terminals.
+                    </Typography>
+                  </div>
+                  <div className={fontSizeStepperClass}>
+                    <button
+                      type="button"
+                      aria-label="Decrease terminal font size"
+                      data-testid="settings-font-size-decrease"
+                      disabled={clampedFontSize <= MIN_TERMINAL_FONT_SIZE}
+                      onClick={() =>
+                        onSetTerminalFontSize(Math.max(MIN_TERMINAL_FONT_SIZE, clampedFontSize - 1))
+                      }
+                    >
+                      <Minus size={14} weight="bold" />
+                    </button>
+                    <Typography
+                      as="span"
+                      variant="smallBody"
+                      tone="default"
+                      className={fontSizeValueClass}
+                      data-testid="settings-font-size-value"
+                    >
+                      {clampedFontSize}px
+                    </Typography>
+                    <button
+                      type="button"
+                      aria-label="Increase terminal font size"
+                      data-testid="settings-font-size-increase"
+                      disabled={clampedFontSize >= MAX_TERMINAL_FONT_SIZE}
+                      onClick={() =>
+                        onSetTerminalFontSize(Math.min(MAX_TERMINAL_FONT_SIZE, clampedFontSize + 1))
+                      }
+                    >
+                      <Plus size={14} weight="bold" />
                     </button>
                   </div>
                 </li>
@@ -367,6 +432,38 @@ const themeSegmentedClass = css({
     background: 'var(--surface-3)',
     boxShadow: 'inset 0 0 0 1px var(--line-strong)',
   },
+});
+
+// A compact minus / value / plus stepper, styled to match the theme pill: a
+// pill-bordered group with two round step buttons flanking the current size.
+const fontSizeStepperClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: '3px',
+  borderRadius: '999px',
+  border: '1px solid var(--line)',
+  background: 'color-mix(in srgb, var(--surface-1) 80%, transparent)',
+  gap: '2px',
+  '& button': {
+    width: '28px',
+    height: '28px',
+    display: 'grid',
+    placeItems: 'center',
+    borderRadius: '999px',
+    color: 'var(--text-3)',
+    cursor: 'pointer',
+    transition: 'color 140ms ease, background 140ms ease',
+    _hover: { color: 'var(--text)', background: 'var(--surface-3)' },
+    _disabled: { color: 'var(--text-4)', cursor: 'not-allowed', _hover: { background: 'none' } },
+  },
+});
+
+// The current size readout between the step buttons. A fixed min-width keeps the
+// stepper from reflowing as the digit count changes; tabular figures align.
+const fontSizeValueClass = css({
+  minWidth: '40px',
+  textAlign: 'center',
+  fontVariantNumeric: 'tabular-nums',
 });
 
 const settingsSelectWrapClass = css({

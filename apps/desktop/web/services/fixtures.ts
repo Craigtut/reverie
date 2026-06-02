@@ -131,6 +131,11 @@ export async function invokeBrowserFixture<T>(
       // lands on the seeded default view (which the smoke test asserts). Nav
       // restore is verified in the real app, not here.
       return undefined as T;
+    case 'set_terminal_font_size':
+      // The harness mirrors the real command so the font-size setting live-applies
+      // to the open terminal for visual iteration; persistence across reload is
+      // verified in the real app.
+      return setFixtureTerminalFontSize(args) as T;
     case 'open_url': {
       // In the browser harness there is no system opener; open a new tab so a
       // human can see the link resolve. The desktop build routes this to the
@@ -426,6 +431,16 @@ function setFixtureAgentCliEnabled(args?: Record<string, unknown>): AgentCliDete
     fixtureDisabledClis.add(request.kind);
   }
   return listFixtureAgentClis();
+}
+
+function setFixtureTerminalFontSize(args?: Record<string, unknown>) {
+  const request = readRequest<{ terminalFontSize: number }>(args);
+  fixtureShell = {
+    ...fixtureShell,
+    workspace: { ...fixtureShell.workspace, terminalFontSize: request.terminalFontSize },
+  };
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
 }
 
 function startFixtureSession(args?: Record<string, unknown>) {
@@ -725,6 +740,7 @@ function makeFixtureShellSnapshot(): WorkspaceShellSnapshot {
     defaultNewSessionDangerous: false,
     theme: 'dark',
     defaultAgentKind: 'cortex_code',
+    terminalFontSize: 14,
   };
 
   const generalFocus = {

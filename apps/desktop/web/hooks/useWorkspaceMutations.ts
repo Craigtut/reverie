@@ -122,6 +122,22 @@ export function useWorkspaceMutations({
     }
   }
 
+  // Persist the terminal font size. The terminal hook reads it from the shell
+  // snapshot and re-derives the cell from the font, so the change live-applies to
+  // open terminals (the renderer remeasures and the backend PTY is resized).
+  async function setWorkspaceTerminalFontSize(next: number) {
+    if (shell.workspace.terminalFontSize === next) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_terminal_font_size', {
+        request: { terminalFontSize: next },
+      });
+      setShell(snapshot);
+      appendLog(`Terminal font size set to ${next}px.`);
+    } catch (error) {
+      appendLog(`Update terminal font size failed: ${errorMessage(error)}`);
+    }
+  }
+
   async function toggleSelectedSessionYolo() {
     // The CLIs read their auto-approve flag at process start, so changing the
     // setting on a live session means terminate + relaunch with --resume +
@@ -380,6 +396,7 @@ export function useWorkspaceMutations({
     setWorkspaceDefaultNewSessionDangerous,
     setWorkspaceTheme,
     setWorkspaceDefaultAgentKind,
+    setWorkspaceTerminalFontSize,
     toggleSelectedSessionYolo,
     archiveSession,
     restoreSessionTab,

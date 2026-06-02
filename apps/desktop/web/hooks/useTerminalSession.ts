@@ -48,12 +48,14 @@ import {
 } from '../terminal/wireDecode';
 import type { TerminalBridgeFramePayload } from '../services/terminalBridge';
 import { createSession } from '../services/shellApi';
-import { TERMINAL_SURFACE } from '../terminal-canvas-renderer';
 import {
   SCROLL_FOLLOW_EPSILON_PX,
+  defaultTerminalSurface,
   terminalInsetPx,
   terminalSurfaceForBounds,
+  terminalSurfaceForFontSize,
 } from '../terminalScrollback';
+import { DEFAULT_TERMINAL_FONT_SIZE } from '../terminal/terminalMetrics';
 import { useNavigationStore, useShellStore, useTerminalStore, useUiStore } from '../store';
 import { TERMINAL_THEME } from '../themes/terminalTheme';
 import { openExternalUrl } from '../services/openApi';
@@ -400,7 +402,10 @@ export function useTerminalSession(params: {
   const controllerRef = useRef<TerminalController | null>(null);
   if (controllerRef.current === null) {
     controllerRef.current = createTerminalController({
-      surface: TERMINAL_SURFACE,
+      // Seed with the default font measured at the real device pixel ratio. The
+      // persisted font-size effect (below) re-derives the cell once the shell
+      // snapshot loads and on every change; the resize observer fits the grid.
+      surface: defaultTerminalSurface(),
       onScrollbackRowCount: count => useTerminalStore.getState().setScrollbackRowCount(count),
       onLiveFollow: live => {
         lastLiveFollowRef.current = live;
@@ -595,6 +600,25 @@ export function useTerminalSession(params: {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- controller/writeLog are stable refs
   }, [theme]);
 
+  // Re-derive the terminal grid whenever the persisted font size changes (the
+  // workspace setting) or the display's device pixel ratio changes. Both shift
+  // the device-aligned cell, so the cell, cols/rows, glyph atlas, and backend
+  // PTY size must all be recomputed; applyTerminalFontSize does that and
+  // live-applies to any open terminal. The font size lives on the workspace
+  // snapshot; absent (a fresh or pre-migration workspace) it falls back to the
+  // default. The dpr listener uses matchMedia so a monitor move re-measures.
+  const terminalFontSize =
+    useShellStore(s => s.shell.workspace.terminalFontSize) ?? DEFAULT_TERMINAL_FONT_SIZE;
+  useEffect(() => {
+    applyTerminalFontSize(terminalFontSize);
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+    const onChange = () => applyTerminalFontSize(terminalFontSize);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- controller + refs are stable
+  }, [terminalFontSize]);
+
   // Switching the displayed session drops any active selection/hover. Without
   // this, a selection made in session A would pin session B's viewport
   // (shouldAutoFollow stays false) and Copy/Send-to-input would read B at A's
@@ -643,6 +667,42 @@ export function useTerminalSession(params: {
     const previous = controller.getSurface();
     const next = terminalSurfaceForBounds(width, height, previous);
     if (next.cols === previous.cols && next.rows === previous.rows) return;
+
+    controller.setSurface(next);
+    useTerminalStore.getState().setTerminalSurface(next);
+    controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
+
+    const terminalId = useTerminalStore.getState().activeTerminalId;
+    if (terminalId) {
+      scheduleBackendTerminalResize(terminalId, next.cols, next.rows);
+    }
+  }
+
+  // Re-derive the whole grid for a new terminal font size. The cell is measured
+  // from the font at the current device pixel ratio (terminalSurfaceForFontSize),
+  // then re-fit to the live viewport so cols/rows track the new cell. The
+  // controller remounts the renderer (the mount key includes font size + cell)
+  // and the backend is told the new cols/rows. Live-applies to open terminals.
+  function applyTerminalFontSize(fontSize: number) {
+    const previous = controller.getSurface();
+    // Re-measure the base cell, then carry the new cell into a viewport re-fit.
+    // Use the live viewport when present so the grid is exact; otherwise keep the
+    // base grid (the resize observer fits it once the viewport is measured).
+    const measured = terminalSurfaceForFontSize(fontSize, previous);
+    const viewport = surfaceViewportRef.current;
+    const next =
+      viewport && viewport.clientWidth > 0 && viewport.clientHeight > 0
+        ? terminalSurfaceForBounds(viewport.clientWidth, viewport.clientHeight, measured)
+        : measured;
+    if (
+      next.cellWidth === previous.cellWidth &&
+      next.cellHeight === previous.cellHeight &&
+      next.fontSize === previous.fontSize &&
+      next.cols === previous.cols &&
+      next.rows === previous.rows
+    ) {
+      return;
+    }
 
     controller.setSurface(next);
     useTerminalStore.getState().setTerminalSurface(next);
