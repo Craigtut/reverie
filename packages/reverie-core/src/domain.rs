@@ -40,6 +40,12 @@ pub struct Workspace {
     /// form and does not change any existing session.
     #[serde(default = "default_agent_kind")]
     pub default_agent_kind: AgentKind,
+    /// Terminal font size in CSS px. The renderer measures the terminal cell
+    /// from this and the configured monospace font, so the cell tracks the
+    /// setting. Defaults to 14 so existing/serialized rows without it upgrade
+    /// unchanged. The domain stores it verbatim; the renderer validates/clamps.
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: u16,
     /// Opaque, frontend-owned UI view state (the last selected focus/session,
     /// active surface, and sidebar accordion), persisted so the workspace
     /// reopens where the user left it instead of resetting to the dashboard on
@@ -61,6 +67,7 @@ impl Workspace {
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
             default_agent_kind: AgentKind::CortexCode,
+            terminal_font_size: default_terminal_font_size(),
             nav_state: None,
         }
     }
@@ -70,6 +77,12 @@ impl Workspace {
 /// persisted or serialized data: Cortex Code, matching the composer default.
 fn default_agent_kind() -> AgentKind {
     AgentKind::CortexCode
+}
+
+/// Default terminal font size (CSS px) when absent from persisted or serialized
+/// data, matching the renderer's default.
+fn default_terminal_font_size() -> u16 {
+    14
 }
 
 /// Persisted light/dark appearance. Serializes as "light"/"dark" to match the
