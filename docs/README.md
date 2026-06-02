@@ -24,3 +24,7 @@ Documentation for Reverie, a local-first agentic workspace. Start with the visio
 - [`technical/packaging-and-distribution.md`](technical/packaging-and-distribution.md): how the app is bundled, how the Ghostty dylib is shipped without runtime `DYLD_LIBRARY_PATH`, code signing, and the tag-driven release flow.
 - [`technical/cortex-activity-contract.md`](technical/cortex-activity-contract.md) — authoritative spec for the Cortex Code activity-state surface (per-session `activity/state.json` + `events.jsonl`).
 - [`technical/activity-ingestion.md`](technical/activity-ingestion.md) — how per-CLI session lifecycle signal is normalized into one `ActivityState`: the `ActivityUpdate` spine, the correlator, the four-axis taxonomy, and the "how to add a CLI" decision tree.
+
+## Planning
+
+- [`ideas-and-tickets.md`](ideas-and-tickets.md) — the parking lot: ideas, to-dos, and open tickets not yet in active work, each with the what / why / UX shape / open questions.
