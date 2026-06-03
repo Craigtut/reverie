@@ -1,9 +1,7 @@
 import { motion } from 'motion/react';
 import { CheckCircle, Plus, Warning } from '@phosphor-icons/react';
 
-import { css, cx } from '../../styled-system/css';
-import { useScrollbarFade } from '../../hooks/useScrollbarFade';
-import { scrollFadeClass } from '../../themes/scrollbars';
+import { css } from '../../styled-system/css';
 import { groupSessionsByState } from '../../domain';
 import type {
   ActivityState,
@@ -51,7 +49,6 @@ export function DashboardSurface({
   onOpenSettings: () => void;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
-  const scrollRef = useScrollbarFade<HTMLDivElement>();
   const active = shell.sessions.filter(s => !s.archived);
   const groups = groupSessionsByState(active, sessionTerminalBindings, cortexActivity);
 
@@ -103,8 +100,7 @@ export function DashboardSurface({
   return (
     <div className={dashboardSurfaceClass} data-testid="dashboard-surface">
       <motion.div
-        ref={scrollRef}
-        className={cx(dashboardContentClass, scrollFadeClass)}
+        className={dashboardContentClass}
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}

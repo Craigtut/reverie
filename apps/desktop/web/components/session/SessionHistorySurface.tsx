@@ -1,9 +1,7 @@
 import { motion } from 'motion/react';
 import { Archive, Plus, Warning } from '@phosphor-icons/react';
 
-import { css, cx } from '../../styled-system/css';
-import { scrollFadeClass } from '../../themes/scrollbars';
-import { useScrollbarFade } from '../../hooks/useScrollbarFade';
+import { css } from '../../styled-system/css';
 import { agentLabel, groupSessionsByState, shortId } from '../../domain';
 import type {
   ActivityState,
@@ -60,7 +58,6 @@ export function SessionHistorySurface({
   onCreateSession: () => void;
   busy: boolean;
 }) {
-  const scrollRef = useScrollbarFade<HTMLDivElement>();
   const project = focus?.projectId
     ? (shell.projects.find(p => p.id === focus.projectId) ?? null)
     : null;
@@ -71,8 +68,7 @@ export function SessionHistorySurface({
   return (
     <div className={focusSurfaceClass} data-testid="session-history-surface">
       <motion.div
-        ref={scrollRef}
-        className={cx(focusContentClass, scrollFadeClass)}
+        className={focusContentClass}
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}

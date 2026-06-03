@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, CaretRight, Folder, ShieldWarning } from '@phosphor-icons/react';
 
-import { css, cx } from '../../styled-system/css';
-import { scrollFadeClass } from '../../themes/scrollbars';
+import { css } from '../../styled-system/css';
 import { folderNameFromPath } from '../../domain';
 import type {
   AgentCliDetection,
@@ -12,7 +11,6 @@ import type {
   ShellProject,
 } from '../../domain';
 import { useFileDrop } from '../../hooks';
-import { useScrollbarFade } from '../../hooks/useScrollbarFade';
 import { DropSurface } from '../dnd';
 import { AgentGlyph } from '../glyphs';
 import { primaryComposerButtonClass, secondaryComposerButtonClass } from '../primitives/buttons';
@@ -105,12 +103,10 @@ export function CreationComposer({
       if (paths.length > 0) onDropProjectFolder(paths[0]);
     },
   });
-  const scrollRef = useScrollbarFade<HTMLElement>();
 
   return (
     <section
-      ref={scrollRef}
-      className={cx(composerScrollClass, scrollFadeClass)}
+      className={composerScrollClass}
       data-testid="creation-composer"
       data-mode={mode}
       {...(isProject ? { 'data-drop-zone': PROJECT_DROP_ZONE, 'data-drop-id': 'new-project' } : {})}

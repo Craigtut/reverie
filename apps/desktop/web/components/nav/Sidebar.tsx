@@ -2,8 +2,6 @@ import type { MouseEvent } from 'react';
 import { Folder, FolderOpen, GearSix, House, MagnifyingGlass, Plus } from '@phosphor-icons/react';
 import { css, cx } from '../../styled-system/css';
 import { rimLitPanelClass } from '../../themes/surfaces';
-import { scrollFadeClass } from '../../themes/scrollbars';
-import { useScrollbarFade } from '../../hooks/useScrollbarFade';
 import {
   activeGeneralSessions,
   activeSessionsInFocus,
@@ -94,7 +92,6 @@ export function Sidebar({
   const toggleProjectCollapsed = useNavigationStore(s => s.toggleProjectCollapsed);
   const toggleFocusExpanded = useNavigationStore(s => s.toggleFocusExpanded);
   const toggleGeneralCollapsed = useNavigationStore(s => s.toggleGeneralCollapsed);
-  const navScrollRef = useScrollbarFade<HTMLElement>();
   // The session whose terminal is on screen: never badged "finished" (you are
   // looking at it). Only the terminal surface counts as viewing; on other
   // surfaces nothing is being viewed, so a finished result still shows.
@@ -197,7 +194,7 @@ export function Sidebar({
         </Typography>
       </button>
 
-      <nav ref={navScrollRef} className={cx(navClass, scrollFadeClass)} data-testid="workspace-nav">
+      <nav className={navClass} data-testid="workspace-nav">
         <NavDndProvider shell={shell}>
           <button
             type="button"

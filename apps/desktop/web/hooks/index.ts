@@ -20,7 +20,6 @@ export { useCreationForm } from './useCreationForm';
 export type { CreationForm } from './useCreationForm';
 export { useWorkspaceMutations } from './useWorkspaceMutations';
 export type { WorkspaceMutations } from './useWorkspaceMutations';
-export { useScrollbarFade } from './useScrollbarFade';
 export { useFileDrop } from './useFileDrop';
 export type {
   FileDropModel,
