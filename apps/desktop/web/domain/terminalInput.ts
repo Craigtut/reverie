@@ -17,7 +17,22 @@ export interface TerminalKeyInput {
 
 export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalModes) {
   if (event.nativeEvent?.isComposing || event.key === 'Process') return null;
-  if (event.metaKey) return null;
+
+  // Cmd is reserved for app shortcuts (copy, palette, tab switching), so it is
+  // swallowed by default. The exceptions are the macOS line-editing combos,
+  // which terminals translate into the equivalent readline control codes.
+  if (event.metaKey) {
+    switch (event.key) {
+      case 'Backspace':
+        return '\x15'; // delete to beginning of line (Ctrl-U)
+      case 'ArrowLeft':
+        return '\x01'; // jump to beginning of line (Ctrl-A)
+      case 'ArrowRight':
+        return '\x05'; // jump to end of line (Ctrl-E)
+      default:
+        return null;
+    }
+  }
 
   if (event.ctrlKey) {
     const key = event.key.toLowerCase();
@@ -29,8 +44,20 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
     return null;
   }
 
-  if (event.altKey && event.key.length === 1) {
-    return `\x1b${event.key}`;
+  if (event.altKey) {
+    // Option + a printable character sends it ESC-prefixed (Meta-x).
+    if (event.key.length === 1) return `\x1b${event.key}`;
+    // Option + an editing key does word-wise edits/motion, matching how macOS
+    // terminals translate the Meta modifier for the CLI's line editor. Other
+    // named keys (Enter, etc.) fall through to the plain switch below.
+    switch (event.key) {
+      case 'Backspace':
+        return '\x1b\x7f'; // delete previous word (Meta-DEL)
+      case 'ArrowLeft':
+        return '\x1bb'; // move back one word (Meta-b)
+      case 'ArrowRight':
+        return '\x1bf'; // move forward one word (Meta-f)
+    }
   }
 
   const cursorApplication = Boolean(modes?.cursorKeyApplication);

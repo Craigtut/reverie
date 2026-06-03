@@ -49,6 +49,22 @@ describe('terminalInputForKey', () => {
     expect(terminalInputForKey(keyEvent({ key: 'Enter', metaKey: true }))).toBeNull();
   });
 
+  it('maps the macOS Cmd line-editing combos to readline control codes', () => {
+    // Cmd+Backspace deletes to the beginning of the line (Ctrl-U).
+    expect(terminalInputForKey(keyEvent({ key: 'Backspace', metaKey: true }))).toBe('\x15');
+    // Cmd+Arrow jumps to the line start/end (Ctrl-A / Ctrl-E).
+    expect(terminalInputForKey(keyEvent({ key: 'ArrowLeft', metaKey: true }))).toBe('\x01');
+    expect(terminalInputForKey(keyEvent({ key: 'ArrowRight', metaKey: true }))).toBe('\x05');
+  });
+
+  it('maps the macOS Option word-editing combos to Meta sequences', () => {
+    // Option+Backspace deletes the previous word (Meta-DEL).
+    expect(terminalInputForKey(keyEvent({ key: 'Backspace', altKey: true }))).toBe('\x1b\x7f');
+    // Option+Arrow moves by word (Meta-b / Meta-f).
+    expect(terminalInputForKey(keyEvent({ key: 'ArrowLeft', altKey: true }))).toBe('\x1bb');
+    expect(terminalInputForKey(keyEvent({ key: 'ArrowRight', altKey: true }))).toBe('\x1bf');
+  });
+
   it('returns null while IME composition is active', () => {
     expect(terminalInputForKey(keyEvent({ key: 'a', isComposing: true }))).toBeNull();
     expect(terminalInputForKey(keyEvent({ key: 'Process' }))).toBeNull();
