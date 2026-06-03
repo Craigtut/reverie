@@ -11,6 +11,7 @@ Documentation for Reverie, a local-first agentic workspace. Start with the visio
 
 - [`product/v1-product-spec.md`](product/v1-product-spec.md) — v1 scope, target users, UX flows, requirements, and non-goals.
 - [`product/search-and-recall.md`](product/search-and-recall.md) — content-level recall ("find the session I was working on"): native-file completeness research, the Reverie-owned conversation index, discovered/external sessions, and the unified command-palette UX.
+- [`product/core-experience/`](product/core-experience/README.md) — the core interaction loop: the two-layer thesis (orchestration minimizes attention, conversation maximizes bandwidth), the attention-router home, capability-tiered approval cards, the completion surface + re-entry header, voice dispatch, and the on-device STT primitive.
 
 ## Technical
 
