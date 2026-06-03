@@ -1,4 +1,4 @@
-export type WindowControlAction = 'close' | 'minimize' | 'toggleMaximize';
+export type WindowControlAction = 'close' | 'minimize' | 'toggleFullscreen';
 
 // Drive the native window (close / minimize / maximize). Lazy-imports the Tauri
 // window module so the browser harness (no Tauri APIs) never pays for it and a
@@ -17,7 +17,10 @@ export async function invokeWindowControl(action: WindowControlAction) {
     const win = mod.getCurrentWindow();
     if (action === 'close') await win.close();
     else if (action === 'minimize') await win.minimize();
-    else await win.toggleMaximize();
+    else {
+      const isFullscreen = await win.isFullscreen();
+      await win.setFullscreen(!isFullscreen);
+    }
   } catch (error) {
     console.warn('[reverie] window control failed', action, error);
   }
