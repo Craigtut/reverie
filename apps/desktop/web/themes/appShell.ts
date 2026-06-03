@@ -46,6 +46,13 @@ export const appShellClass = css({
   // terminal panel matches.
   '--terminal-bg': '#0B0A09',
   '--shadow': '0 30px 60px -20px rgba(0,0,0,0.55), 0 12px 32px -12px rgba(0,0,0,0.6)',
+  // Non-selectable by default across the whole shell, so click-dragging never
+  // highlights chrome: labels, headings, nav rows, and the status-dot canvases.
+  // Genuine copyable content opts back in via Typography's `selectable` prop
+  // (which sets user-select: text and overrides this), and form fields are
+  // re-enabled globally in main.css. The terminal manages its own selection.
+  userSelect: 'none',
+  WebkitUserSelect: 'none',
   position: 'fixed',
   inset: 0,
   display: 'grid',

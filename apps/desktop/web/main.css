@@ -15,6 +15,15 @@ body,
   background-color: var(--selection, rgba(231, 222, 206, 0.22));
 }
 
+/* The shell is non-selectable by default (see appShell.ts), but text the user
+ * actually types into must stay editable/selectable. Re-enable selection on form
+ * fields so the shell baseline never blocks input editing. */
+input,
+textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .terminal-canvas {
   position: absolute;
   top: 0;
