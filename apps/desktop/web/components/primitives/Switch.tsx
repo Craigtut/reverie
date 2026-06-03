@@ -1,22 +1,19 @@
 import { css } from '../../styled-system/css';
 
 // The one sliding on/off switch used across the app (settings, agent rows).
-// A binary control: a pill track with a knob that slides right when on. Two
-// tones share the same geometry and motion: `neutral` fills with the text color
-// (a plain preference), `warn` fills with the warn color (a dangerous setting
-// like YOLO/auto-approve). Mutually-exclusive choices use a segmented control
-// instead; this is only for true on/off toggles.
+// A binary control: a pill track with a knob that slides right when on. When
+// on, the track fills with the text color and the knob reads as a light disc,
+// so every switch looks the same wherever it appears. Mutually-exclusive
+// choices use a segmented control instead; this is only for true on/off toggles.
 export function Switch({
   checked,
   onChange,
-  tone = 'neutral',
   disabled = false,
   ariaLabel,
   testId,
 }: {
   checked: boolean;
   onChange: (next: boolean) => void;
-  tone?: 'neutral' | 'warn';
   disabled?: boolean;
   ariaLabel: string;
   testId?: string;
@@ -28,7 +25,6 @@ export function Switch({
       aria-checked={checked}
       aria-label={ariaLabel}
       data-state={checked ? 'on' : 'off'}
-      data-tone={tone}
       data-testid={testId}
       disabled={disabled}
       className={switchClass}
@@ -51,13 +47,9 @@ const switchClass = css({
   flexShrink: 0,
   transition: 'background 160ms ease, border-color 160ms ease',
   _hover: { borderColor: 'var(--line-strong)' },
-  '&[data-state="on"][data-tone="neutral"]': {
+  '&[data-state="on"]': {
     background: 'var(--text)',
     borderColor: 'var(--text)',
-  },
-  '&[data-state="on"][data-tone="warn"]': {
-    background: 'color-mix(in srgb, var(--warn) 78%, transparent)',
-    borderColor: 'color-mix(in srgb, var(--warn) 60%, var(--line-strong))',
   },
   '&:disabled': { opacity: 0.5, cursor: 'not-allowed' },
 });
@@ -73,7 +65,8 @@ const switchKnobClass = css({
   transform: 'translateY(-50%)',
   transition: 'left 160ms ease, background 160ms ease',
   boxShadow: '0 1px 2px rgba(0,0,0,0.25)',
-  '[data-state="on"] &': { left: '18px' },
-  '[data-state="on"][data-tone="neutral"] &': { background: 'var(--surface-1)' },
-  '[data-state="on"][data-tone="warn"] &': { background: '#FFFFFF' },
+  '[data-state="on"] &': {
+    left: '18px',
+    background: 'var(--surface-1)',
+  },
 });
