@@ -196,7 +196,11 @@ export function DashboardSurface({
 
 const dashboardSurfaceClass = css({
   position: 'relative',
-  flex: 1,
+  // height (not flex: 1): the parent canvas stage is a block, not a flex
+  // container, so flex: 1 collapses to auto/content height and the inner
+  // overflowY: auto never gets a bounded height to scroll within. A definite
+  // 100% height fills the stage and lets the content rail scroll on overflow.
+  height: '100%',
   minHeight: 0,
   display: 'flex',
   flexDirection: 'column',
@@ -254,7 +258,9 @@ const dashboardCountsClass = css({
 
 const caughtUpClass = css({
   position: 'relative',
-  flex: 1,
+  // height (not flex: 1): see dashboardSurfaceClass. The parent stage is a block,
+  // so a definite height is needed to fill it and center the panel in the stage.
+  height: '100%',
   minHeight: 0,
   display: 'grid',
   placeItems: 'center',
