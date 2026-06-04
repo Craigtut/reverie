@@ -52,6 +52,7 @@ function fakeWebGl2Context(options: { lost?: boolean } = {}) {
     LINEAR: 0x2601,
     LINK_STATUS: 0x8b82,
     NEAREST: 0x2600,
+    ONE: 0x0001,
     ONE_MINUS_SRC_ALPHA: 0x0303,
     READ_FRAMEBUFFER: 0x8ca8,
     RGBA: 0x1908,
@@ -74,6 +75,7 @@ function fakeWebGl2Context(options: { lost?: boolean } = {}) {
     bindTexture: vi.fn(),
     bindVertexArray: vi.fn(),
     blendFunc: vi.fn(),
+    blendFuncSeparate: vi.fn(),
     blitFramebuffer: vi.fn(),
     bufferData: vi.fn(),
     checkFramebufferStatus: vi.fn(() => 0x8cd5),
@@ -277,6 +279,29 @@ describe('createTerminalGpuRenderer', () => {
 
     expect(gl.clearColor).toHaveBeenCalledWith(0x11 / 255, 0x22 / 255, 0x33 / 255, 1);
     expect(gl.clear).toHaveBeenCalledWith(gl.COLOR_BUFFER_BIT);
+  });
+
+  it('uses an alpha-backed canvas cleared to premultiplied transparent when the background is translucent', () => {
+    const gl = fakeWebGl2Context();
+    const canvas = fakeCanvas({ webgl2: gl });
+
+    createTerminalGpuRenderer(canvas, {
+      cols: 4,
+      rows: 1,
+      cellWidth: 8,
+      cellHeight: 10,
+      background: '#112233',
+      backgroundOpacity: 0,
+    });
+
+    // alpha-backed context so the CSS panel behind the canvas shows through.
+    expect(canvas.getContext).toHaveBeenCalledWith(
+      'webgl2',
+      expect.objectContaining({ alpha: true }),
+    );
+    // Premultiplied transparent: the default color is multiplied by alpha 0, not
+    // written raw (which would additively tint the panel behind it).
+    expect(gl.clearColor).toHaveBeenCalledWith(0, 0, 0, 0);
   });
 
   it('clears and draws a WebGL2 terminal frame', () => {

@@ -186,15 +186,26 @@ export function createTerminalWebGl2Renderer(
   const fontFamily = options.fontFamily ?? DEFAULT_FONT_FAMILY;
   const baseline = options.baseline ?? TERMINAL_SURFACE.baseline;
   const defaultForeground = colorToRgba(options.foreground, DEFAULT_FOREGROUND);
+  // `defaultBackground` is the terminal's default background *color*. It is kept
+  // fully opaque because it is reused as a draw color (inverse-cell foreground,
+  // the glyph under a block cursor). How opaquely that color FILLS the canvas is
+  // a separate knob, `backgroundAlpha`: at < 1 the canvas is alpha-backed and the
+  // CSS-painted panel behind it (.terminal-canvas's own --terminal-bg) shows
+  // through for default cells, putting the default background on the same paint
+  // path as the surrounding shell.
   const defaultBackground = colorToRgba(options.background, DEFAULT_BACKGROUND);
-  defaultBackground.a = Math.min(
+  const backgroundAlpha = Math.min(
     1,
     Math.max(0, options.backgroundOpacity ?? DEFAULT_BACKGROUND_OPACITY),
   );
+  // The fill used to clear/underlay the canvas: the default color at the
+  // configured alpha. Distinct from `defaultBackground` so that stays opaque
+  // wherever it is drawn as a glyph or inverse color.
+  const defaultBackgroundFill: Rgba = { ...defaultBackground, a: backgroundAlpha };
   const defaultCursor = colorToRgba(options.cursor, options.foreground ?? DEFAULT_FOREGROUND);
   const dpr = window.devicePixelRatio || 1;
   const context = canvas.getContext('webgl2', {
-    alpha: defaultBackground.a < 1,
+    alpha: backgroundAlpha < 1,
     antialias: false,
     depth: false,
     stencil: false,
@@ -217,7 +228,13 @@ export function createTerminalWebGl2Renderer(
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.disable(gl.DEPTH_TEST);
   gl.enable(gl.BLEND);
-  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  // Separate alpha factors so the canvas's own alpha channel accumulates as
+  // src.a + dst.a*(1-src.a). When the default background is translucent the
+  // canvas is composited over the CSS panel behind it, so the alpha channel has
+  // to be correct (plain SRC_ALPHA for alpha would store coverage^2 and bleed the
+  // panel through glyph antialiasing). RGB blending is unchanged, so opaque mode,
+  // where the alpha channel is ignored at composite, behaves exactly as before.
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
   const rectProgram = createProgram(gl, RECT_VERTEX_SHADER, RECT_FRAGMENT_SHADER);
   const glyphProgram = createProgram(gl, GLYPH_VERTEX_SHADER, GLYPH_FRAGMENT_SHADER);
@@ -239,7 +256,7 @@ export function createTerminalWebGl2Renderer(
   const rectVertexArray = createRectVertexArray();
   const glyphVertexArray = createGlyphVertexArray();
   bindDrawingBuffer();
-  gl.clearColor(defaultBackground.r, defaultBackground.g, defaultBackground.b, defaultBackground.a);
+  setClearColor(defaultBackgroundFill);
   gl.clear(gl.COLOR_BUFFER_BIT);
   flushDrawingBuffer();
   let stats = emptyRendererStats('webgl2');
@@ -279,13 +296,21 @@ export function createTerminalWebGl2Renderer(
     pushRect(rects, 0, row * cellHeight, cols * cellWidth, cellHeight, color);
   }
 
+  // The drawing buffer is premultiplied-alpha; a clear value is written raw (it
+  // does not go through the blend stage), so premultiply it here to match how the
+  // canvas is composited. At alpha 1 this is the identity, so opaque mode is
+  // unchanged; at alpha 0 it clears to true transparent (0,0,0,0).
+  function setClearColor(color: Rgba) {
+    gl.clearColor(color.r * color.a, color.g * color.a, color.b * color.a, color.a);
+  }
+
   function clear(background?: TerminalColor) {
     if (disposed) return;
     stats.clears += 1;
     const color = colorToRgba(colorToCss(background, options.background ?? DEFAULT_BACKGROUND));
-    color.a = defaultBackground.a;
+    color.a = backgroundAlpha;
     bindDrawingBuffer();
-    gl.clearColor(color.r, color.g, color.b, color.a);
+    setClearColor(color);
     gl.clear(gl.COLOR_BUFFER_BIT);
     flushDrawingBuffer();
   }
@@ -312,7 +337,13 @@ export function createTerminalWebGl2Renderer(
       overlayRects.clear();
 
       for (const row of paintRows) {
-        rowRect(row.index, defaultBackground, underlayRects);
+        // Only lay down the default-background underlay when it is at least
+        // partly opaque. At alpha 0 the CSS panel behind the canvas is the
+        // background, so a transparent underlay rect would be wasted work; the
+        // dirty row is still cleared to transparent by clearTranslucentRows.
+        if (backgroundAlpha > 0) {
+          rowRect(row.index, defaultBackgroundFill, underlayRects);
+        }
         for (const cell of row.cells) {
           paintCell(cell, row.index, underlayRects, glyphBatches, foregroundRects);
         }
@@ -438,7 +469,7 @@ export function createTerminalWebGl2Renderer(
   }
 
   function clearTranslucentRows(rows: readonly TerminalRow[]) {
-    if (defaultBackground.a >= 1 || rows.length === 0) return;
+    if (backgroundAlpha >= 1 || rows.length === 0) return;
     gl.enable(gl.SCISSOR_TEST);
     gl.clearColor(0, 0, 0, 0);
     for (const row of rows) {

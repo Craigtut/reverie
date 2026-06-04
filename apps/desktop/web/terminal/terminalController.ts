@@ -52,12 +52,18 @@ import type { BufferCell, BufferLinkSpan, RowSpan, SelectionRange } from './inte
 import { TERMINAL_THEME, type TerminalThemeColors } from '../themes/terminalTheme';
 import { terminalRowTextLayout, terminalTextRangeToCellSpan } from './cellGeometry';
 
-// The terminal's default background is painted as a solid, opaque panel in the
-// active theme's surface color (set via setThemeColors). Opacity 1 keeps the
-// fast non-alpha canvas; the surface is theme-matched rather than transparent so
-// it reads as a calm solid panel and the default foreground stays legible in
-// both light and dark.
-const TERMINAL_BACKGROUND_OPACITY = 1;
+// The terminal's default background is left transparent at the renderer so the
+// CSS-painted panel behind the canvas shows through for default cells. That CSS
+// background is `.terminal-canvas`'s own --terminal-bg (themes/terminalTheme.ts),
+// the same token the surrounding shell paints, so the default background renders
+// on one paint path. Painting it on the canvas instead exposed a WebGL/CSS
+// color-management gap on wide-gamut displays: the GPU-composited canvas landed a
+// hair darker than the identical CSS color around it, leaving a faint seam at the
+// canvas edge. Cells with an explicit background, glyphs, the cursor, and the
+// selection still paint on the canvas; only the default fill defers to CSS. The
+// theme color is still handed to the renderer (for inverse/cursor glyphs) and to
+// Ghostty via OSC 10/11, so any CLI that queries its background sees the surface.
+const TERMINAL_BACKGROUND_OPACITY = 0;
 // Backend resize redraws can arrive as sparse full or partial frames for several
 // animation frames, especially in the canvas fallback under resize churn. Keep
 // the guard long enough to bridge that redraw window without letting a transient
