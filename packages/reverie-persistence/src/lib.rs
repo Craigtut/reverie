@@ -201,7 +201,19 @@ pub struct SqliteWorkspaceRepository {
 impl SqliteWorkspaceRepository {
     /// Open (or create) a database at `path`, apply PRAGMAs and migrations.
     pub fn open(path: impl AsRef<Path>) -> RepoResult<Self> {
-        let conn = Connection::open(path.as_ref()).map_err(backend)?;
+        let path = path.as_ref();
+        // "Or create" includes the parent directory: SQLite creates the database
+        // file but not its folder, and a fresh app-data dir (e.g. a new bundle
+        // identifier's first launch, like the dev channel) has none yet.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                PersistenceError::Backend(format!(
+                    "failed to create database directory {}: {err}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let conn = Connection::open(path).map_err(backend)?;
         Self::from_connection(conn)
     }
 
@@ -993,6 +1005,23 @@ mod tests {
         repo.ensure_seeded(&Workspace::new("Local workspace", "General"))
             .unwrap();
         repo
+    }
+
+    #[test]
+    fn open_creates_a_missing_parent_directory() {
+        // A fresh bundle identifier's app-data dir does not exist yet (the dev
+        // channel's first launch is exactly this case). open() must create the
+        // parent directory, not fail the way SQLite's bare open does.
+        let base = std::env::temp_dir().join(format!("reverie-open-test-{}", uuid::Uuid::new_v4()));
+        let db_path = base.join("nested").join("workspace-shell.v1.sqlite3");
+        assert!(!db_path.exists());
+
+        let repo = SqliteWorkspaceRepository::open(&db_path)
+            .expect("open should create the missing parent directory");
+        drop(repo);
+
+        assert!(db_path.exists(), "database file should exist after open");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
