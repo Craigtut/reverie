@@ -1021,11 +1021,25 @@ pub(crate) fn record_render_metrics(metrics: serde_json::Value) -> Result<(), St
     Ok(())
 }
 
+/// Whether this build is the dev channel (separate bundle identifier ending in
+/// `.dev`). Dev-only behaviors (the runtime Dock badge in `main`, verbose
+/// terminal diagnostics below) key off this so they never run in a production
+/// install, keyed off the same identifier that separates the data dir.
+pub(crate) fn is_dev_channel(app: &AppHandle) -> bool {
+    app.config().identifier.ends_with(".dev")
+}
+
 #[tauri::command]
 pub(crate) fn record_terminal_diagnostics(
     app: AppHandle,
     events: serde_json::Value,
 ) -> Result<(), String> {
+    // Terminal renderer diagnostics are a dev-only aid; a production install
+    // should not accumulate a diagnostics log. The frontend may still send them,
+    // so drop them here on any non-dev channel.
+    if !is_dev_channel(&app) {
+        return Ok(());
+    }
     let dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let path = dir.join("terminal-diagnostics.jsonl");

@@ -57,6 +57,41 @@ fn apply_macos_window_corners(window: &tauri::WebviewWindow, radius: f64) {
     }
 }
 
+/// The dev channel's badged icon, embedded so a non-bundled `cargo run` (which
+/// has no app bundle to carry an icon) can still show a distinct Dock icon.
+#[cfg(target_os = "macos")]
+const DEV_DOCK_ICON_PNG: &[u8] = include_bytes!("../icons-dev/source.png");
+
+/// Set the macOS Dock icon at runtime from PNG bytes. Production builds get their
+/// icon from the app bundle; the dev channel runs as a bare `cargo run` binary
+/// with no bundle, so we set it here to keep the dev app visibly distinct from a
+/// real install.
+#[cfg(target_os = "macos")]
+fn set_macos_dock_icon(png_bytes: &[u8]) {
+    use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    // SAFETY: standard AppKit calls on the main thread during Tauri setup. NSData
+    // borrows the buffer only for the call; NSImage copies what it retains.
+    unsafe {
+        let data: *mut Object = msg_send![
+            class!(NSData),
+            dataWithBytes: png_bytes.as_ptr() as *const std::ffi::c_void
+            length: png_bytes.len()
+        ];
+        if data.is_null() {
+            return;
+        }
+        let image: *mut Object = msg_send![class!(NSImage), alloc];
+        let image: *mut Object = msg_send![image, initWithData: data];
+        if image.is_null() {
+            return;
+        }
+        let ns_app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![ns_app, setApplicationIconImage: image];
+    }
+}
+
 #[cfg(debug_assertions)]
 fn install_dev_panic_logger() {
     let log_path = env::current_dir()
@@ -146,6 +181,18 @@ fn main() {
                         let _ = window.navigate(url);
                     }
                 }
+            }
+
+            // Dev channel adornment: the dev build runs from a separate bundle
+            // identifier (com.animus.reverie.dev) so its data never co-mingles
+            // with a real install. Make it visibly distinct too, so the two are
+            // never confused on screen.
+            if commands::is_dev_channel(app.handle()) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_title("Reverie Dev");
+                }
+                #[cfg(target_os = "macos")]
+                set_macos_dock_icon(DEV_DOCK_ICON_PNG);
             }
 
             // Activity file watcher: one active-file, incremental-tail engine that
