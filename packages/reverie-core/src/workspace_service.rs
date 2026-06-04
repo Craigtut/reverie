@@ -701,6 +701,38 @@ impl WorkspaceService {
         Ok(true)
     }
 
+    /// Reset the activity ordering baseline for a session that is about to be
+    /// (re)launched. A launch begins a fresh activity stream whose sequence
+    /// numbering is independent of the previous run's:
+    ///
+    /// - The Claude hook server counts sequences in a per-process map that resets
+    ///   to zero on every app restart, so after a restart the first hook events of
+    ///   a resumed session arrive as sequence 1, 2, 3...
+    /// - A resumed file-log CLI may open a fresh transcript that the fold re-counts
+    ///   from the start.
+    ///
+    /// Either way the persisted sequence (e.g. 23) is larger than the new stream's
+    /// first events, so [`record_session_activity`]'s out-of-order guard would drop
+    /// them and the session would be stranded showing its pre-relaunch state (the
+    /// "resumed Claude session never re-enters working" bug). Zeroing the stored
+    /// sequence makes the next event win while leaving the last snapshot on screen
+    /// until it arrives. No-op when there is no stored activity or it is already at
+    /// zero.
+    pub fn reset_session_activity_sequence(&self, reverie_session_id: SessionId) -> Result<bool> {
+        let Some(mut session) = self.repo.get_session(reverie_session_id)? else {
+            return Ok(false);
+        };
+        let Some(activity) = session.latest_activity.as_mut() else {
+            return Ok(false);
+        };
+        if activity.sequence == 0 {
+            return Ok(false);
+        }
+        activity.sequence = 0;
+        self.repo.upsert_session(&session)?;
+        Ok(true)
+    }
+
     /// Resolve the adapter for a session and build its terminal spawn spec.
     pub fn build_agent_spawn_spec(
         &self,
@@ -1487,6 +1519,72 @@ mod tests {
 
         let session = service.snapshot().unwrap().sessions[0].clone();
         assert_eq!(session.latest_activity.unwrap().sequence, 5);
+    }
+
+    #[test]
+    fn relaunch_reset_lets_a_restarted_streams_low_sequence_through() {
+        // Models the "resumed Claude session never re-enters working" bug: before
+        // an app restart the hook stream reached a high sequence; after the restart
+        // the hook server's counter is back at 1. Without resetting the baseline the
+        // out-of-order guard drops every post-restart event; with it the new stream
+        // is accepted.
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(
+                focus,
+                "Claude".to_owned(),
+                AgentKind::ClaudeCode,
+                "/tmp/reverie".into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+
+        let state = |seq: u64, status: &str| {
+            crate::activity::parse_state(&format!(
+                r#"{{"version":1,"sessionId":"claude-native","status":"{status}","updatedAt":"t","sequence":{seq},"cwd":"/tmp/reverie"}}"#
+            ))
+            .unwrap()
+        };
+
+        // Pre-restart stream climbs to a high sequence and comes to rest.
+        service
+            .record_session_activity_by_id(id, "claude-native", state(23, "awaiting_input"))
+            .unwrap();
+
+        // A post-restart event arrives at sequence 1: dropped while the stale
+        // baseline (23) is in place.
+        assert!(
+            !service
+                .record_session_activity_by_id(id, "claude-native", state(1, "working"))
+                .unwrap()
+        );
+        assert_eq!(
+            service.snapshot().unwrap().sessions[0]
+                .latest_activity
+                .as_ref()
+                .unwrap()
+                .status,
+            ActivityStatus::AwaitingInput,
+            "without a reset the session is stranded in its pre-restart state"
+        );
+
+        // Relaunch resets the ordering baseline (23 -> 0); resetting again while
+        // already at the baseline is a no-op.
+        assert!(service.reset_session_activity_sequence(id).unwrap());
+        assert!(!service.reset_session_activity_sequence(id).unwrap());
+
+        // Now the restarted stream's first event wins and the session re-enters
+        // working.
+        service
+            .record_session_activity_by_id(id, "claude-native", state(1, "working"))
+            .unwrap();
+        let session = service.snapshot().unwrap().sessions[0].clone();
+        let activity = session.latest_activity.unwrap();
+        assert_eq!(activity.status, ActivityStatus::Working);
+        assert_eq!(activity.sequence, 1);
     }
 
     #[test]
