@@ -1,8 +1,8 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { Plus, ShieldWarning } from '@phosphor-icons/react';
 import { css } from '../../styled-system/css';
-import { agentTabLabel, cellStateFor } from '../../domain';
-import type { ShellSession } from '../../domain';
+import { activityForSession, agentTabLabel, cellStateFor } from '../../domain';
+import type { ActivityState, SessionTerminalBinding, ShellSession } from '../../domain';
 import { TERMINAL_TAB_DROP_ZONE } from '../../hooks';
 import { AgentGlyph, CloseGlyph, StateCell } from '../glyphs';
 import { Typography } from '../primitives/Typography';
@@ -10,7 +10,10 @@ import { Typography } from '../primitives/Typography';
 export interface SessionTabsBarProps {
   visibleSessions: ShellSession[];
   selectedSessionId: string | null;
-  runningSessionId: string | null;
+  // The same live signals the left nav reads, so a tab's state dot matches its
+  // sidebar row instead of falling back to the persisted record status.
+  sessionTerminalBindings: Record<string, SessionTerminalBinding>;
+  cortexActivity: Record<string, ActivityState>;
   busy: boolean;
   canUseAppServices: boolean;
   canCreateSession: boolean;
@@ -54,7 +57,8 @@ function wantsCompact(available: number, count: number): boolean {
 export function SessionTabsBar({
   visibleSessions,
   selectedSessionId,
-  runningSessionId,
+  sessionTerminalBindings,
+  cortexActivity,
   busy,
   canUseAppServices,
   canCreateSession,
@@ -95,6 +99,16 @@ export function SessionTabsBar({
             // every tab in comfortable mode keep theirs.
             const iconOnly = compact && !active;
             const label = agentTabLabel(session);
+            // Derive the dot the same way the left nav does, so a working agent
+            // reads green here too. The tabs bar only renders on the terminal
+            // stage, so the selected tab is the session on screen: pass it as
+            // viewed so it never badges as a finished/unseen result.
+            const cellState = cellStateFor(
+              session,
+              Boolean(sessionTerminalBindings[session.id]),
+              activityForSession(session, cortexActivity),
+              active,
+            );
             return (
               <button
                 key={session.id}
@@ -123,14 +137,7 @@ export function SessionTabsBar({
                     tightest compact widths it drops out, leaving just the glyph. */}
                 <span className={tabTrailingClass}>
                   <span className={tabCellWrapClass} data-tab-meta="true" aria-hidden="true">
-                    <StateCell
-                      state={cellStateFor(
-                        session,
-                        session.status === 'running' || session.id === runningSessionId,
-                        null,
-                      )}
-                      size={12}
-                    />
+                    <StateCell state={cellState} size={12} />
                   </span>
                   <span
                     className={tabCloseClass}
