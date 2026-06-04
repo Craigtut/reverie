@@ -12,7 +12,7 @@ export function fallbackShellSnapshot(): WorkspaceShellSnapshot {
       generalLabel: 'General',
       defaultDangerousMode: false,
       theme: 'dark',
-      defaultAgentKind: 'cortex_code',
+      defaultAgentKind: 'claude_code',
       terminalFontSize: 14,
     },
     projects: [],
@@ -89,16 +89,11 @@ export function agentLabel(value: string) {
   return value.replace(/_/g, ' ').replace(/\b\w/g, character => character.toUpperCase());
 }
 
+// Listed in the agent priority order the backend uses (`built_in_adapters`:
+// Claude Code, then Codex, then Cortex, then any later additions), so the
+// harness picks the same default and fallback as a real install.
 export function fallbackAgentCliDetections(): AgentCliDetection[] {
   return [
-    {
-      kind: 'cortex_code',
-      displayName: 'Cortex Code',
-      executable: 'cortex',
-      candidates: ['cortex'],
-      available: true,
-      enabled: true,
-    },
     {
       kind: 'claude_code',
       displayName: 'Claude Code',
@@ -112,6 +107,14 @@ export function fallbackAgentCliDetections(): AgentCliDetection[] {
       displayName: 'Codex CLI',
       executable: 'codex',
       candidates: ['codex'],
+      available: true,
+      enabled: true,
+    },
+    {
+      kind: 'cortex_code',
+      displayName: 'Cortex Code',
+      executable: 'cortex',
+      candidates: ['cortex'],
       available: true,
       enabled: true,
     },

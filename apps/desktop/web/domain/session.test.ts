@@ -86,9 +86,9 @@ describe('fallbackShellSnapshot', () => {
 });
 
 describe('fallbackAgentCliDetections', () => {
-  it('lists the three known agent CLIs, all available', () => {
+  it('lists the three known agent CLIs in priority order, all available', () => {
     const detections = fallbackAgentCliDetections();
-    expect(detections.map(d => d.kind)).toEqual(['cortex_code', 'claude_code', 'codex_cli']);
+    expect(detections.map(d => d.kind)).toEqual(['claude_code', 'codex_cli', 'cortex_code']);
     for (const detection of detections) {
       expect(detection.available).toBe(true);
       expect(detection.displayName.length).toBeGreaterThan(0);

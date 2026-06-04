@@ -62,7 +62,13 @@ export function WorkspaceShell() {
   useSessionActivity(writeLog, model.loadWorkspaceShell);
   useSessionViewed();
   useSessionTitle(writeLog);
-  useAgentClis(creation.newSessionAgentKind, creation.setNewSessionAgentKind, writeLog);
+  useAgentClis(
+    creation.newSessionAgentKind,
+    creation.setNewSessionAgentKind,
+    model.shell.workspace.defaultAgentKind,
+    mutations.setWorkspaceDefaultAgentKind,
+    writeLog,
+  );
   useAppFocus();
   useEffect(() => {
     maybeRunHarnessSmokeTest();
