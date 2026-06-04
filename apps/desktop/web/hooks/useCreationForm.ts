@@ -49,7 +49,6 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
   const [newFocusDangerousMode, setNewFocusDangerousMode] = useState(
     model.shell.workspace.defaultDangerousMode,
   );
-  const [newSessionCwd, setNewSessionCwd] = useState('');
   const [newSessionAgentKind, setNewSessionAgentKind] = useState<AgentKind>(
     model.shell.workspace.defaultAgentKind,
   );
@@ -71,13 +70,7 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
   const setBusy = useUiStore(s => s.setBusy);
   const appendLog = useUiStore(s => s.appendLog);
 
-  const { shell, selectedProject, selectedFocus, selectedFocusDefaultCwd } = model;
-
-  // Keep the new-session cwd defaulted to the selected topic's project folder
-  // until the user edits it.
-  useEffect(() => {
-    setNewSessionCwd(selectedFocusDefaultCwd);
-  }, [selectedFocusDefaultCwd]);
+  const { shell, selectedProject, selectedFocus } = model;
 
   // Re-seed the topic auto-approve from the workspace default whenever it moves
   // (a Settings change or reload). The composer toggle stays a per-topic tweak
@@ -102,7 +95,6 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
       setNewSessionAgentKind(shell.workspace.defaultAgentKind);
     }
     if (mode === 'session') {
-      setNewSessionCwd(defaultCwdForFocus(selectedFocus, shell));
       setNewSessionDangerousMode(inheritedDangerousMode(selectedFocus, shell));
       setNewSessionAgentKind(shell.workspace.defaultAgentKind);
     }
@@ -118,19 +110,18 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     setCreationMode('session');
     setSurfaceMode('terminal');
     const focus = shell.focuses.find(item => item.id === focusId) ?? null;
-    setNewSessionCwd(defaultCwdForFocus(focus, shell));
     setNewSessionDangerousMode(inheritedDangerousMode(focus, shell));
     setNewSessionAgentKind(shell.workspace.defaultAgentKind);
   }
 
   // Record a chosen project folder (from the OS picker or a drag-drop) into the
   // composer. The user still confirms with "Add project"; the folder name
-  // becomes the project name verbatim and seeds the first session's cwd.
+  // becomes the project name verbatim. Sessions opened in the project later
+  // default their cwd to this folder via `defaultCwdForFocus`.
   function applyProjectFolder(selection: ProjectFolderSelection) {
     setProjectDropError(null);
     setNewProjectPath(selection.path);
     setNewProjectName(selection.name || folderNameFromPath(selection.path) || 'New project');
-    setNewSessionCwd(selection.path);
   }
 
   async function chooseProjectFolder() {
@@ -222,7 +213,10 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     // must be non-empty (the backend rejects blank titles) and the agent's live
     // terminal title overwrites it later.
     const title = agentLabel(agentKind);
-    const cwd = newSessionCwd.trim() || defaultCwdForFocus(focus, shellSnapshot);
+    // The cwd is never user-chosen: a project session runs in its project
+    // folder; a General session sends '' and the backend provisions (and
+    // trusts) a fresh scratch workspace for it.
+    const cwd = defaultCwdForFocus(focus, shellSnapshot);
     const request: CreateSessionRecordRequest = {
       focusId: focus.id,
       title,
@@ -313,8 +307,6 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     setNewFocusTitle,
     newFocusDangerousMode,
     setNewFocusDangerousMode,
-    newSessionCwd,
-    setNewSessionCwd,
     newSessionAgentKind,
     setNewSessionAgentKind,
     newSessionDangerousMode,

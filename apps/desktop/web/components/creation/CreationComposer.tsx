@@ -40,8 +40,6 @@ export function CreationComposer({
   setNewFocusTitle,
   newFocusDangerousMode,
   setNewFocusDangerousMode,
-  newSessionCwd,
-  setNewSessionCwd,
   newSessionDangerousMode,
   setNewSessionDangerousMode,
   cliDetections,
@@ -63,8 +61,6 @@ export function CreationComposer({
   setNewFocusTitle: (value: string) => void;
   newFocusDangerousMode: boolean;
   setNewFocusDangerousMode: (value: boolean) => void;
-  newSessionCwd: string;
-  setNewSessionCwd: (value: string) => void;
   newSessionDangerousMode: boolean;
   setNewSessionDangerousMode: (value: boolean) => void;
   cliDetections: AgentCliDetection[];
@@ -155,8 +151,6 @@ export function CreationComposer({
         ) : (
           <SessionComposer
             selectedFocus={selectedFocus}
-            newSessionCwd={newSessionCwd}
-            setNewSessionCwd={setNewSessionCwd}
             newSessionDangerousMode={newSessionDangerousMode}
             setNewSessionDangerousMode={setNewSessionDangerousMode}
             cliDetections={cliDetections}
@@ -377,13 +371,13 @@ function TopicComposer({
   );
 }
 
-// New session in an existing topic: pick an agent to open it. Power-user details
-// (working directory, this session's auto-approve) live behind a quiet Options
-// disclosure so the agent choice stays the focus.
+// New session in an existing topic: pick an agent to open it. The working
+// directory is never chosen by hand: a project session runs in its project
+// folder and a General session runs in a scratch workspace Reverie provisions.
+// The one power-user detail, this session's auto-approve, lives behind a quiet
+// Options disclosure so the agent choice stays the focus.
 function SessionComposer({
   selectedFocus,
-  newSessionCwd,
-  setNewSessionCwd,
   newSessionDangerousMode,
   setNewSessionDangerousMode,
   cliDetections,
@@ -391,8 +385,6 @@ function SessionComposer({
   onCreateSessionWithAgent,
 }: {
   selectedFocus: ShellFocus | null;
-  newSessionCwd: string;
-  setNewSessionCwd: (value: string) => void;
   newSessionDangerousMode: boolean;
   setNewSessionDangerousMode: (value: boolean) => void;
   cliDetections: AgentCliDetection[];
@@ -400,7 +392,6 @@ function SessionComposer({
   onCreateSessionWithAgent: (kind: AgentKind) => void;
 }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
-  const cwdLabel = newSessionCwd.trim();
 
   return (
     <>
@@ -409,7 +400,7 @@ function SessionComposer({
       </Typography>
       <Typography as="p" variant="smallBody" tone="faint" className={leadClass}>
         {selectedFocus
-          ? `Pick an agent. It opens in ${selectedFocus.title}${cwdLabel ? ` and works in ${cwdLabel}` : ''}.`
+          ? `Pick an agent. It opens in ${selectedFocus.title}.`
           : 'Pick a topic first, then choose an agent to open a session.'}
       </Typography>
 
@@ -434,23 +425,12 @@ function SessionComposer({
             Options
           </Typography>
           <Typography as="span" variant="caption" tone="ghost">
-            working directory · auto-approve
+            auto-approve
           </Typography>
         </button>
 
         {optionsOpen ? (
           <div className={optionsBodyClass}>
-            <label className={fieldLabelClass}>
-              <Typography as="span" variant="caption" tone="faint">
-                Working directory
-              </Typography>
-              <input
-                className={fieldInputClass}
-                data-testid="session-cwd-input"
-                value={newSessionCwd}
-                onChange={event => setNewSessionCwd(event.currentTarget.value)}
-              />
-            </label>
             <AutoApproveToggle
               label="Auto-approve this session"
               help="Overrides the topic default for this one session."
@@ -822,19 +802,6 @@ const optionsBodyClass = css({
   borderRadius: '14px',
   border: '1px solid var(--line)',
   background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
-});
-
-const fieldLabelClass = css({ display: 'grid', gap: '6px' });
-
-const fieldInputClass = css({
-  height: '34px',
-  border: '1px solid var(--line)',
-  borderRadius: '10px',
-  padding: '0 10px',
-  background: 'var(--surface-1)',
-  color: 'var(--text)',
-  outline: 'none',
-  _focus: { borderColor: 'var(--line-strong)' },
 });
 
 // Auto-approve segmented control.

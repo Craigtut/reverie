@@ -72,7 +72,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const paletteOpen = usePaletteStore(s => s.paletteOpen);
   const setPaletteOpen = usePaletteStore(s => s.setPaletteOpen);
   const sessionTerminalBindings = useTerminalStore(s => s.sessionTerminalBindings);
-  const runningSessionId = useTerminalStore(s => s.runningSessionId);
   const terminalLiveFollow = useTerminalStore(s => s.terminalLiveFollow);
   const scrollbackRowCount = useTerminalStore(s => s.scrollbackRowCount);
   const cortexActivity = useActivityStore(s => s.cortexActivity);
@@ -110,8 +109,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setNewFocusTitle,
     newFocusDangerousMode,
     setNewFocusDangerousMode,
-    newSessionCwd,
-    setNewSessionCwd,
     // Kept for the Settings default-agent picker; the composer no longer uses it.
     newSessionAgentKind,
     setNewSessionAgentKind,
@@ -295,7 +292,8 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
               <SessionTabsBar
                 visibleSessions={visibleSessions}
                 selectedSessionId={selectedSession?.id ?? null}
-                runningSessionId={runningSessionId}
+                sessionTerminalBindings={sessionTerminalBindings}
+                cortexActivity={cortexActivity}
                 busy={busy}
                 canUseAppServices={canUseAppServices}
                 canCreateSession={Boolean(selectedFocus)}
@@ -325,8 +323,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 setNewFocusTitle={setNewFocusTitle}
                 newFocusDangerousMode={newFocusDangerousMode}
                 setNewFocusDangerousMode={setNewFocusDangerousMode}
-                newSessionCwd={newSessionCwd}
-                setNewSessionCwd={setNewSessionCwd}
                 newSessionDangerousMode={newSessionDangerousMode}
                 setNewSessionDangerousMode={setNewSessionDangerousMode}
                 cliDetections={agentCliDetections}

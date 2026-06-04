@@ -88,10 +88,6 @@ export function useWorkspaceModel() {
   }, [selectedProjectId, shell.focuses]);
   const selectedFocus =
     visibleFocuses.find(focus => focus.id === selectedFocusId) ?? visibleFocuses[0] ?? null;
-  const selectedFocusProject = selectedFocus?.projectId
-    ? (shell.projects.find(project => project.id === selectedFocus.projectId) ?? null)
-    : null;
-  const selectedFocusDefaultCwd = selectedFocusProject?.path ?? '';
   const focusSessions = useMemo(() => {
     if (!selectedFocus) return [];
     return shell.sessions.filter(session => session.focusId === selectedFocus.id);
@@ -306,7 +302,6 @@ export function useWorkspaceModel() {
     shell,
     selectedProject,
     selectedFocus,
-    selectedFocusDefaultCwd,
     focusSessions,
     visibleSessions,
     activeFocusSessions,

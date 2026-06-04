@@ -266,13 +266,6 @@ async function runPartialCliScenario() {
   await clickTestId('empty-create-session-button');
 
   await expectComposerMode('session');
-  // The cwd lives behind the Options disclosure now.
-  await clickTestId('session-options-toggle');
-  assertInputValue(
-    'session-cwd-input',
-    '/Users/user',
-    'general workspace session defaults to the home cwd',
-  );
   expectCliAvailability('codex_cli', false, 'Codex is shown unavailable in the partial fixture');
   expectDisabled(selectorForCli('codex_cli'), true, 'unavailable Codex tile is disabled');
   await clickCliChoice('claude_code');
@@ -1362,16 +1355,6 @@ function assertTextIncludes(testId: string, text: string, label: string) {
   if (!element.textContent?.includes(text)) {
     throw new Error(
       `${label}: expected [${testId}] to include ${JSON.stringify(text)}, got ${JSON.stringify(element.textContent ?? '')}`,
-    );
-  }
-  assertions.push(label);
-}
-
-function assertInputValue(testId: string, value: string, label: string) {
-  const input = requireTestId<HTMLInputElement>(testId);
-  if (input.value !== value) {
-    throw new Error(
-      `${label}: expected [${testId}] value ${JSON.stringify(value)}, got ${JSON.stringify(input.value)}`,
     );
   }
   assertions.push(label);
