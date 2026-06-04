@@ -395,6 +395,34 @@ impl TerminalSessionRuntime {
         self.controller_for(terminal_id)?.terminate()
     }
 
+    /// Gracefully terminate every live terminal whose product session id matches,
+    /// returning the terminal ids that were signalled. This is the authoritative
+    /// reap path for close/archive, delete, and relaunch: the backend owns the
+    /// process, so stopping it must not depend on the webview still holding a
+    /// terminal id. A frontend HMR/store reset or cold reload drops those
+    /// bindings, and a crash skips the graceful shutdown, both of which otherwise
+    /// strand the agent (and anything it spawned) running. The stream worker's
+    /// exit path then removes the controller and persists the session as finished.
+    pub fn terminate_for_session(&self, session_id: SessionId) -> Vec<TerminalId> {
+        let terminal_ids: Vec<TerminalId> = match self.sessions.lock() {
+            Ok(sessions) => sessions
+                .values()
+                .filter(|record| record.session_id == Some(session_id))
+                .map(|record| record.terminal_id)
+                .collect(),
+            Err(_) => return Vec::new(),
+        };
+        let mut terminated = Vec::new();
+        for terminal_id in terminal_ids {
+            if let Ok(controller) = self.controller_for(terminal_id) {
+                if controller.terminate().is_ok() {
+                    terminated.push(terminal_id);
+                }
+            }
+        }
+        terminated
+    }
+
     /// Gracefully terminate every live session's process tree on app shutdown.
     /// SIGTERMs all groups first, waits once for a shared grace period, then
     /// SIGKILLs any stragglers, so quitting does not orphan the agents or

@@ -467,8 +467,17 @@ pub(crate) fn update_session_tab_visibility(
 #[tauri::command]
 pub(crate) fn set_session_archived(
     service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
     request: SetSessionArchivedRequest,
 ) -> Result<WorkspaceSnapshot, String> {
+    // Closing a session stops its agent. Reap the live process tree backend-side
+    // (authoritative, independent of any frontend terminal binding) before
+    // flipping the archive flag, so a dropped binding (HMR/cold reload) or a tab
+    // closed from elsewhere can never leave the CLI running. Restore re-launches
+    // via --resume, so "stopped" is the correct closed state.
+    if request.archived {
+        runtime.terminate_for_session(request.shell_session_id);
+    }
     service
         .set_session_archived(request.shell_session_id, request.archived)
         .map_err(|err| err.to_string())
@@ -478,8 +487,13 @@ pub(crate) fn set_session_archived(
 pub(crate) fn remove_session(
     app: AppHandle,
     service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
     session_id: SessionId,
 ) -> Result<WorkspaceSnapshot, String> {
+    // Stop any live process for this session before deleting the record, so a
+    // removed session can never leave an orphaned CLI behind (the frontend may
+    // have lost its terminal binding and skipped its own terminate call).
+    runtime.terminate_for_session(session_id);
     // Revoke any hook token tied to this session before deleting the record
     // so a still-running CLI can't keep authorizing against a now-orphaned id.
     if let (Some(control), Some(registry)) = (
@@ -810,6 +824,14 @@ pub(crate) fn start_session(
 ) -> Result<TerminalId, String> {
     let terminal_id = request.terminal_id.unwrap_or_else(TerminalId::new_v4);
     let session_id = request.session_id;
+    // Reap any process still live for this session before spawning a new one. The
+    // frontend only reaches start_session when it believes the session is not
+    // running (no terminal binding); if the backend still holds a live process
+    // for it (a binding lost to an HMR or cold reload), launching again would
+    // leave two CLIs resuming the same conversation. Stop the stale one first.
+    if let Some(session_id) = session_id {
+        runtime.terminate_for_session(session_id);
+    }
     // `agent_kind` + `folder_name` give the OSC-title worker what it needs to
     // apply this CLI's title rule and suppress folder-name defaults. The
     // caller-supplied-spec path (bench/proof) has no session, so both stay
