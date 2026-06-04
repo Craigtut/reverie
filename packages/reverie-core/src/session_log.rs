@@ -31,7 +31,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -156,6 +156,12 @@ pub struct SessionLogWatcher {
 /// Coalesce window for appends; a burst of writes folds at most once per window.
 const DEBOUNCE_MS: u64 = 120;
 
+/// How often the watch loop reconciles each registered file's on-disk length
+/// against what it last folded, as a safety net for change notifications the OS
+/// dropped (see [`poll_changed_tails`]). Short enough that a missed transition
+/// surfaces promptly, long enough to be effectively free for a handful of files.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Start a watcher for `source`. It watches nothing until files are registered
 /// via the returned control, so an idle app pays nothing and a busy one watches
 /// exactly its active sessions.
@@ -196,6 +202,13 @@ fn run_watch_loop(
         };
 
     let mut tails: HashMap<PathBuf, FileTail> = HashMap::new();
+    // Reference count of directories we hold a watch on. We watch the *parent
+    // directory* of each registered file, not the file itself (see `register_file`),
+    // and several session files can share one directory (e.g. two Codex rollouts
+    // written on the same day), so a dir's watch is dropped only when its last
+    // registered file is unregistered.
+    let mut watched_dirs: HashMap<PathBuf, usize> = HashMap::new();
+    let mut last_poll = Instant::now();
 
     loop {
         // Drain any pending register/unregister commands first so a newly
@@ -203,11 +216,17 @@ fn run_watch_loop(
         loop {
             match command_rx.try_recv() {
                 Ok(WatchCommand::Register(path)) => {
-                    register_file(&source, &mut debouncer, &mut tails, &events_tx, path);
+                    register_file(
+                        &source,
+                        &mut debouncer,
+                        &mut tails,
+                        &mut watched_dirs,
+                        &events_tx,
+                        path,
+                    );
                 }
                 Ok(WatchCommand::Unregister(path)) => {
-                    tails.remove(&path);
-                    let _ = debouncer.unwatch(&path);
+                    unregister_file(&mut debouncer, &mut tails, &mut watched_dirs, &path);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 // Control dropped on the shell side -> shut the worker down.
@@ -239,35 +258,97 @@ fn run_watch_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+
+        // Safety-net poll: reconcile any file whose length drifted from what we
+        // last folded but for which no change event arrived. The recv_timeout
+        // above bounds the loop, so this runs about once per `POLL_INTERVAL`.
+        if last_poll.elapsed() >= POLL_INTERVAL {
+            poll_changed_tails(&mut tails, &events_tx);
+            last_poll = Instant::now();
+        }
     }
 
     drop(debouncer);
+}
+
+/// Resolve a registered file path to the (directory, full-path) pair the watcher
+/// keys on, with the directory portion canonicalized.
+///
+/// macOS's FSEvents reports the *resolved* path of a changed file (symlinks
+/// followed, e.g. `/tmp` -> `/private/tmp`), so an event path will not string-
+/// match a registered path that still contains a symlink. We canonicalize the
+/// parent directory (stable: it outlives the file and survives the file being
+/// rotated away) and rejoin the file name, so the key we store equals the path
+/// FSEvents will deliver. The directory is also what we watch.
+fn canonical_dir_and_key(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    let dir = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let key = dir.join(name);
+    Some((dir, key))
 }
 
 fn register_file(
     source: &Arc<dyn SessionLogSource>,
     debouncer: &mut Debouncer<RecommendedWatcher, RecommendedCache>,
     tails: &mut HashMap<PathBuf, FileTail>,
+    watched_dirs: &mut HashMap<PathBuf, usize>,
     events_tx: &Sender<ActivityUpdate>,
     path: PathBuf,
 ) {
-    if tails.contains_key(&path) || !source.matches(&path) {
+    if !source.matches(&path) {
         return;
     }
-    // Watch the file directly; rollout/snapshot files are written in place.
-    if debouncer.watch(&path, RecursiveMode::NonRecursive).is_err() {
+    let Some((dir, key)) = canonical_dir_and_key(&path) else {
+        return;
+    };
+    if tails.contains_key(&key) {
         return;
     }
+    // Watch the file's parent directory, not the file itself. On macOS the
+    // FSEvents backend does not reliably report plain appends to a file watched
+    // by its exact path, so a Codex rollout's turn-end record (`task_complete`)
+    // could be written without ever waking the watcher, stranding the session in
+    // "working". Watching the directory non-recursively catches every write to
+    // its children; the event loop filters back down to the files in `tails`.
+    let already_watched = watched_dirs.contains_key(&dir);
+    if !already_watched && debouncer.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+        return;
+    }
+    *watched_dirs.entry(dir).or_insert(0) += 1;
     tails.insert(
-        path.clone(),
+        key.clone(),
         FileTail {
             offset: 0,
-            fold: source.new_fold(&path),
+            fold: source.new_fold(&key),
         },
     );
     // Establish current state immediately (covers a session already mid-run when
     // it is registered, e.g. after a Reverie restart).
-    fold_new_bytes(tails, events_tx, &path);
+    fold_new_bytes(tails, events_tx, &key);
+}
+
+/// Stop tailing a file: drop its fold and, when it was the last file registered
+/// under its directory, release that directory's watch.
+fn unregister_file(
+    debouncer: &mut Debouncer<RecommendedWatcher, RecommendedCache>,
+    tails: &mut HashMap<PathBuf, FileTail>,
+    watched_dirs: &mut HashMap<PathBuf, usize>,
+    path: &Path,
+) {
+    let Some((dir, key)) = canonical_dir_and_key(path) else {
+        return;
+    };
+    if tails.remove(&key).is_none() {
+        return;
+    }
+    if let Some(count) = watched_dirs.get_mut(&dir) {
+        *count -= 1;
+        if *count == 0 {
+            watched_dirs.remove(&dir);
+            let _ = debouncer.unwatch(&dir);
+        }
+    }
 }
 
 /// Read the bytes a file has gained since we last looked, feed them to its fold,
@@ -316,5 +397,112 @@ fn fold_new_bytes(
             fidelity: tail.fold.fidelity(),
             state,
         });
+    }
+}
+
+/// Reconcile registered files whose on-disk length no longer matches what we last
+/// folded, as a safety net for change notifications the OS dropped.
+///
+/// macOS FSEvents is best-effort: under load, or for a file that existed before
+/// the watch began and is appended to much later, a modify event can simply never
+/// arrive. That stranded a resumed Codex rollout once: its post-resume
+/// `task_started` was written but no event woke the watcher, so the session sat
+/// in its pre-resume "idle" state while the agent was really working. Comparing
+/// each tail's current length to its folded offset and catching up the difference
+/// guarantees the dashboard converges to the file's true state within a poll.
+///
+/// The normal FSEvents path keeps every tail's offset current, so for all but a
+/// genuinely-missed file `len == offset` and this does nothing beyond a `stat`.
+fn poll_changed_tails(tails: &mut HashMap<PathBuf, FileTail>, events_tx: &Sender<ActivityUpdate>) {
+    let stale: Vec<PathBuf> = tails
+        .iter()
+        .filter(|(path, tail)| {
+            std::fs::metadata(path)
+                .map(|meta| meta.len() != tail.offset)
+                .unwrap_or(false)
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    for path in stale {
+        fold_new_bytes(tails, events_tx, &path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity::ActivityStatus;
+    use crate::codex_rollout::CodexLogSource;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    const META: &str = r#"{"type":"session_meta","payload":{"id":"poll-codex","cwd":"/p"}}"#;
+
+    // The poll fallback must recover the true state even when no change event ever
+    // arrives for an append (the dropped-FSEvents case that stranded a resumed
+    // Codex session in "idle"). We fold a file once to set the offset, append the
+    // turn-end record WITHOUT notifying the watcher, then poll and assert it folds
+    // the missed bytes through to AwaitingInput.
+    #[test]
+    fn poll_recovers_an_append_with_no_change_event() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("rollout-poll.jsonl");
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            writeln!(f, "{META}").unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_started"}}}}"#
+            )
+            .unwrap();
+            f.flush().unwrap();
+        }
+
+        let (tx, rx) = mpsc::channel::<ActivityUpdate>();
+        let mut tails: HashMap<PathBuf, FileTail> = HashMap::new();
+        tails.insert(
+            path.clone(),
+            FileTail {
+                offset: 0,
+                fold: CodexLogSource.new_fold(&path),
+            },
+        );
+
+        // Initial fold: working, offset advanced to EOF.
+        fold_new_bytes(&mut tails, &tx, &path);
+        match rx.recv().unwrap() {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::Working)
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // The turn ends, but pretend the OS dropped the notification: append and
+        // do NOT call fold_new_bytes. The poll alone must catch it.
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_complete"}}}}"#
+            )
+            .unwrap();
+            f.flush().unwrap();
+        }
+
+        poll_changed_tails(&mut tails, &tx);
+        match rx.recv().unwrap() {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::AwaitingInput)
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Nothing new since the last fold: the poll is now a no-op (no emit).
+        poll_changed_tails(&mut tails, &tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "poll re-emitted with no file change"
+        );
     }
 }

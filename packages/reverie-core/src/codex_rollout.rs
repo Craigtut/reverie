@@ -510,6 +510,81 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
+    // Empirical check of the live watcher path (not just the pure fold): start the
+    // real session-log watcher, register a rollout file as the launch path does,
+    // then append `task_complete` and assert the watcher folds it through to
+    // `AwaitingInput`. This is the wiring the dashboard depends on to leave the
+    // "working" state; if it never fires, a finished Codex session stays "active".
+    #[test]
+    fn watcher_detects_appended_task_complete() {
+        use crate::activity_source::ActivityUpdate;
+        use crate::session_log::start_session_log_watcher;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let dir = TempDir::new().unwrap();
+        // Deliberately the raw (possibly symlinked, e.g. /tmp -> /private/tmp)
+        // path: the watcher must canonicalize internally so its keys match the
+        // resolved paths FSEvents reports, or every append event is dropped.
+        let path = dir.path().join("rollout-live.jsonl");
+        {
+            let mut f = fs::File::create(&path).unwrap();
+            writeln!(f, "{META}").unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_started"}}}}"#
+            )
+            .unwrap();
+            f.flush().unwrap();
+        }
+
+        let watcher = start_session_log_watcher(Arc::new(CodexLogSource)).unwrap();
+        watcher.control.register(path.clone());
+
+        // Registration triggers an immediate read: we should see Working.
+        let first = watcher
+            .events
+            .recv_timeout(Duration::from_secs(2))
+            .expect("initial state on register");
+        match first {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::Working)
+            }
+            other => panic!("unexpected first update: {other:?}"),
+        }
+
+        // Append the turn-end record the way Codex does, then wait for the watcher
+        // to deliver the AwaitingInput fold.
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"event_msg","payload":{{"type":"task_complete"}}}}"#
+            )
+            .unwrap();
+            f.flush().unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut got_awaiting = false;
+        while Instant::now() < deadline {
+            match watcher.events.recv_timeout(Duration::from_millis(500)) {
+                Ok(ActivityUpdate::State { state, .. }) => {
+                    if state.status == ActivityStatus::AwaitingInput {
+                        got_awaiting = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        assert!(
+            got_awaiting,
+            "watcher never delivered AwaitingInput after task_complete was appended"
+        );
+    }
+
     fn write_rollout(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {
         let path = dir.join(name);
         let mut file = fs::File::create(&path).unwrap();
