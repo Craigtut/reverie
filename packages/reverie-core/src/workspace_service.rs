@@ -67,7 +67,9 @@ impl WorkspaceService {
             default_dangerous_mode: false,
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
-            default_agent_kind: AgentKind::CortexCode,
+            // First entry in the agent priority order (Claude Code, then Codex,
+            // then Cortex). The frontend re-points it if it is off or missing.
+            default_agent_kind: AgentKind::ClaudeCode,
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             nav_state: None,
         };
@@ -980,15 +982,15 @@ mod tests {
     #[test]
     fn set_workspace_theme_and_default_agent_kind_persist_independently() {
         let (_repo, service) = service();
-        // Fresh workspaces default to dark + Cortex.
+        // Fresh workspaces default to dark + Claude Code (top of the priority order).
         let workspace = service.snapshot().unwrap().workspace;
         assert_eq!(workspace.theme, ThemeMode::Dark);
-        assert_eq!(workspace.default_agent_kind, AgentKind::CortexCode);
+        assert_eq!(workspace.default_agent_kind, AgentKind::ClaudeCode);
 
         // Theme persists and round-trips without touching the default agent.
         let snapshot = service.set_workspace_theme(ThemeMode::Light).unwrap();
         assert_eq!(snapshot.workspace.theme, ThemeMode::Light);
-        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::CortexCode);
+        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::ClaudeCode);
         assert_eq!(
             service.snapshot().unwrap().workspace.theme,
             ThemeMode::Light
@@ -996,15 +998,15 @@ mod tests {
 
         // Default agent persists and is independent of the theme.
         let snapshot = service
-            .set_workspace_default_agent_kind(AgentKind::ClaudeCode)
+            .set_workspace_default_agent_kind(AgentKind::CortexCode)
             .unwrap();
-        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::ClaudeCode);
+        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::CortexCode);
         assert_eq!(snapshot.workspace.theme, ThemeMode::Light);
 
         // Setting one does not flip the other.
         let snapshot = service.set_workspace_theme(ThemeMode::Dark).unwrap();
         assert_eq!(snapshot.workspace.theme, ThemeMode::Dark);
-        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::ClaudeCode);
+        assert_eq!(snapshot.workspace.default_agent_kind, AgentKind::CortexCode);
     }
 
     #[test]

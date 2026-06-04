@@ -61,7 +61,7 @@ impl Workspace {
             default_dangerous_mode: false,
             disabled_agent_kinds: Vec::new(),
             theme: ThemeMode::Dark,
-            default_agent_kind: AgentKind::CortexCode,
+            default_agent_kind: default_agent_kind(),
             terminal_font_size: default_terminal_font_size(),
             nav_state: None,
         }
@@ -69,9 +69,13 @@ impl Workspace {
 }
 
 /// Default agent kind for `Workspace::default_agent_kind` when absent from
-/// persisted or serialized data: Cortex Code, matching the composer default.
+/// persisted or serialized data: Claude Code, the first entry in the agent
+/// priority order (see `agents::built_in_adapters`: Claude Code, then Codex,
+/// then Cortex, then any later additions). A new session seeds its CLI from
+/// here, and the frontend re-points it to the next usable CLI in that order if
+/// this one is switched off or not installed.
 fn default_agent_kind() -> AgentKind {
-    AgentKind::CortexCode
+    AgentKind::ClaudeCode
 }
 
 /// Default terminal font size (CSS px) when absent from persisted or serialized
@@ -448,7 +452,7 @@ mod tests {
         // default_agent_kind keeps the snake_case enum value, like agentKind.
         assert_eq!(
             encoded["defaultAgentKind"],
-            serde_json::json!("cortex_code")
+            serde_json::json!("claude_code")
         );
     }
 
