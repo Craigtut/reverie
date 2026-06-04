@@ -85,8 +85,8 @@ export function EmptyState({
               <Sparkle size={12} weight="fill" /> Auto-approve default
             </Typography>
             <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
-              Off by default. New sessions launch with full prompts unless you choose otherwise.
-              Override per session anytime.
+              When off, agents ask before running a command or editing a file. When on, they carry
+              those actions out on their own.
             </Typography>
           </div>
           <div className={safetyToggleClass} role="radiogroup" aria-label="Auto-approve default">
