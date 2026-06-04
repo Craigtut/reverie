@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod activity_bridge;
+mod agent_trust;
 #[cfg(unix)]
 mod bridge;
 #[cfg(unix)]

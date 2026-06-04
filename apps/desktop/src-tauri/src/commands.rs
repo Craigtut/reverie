@@ -433,7 +433,13 @@ pub(crate) fn create_session(
         .map(|focus| focus.project_id.is_none())
         .ok_or_else(|| format!("unknown focus {}", request.focus_id))?;
     let cwd = if project_less {
-        provision_general_workspace(&app)?
+        let dir = provision_general_workspace(&app)?;
+        // Pre-accept the CLI's folder-trust prompt for this app-created scratch
+        // workspace, so a brand-new General session never opens on "do you trust
+        // this folder?". Scoped to General sessions: a real project folder is the
+        // user's own, and they answer that prompt themselves on first run.
+        crate::agent_trust::trust_workspace(request.agent_kind, &dir);
+        dir
     } else {
         request.cwd
     };
@@ -593,6 +599,10 @@ fn cleanup_general_workspace(app: &AppHandle, cwd: &Path) {
     if !cwd.starts_with(&root) || !cwd.exists() {
         return;
     }
+    // Drop the CLI trust entry we seeded for this scratch dir before deleting it,
+    // so ~/.claude.json and ~/.codex/config.toml don't accumulate dead project
+    // entries. Done while the dir still exists so its path resolves.
+    crate::agent_trust::untrust_workspace(cwd);
     if let Err(err) = std::fs::remove_dir_all(cwd) {
         eprintln!(
             "[reverie-general] failed removing scratch workspace {}: {err}",
@@ -619,15 +629,20 @@ pub(crate) fn sweep_orphan_general_sessions(app: &AppHandle, service: &Workspace
         .into_iter()
         .map(|session| session.cwd)
         .collect();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() && !live.contains(&path) {
-            if let Err(err) = std::fs::remove_dir_all(&path) {
-                eprintln!(
-                    "[reverie-general] failed sweeping orphan workspace {}: {err}",
-                    path.display()
-                );
-            }
+    let orphans: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && !live.contains(path))
+        .collect();
+    // Clear the seeded CLI trust entries for the orphans (one pass over each
+    // config file) before deleting the dirs, so their paths still resolve.
+    crate::agent_trust::untrust_workspaces(&orphans);
+    for path in orphans {
+        if let Err(err) = std::fs::remove_dir_all(&path) {
+            eprintln!(
+                "[reverie-general] failed sweeping orphan workspace {}: {err}",
+                path.display()
+            );
         }
     }
 }
@@ -829,6 +844,15 @@ pub(crate) fn start_session(
     if let Some(shell_session_id) = session_id {
         keep_cli_auth_env_unmodified(&service, shell_session_id, &spawn_spec)
             .map_err(|err| err.to_string())?;
+        // This launch starts a fresh activity stream whose sequence numbering is
+        // independent of any prior run (the hook server's counter resets across app
+        // restarts; a resumed CLI may open a new transcript). Reset the persisted
+        // ordering baseline so the new stream's first events are not dropped as
+        // stale, which would strand a resumed session showing its pre-restart state
+        // (e.g. a working Claude session that never re-enters the active state).
+        if let Err(err) = service.reset_session_activity_sequence(shell_session_id) {
+            eprintln!("[reverie] failed to reset activity sequence baseline: {err:#}");
+        }
         if agent_kind == Some(AgentKind::ClaudeCode) {
             attach_claude_hooks(&app, shell_session_id, &mut spawn_spec);
         }
