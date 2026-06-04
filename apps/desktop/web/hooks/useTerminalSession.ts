@@ -1199,6 +1199,30 @@ export function useTerminalSession(params: {
     }
   }
 
+  // Tear down the frontend view + input state bound to a session whose process is
+  // being stopped (close/archive or delete). The inverse of launchSession's
+  // registration: drop the binding, release the singleton active-terminal claim
+  // if it was this session's, and forget the controller's cached buffer so a
+  // later resume repaints fresh. The backend PTY is terminated by the caller;
+  // doing this synchronously means the canvas and keyboard cannot keep driving
+  // the just-closed terminal in the window before the async terminal_exit lands.
+  function detachSession(sessionId: string) {
+    const store = useTerminalStore.getState();
+    const binding = store.sessionTerminalBindings[sessionId];
+    const releasingActive = Boolean(binding) && store.activeTerminalId === binding?.terminalId;
+    const nextBindings = { ...store.sessionTerminalBindings };
+    delete nextBindings[sessionId];
+    store.setSessionTerminalBindings(nextBindings);
+    if (releasingActive) {
+      store.setActiveTerminalId(null);
+      store.setTerminalInputArmed(false);
+      syncTerminalFrontendActivity(null);
+    }
+    store.setRunningSessionId(current => (current === sessionId ? null : current));
+    store.setLaunchingSessionId(current => (current === sessionId ? null : current));
+    controller.dropSession(sessionId);
+  }
+
   function inputReady() {
     const store = useTerminalStore.getState();
     return Boolean(store.activeTerminalId && store.terminalInputArmed);
@@ -1207,6 +1231,15 @@ export function useTerminalSession(params: {
   async function sendTerminalInput(input: string) {
     const terminalId = useTerminalStore.getState().activeTerminalId;
     if (!terminalId || !inputReady() || input.length === 0) return;
+    // Invariant: only ever drive the terminal bound to the visible (selected)
+    // session. activeTerminalId is a singleton; if a teardown/selection race
+    // leaves it pointing at another session's terminal, refuse the write rather
+    // than send keystrokes to a process the user is not looking at.
+    const selectedSessionId = useNavigationStore.getState().selectedSessionId;
+    const selectedBinding = selectedSessionId
+      ? useTerminalStore.getState().sessionTerminalBindings[selectedSessionId]
+      : undefined;
+    if (!selectedBinding || selectedBinding.terminalId !== terminalId) return;
     const queues = terminalInputQueuesRef.current;
     const previous = queues.get(terminalId) ?? Promise.resolve();
     const send = async () => {
@@ -1703,6 +1736,7 @@ export function useTerminalSession(params: {
     },
     clearSurface: () => controller.clear(),
     dropSession: (sessionId: string) => controller.dropSession(sessionId),
+    detachSession,
     insertTextIntoSession,
   };
 }

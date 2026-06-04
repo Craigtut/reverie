@@ -50,7 +50,6 @@ export function useWorkspaceMutations({
   const selectedSessionId = useNavigationStore(s => s.selectedSessionId);
   const setSelectedSessionId = useNavigationStore(s => s.setSelectedSessionId);
   const setSurfaceMode = useNavigationStore(s => s.setSurfaceMode);
-  const setSessionTerminalBindings = useTerminalStore(s => s.setSessionTerminalBindings);
   const setBusy = useUiStore(s => s.setBusy);
   const appendLog = useUiStore(s => s.appendLog);
 
@@ -187,13 +186,18 @@ export function useWorkspaceMutations({
     const cortexActivity = useActivityStore.getState().cortexActivity;
     const status = activityForSession(session, cortexActivity)?.status;
     const isBound = Boolean(useTerminalStore.getState().sessionTerminalBindings[session.id]);
-    if (isBound && (status === 'working' || status === 'awaiting_permission')) {
-      const awaitingPermission = status === 'awaiting_permission';
+    if (
+      isBound &&
+      (status === 'working' || status === 'awaiting_permission' || status === 'awaiting_response')
+    ) {
+      // A permission gate or a raised question is a blocking ask: the agent is
+      // paused on you, so closing abandons that ask rather than a running step.
+      const blockingAsk = status === 'awaiting_permission' || status === 'awaiting_response';
       useOverlayStore.getState().requestConfirm({
-        title: awaitingPermission
-          ? `“${session.title}” is waiting for your approval`
+        title: blockingAsk
+          ? `“${session.title}” is waiting for you`
           : `“${session.title}” is still working`,
-        body: awaitingPermission
+        body: blockingAsk
           ? 'Closing it stops the agent now without finishing. The conversation is saved and you can resume it later.'
           : 'Closing it stops the agent now. The conversation is saved and you can resume it later, but the current step won’t finish.',
         confirmLabel: 'Close and stop',
@@ -216,6 +220,11 @@ export function useWorkspaceMutations({
         );
       }
     }
+    // Release this session's terminal binding + active-terminal claim and forget
+    // its cached buffer synchronously, so the canvas/keyboard cannot keep driving
+    // the just-closed process while we re-point the tab below (the async
+    // terminal_exit cleanup otherwise races this re-selection).
+    terminal.detachSession(session.id);
     const nextVisibleSession =
       visibleSessions.find(candidate => candidate.id !== session.id) ?? null;
     const snapshot = await setSessionArchived(session, true);
@@ -275,12 +284,7 @@ export function useWorkspaceMutations({
       sessionId: session.id,
     });
     setShell(snapshot);
-    setSessionTerminalBindings(bindings => {
-      const next = { ...bindings };
-      delete next[session.id];
-      return next;
-    });
-    terminal.dropSession(session.id);
+    terminal.detachSession(session.id);
     if (selectedSessionId === session.id) {
       setSelectedSessionId(null);
       terminal.clearSurface();
