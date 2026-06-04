@@ -215,8 +215,8 @@ function ProjectComposer({
         Add a project
       </Typography>
       <Typography as="p" variant="smallBody" tone="faint" className={leadClass}>
-        A project is just a folder on your computer. Your agents run inside it. Git is optional,
-        never required.
+        A project is a folder on your computer that gathers related work in one place. Your agent
+        sessions will run inside it and have access to the files in the folder.
       </Typography>
 
       {hasFolder ? (
