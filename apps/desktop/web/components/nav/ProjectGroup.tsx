@@ -1,7 +1,8 @@
-import type { MouseEvent, ReactNode } from 'react';
+import type { CSSProperties, MouseEvent, ReactNode } from 'react';
 import { CaretRight } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
+import type { DashboardStatus } from '../../domain';
 import { CloseGlyph } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 import {
@@ -22,13 +23,17 @@ import {
 // group). The whole header toggles the accordion; both the caret and the row
 // body are toggle targets, so the user can hit anywhere across the row. The
 // trailing session count crossfades to the remove action on hover. Children
-// render under a hairline guide rail when expanded.
+// render under a hairline guide rail when expanded. The leading folder icon
+// doubles as a status light: it rolls the worst session state inside the
+// project upward, going green while an agent is working and amber when one needs
+// you, so a collapsed project still signals what is happening beneath it.
 export function ProjectGroup({
   icon,
   title,
   count,
   attention = 0,
   finished = 0,
+  tone = 'recent',
   expanded,
   onToggle,
   onRemove,
@@ -42,6 +47,7 @@ export function ProjectGroup({
   count: number;
   attention?: number;
   finished?: number;
+  tone?: DashboardStatus;
   expanded: boolean;
   onToggle: () => void;
   onRemove?: (event: MouseEvent<HTMLElement>) => void;
@@ -72,7 +78,16 @@ export function ProjectGroup({
           data-testid={testId}
           data-expanded={expanded ? 'true' : 'false'}
         >
-          {icon}
+          {icon ? (
+            <span
+              className={folderToneClass}
+              data-tone={toneAttr(tone)}
+              style={folderToneStyle(tone)}
+              aria-hidden="true"
+            >
+              {icon}
+            </span>
+          ) : null}
           <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
             {title}
           </Typography>
@@ -133,6 +148,32 @@ export function ProjectGroup({
     </div>
   );
 }
+
+// Only the demanding tones tint the folder; idle / finished projects keep the
+// calm default icon color (no data-tone attribute, so the rule below misses).
+function toneAttr(tone: DashboardStatus): 'attention' | 'live' | undefined {
+  return tone === 'attention' || tone === 'live' ? tone : undefined;
+}
+
+// The hue rides an inline custom property so the static class can stay shared;
+// `recent` carries no property because the data-tone selector never matches it.
+function folderToneStyle(tone: DashboardStatus): CSSProperties | undefined {
+  if (tone === 'attention') return { '--folder-tone': 'var(--warn)' } as CSSProperties;
+  if (tone === 'live') return { '--folder-tone': 'var(--good)' } as CSSProperties;
+  return undefined;
+}
+
+// Wraps the folder icon so it can carry the rollup hue. The `&[data-tone] svg`
+// selector outranks rowPrimaryClass's default `& svg` muted color (one extra
+// attribute selector), so when a tone is present the folder takes it; absent the
+// attribute the icon falls back to that calm default. The color eases so a
+// session starting or finishing work fades the folder rather than snapping it.
+const folderToneClass = css({
+  display: 'inline-flex',
+  flexShrink: 0,
+  '& svg': { transition: 'color 180ms ease' },
+  '&[data-tone] svg': { color: 'var(--folder-tone)' },
+});
 
 const projectGroupClass = css({
   display: 'grid',

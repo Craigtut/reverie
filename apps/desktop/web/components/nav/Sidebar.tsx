@@ -284,6 +284,7 @@ export function Sidebar({
                     count={projectRollup.total}
                     attention={projectRollup.attention}
                     finished={projectRollup.finished}
+                    tone={projectRollup.tone}
                     expanded={expanded}
                     onToggle={() => toggleProjectCollapsed(project.id)}
                     onRemove={(event: MouseEvent<HTMLElement>) => {
