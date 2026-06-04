@@ -224,6 +224,46 @@ them, so users still get a single installer). Linux would mirror macOS with an
   `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Without them the build is
   ad-hoc signed and users hit Gatekeeper warnings.
 
+## Dev vs production channels
+
+The app ships from one base config (`tauri.conf.json` = production,
+`com.animus.reverie`). To keep a `npm run dev` build from co-mingling its data,
+icon, and Dock identity with a real install, the **dev channel** runs under a
+separate bundle identifier.
+
+- **Identity.** `scripts/tauri-channel.mjs dev` merges
+  `apps/desktop/src-tauri/tauri.dev.conf.json` (`identifier`
+  `com.animus.reverie.dev`, `productName` "Reverie Dev", a badged icon set in
+  `icons-dev/`) over the base config. macOS namespaces Application Support,
+  Caches, and Preferences by identifier, so the dev build's database, General
+  scratch workspaces, and diagnostics land in
+  `~/Library/Application Support/com.animus.reverie.dev/` and never touch the
+  production folder. The agent CLI homes (`~/.claude`, `~/.codex`, `~/.cortex`)
+  are deliberately shared: those sessions belong to the CLIs, not to Reverie.
+
+- **Mechanism.** The overlay is passed through the `TAURI_CONFIG` env var, a
+  JSON string that `tauri-build` reads at compile time and merge-patches
+  (RFC 7396) over the file config. This is the same merge the Tauri CLI's
+  `--config` flag performs, but it works through our `cargo run` dev path
+  without routing through the Tauri CLI. `tauri-build` emits
+  `rerun-if-env-changed=TAURI_CONFIG`, so switching channels recompiles the
+  embedded context; dev (debug profile) and prod (release profile) keep separate
+  build artifacts, so they never thrash each other.
+
+- **Production stays default.** `npm run build` and `npm run bundle` pass no
+  overlay, so a local `npm run build` produces a genuine production app you can
+  install and test. Only `npm run dev` carries the dev identity.
+
+- **Runtime adornment.** A `cargo run` dev build is a bare binary with no app
+  bundle, so the badged Dock icon is set at runtime (`set_macos_dock_icon` in
+  `main.rs`) and the window title gets a " Dev" suffix. Both are gated on
+  `commands::is_dev_channel` (identifier ends in `.dev`), as are the terminal
+  renderer diagnostics.
+
+- **Helpers.** `npm run dev:reset` wipes the dev data folder (only ever the
+  `.dev` path) for a clean schema slate; `npm run icon:dev` regenerates the
+  badged icon from the production master after it changes.
+
 ## Release flow
 
 Releases are cut by pushing a version tag, which triggers
@@ -234,8 +274,10 @@ Releases are cut by pushing a version tag, which triggers
    `## [X.Y.Z]` section, summarizing changes from the commits since the previous
    tag (`git log <prev-tag>..HEAD`). Group by Conventional Commit type
    (Added/Changed/Fixed). Commit as `docs(release): changelog for vX.Y.Z`.
-3. Bump versions in `apps/desktop/src-tauri/tauri.conf.json`, the crate
-   `Cargo.toml` files, and `package.json` to `X.Y.Z`.
+3. Bump every manifest in lockstep with
+   `npm run version:set -- X.Y.Z` (updates `package.json`,
+   `apps/desktop/src-tauri/tauri.conf.json`, and the crate `Cargo.toml` files;
+   then `npm run check` refreshes `Cargo.lock`).
 4. Tag and push:
 
    ```bash

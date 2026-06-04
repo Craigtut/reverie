@@ -41,12 +41,17 @@ reverie/
 ### Build & check
 
 ```bash
-npm run dev               # run the desktop app (Panda watch + Vite + Tauri)
+npm run dev               # run the desktop app on the DEV channel (separate data dir + "dev" badged icon)
 npm run dev:harness       # browser-only React harness with fixture services (fast UI loop)
+npm run dev:reset         # wipe the dev channel's data (only ever the com.animus.reverie.dev folder)
 npm run check             # frontend typecheck/build + Rust tests/checks
-npm run build             # production desktop build
+npm run build             # PRODUCTION desktop build (base identity; install/test prod locally)
+npm run version:set -- X  # bump version across all 6 manifests in lockstep (x.y.z | patch | minor | major)
+npm run icon:dev          # regenerate the badged dev icon after the production icon changes
 cargo test                # core Rust tests
 ```
+
+See "Dev vs production channels" below for why `npm run dev` and `npm run build` use different bundle identifiers and data directories.
 
 Keep the checks in [`docs/technical/implementation-queue.md`](docs/technical/implementation-queue.md) green; that file is the source of truth for the current check list.
 
@@ -56,12 +61,22 @@ Keep the checks in [`docs/technical/implementation-queue.md`](docs/technical/imp
 - The terminal core links `libghostty-vt.dylib`, but **nothing needs `DYLD_LIBRARY_PATH` at runtime**. For development, `npm run dev` / `dev:desktop` / `run:release` go through `cargo run`, which injects the library search path automatically. For distribution, `npm run bundle` ships the dylib inside the app (`Contents/Frameworks`) resolved by a baked rpath. Prefer those scripts over launching the raw built binary directly. See [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md).
 - macOS desktop WebDriver can't drive WKWebView, so **use `npm run dev:harness` for UI iteration and screenshots**. Rust/Tauri tests remain the source of truth for persistence, commands, CLI detection, and native session launch.
 
+### Dev vs production channels
+
+`npm run dev` runs the **dev channel**: a separate bundle identifier (`com.animus.reverie.dev`, productName "Reverie Dev", badged Dock icon, " Dev" window title). Production (`npm run build`, `npm run bundle`) keeps the base `com.animus.reverie`. Because macOS namespaces Application Support by identifier, the dev build's database, scratch workspaces, and diagnostics live in a **separate folder** and never co-mingle with a real install. The agent CLI homes (`~/.claude`, `~/.codex`, `~/.cortex`) are intentionally shared across channels: those sessions belong to the CLIs.
+
+- Mechanism: `scripts/tauri-channel.mjs dev` merges `tauri.dev.conf.json` over `tauri.conf.json` via the `TAURI_CONFIG` env var (the same RFC 7396 merge the Tauri CLI's `--config` uses; `tauri-build` reads it at compile time). It works through our `cargo run` dev path without the Tauri CLI. Production paths pass no overlay, so a local `npm run build` is a real production app.
+- `npm run dev:reset` wipes the dev data folder (only ever the `.dev` path) when a schema or migration needs a clean slate.
+- `npm run icon:dev` regenerates the badged dev icon (`scripts/make-dev-icon.py`) after the production icon changes.
+- Dev-only behaviors (terminal diagnostics, the runtime Dock badge) key off `commands::is_dev_channel`, i.e. the identifier ending in `.dev`.
+
 ### Runtime diagnostics
 
-The desktop app appends terminal renderer diagnostics to:
+The desktop app appends terminal renderer diagnostics (dev channel only) to its app-data dir:
 
 ```bash
-~/Library/Application Support/com.animus.reverie/terminal-diagnostics.jsonl
+~/Library/Application Support/com.animus.reverie.dev/terminal-diagnostics.jsonl   # npm run dev
+# A production build writes no diagnostics log.
 ```
 
 Use this log when investigating real Tauri terminal behavior that the browser harness cannot fully show: resize flicker, blank or repeated history rows, scrollback cache misses, renderer remounts, slow paints, input focus stalls, or a running terminal that appears stuck. Each JSONL entry includes the selected session id, active terminal id, timestamp, and a payload such as `buffer_cache_miss`, `history_rows_request`, `history_jump_*`, renderer lifecycle traces, or slow paint samples. Check this file before guessing from screenshots when the running desktop app diverges from harness behavior.
@@ -71,7 +86,7 @@ Use this log when investigating real Tauri terminal behavior that the browser ha
 Releases are cut by pushing a `vX.Y.Z` tag, which triggers `.github/workflows/release.yml` (macOS, Apple Silicon: Reverie's only target). Read [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md) before cutting one. Before tagging:
 
 - Update `CHANGELOG.md`: move `Unreleased` items into a new `## [X.Y.Z]` section, summarizing the commits since the previous tag (`git log <prev-tag>..HEAD`), grouped by Conventional Commit type. Commit as `docs(release): changelog for vX.Y.Z`.
-- Bump the version in `package.json`, `apps/desktop/src-tauri/tauri.conf.json`, and the crate `Cargo.toml` files.
+- Bump the version with `npm run version:set -- <x.y.z | patch | minor | major>`, which updates `package.json`, `apps/desktop/src-tauri/tauri.conf.json`, and every crate `Cargo.toml` in lockstep (then run `npm run check` to refresh `Cargo.lock`).
 - macOS signing/notarization needs these repo secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Without them the build is unsigned.
 
 Bundling is enabled and the Ghostty dylib ships inside the app with a baked rpath (no runtime `DYLD_LIBRARY_PATH`). `npm run bundle` produces the `.app` and `.dmg` locally; the release workflow builds them in CI. Signed, notarized releases additionally need the Apple secrets above. See the packaging doc for how it works.
