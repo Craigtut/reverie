@@ -1194,10 +1194,11 @@ mod tests {
     #[test]
     fn save_workspace_round_trips_theme_and_default_agent_kind() {
         let repo = seeded();
-        // Fresh workspaces default to the dark theme and the Cortex agent.
+        // Fresh workspaces default to the dark theme and Claude Code, the first
+        // agent in the priority order (see `domain::default_agent_kind`).
         let workspace = repo.load_snapshot().unwrap().workspace;
         assert_eq!(workspace.theme, ThemeMode::Dark);
-        assert_eq!(workspace.default_agent_kind, AgentKind::CortexCode);
+        assert_eq!(workspace.default_agent_kind, AgentKind::ClaudeCode);
 
         // Flipping the theme persists and round-trips without touching the agent.
         let mut workspace = repo.load_snapshot().unwrap().workspace;
@@ -1205,14 +1206,15 @@ mod tests {
         repo.save_workspace(&workspace).unwrap();
         let loaded = repo.load_snapshot().unwrap().workspace;
         assert_eq!(loaded.theme, ThemeMode::Light);
-        assert_eq!(loaded.default_agent_kind, AgentKind::CortexCode);
+        assert_eq!(loaded.default_agent_kind, AgentKind::ClaudeCode);
 
-        // Changing the default agent persists and is independent of the theme.
+        // Changing the default agent away from the seeded default persists and is
+        // independent of the theme.
         let mut workspace = repo.load_snapshot().unwrap().workspace;
-        workspace.default_agent_kind = AgentKind::ClaudeCode;
+        workspace.default_agent_kind = AgentKind::CortexCode;
         repo.save_workspace(&workspace).unwrap();
         let loaded = repo.load_snapshot().unwrap().workspace;
-        assert_eq!(loaded.default_agent_kind, AgentKind::ClaudeCode);
+        assert_eq!(loaded.default_agent_kind, AgentKind::CortexCode);
         assert_eq!(loaded.theme, ThemeMode::Light);
     }
 
