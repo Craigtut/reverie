@@ -85,8 +85,7 @@ export function EmptyState({
               <Sparkle size={12} weight="fill" /> Auto-approve default
             </Typography>
             <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
-              When off, agents ask before running a command or editing a file. When on, they carry
-              those actions out on their own.
+              When off, agents ask before running a command or editing a file.
             </Typography>
           </div>
           <div className={safetyToggleClass} role="radiogroup" aria-label="Auto-approve default">
