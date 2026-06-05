@@ -28,6 +28,15 @@ fn main() {
     if target_os == "macos" {
         if let Err(err) = stage_ghostty_dylib() {
             println!("cargo:warning=failed to stage libghostty-vt.dylib for bundling: {err}");
+            // `tauri_build::build()` validates bundle.macOS.frameworks at COMPILE
+            // time, so the file must exist even for `cargo check`/clippy/test on a
+            // clean checkout where the dylib has not been built yet (otherwise the
+            // build script fails hard). Stage an empty placeholder, the same way the
+            // reverie-bridge externalBin handling does; a real bundling build
+            // rebuilds the dylib and overwrites it with real bytes.
+            if let Err(err) = ensure_ghostty_framework_placeholder() {
+                println!("cargo:warning=failed to stage libghostty-vt.dylib placeholder: {err}");
+            }
         }
     }
 
@@ -133,6 +142,24 @@ fn stage_ghostty_dylib() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Ensure `frameworks/libghostty-vt.dylib` exists so Tauri's compile-time
+/// `frameworks` validation passes even when the real dylib has not been built
+/// yet (e.g. `cargo check`/clippy/test on a clean checkout). A real bundling
+/// build stages the actual dylib and overwrites this placeholder.
+fn ensure_ghostty_framework_placeholder() -> std::io::Result<()> {
+    const LIB_NAME: &str = "libghostty-vt.dylib";
+    let dest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("frameworks");
+    fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join(LIB_NAME);
+    // Keep a real (non-empty) dylib if one is already staged.
+    if fs::metadata(&dest).map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(());
+    }
+    fs::write(&dest, b"")?;
+    Ok(())
+}
+
 fn io_error(message: &str) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, message)
+    std::io::Error::other(message)
 }
