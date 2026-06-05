@@ -75,4 +75,14 @@ Reverie's terminal core is built on [Ghostty](https://ghostty.org/)'s VT engine 
 
 ## License
 
-Reverie is licensed under the [MIT License](LICENSE). © 2026 Craig Tuttle.
+Reverie's source code is licensed under the [MIT License](LICENSE). © 2026 Craig Tuttle.
+
+The Reverie name and the brand assets in [`branding/`](branding/) are not covered by
+the MIT License; all rights reserved. See [`branding/README.md`](branding/README.md).
+
+If you fork Reverie and ship a modified build, please give it a different name and
+your own branding, so users can tell it apart from the official project. This is a
+community courtesy, not a trademark claim: the Reverie name is unregistered.
+
+Contributions are accepted under the [Developer Certificate of Origin](DCO); see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for how to sign off your commits.

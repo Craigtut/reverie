@@ -7,8 +7,8 @@ in this repository, and the docs it points to in [`docs/`](docs/README.md).
 
 ## Code of conduct
 
-This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By
-participating, you agree to uphold it.
+Be respectful and constructive. Harassment, personal attacks, and abusive
+behavior are not welcome in issues, pull requests, or any project space.
 
 ## Prerequisites
 
@@ -75,7 +75,9 @@ enforced by commitlint. The full rules live in [`CLAUDE.md`](CLAUDE.md). In shor
 <type>(<scope>): <description>
 ```
 
-- **Single line only.** No body, no footer, no `Co-Authored-By`.
+- **Single line only.** No body or footer, except the DCO `Signed-off-by`
+  trailer added by `git commit -s` (see the DCO section below). No
+  `Co-Authored-By` or other trailers.
 - Imperative mood ("add resume flow", not "added resume flow").
 - Under 100 characters.
 - **Types:** `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `style`.
@@ -95,7 +97,28 @@ error. It does not rewrite them, so fix the message and commit again.
   [`CLAUDE.md`](CLAUDE.md) (never require git, keep the domain layer
   independent of the terminal renderer, local-first only, and so on).
 
-## License
+## Developer Certificate of Origin (DCO)
 
-By contributing, you agree that your contributions will be licensed under the
-[MIT License](LICENSE).
+Reverie uses the [Developer Certificate of Origin](DCO) (DCO 1.1) instead of a
+Contributor License Agreement. The DCO is a lightweight, contributor-friendly
+sign-off: by adding it to a commit you certify that you wrote the change, or
+otherwise have the right to submit it under the project's license. There is no
+separate form to sign.
+
+Sign off each commit by adding the `-s` flag:
+
+```bash
+git commit -s -m "feat(web): add focus rename inline editor"
+```
+
+That appends a trailer using your configured git name and email:
+
+```
+Signed-off-by: Your Name <you@example.com>
+```
+
+By signing off you agree to the terms in the [`DCO`](DCO) file. Contributions are
+licensed inbound under the same [MIT License](LICENSE) the project ships under
+(inbound = outbound). The `Signed-off-by` line is the one trailer allowed by the
+single-line commit rule above; please do not add any other body, footer, or
+co-author trailers.

@@ -137,7 +137,7 @@ refactor(core): split native session ref capture out of app_shell
 
 **Rules:**
 
-- Single line only. No message body, no footer, no `Co-Authored-By`.
+- Single line only. No message body, no footer, no `Co-Authored-By`. (External contributors sign commits with a DCO `Signed-off-by` trailer via `git commit -s`; that trailer is the one allowed exception. See CONTRIBUTING.md.)
 - Commit early and often. Small, focused commits are preferred; one logical change per commit.
 - Write in imperative mood: "add resume flow" not "added resume flow".
 - Keep the first line under 100 characters.
