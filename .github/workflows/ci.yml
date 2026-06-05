@@ -17,7 +17,7 @@ jobs:
     name: Frontend (lint, typecheck, build, tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -43,7 +43,7 @@ jobs:
     # The root workspace (reverie-core, persistence, bridge) is pure Rust and
     # does NOT link libghostty-vt, so it needs no Zig toolchain.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -64,7 +64,7 @@ jobs:
     # Reverie targets macOS (Apple Silicon) only. macos-latest runners are arm64.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
