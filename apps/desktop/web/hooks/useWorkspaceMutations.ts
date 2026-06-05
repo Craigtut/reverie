@@ -2,6 +2,7 @@ import {
   activityForSession,
   agentLabel,
   errorMessage,
+  folderNameFromPath,
   rollupSessionStates,
   shortId,
 } from '../domain';
@@ -29,6 +30,7 @@ interface WorkspaceMutationsOptions {
   model: WorkspaceModel;
   terminal: TerminalSession;
   selectSessionTab: (session: ShellSession) => void;
+  openFocus: (projectId: string | null, focusId: string) => void;
 }
 
 // Workspace-record mutations that persist a change and reconcile the navigation
@@ -40,8 +42,9 @@ export function useWorkspaceMutations({
   model,
   terminal,
   selectSessionTab,
+  openFocus,
 }: WorkspaceMutationsOptions) {
-  const { shell, selectedSession, visibleSessions } = model;
+  const { shell, selectedSession } = model;
   const setShell = useShellStore(s => s.setShell);
   const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
   const setSelectedProjectId = useNavigationStore(s => s.setSelectedProjectId);
@@ -164,6 +167,49 @@ export function useWorkspaceMutations({
     }
   }
 
+  // Folders dropped onto the left panel each become a new project, silently: the
+  // rail just gains the projects, with no surface change. Each path is resolved
+  // and created on the backend, which enforces the folder-only rule (a dropped
+  // file or missing path is rejected). Creates run sequentially so each sees the
+  // previous one persisted and the final snapshot reflects them all; a clean
+  // summary toast confirms, and the first failure (if any) surfaces its message.
+  async function addProjectsFromDroppedFolders(paths: string[]) {
+    const cleaned = paths.map(path => path.trim()).filter(Boolean);
+    if (cleaned.length === 0) return;
+    setBusy(true);
+    const created: string[] = [];
+    const failures: string[] = [];
+    try {
+      for (const path of cleaned) {
+        try {
+          const snapshot = await invoke<WorkspaceShellSnapshot>('create_project_from_folder', {
+            path,
+          });
+          setShell(snapshot);
+          created.push(folderNameFromPath(path) || 'project');
+          appendLog(`Added project from dropped folder: ${path}.`);
+        } catch (error) {
+          const message = errorMessage(error);
+          failures.push(message);
+          appendLog(`Add project from dropped folder failed (${path}): ${message}`);
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+    const { pushToast } = useOverlayStore.getState();
+    if (created.length === 1) {
+      pushToast({ message: `Added project “${created[0]}”` });
+    } else if (created.length > 1) {
+      pushToast({ message: `Added ${created.length} projects` });
+    }
+    if (failures.length > 0) {
+      // Most drops are a single folder, so surface the first problem; the rest
+      // (a rare multi-folder drop with several bad paths) stay in the log.
+      pushToast({ message: failures[0] });
+    }
+  }
+
   async function setSessionArchived(session: ShellSession, archived: boolean) {
     const snapshot = await invoke<WorkspaceShellSnapshot>('set_session_archived', {
       request: { shellSessionId: session.id, archived },
@@ -222,23 +268,15 @@ export function useWorkspaceMutations({
     }
     // Release this session's terminal binding + active-terminal claim and forget
     // its cached buffer synchronously, so the canvas/keyboard cannot keep driving
-    // the just-closed process while we re-point the tab below (the async
+    // the just-closed process while we re-point the view below (the async
     // terminal_exit cleanup otherwise races this re-selection).
     terminal.detachSession(session.id);
-    const nextVisibleSession =
-      visibleSessions.find(candidate => candidate.id !== session.id) ?? null;
-    const snapshot = await setSessionArchived(session, true);
+    await setSessionArchived(session, true);
     if (selectedSessionId === session.id) {
-      if (nextVisibleSession) {
-        selectSessionTab(nextVisibleSession);
-      } else {
-        setSelectedSessionId(null);
-        terminal.clearSurface();
-        const stillHasActive = snapshot.sessions.some(
-          candidate => candidate.focusId === session.focusId && !candidate.archived,
-        );
-        setSurfaceMode(stillHasActive ? 'dashboard' : 'session-history');
-      }
+      // Closing the session you're viewing returns you to its topic's dashboard
+      // (the topic's own session overview), not to another session in the topic.
+      const focus = shell.focuses.find(candidate => candidate.id === session.focusId);
+      openFocus(focus?.projectId ?? null, session.focusId);
     }
     appendLog(`Closed ${session.title}; archived to the focus history.`);
     useOverlayStore.getState().pushToast({
@@ -381,6 +419,7 @@ export function useWorkspaceMutations({
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     toggleSelectedSessionYolo,
+    addProjectsFromDroppedFolders,
     archiveSession,
     restoreSessionTab,
     removeSessionRecord,

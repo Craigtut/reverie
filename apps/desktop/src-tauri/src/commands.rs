@@ -400,6 +400,47 @@ pub(crate) fn create_project(
         .map_err(|err| err.to_string())
 }
 
+/// Add a project straight from a folder dropped onto the left panel. Strictly
+/// folder-only: unlike `resolve_project_folder` (which maps a dropped file to its
+/// parent so the composer can recover from a near-miss), this rejects anything
+/// that is not itself an existing directory, so the sidebar drop adds exactly the
+/// folder you dropped and never silently substitutes a parent. The folder's own
+/// name becomes the project name. Returns the updated snapshot so the rail shows
+/// the new project at once.
+#[tauri::command]
+pub(crate) fn create_project_from_folder(
+    service: State<'_, WorkspaceService>,
+    path: String,
+) -> Result<WorkspaceSnapshot, String> {
+    let folder = classify_dropped_folder(&path)?;
+    let name = folder
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("New project")
+        .to_owned();
+    service
+        .create_project(name, folder)
+        .map_err(|err| err.to_string())
+}
+
+/// Classify a path dropped onto the left panel for use as a project folder: it
+/// must be an existing directory. A file or a missing path is rejected with a
+/// message the toast surfaces. Kept pure (no service state, no Tauri types) so the
+/// folder-only rule can be unit-tested directly.
+fn classify_dropped_folder(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("No folder was provided.".to_owned());
+    }
+    let candidate = PathBuf::from(trimmed);
+    let metadata = std::fs::metadata(&candidate)
+        .map_err(|_| format!("That folder could not be found: {trimmed}"))?;
+    if !metadata.is_dir() {
+        return Err("That is a file. Drop a folder to add a project.".to_owned());
+    }
+    Ok(candidate)
+}
+
 #[tauri::command]
 pub(crate) fn create_focus(
     service: State<'_, WorkspaceService>,
@@ -1652,5 +1693,61 @@ mod env_guard_tests {
         let err = assert_safe_cli_env(AgentKind::ClaudeCode, &env)
             .expect_err("forbidden key still trips guard even with REVERIE_* present");
         assert!(err.to_string().contains("CLAUDE_CONFIG_DIR"));
+    }
+}
+
+#[cfg(test)]
+mod dropped_folder_tests {
+    //! Pin the folder-only rule for the left-panel project drop: a real
+    //! directory resolves, while a file, a missing path, or a blank string is
+    //! rejected with a clear message. Unlike the composer's resolver, this must
+    //! never turn a dropped file into its parent folder.
+
+    use super::classify_dropped_folder;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn accepts_an_existing_directory() {
+        let dir = tempdir().expect("temp dir");
+        let resolved = classify_dropped_folder(&dir.path().display().to_string())
+            .expect("a real directory resolves");
+        assert_eq!(
+            resolved.display().to_string(),
+            dir.path().display().to_string()
+        );
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace_before_resolving() {
+        let dir = tempdir().expect("temp dir");
+        let padded = format!("  {}  ", dir.path().display());
+        classify_dropped_folder(&padded).expect("a padded directory path still resolves");
+    }
+
+    #[test]
+    fn rejects_a_file_without_substituting_its_parent() {
+        let dir = tempdir().expect("temp dir");
+        let file = dir.path().join("notes.txt");
+        fs::write(&file, b"hi").expect("write file");
+        let err = classify_dropped_folder(&file.display().to_string())
+            .expect_err("a file is rejected, not mapped to its parent");
+        assert!(err.contains("Drop a folder"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn rejects_a_missing_path() {
+        let err = classify_dropped_folder("/no/such/path/for/reverie/tests")
+            .expect_err("a missing path is rejected");
+        assert!(
+            err.contains("could not be found"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_blank_path() {
+        let err = classify_dropped_folder("   ").expect_err("a blank path is rejected");
+        assert!(err.contains("No folder"), "unexpected message: {err}");
     }
 }

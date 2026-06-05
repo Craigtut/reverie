@@ -320,6 +320,7 @@ fn main() {
             commands::choose_project_folder,
             commands::resolve_project_folder,
             commands::create_project,
+            commands::create_project_from_folder,
             commands::create_focus,
             commands::create_session,
             commands::update_session_tab_visibility,

@@ -21,12 +21,14 @@ import type {
   WorkspaceShellSnapshot,
 } from '../../domain';
 import { useNavigationStore } from '../../store';
+import { useSidebarFolderDrop, SIDEBAR_PROJECT_DROP_ZONE } from '../../hooks';
 import { ReverieMark, TrafficLights } from '../chrome';
 import { Typography } from '../primitives/Typography';
 import { ProjectGroup } from './ProjectGroup';
+import { SidebarDropOverlay } from './SidebarDropOverlay';
 import { FocusRow } from './FocusRow';
 import { SessionRow } from './SessionRow';
-import { rowAddClass } from './navStyles';
+import { rowAddClass, rowAttentionBadgeClass, rowReadyBadgeClass } from './navStyles';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { NavDndProvider } from './NavDndProvider';
 import { SortableRow } from './SortableRow';
@@ -46,7 +48,6 @@ export interface SidebarProps {
   selectedFocusId: string | null;
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
-  liveSessionCount: number;
   busy: boolean;
   canUseAppServices: boolean;
   onOpenCommandPalette: () => void;
@@ -59,6 +60,8 @@ export interface SidebarProps {
   onArchiveProject: (project: ShellProject) => void;
   onOpenCreation: (mode: NonNullable<CreationMode>, projectId?: string | null) => void;
   onOpenSettings: () => void;
+  // A folder (or several) dropped onto the rail: each becomes a new project.
+  onAddProjectsFromFolders: (paths: string[]) => void;
 }
 
 // The left navigation rail: workspace search, the Home row, the General group
@@ -71,7 +74,6 @@ export function Sidebar({
   selectedFocusId,
   sessionTerminalBindings,
   cortexActivity,
-  liveSessionCount,
   busy,
   canUseAppServices,
   onOpenCommandPalette,
@@ -84,7 +86,11 @@ export function Sidebar({
   onArchiveProject,
   onOpenCreation,
   onOpenSettings,
+  onAddProjectsFromFolders,
 }: SidebarProps) {
+  // The whole rail is a folder drop zone (marked on the <aside> below). A folder
+  // dropped anywhere on it adds a project; the visual is confined to the panel.
+  const folderDrop = useSidebarFolderDrop({ onDropFolders: onAddProjectsFromFolders });
   const selectedSessionId = useNavigationStore(s => s.selectedSessionId);
   const collapsedProjectIds = useNavigationStore(s => s.collapsedProjectIds);
   const expandedFocusIds = useNavigationStore(s => s.expandedFocusIds);
@@ -162,6 +168,18 @@ export function Sidebar({
     cortexActivity,
     viewedSessionId,
   );
+  // The Home row surfaces only the demanding states across the whole workspace:
+  // how many sessions need you (a blocking ask or a hard failure) and how many
+  // finished off-screen and are waiting to be seen. Working and idle are calm by
+  // design and intentionally absent, so the badge reads as "look here" rather
+  // than a running-process tally. When nothing needs you and nothing is ready,
+  // the row carries no badge at all.
+  const workspaceRollup = rollupSessionStates(
+    shell.sessions.filter(session => !session.archived),
+    sessionTerminalBindings,
+    cortexActivity,
+    viewedSessionId,
+  );
   const sortedProjects = shell.projects
     .filter(project => !project.archived)
     .slice()
@@ -172,6 +190,8 @@ export function Sidebar({
       className={cx(rimLitPanelClass, leftPanelClass)}
       aria-label="Reverie navigation"
       data-testid="left-panel"
+      data-drop-zone={SIDEBAR_PROJECT_DROP_ZONE}
+      data-drop-id="sidebar"
     >
       <div className={titlebarClass} data-tauri-drag-region>
         <TrafficLights />
@@ -207,16 +227,35 @@ export function Sidebar({
             <Typography as="span" variant="smallBody" tone="inherit" className={homeRowLabelClass}>
               Home
             </Typography>
-            {liveSessionCount > 0 ? (
-              <Typography
-                as="span"
-                variant="tiny"
-                tone="faint"
-                className={homeRowMetaClass}
-                data-testid="home-nav-live-count"
-              >
-                {liveSessionCount} live
-              </Typography>
+            {workspaceRollup.attention > 0 || workspaceRollup.finished > 0 ? (
+              <span className={homeRowMetaClass}>
+                {workspaceRollup.attention > 0 ? (
+                  <Typography
+                    as="span"
+                    variant="caption"
+                    tone="warn"
+                    className={rowAttentionBadgeClass}
+                    data-testid="home-nav-attention-count"
+                    title={`${workspaceRollup.attention} need${
+                      workspaceRollup.attention === 1 ? 's' : ''
+                    } you`}
+                  >
+                    {workspaceRollup.attention}
+                  </Typography>
+                ) : null}
+                {workspaceRollup.finished > 0 ? (
+                  <Typography
+                    as="span"
+                    variant="caption"
+                    tone="muted"
+                    className={rowReadyBadgeClass}
+                    data-testid="home-nav-ready-count"
+                    title={`${workspaceRollup.finished} ready for you`}
+                  >
+                    {workspaceRollup.finished}
+                  </Typography>
+                ) : null}
+              </span>
             ) : null}
           </button>
 
@@ -367,6 +406,11 @@ export function Sidebar({
           </Typography>
         </button>
       </div>
+
+      {/* The folder-drop field, confined to the rail (contain): it rises with a
+          gravity-well under the cursor and splashes on release. pointer-events
+          none, so the native drop still lands on the <aside> zone beneath it. */}
+      <SidebarDropOverlay model={folderDrop} />
     </aside>
   );
 }
@@ -466,11 +510,11 @@ const homeRowLabelClass = css({
 });
 
 const homeRowMetaClass = css({
+  flexShrink: 0,
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '8px',
   fontVariantNumeric: 'tabular-nums',
-  padding: '1px 7px',
-  border: '1px solid var(--line)',
-  borderRadius: '999px',
-  background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
 });
 
 const sectionLabelClass = css({

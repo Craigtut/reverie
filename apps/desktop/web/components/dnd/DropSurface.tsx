@@ -27,6 +27,12 @@ export interface DropSurfaceProps {
   // How strongly the field rises when a drag is loose but not over this zone
   // (the ambient "you can drop here" whisper). 0 disables it. Default 0.16.
   armedLevel?: number;
+  // Confine the field to its parent instead of the whole window. The root then
+  // anchors to the nearest positioned ancestor (position:absolute, not fixed) and
+  // the plate centers inside it, so a panel-scoped zone (e.g. the left rail) shows
+  // its dots only over itself and never bleeds across the app. The parent must be
+  // positioned (relative/absolute). Default false (full-window, like the terminal).
+  contain?: boolean;
   className?: string;
 }
 
@@ -46,6 +52,7 @@ export function DropSurface({
   invalidSublabel,
   showChip = false,
   armedLevel = 0.16,
+  contain = false,
   className,
 }: DropSurfaceProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -115,10 +122,12 @@ export function DropSurface({
   }, [model, level, overZone, onZone, valid]);
 
   // Measure the active zone's element so the plate anchors over it. Keyed on the
-  // target (not the pointer), so it measures once per hover, before paint.
+  // target (not the pointer), so it measures once per hover, before paint. Skipped
+  // when contained: the root already fills the zone's panel, so the plate centers
+  // in the root and needs no per-zone rect.
   const targetId = model.target?.id;
   useLayoutEffect(() => {
-    if (!overZone) {
+    if (!overZone || contain) {
       setZoneRect(null);
       return;
     }
@@ -127,7 +136,7 @@ export function DropSurface({
       : `[data-drop-zone="${zone}"]`;
     const el = document.querySelector(selector);
     setZoneRect(el ? el.getBoundingClientRect() : null);
-  }, [overZone, zone, targetId]);
+  }, [overZone, zone, targetId, contain]);
 
   const fileCount = model.files.length;
   const primaryFile = fileCount > 0 ? droppedPathLabel(model.files[0]) : '';
@@ -135,45 +144,60 @@ export function DropSurface({
   const plateLabel = valid ? label : (invalidLabel ?? label);
   const plateSub = valid ? sublabel : (invalidSublabel ?? sublabel);
 
+  // The plate body is identical in both layouts; only its wrapper differs (the
+  // contained one centers in the panel, the windowed one anchors over the zone's
+  // measured rect).
+  const plateBody = (
+    <div className={plateClass} data-valid={valid ? 'true' : 'false'}>
+      {icon}
+      <div className={plateTextClass}>
+        {plateLabel ? (
+          <Typography as="span" variant="caption" tone="default">
+            {plateLabel}
+          </Typography>
+        ) : null}
+        {plateSub ? (
+          <Typography as="span" variant="tiny" tone="muted" className={plateSubClass}>
+            {plateSub}
+          </Typography>
+        ) : null}
+      </div>
+    </div>
+  );
+
+  const rootClass = contain ? containedRootClass : overlayRootClass;
+  // The vignette reads heavier over a narrow panel than over the whole window, so
+  // the contained variant darkens more gently.
+  const scrimOpacity = Math.min(1, level * (contain ? 0.32 : 0.58));
+
   return (
-    <div
-      className={className ? `${overlayRootClass} ${className}` : overlayRootClass}
-      aria-hidden="true"
-    >
-      <div className={scrimClass} style={{ opacity: Math.min(1, level * 0.58) }} />
+    <div className={className ? `${rootClass} ${className}` : rootClass} aria-hidden="true">
+      <div className={scrimClass} style={{ opacity: scrimOpacity }} />
       <canvas ref={canvasRef} className={canvasClass} data-testid="drop-field" />
 
-      <div
-        className={plateWrapClass}
-        data-shown={showPlate && zoneRect ? 'true' : 'false'}
-        style={
-          zoneRect
-            ? {
-                left: `${zoneRect.left}px`,
-                top: `${zoneRect.top}px`,
-                width: `${zoneRect.width}px`,
-                height: `${zoneRect.height}px`,
-                paddingBottom: `${Math.max(20, zoneRect.height * 0.13)}px`,
-              }
-            : undefined
-        }
-      >
-        <div className={plateClass} data-valid={valid ? 'true' : 'false'}>
-          {icon}
-          <div className={plateTextClass}>
-            {plateLabel ? (
-              <Typography as="span" variant="caption" tone="default">
-                {plateLabel}
-              </Typography>
-            ) : null}
-            {plateSub ? (
-              <Typography as="span" variant="tiny" tone="muted" className={plateSubClass}>
-                {plateSub}
-              </Typography>
-            ) : null}
-          </div>
+      {contain ? (
+        <div className={containedPlateWrapClass} data-shown={showPlate ? 'true' : 'false'}>
+          {plateBody}
         </div>
-      </div>
+      ) : (
+        <div
+          className={plateWrapClass}
+          data-shown={showPlate && zoneRect ? 'true' : 'false'}
+          style={
+            zoneRect
+              ? {
+                  left: `${zoneRect.left}px`,
+                  top: `${zoneRect.top}px`,
+                  width: `${zoneRect.width}px`,
+                  height: `${zoneRect.height}px`,
+                  paddingBottom: `${Math.max(20, zoneRect.height * 0.13)}px`,
+                }
+              : undefined
+          }
+        >
+          {plateBody}
+        </div>
+      )}
 
       {/* The carried-file chip portals to document.body so it rides ABOVE the
           chrome at the cursor, even though the field itself sits behind it. */}
@@ -222,6 +246,18 @@ const overlayRootClass = css({
   overflow: 'hidden',
 });
 
+// Contained variant: anchors to the nearest positioned ancestor (the host panel)
+// rather than the window, so the field paints only over that panel. zIndex sits
+// above the panel's own content and rim so the dots read on top during a drag;
+// the panel's overflow:hidden clips the field to its rounded corners.
+const containedRootClass = css({
+  position: 'absolute',
+  inset: 0,
+  zIndex: 4,
+  pointerEvents: 'none',
+  overflow: 'hidden',
+});
+
 const scrimClass = css({
   position: 'absolute',
   inset: 0,
@@ -246,6 +282,21 @@ const plateWrapClass = css({
   display: 'flex',
   justifyContent: 'center',
   alignItems: 'flex-end',
+  opacity: 0,
+  transform: 'translateY(6px)',
+  transition: 'opacity 220ms ease, transform 220ms ease',
+  '&[data-shown="true"]': { opacity: 1, transform: 'translateY(0)' },
+});
+
+// Contained plate: centered in the host panel (the whole panel is the zone), so
+// no per-zone rect is needed. Same fade/lift as the windowed plate.
+const containedPlateWrapClass = css({
+  position: 'absolute',
+  inset: 0,
+  display: 'flex',
+  justifyContent: 'center',
+  alignItems: 'center',
+  padding: '16px',
   opacity: 0,
   transform: 'translateY(6px)',
   transition: 'opacity 220ms ease, transform 220ms ease',

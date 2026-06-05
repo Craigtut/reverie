@@ -1204,6 +1204,14 @@ const LAUNCH_CAPTURE_INITIAL_INTERVAL: Duration = Duration::from_millis(500);
 const LAUNCH_CAPTURE_MAX_INTERVAL: Duration = Duration::from_secs(5);
 const LAUNCH_CAPTURE_TOTAL_WAIT: Duration = Duration::from_secs(300);
 
+/// Claude reports its native session id through a per-launch, token-bound
+/// SessionStart hook that is immune to how many sessions share a folder. The
+/// filesystem scan cannot tell apart several Claude sessions in one cwd by
+/// mtime, so we let the hook win: for this grace window after launch the poll
+/// only checks whether the hook has captured, and runs the (exclusion-guarded)
+/// scan afterward solely as a backstop for launches whose hook never fired.
+const CLAUDE_HOOK_CAPTURE_GRACE: Duration = Duration::from_secs(6);
+
 /// Poll adapter-driven native-session discovery for a short window after launch
 /// so a session binds its native ref (and the dashboard binds its live activity)
 /// as soon as the CLI has written its session file, rather than only at exit.
@@ -1238,6 +1246,14 @@ fn spawn_launch_capture_poll(
             let Some((service, session_id)) = workspace_service(&app, Some(session_id)) else {
                 return;
             };
+            // Prefer Claude's collision-proof hook over the racy cwd scan: during
+            // the grace window only stop if the hook has already captured.
+            if matches!(agent_kind, AgentKind::ClaudeCode) && waited < CLAUDE_HOOK_CAPTURE_GRACE {
+                if session_native_ref_present(&service, session_id) {
+                    return;
+                }
+                continue;
+            }
             match service.discover_and_attach_native_session(
                 session_id,
                 Some(launch_started_ms),

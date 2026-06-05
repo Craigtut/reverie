@@ -7,6 +7,7 @@
 //! it is fully testable against [`InMemoryWorkspaceRepository`] without Tauri
 //! or a real database, and it is `Send + Sync` for use as Tauri managed state.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -603,14 +604,41 @@ impl WorkspaceService {
         else {
             return Ok(false);
         };
+        // Native ids already owned by other sessions. Filesystem discovery picks
+        // the newest cwd-matching file by mtime, which cannot distinguish several
+        // same-CLI sessions sharing one folder; the exclusion stops a launching
+        // session from adopting a sibling's id (the cross-session collision that
+        // makes two tabs `--resume` into one conversation).
+        let claimed_native_ids: BTreeSet<String> = self
+            .repo
+            .load_snapshot()?
+            .sessions
+            .into_iter()
+            .filter(|other| other.id != session_id)
+            .filter_map(|other| {
+                other
+                    .native_session_ref
+                    .and_then(|reference| reference.session_id)
+            })
+            .collect();
         let context = DiscoveryContext {
             cwd: session.cwd.clone(),
             launched_after_ms,
             agent_home,
+            claimed_native_ids,
         };
         let Some(native_session_ref) = adapter.discover_native_session(&context)? else {
             return Ok(false);
         };
+        // Defense in depth: even past the scanner's exclusion, never attach an id
+        // that already resolves to a different session.
+        if let Some(discovered_id) = native_session_ref.session_id.as_deref() {
+            if let Some(owner) = self.repo.find_session_by_native_id(discovered_id)? {
+                if owner.id != session_id {
+                    return Ok(false);
+                }
+            }
+        }
         self.attach_native_session(
             session_id,
             session.cwd.clone(),
@@ -903,19 +931,22 @@ fn normalize_session(session: &mut Session) -> bool {
 
 /// Reconcile a persisted activity snapshot left mid-flight by an unclean
 /// shutdown. Quitting Reverie kills every agent process, so on the next boot no
-/// session can still be `Working` or `AwaitingPermission`: those are live-process
-/// states. Resuming a CLI only restores the conversation history, it does not
-/// re-raise the permission prompt or pick the turn back up, so a persisted
-/// "needs your approval" or "working" snapshot is stale and would mislead the
+/// session can still be `Working`, `AwaitingPermission`, or `AwaitingResponse`:
+/// those are live-process states. Resuming a CLI only restores the conversation
+/// history, it does not re-raise the permission prompt, re-present the pending
+/// question, or pick the turn back up, so a persisted "needs your approval",
+/// "needs your answer", or "working" snapshot is stale and would mislead the
 /// dashboard into showing attention/active for a session that is really just
-/// waiting for you. Reset those two statuses to the at-rest `AwaitingInput` and
+/// waiting for you. Reset those statuses to the at-rest `AwaitingInput` and
 /// drop the now-meaningless pending permission, running turn, and active tools.
 /// Other statuses (`AwaitingInput`, `Done`, `Error`) describe an outcome, not a
 /// live process, so they are left untouched. Returns whether anything changed.
 fn normalize_stale_activity(activity: &mut ActivityState) -> bool {
     if !matches!(
         activity.status,
-        ActivityStatus::Working | ActivityStatus::AwaitingPermission
+        ActivityStatus::Working
+            | ActivityStatus::AwaitingPermission
+            | ActivityStatus::AwaitingResponse
     ) {
         return false;
     }
@@ -1731,6 +1762,194 @@ mod tests {
             !service
                 .discover_and_attach_native_session(id, Some(0), Some("/nonexistent".into()))
                 .unwrap()
+        );
+    }
+
+    /// Two same-CLI sessions sharing one folder must not adopt the same native
+    /// id. The mtime heuristic alone would hand a launching session whichever
+    /// sibling wrote most recently; the exclusion guard makes it skip claimed
+    /// ids and bind to its own (here older) file instead, so the two sessions
+    /// never `--resume` into one conversation.
+    #[test]
+    fn discover_skips_a_native_id_a_sibling_already_owns_in_the_same_folder() {
+        use std::collections::BTreeMap;
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+
+        let cortex_home = tempfile::TempDir::new().unwrap();
+        let shared = tempfile::TempDir::new().unwrap();
+        let cwd: PathBuf = shared.path().into();
+
+        let write_meta = |id: &str, updated_at: i64| {
+            let dir = cortex_home.path().join("sessions").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let metadata = CortexSessionMetadata {
+                id: id.to_owned(),
+                mode: Some("build".to_owned()),
+                provider: Some("openai-codex".to_owned()),
+                model: None,
+                cwd: cwd.clone(),
+                created_at: Some(updated_at - 100),
+                updated_at: Some(updated_at),
+                adapter_payload: BTreeMap::new(),
+            };
+            std::fs::write(
+                dir.join("meta.json"),
+                serde_json::to_string(&metadata).unwrap(),
+            )
+            .unwrap();
+        };
+        // Sibling A's file is the NEWEST on disk (it is actively writing); the
+        // new session B's own file is older.
+        write_meta("sess-shared", 2_000);
+        write_meta("sess-bee", 1_000);
+
+        let a = service
+            .create_session(
+                focus,
+                "A".to_owned(),
+                AgentKind::CortexCode,
+                cwd.clone(),
+                None,
+            )
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.title == "A")
+            .unwrap()
+            .id;
+        let b = service
+            .create_session(
+                focus,
+                "B".to_owned(),
+                AgentKind::CortexCode,
+                cwd.clone(),
+                None,
+            )
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.title == "B")
+            .unwrap()
+            .id;
+
+        // A owns the newest file's id.
+        service
+            .attach_native_session(
+                a,
+                cwd.clone(),
+                NativeSessionRef::cortex("sess-shared", None),
+                AgentKind::CortexCode,
+            )
+            .unwrap();
+
+        // B discovers: it must skip A's claimed id and bind its own older file.
+        let captured = service
+            .discover_and_attach_native_session(b, Some(0), Some(cortex_home.path().into()))
+            .unwrap();
+        assert!(captured, "B should still capture its own session");
+        let b_ref = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == b)
+            .unwrap()
+            .native_session_ref
+            .expect("B captured a native ref");
+        assert_eq!(
+            b_ref.session_id.as_deref(),
+            Some("sess-bee"),
+            "B must not adopt the sibling's claimed id"
+        );
+    }
+
+    /// When the only cwd-matching file on disk is one a sibling already owns
+    /// (the new session has not written its own yet), discovery must capture
+    /// nothing rather than collide. The token-bound hook (Claude) or a later
+    /// poll iteration is then free to bind the correct id.
+    #[test]
+    fn discover_captures_nothing_when_only_a_claimed_sibling_file_matches() {
+        use std::collections::BTreeMap;
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+
+        let cortex_home = tempfile::TempDir::new().unwrap();
+        let shared = tempfile::TempDir::new().unwrap();
+        let cwd: PathBuf = shared.path().into();
+
+        let dir = cortex_home.path().join("sessions").join("sess-shared");
+        std::fs::create_dir_all(&dir).unwrap();
+        let metadata = CortexSessionMetadata {
+            id: "sess-shared".to_owned(),
+            mode: Some("build".to_owned()),
+            provider: Some("openai-codex".to_owned()),
+            model: None,
+            cwd: cwd.clone(),
+            created_at: Some(900),
+            updated_at: Some(1_000),
+            adapter_payload: BTreeMap::new(),
+        };
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let a = service
+            .create_session(
+                focus,
+                "A".to_owned(),
+                AgentKind::CortexCode,
+                cwd.clone(),
+                None,
+            )
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.title == "A")
+            .unwrap()
+            .id;
+        let b = service
+            .create_session(
+                focus,
+                "B".to_owned(),
+                AgentKind::CortexCode,
+                cwd.clone(),
+                None,
+            )
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.title == "B")
+            .unwrap()
+            .id;
+        service
+            .attach_native_session(
+                a,
+                cwd.clone(),
+                NativeSessionRef::cortex("sess-shared", None),
+                AgentKind::CortexCode,
+            )
+            .unwrap();
+
+        let captured = service
+            .discover_and_attach_native_session(b, Some(0), Some(cortex_home.path().into()))
+            .unwrap();
+        assert!(
+            !captured,
+            "B must not adopt the sibling's only matching file"
+        );
+        assert!(
+            service
+                .snapshot()
+                .unwrap()
+                .sessions
+                .into_iter()
+                .find(|session| session.id == b)
+                .unwrap()
+                .native_session_ref
+                .is_none()
         );
     }
 

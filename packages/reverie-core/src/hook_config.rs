@@ -45,6 +45,14 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "SessionEnd",
     "UserPromptSubmit",
+    // Fires when Claude blocks on the user: a permission dialog, an MCP
+    // elicitation, or the idle prompt. It is the only hook that signals "the
+    // turn is live but the agent is waiting for you" for asks that do NOT cross
+    // a tool boundary, so without it a session that pops a question reads as
+    // still-working (green) until something else moves it. No matcher: the
+    // matcher key is the notification type, not a tool name, and a tool-style
+    // `"*"` matcher would suppress it.
+    "Notification",
 ];
 
 /// Claude hook events that key off a tool name and therefore take a `matcher`.

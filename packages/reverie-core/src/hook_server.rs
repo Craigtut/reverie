@@ -386,6 +386,11 @@ struct HookEnvelope {
     error_type: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    /// The kind of `Notification` event (`permission_prompt`, `idle_prompt`,
+    /// `elicitation_dialog`, …). Only present on Notification payloads; it is
+    /// how we tell a blocking ask apart from a benign toast.
+    #[serde(default)]
+    notification_type: Option<String>,
 }
 
 fn parse_envelope(payload: &Value) -> Option<HookEnvelope> {
@@ -409,6 +414,33 @@ fn hook_state_update(
     }
 }
 
+/// Built-in Claude tools that block the turn on a user response rather than
+/// doing work: a multiple-choice question (`AskUserQuestion`) or a plan
+/// approval (`ExitPlanMode`). They emit a `PreToolUse` like any tool but no
+/// `PostToolUse` until the user answers, and no `Stop` (the turn is still
+/// live), so without special-casing them the session sits on its last
+/// `Working` state and reads as green while it is really waiting for you.
+const CLAUDE_ASKING_TOOLS: &[&str] = &["AskUserQuestion", "ExitPlanMode"];
+
+fn is_asking_tool(tool_name: &str) -> bool {
+    CLAUDE_ASKING_TOOLS.contains(&tool_name)
+}
+
+/// Resolve a Claude `Notification` to a status change, or `None` when it
+/// carries no turn-state meaning. `elicitation_dialog` (an MCP server asking
+/// the user) blocks the turn, so it is an `AwaitingResponse`; its completion
+/// resumes work. `idle_prompt` is deliberately ignored: it fires for ANY
+/// session left untouched at the prompt, so escalating it would falsely amber
+/// every resting session after a minute. `permission_prompt` is already covered
+/// by the dedicated `PermissionRequest` hook, and `auth_success` is a toast.
+fn claude_notification_status(notification_type: Option<&str>) -> Option<ActivityStatus> {
+    match notification_type? {
+        "elicitation_dialog" => Some(ActivityStatus::AwaitingResponse),
+        "elicitation_complete" | "elicitation_response" => Some(ActivityStatus::Working),
+        _ => None,
+    }
+}
+
 fn translate_claude(
     reverie_session_id: SessionId,
     payload: &Value,
@@ -420,6 +452,25 @@ fn translate_claude(
     let sequence = next_sequence(sequences, &session_id);
     let cwd = envelope.cwd.clone().unwrap_or_default();
 
+    // Notification is the one event that can resolve to "no state change", so it
+    // is handled apart from the match below (which always yields a state). The
+    // trace line is the ground truth for what Claude actually sends here, which
+    // the hook docs leave unspecified.
+    if envelope.hook_event_name == "Notification" {
+        let kind = envelope.notification_type.as_deref().unwrap_or("?");
+        eprintln!(
+            "[reverie] claude notification session={session_id} type={kind} message={:?}",
+            envelope.message.as_deref().unwrap_or("")
+        );
+        let status = claude_notification_status(envelope.notification_type.as_deref())?;
+        let state = build_simple_state(&session_id, timestamp, sequence, cwd, status);
+        return Some(hook_state_update(
+            HookSource::ClaudeCode,
+            reverie_session_id,
+            state,
+        ));
+    }
+
     let state = match envelope.hook_event_name.as_str() {
         "PermissionRequest" => build_state_awaiting_permission(
             &session_id,
@@ -429,18 +480,38 @@ fn translate_claude(
             envelope.tool_name.as_deref().unwrap_or("tool"),
             envelope.tool_input.as_ref(),
         ),
-        // A tool is starting: surface it as the active tool so the dashboard can
-        // show "Run shell: npm test" instead of a bare "Working".
-        "PreToolUse" => build_state_working_tool(
-            &session_id,
-            timestamp,
-            sequence,
-            cwd,
-            envelope.tool_name.as_deref().unwrap_or("tool"),
-            envelope.tool_input.as_ref(),
-        ),
+        // A tool is starting. A genuine work tool surfaces as the active tool so
+        // the dashboard can show "Run shell: npm test" instead of a bare
+        // "Working". An *asking* tool (AskUserQuestion / ExitPlanMode) instead
+        // blocks the turn on the user: there is no PostToolUse and no Stop until
+        // you answer, so we hold AwaitingResponse rather than leave it green.
+        "PreToolUse" => {
+            let tool = envelope.tool_name.as_deref().unwrap_or("tool");
+            if is_asking_tool(tool) {
+                eprintln!(
+                    "[reverie] claude session={session_id} awaiting user response (PreToolUse:{tool})"
+                );
+                build_simple_state(
+                    &session_id,
+                    timestamp,
+                    sequence,
+                    cwd,
+                    ActivityStatus::AwaitingResponse,
+                )
+            } else {
+                build_state_working_tool(
+                    &session_id,
+                    timestamp,
+                    sequence,
+                    cwd,
+                    tool,
+                    envelope.tool_input.as_ref(),
+                )
+            }
+        }
         // The tool finished; clear the active tool but stay Working until the
-        // turn's Stop arrives.
+        // turn's Stop arrives. (For an asking tool this is the answer landing,
+        // which correctly moves us off AwaitingResponse back to Working.)
         "PostToolUse" | "SessionStart" | "UserPromptSubmit" => build_simple_state(
             &session_id,
             timestamp,
@@ -924,6 +995,105 @@ mod tests {
             }
             other => panic!("expected State, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn claude_ask_user_question_pre_tool_use_marks_awaiting_response() {
+        // AskUserQuestion blocks the turn on the user but, unlike a Stop, leaves
+        // the turn live (no Stop fires). Surfacing it as Working would read as a
+        // busy green agent; it must be AwaitingResponse so the dashboard shows it
+        // needs you.
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "claude-ask-1",
+            "cwd": "/repo",
+            "tool_name": "AskUserQuestion",
+            "tool_input": { "questions": [] }
+        })
+        .to_string();
+
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+
+        match wait_for_update(&handle) {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::AwaitingResponse);
+                assert!(
+                    state.active_tools.is_empty(),
+                    "an asking tool is not a running work tool"
+                );
+            }
+            other => panic!("expected State, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_notification_elicitation_marks_awaiting_response() {
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({
+            "hook_event_name": "Notification",
+            "session_id": "claude-note-1",
+            "cwd": "/repo",
+            "notification_type": "elicitation_dialog",
+            "message": "An MCP server is asking for input"
+        })
+        .to_string();
+
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+
+        match wait_for_update(&handle) {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::AwaitingResponse);
+            }
+            other => panic!("expected State, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claude_notification_idle_prompt_emits_no_state_change() {
+        // idle_prompt fires for any session left untouched at the prompt, so it
+        // must NOT escalate a resting session to attention. The server still
+        // accepts the POST, but no ActivityUpdate is produced.
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({
+            "hook_event_name": "Notification",
+            "session_id": "claude-note-2",
+            "cwd": "/repo",
+            "notification_type": "idle_prompt",
+            "message": "Claude is waiting for your input"
+        })
+        .to_string();
+
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+        assert!(
+            handle
+                .events
+                .recv_timeout(Duration::from_millis(400))
+                .is_err(),
+            "idle_prompt must not produce an activity update"
+        );
+    }
+
+    #[test]
+    fn asking_tool_and_notification_mapping_units() {
+        assert!(is_asking_tool("AskUserQuestion"));
+        assert!(is_asking_tool("ExitPlanMode"));
+        assert!(!is_asking_tool("Bash"));
+
+        assert_eq!(
+            claude_notification_status(Some("elicitation_dialog")),
+            Some(ActivityStatus::AwaitingResponse)
+        );
+        assert_eq!(
+            claude_notification_status(Some("elicitation_complete")),
+            Some(ActivityStatus::Working)
+        );
+        assert_eq!(claude_notification_status(Some("idle_prompt")), None);
+        assert_eq!(claude_notification_status(Some("permission_prompt")), None);
+        assert_eq!(claude_notification_status(None), None);
     }
 
     #[test]

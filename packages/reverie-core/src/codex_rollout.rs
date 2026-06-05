@@ -15,6 +15,7 @@
 //! comes from the (separately wired) trusted `PermissionRequest` command hook.
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -344,6 +345,7 @@ pub fn discover_latest_codex_rollout_for_cwd(
     codex_home: impl AsRef<Path>,
     cwd: impl AsRef<Path>,
     launched_after_ms: Option<i64>,
+    claimed_native_ids: &BTreeSet<String>,
 ) -> Result<Option<NativeSessionRef>> {
     let sessions_dir = codex_home.as_ref().join("sessions");
     if !sessions_dir.exists() {
@@ -365,6 +367,10 @@ pub fn discover_latest_codex_rollout_for_cwd(
             continue;
         };
         if !same_logical_path(Path::new(&meta.cwd), cwd) {
+            continue;
+        }
+        // Never adopt a native id another Reverie session already owns.
+        if claimed_native_ids.contains(&meta.session_id) {
             continue;
         }
         let is_newer = best
@@ -509,6 +515,11 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    /// No sibling has claimed a native id in these scanner tests.
+    fn claimed() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
 
     // Empirical check of the live watcher path (not just the pure fold): start the
     // real session-log watcher, register a rollout file as the launch path does,
@@ -740,9 +751,10 @@ mod tests {
             &[r#"{"type":"session_meta","payload":{"id":"other","cwd":"/somewhere/else"}}"#],
         );
 
-        let found = discover_latest_codex_rollout_for_cwd(home.path(), "/Users/dev/proj", None)
-            .unwrap()
-            .expect("cwd-matching rollout");
+        let found =
+            discover_latest_codex_rollout_for_cwd(home.path(), "/Users/dev/proj", None, &claimed())
+                .unwrap()
+                .expect("cwd-matching rollout");
         assert_eq!(found.session_id.as_deref(), Some("019e-codex"));
 
         // A future launch window filters everything out.
@@ -751,6 +763,7 @@ mod tests {
                 home.path(),
                 "/Users/dev/proj",
                 Some(32_503_680_000_000),
+                &claimed(),
             )
             .unwrap()
             .is_none()

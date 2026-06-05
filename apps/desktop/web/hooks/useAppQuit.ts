@@ -41,7 +41,11 @@ export function useAppQuit(writeLog: (line: string) => void) {
           const busy = sessions.filter(session => {
             if (!bindings[session.id]) return false;
             const status = activityForSession(session, cortexActivity)?.status;
-            return status === 'working' || status === 'awaiting_permission';
+            return (
+              status === 'working' ||
+              status === 'awaiting_permission' ||
+              status === 'awaiting_response'
+            );
           });
 
           if (busy.length === 0) {
@@ -83,9 +87,9 @@ function quitConfirmCopy(
   if (busy.length === 1) {
     const only = busy[0];
     const status = activityForSession(only, cortexActivity)?.status;
-    if (status === 'awaiting_permission') {
+    if (status === 'awaiting_permission' || status === 'awaiting_response') {
       return {
-        title: `“${only.title}” is waiting for your approval`,
+        title: `“${only.title}” is waiting for you`,
         body: 'If you quit now it stops without finishing. You can resume the conversation later.',
       };
     }

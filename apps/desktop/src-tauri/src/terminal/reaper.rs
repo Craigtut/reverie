@@ -105,13 +105,15 @@ fn reap_coldest_eligible(runtime: &TerminalSessionRuntime, service: &WorkspaceSe
         if now.duration_since(record.last_output_at) < RECENT_OUTPUT_GUARD {
             continue;
         }
-        // Never reap a working or permission-blocked agent: that is the whole
-        // point of the product, and a permission prompt needs the live process
-        // to receive the user's answer.
+        // Never reap a working agent or one blocked on the user: that is the
+        // whole point of the product, and a permission prompt or a raised
+        // question needs the live process to receive the user's answer.
         if let Some(status) = activity_status(snapshot.as_ref(), session_id)
             && matches!(
                 status,
-                ActivityStatus::Working | ActivityStatus::AwaitingPermission
+                ActivityStatus::Working
+                    | ActivityStatus::AwaitingPermission
+                    | ActivityStatus::AwaitingResponse
             )
         {
             continue;

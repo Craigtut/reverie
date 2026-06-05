@@ -29,7 +29,8 @@ export function classifyForDashboard(
   activity: ActivityState | null,
 ): DashboardStatus {
   if (activity) {
-    if (activity.status === 'awaiting_permission') return 'attention';
+    if (activity.status === 'awaiting_permission' || activity.status === 'awaiting_response')
+      return 'attention';
     if (activity.lastError && !activity.lastError.recoverable) return 'attention';
     if (activity.status === 'working') return 'live';
     if (activity.status === 'awaiting_input') return isBound ? 'live' : 'recent';
@@ -98,7 +99,12 @@ export function deriveSessionState(
   isViewed = false,
 ): SessionState {
   if (activity) {
-    if (activity.status === 'awaiting_permission') return 'attention';
+    // A blocking ask the agent raised mid-turn (permission gate, or a question /
+    // plan approval) is attention: it cannot proceed without you. This is NOT
+    // the everyday awaiting_input rest state, and it must win over `working` so
+    // an AskUserQuestion pause stops reading as a green, busy agent.
+    if (activity.status === 'awaiting_permission' || activity.status === 'awaiting_response')
+      return 'attention';
     if (activity.lastError && !activity.lastError.recoverable) return 'attention';
     if (activity.status === 'working') return 'active';
     // awaiting_input | done | recoverable error: alive, waiting on you. If the
@@ -226,6 +232,8 @@ export function plainLanguageStatus(
     switch (activity.status) {
       case 'awaiting_permission':
         return 'Needs your approval';
+      case 'awaiting_response':
+        return 'Needs your answer';
       case 'working': {
         const tool = activity.activeTools?.[0];
         if (tool?.displaySummary) return tool.displaySummary;
@@ -256,8 +264,13 @@ export function statusDotColor(tone: DashboardStatus): string {
 }
 
 export function glyphStateFor(activity: ActivityState | null, tone: DashboardStatus): GlyphState {
+  if (
+    activity?.status === 'awaiting_permission' ||
+    activity?.status === 'awaiting_response' ||
+    tone === 'attention'
+  )
+    return 'attention';
   if (activity?.status === 'working') return 'working';
-  if (activity?.status === 'awaiting_permission' || tone === 'attention') return 'attention';
   if (activity?.status === 'error' && activity.lastError && !activity.lastError.recoverable)
     return 'error';
   return 'idle';

@@ -125,17 +125,6 @@ export function useWorkspaceModel() {
     selectedSessionActivity?.status === 'awaiting_permission'
       ? (selectedSessionActivity.awaitingPermission ?? null)
       : null;
-  const liveSessionCount = useMemo(
-    () =>
-      shell.sessions.filter(s => {
-        if (s.archived) return false;
-        if (s.status === 'running' || sessionTerminalBindings[s.id]) return true;
-        const cortexId = s.nativeSessionRef?.sessionId;
-        const activity = cortexId ? cortexActivity[cortexId] : null;
-        return activity?.status === 'working' || activity?.status === 'awaiting_permission';
-      }).length,
-    [shell.sessions, sessionTerminalBindings, cortexActivity],
-  );
   // The selected session inherits its topic's (focus's) default when it has no
   // override of its own, then the workspace default.
   const effectiveDangerousMode =
@@ -310,7 +299,6 @@ export function useWorkspaceModel() {
     selectedTerminalBinding,
     isLaunchingSelectedSession,
     selectedPermissionRequest,
-    liveSessionCount,
     effectiveDangerousMode,
     dangerousToggleLocked,
     runningLabel,

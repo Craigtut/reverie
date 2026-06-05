@@ -32,3 +32,4 @@ export {
   TERMINAL_DROP_ZONE,
   TERMINAL_TAB_DROP_ZONE,
 } from './useTerminalFileDrop';
+export { useSidebarFolderDrop, SIDEBAR_PROJECT_DROP_ZONE } from './useSidebarFolderDrop';

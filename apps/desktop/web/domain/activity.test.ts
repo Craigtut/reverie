@@ -111,6 +111,12 @@ describe('classifyForDashboard', () => {
       );
     });
 
+    it('classifies a raised question (awaiting_response) as attention', () => {
+      expect(
+        classifyForDashboard(makeSession(), true, makeActivity({ status: 'awaiting_response' })),
+      ).toBe('attention');
+    });
+
     it('classifies awaiting_input as live when bound', () => {
       expect(
         classifyForDashboard(makeSession(), true, makeActivity({ status: 'awaiting_input' })),
@@ -179,6 +185,19 @@ describe('deriveSessionState', () => {
     expect(deriveSessionState(makeSession(), false, makeActivity({ status: 'working' }))).toBe(
       'active',
     );
+  });
+
+  // A mid-turn question / plan approval the agent raised is a blocking ask, not
+  // the at-rest awaiting_input: it must read as attention and win over working,
+  // even for the session you are currently viewing (an AskUserQuestion pause
+  // should never sit on screen looking like a busy green agent).
+  it('routes a raised question (awaiting_response) to attention, beating working', () => {
+    expect(
+      deriveSessionState(makeSession(), true, makeActivity({ status: 'awaiting_response' })),
+    ).toBe('attention');
+    expect(
+      deriveSessionState(makeSession(), true, makeActivity({ status: 'awaiting_response' }), true),
+    ).toBe('attention');
   });
 
   // A turn that came to rest is `idle` only once it has been seen: the session
@@ -399,6 +418,12 @@ describe('plainLanguageStatus', () => {
       ).toBe('Needs your approval');
     });
 
+    it('reports a raised question (awaiting_response) as needing your answer', () => {
+      expect(
+        plainLanguageStatus(makeSession(), true, makeActivity({ status: 'awaiting_response' })),
+      ).toBe('Needs your answer');
+    });
+
     it('prefers a tool displaySummary while working', () => {
       const activity = makeActivity({
         status: 'working',
@@ -534,6 +559,12 @@ describe('glyphStateFor', () => {
 
   it('returns attention when awaiting permission', () => {
     expect(glyphStateFor(makeActivity({ status: 'awaiting_permission' }), 'recent')).toBe(
+      'attention',
+    );
+  });
+
+  it('returns attention for a raised question (awaiting_response)', () => {
+    expect(glyphStateFor(makeActivity({ status: 'awaiting_response' }), 'recent')).toBe(
       'attention',
     );
   });

@@ -36,7 +36,9 @@ export function SessionDashboardCard({
   const { project, topic } = sessionContext(session, shell);
   const permission = activity?.awaitingPermission ?? null;
   const liveActivity =
-    activity?.status === 'working' ? plainLanguageStatus(session, isBound, activity) : null;
+    activity?.status === 'working' || activity?.status === 'awaiting_response'
+      ? plainLanguageStatus(session, isBound, activity)
+      : null;
   const openConnectionPanel = useConnectionPanelStore(s => s.openForSession);
 
   // The card is a `role="button"` div rather than a native `<button>` so the

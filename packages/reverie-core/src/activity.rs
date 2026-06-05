@@ -49,8 +49,19 @@ pub struct ActivityState {
 #[serde(rename_all = "snake_case")]
 pub enum ActivityStatus {
     Working,
+    /// The turn ended and the agent is back at the prompt, waiting for your
+    /// next message whenever you get to it. A resting state, not a blocking ask.
     AwaitingInput,
+    /// The agent is blocked mid-turn on a tool-permission decision. Suppressed
+    /// when auto-approve is on (the CLI never raises the gate).
     AwaitingPermission,
+    /// The agent is blocked mid-turn waiting for you to answer a question or
+    /// approve a plan (Claude's AskUserQuestion / ExitPlanMode pickers, or an
+    /// MCP elicitation dialog). Unlike `AwaitingInput` the turn is still live
+    /// and cannot proceed until you respond, so it reads as attention; unlike
+    /// `AwaitingPermission` it is NOT suppressed by auto-approve, which is why a
+    /// "yolo" session can still sit on a question.
+    AwaitingResponse,
     Done,
     Error,
 }

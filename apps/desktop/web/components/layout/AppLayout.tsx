@@ -94,7 +94,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     selectedTerminalBinding,
     isLaunchingSelectedSession,
     selectedPermissionRequest,
-    liveSessionCount,
     effectiveDangerousMode,
     dangerousToggleLocked,
     runningLabel,
@@ -128,6 +127,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     toggleSelectedSessionYolo,
+    addProjectsFromDroppedFolders,
     archiveSession,
     restoreSessionTab,
     removeSessionRecord,
@@ -214,7 +214,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         selectedFocusId={selectedFocusId}
         sessionTerminalBindings={sessionTerminalBindings}
         cortexActivity={cortexActivity}
-        liveSessionCount={liveSessionCount}
         busy={busy}
         canUseAppServices={canUseAppServices}
         onOpenCommandPalette={() => setPaletteOpen(true)}
@@ -227,6 +226,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         onArchiveProject={project => void archiveProjectRecord(project)}
         onOpenCreation={openCreation}
         onOpenSettings={() => setSurfaceMode('settings')}
+        onAddProjectsFromFolders={paths => void addProjectsFromDroppedFolders(paths)}
       />
 
       <ConnectionPanelHost />

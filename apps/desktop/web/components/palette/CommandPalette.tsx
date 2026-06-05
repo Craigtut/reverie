@@ -275,6 +275,7 @@ const paletteItemStatusClass = css({
   color: 'var(--text-3)',
   '&[data-status="working"]': { color: 'var(--good)' },
   '&[data-status="awaiting_permission"]': { color: 'var(--warn)' },
+  '&[data-status="awaiting_response"]': { color: 'var(--warn)' },
   '&[data-status="error"]': { color: 'var(--bad)' },
 });
 

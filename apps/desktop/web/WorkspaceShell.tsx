@@ -55,6 +55,7 @@ export function WorkspaceShell() {
     model,
     terminal,
     selectSessionTab: nav.selectSessionTab,
+    openFocus: nav.openFocus,
   });
 
   useCommandPalette();

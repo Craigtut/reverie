@@ -242,10 +242,16 @@ export interface ShellSession {
 }
 
 // Mirrors reverie-core's ActivityStatus enum (snake_case wire format).
+//   - awaiting_input    = turn ended, agent at the prompt, your move whenever.
+//   - awaiting_permission = blocked mid-turn on a tool-permission gate.
+//   - awaiting_response = blocked mid-turn on a question / plan approval the
+//     agent raised (AskUserQuestion / ExitPlanMode / MCP elicitation). The turn
+//     cannot proceed until you answer, and auto-approve does NOT clear it.
 export type ActivityStatus =
   | 'working'
   | 'awaiting_input'
   | 'awaiting_permission'
+  | 'awaiting_response'
   | 'done'
   | 'error';
 

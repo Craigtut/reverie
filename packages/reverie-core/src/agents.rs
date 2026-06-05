@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
 };
@@ -51,11 +51,19 @@ pub struct LaunchContext {
 /// Inputs for adapter-driven native-session discovery after a launch.
 /// `agent_home` is the CLI's home directory (e.g. `CORTEX_HOME`), resolved by
 /// the shell so core stays free of environment lookups for it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DiscoveryContext {
     pub cwd: PathBuf,
     pub launched_after_ms: Option<i64>,
     pub agent_home: Option<PathBuf>,
+    /// Native session ids already owned by a *different* Reverie session.
+    /// Filesystem discovery matches sessions by cwd + newest mtime, which cannot
+    /// tell apart several sessions of the same CLI running in one folder (a
+    /// first-class supported scenario). Without this exclusion, a launching
+    /// session adopts whichever sibling most recently wrote its transcript and
+    /// both then `--resume` into one conversation. Scanners skip any candidate
+    /// in this set so they bind only to an unclaimed (i.e. this launch's) file.
+    pub claimed_native_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -232,6 +240,7 @@ impl CortexSessionMetadata {
         cortex_home: impl AsRef<Path>,
         cwd: impl AsRef<Path>,
         launched_after_ms: Option<i64>,
+        claimed_native_ids: &BTreeSet<String>,
     ) -> Result<Option<CortexSessionDiscovery>> {
         let sessions_dir = cortex_home.as_ref().join("sessions");
         if !sessions_dir.exists() {
@@ -266,6 +275,10 @@ impl CortexSessionMetadata {
             };
 
             if !same_logical_path(&metadata.cwd, cwd.as_ref()) {
+                continue;
+            }
+            // Never adopt a native id another Reverie session already owns.
+            if claimed_native_ids.contains(&metadata.id) {
                 continue;
             }
 
@@ -403,6 +416,7 @@ impl AgentAdapter for CortexAdapter {
             cortex_home,
             &ctx.cwd,
             ctx.launched_after_ms,
+            &ctx.claimed_native_ids,
         )? {
             Some(discovery) => Ok(Some(
                 discovery.metadata.into_native_ref(discovery.metadata_path),
@@ -500,7 +514,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
         let Some(claude_home) = ctx.agent_home.as_ref() else {
             return Ok(None);
         };
-        discover_latest_claude_transcript_for_cwd(claude_home, &ctx.cwd, ctx.launched_after_ms)
+        discover_latest_claude_transcript_for_cwd(
+            claude_home,
+            &ctx.cwd,
+            ctx.launched_after_ms,
+            &ctx.claimed_native_ids,
+        )
     }
     // Title normalization uses the default: Claude's `✳` idle mark and `⠂ ⠐ ...`
     // working spinner are both handled by `is_status_decoration`.
@@ -598,6 +617,7 @@ impl AgentAdapter for CodexCliAdapter {
             codex_home,
             &ctx.cwd,
             ctx.launched_after_ms,
+            &ctx.claimed_native_ids,
         )
     }
     // Title normalization uses the default: Codex's `⠙ ⠹ ...` working spinner is
@@ -698,6 +718,7 @@ pub fn discover_latest_claude_transcript_for_cwd(
     claude_home: impl AsRef<Path>,
     cwd: impl AsRef<Path>,
     launched_after_ms: Option<i64>,
+    claimed_native_ids: &BTreeSet<String>,
 ) -> Result<Option<NativeSessionRef>> {
     let projects_dir = claude_home.as_ref().join("projects");
     if !projects_dir.exists() {
@@ -753,6 +774,14 @@ pub fn discover_latest_claude_transcript_for_cwd(
             let Some(session_id) = session_id else {
                 continue;
             };
+            // Never adopt a native id another Reverie session already owns, so a
+            // session launched into a folder shared with its siblings binds to
+            // its own transcript rather than whichever sibling wrote most
+            // recently. The siblings hold the claimed ids; this launch's own
+            // (not-yet-captured) transcript is unclaimed and still eligible.
+            if claimed_native_ids.contains(&session_id) {
+                continue;
+            }
 
             let is_newer = best
                 .as_ref()
@@ -873,6 +902,11 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// No sibling has claimed a native id in these scanner tests.
+    fn claimed() -> BTreeSet<String> {
+        BTreeSet::new()
+    }
+
     #[test]
     fn cortex_new_command_applies_yolo_and_model() {
         let adapter = CortexAdapter;
@@ -981,7 +1015,7 @@ mod tests {
         .unwrap();
         drop(g);
 
-        let found = discover_latest_claude_transcript_for_cwd(home.path(), cwd, None)
+        let found = discover_latest_claude_transcript_for_cwd(home.path(), cwd, None, &claimed())
             .unwrap()
             .expect("cwd-matching transcript is found");
         assert_eq!(found.kind, AgentKind::ClaudeCode);
@@ -1002,13 +1036,18 @@ mod tests {
         // A launch window in the far future filters out the just-written file.
         let far_future_ms = 32_503_680_000_000; // ~year 3000
         assert!(
-            discover_latest_claude_transcript_for_cwd(home.path(), cwd, Some(far_future_ms))
-                .unwrap()
-                .is_none()
+            discover_latest_claude_transcript_for_cwd(
+                home.path(),
+                cwd,
+                Some(far_future_ms),
+                &claimed(),
+            )
+            .unwrap()
+            .is_none()
         );
         // With no window it is captured.
         assert!(
-            discover_latest_claude_transcript_for_cwd(home.path(), cwd, None)
+            discover_latest_claude_transcript_for_cwd(home.path(), cwd, None, &claimed())
                 .unwrap()
                 .is_some()
         );
@@ -1065,10 +1104,14 @@ mod tests {
         write_cortex_meta(&cortex_home, "latest-match", &cwd, 2_000);
         write_cortex_meta(&cortex_home, "wrong-cwd", &other_cwd, 3_000);
 
-        let discovered =
-            CortexSessionMetadata::discover_latest_for_cwd(&cortex_home, &cwd, Some(1_500))
-                .unwrap()
-                .expect("matching Cortex metadata should be discovered");
+        let discovered = CortexSessionMetadata::discover_latest_for_cwd(
+            &cortex_home,
+            &cwd,
+            Some(1_500),
+            &claimed(),
+        )
+        .unwrap()
+        .expect("matching Cortex metadata should be discovered");
 
         assert_eq!(discovered.metadata.id, "latest-match");
         assert_eq!(
@@ -1076,9 +1119,13 @@ mod tests {
             cortex_home.join("sessions/latest-match/meta.json")
         );
 
-        let too_late =
-            CortexSessionMetadata::discover_latest_for_cwd(&cortex_home, &cwd, Some(2_500))
-                .unwrap();
+        let too_late = CortexSessionMetadata::discover_latest_for_cwd(
+            &cortex_home,
+            &cwd,
+            Some(2_500),
+            &claimed(),
+        )
+        .unwrap();
         assert_eq!(too_late, None);
 
         let _ = fs::remove_dir_all(root);
@@ -1126,6 +1173,7 @@ mod tests {
                 cwd: cwd.clone(),
                 launched_after_ms: Some(1_000),
                 agent_home: Some(cortex_home),
+                ..Default::default()
             })
             .unwrap()
             .expect("matching Cortex session is discovered");
@@ -1138,6 +1186,7 @@ mod tests {
                 cwd,
                 launched_after_ms: None,
                 agent_home: None,
+                ..Default::default()
             })
             .unwrap();
         assert!(none.is_none());
