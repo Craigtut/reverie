@@ -238,6 +238,8 @@ async function runEmptyOnboardingScenario() {
   assertions.push('closing a top tab hides it from active tabs');
   await clickTestId('nav-focus-open');
   await expectTestId('session-history-surface', 'opening the topic shows its dashboard');
+  // Archives are collapsed by default; open the disclosure to reach the row.
+  await clickTestId('archived-disclosure-toggle');
   await waitFor(
     () =>
       Boolean(

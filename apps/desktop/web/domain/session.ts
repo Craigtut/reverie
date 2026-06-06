@@ -148,6 +148,17 @@ export function launchButtonLabel(session: ShellSession) {
   return 'Run';
 }
 
+// Whether restoring an archived session can bring its conversation back. Restore
+// puts the tab back and, for a session that already ran, resumes the underlying
+// CLI conversation. That resume is only impossible when the session exited
+// without ever capturing a native session id: there is nothing to `--resume`
+// into. Every other state can be restored (still resumable, retryable after a
+// failed resume, never started, or still running), so the UI stays quiet and
+// only flags the genuine dead end.
+export function sessionCanRestore(session: ShellSession): boolean {
+  return !(session.status === 'exited' && !session.nativeSessionRef);
+}
+
 // Resolve a session's effective dangerous (auto-approve) mode. Precedence:
 // the session's own override, then its topic (focus) default, then the
 // workspace default. Mirrors Session::effective_dangerous_mode in the Rust core.

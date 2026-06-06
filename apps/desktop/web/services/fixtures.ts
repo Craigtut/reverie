@@ -898,9 +898,31 @@ function makePopulatedFixtureSnapshot(
       session({
         id: 'session-auth-archived',
         focusId: authFocus.id,
-        title: 'Old password reset',
+        title: 'Old password reset flow',
         agentKind: 'cortex_code',
+        // Exited with no captured native id: the conversation is gone, so this
+        // is the one archived row that earns the "Can't restore" tag.
         status: 'exited',
+        tabVisible: false,
+        archived: true,
+      }),
+      session({
+        id: 'session-auth-archived-claude',
+        focusId: authFocus.id,
+        title: 'Investigate stale refresh tokens',
+        agentKind: 'claude_code',
+        status: 'restorable',
+        nativeSessionRef: { kind: 'claude_code', sessionId: 'native-auth-archived-claude' },
+        tabVisible: false,
+        archived: true,
+      }),
+      session({
+        id: 'session-auth-archived-codex',
+        focusId: authFocus.id,
+        title: 'Draft sign-in copy variations',
+        agentKind: 'codex_cli',
+        status: 'restorable',
+        nativeSessionRef: { kind: 'codex_cli', sessionId: 'native-auth-archived-codex' },
         tabVisible: false,
         archived: true,
       }),
