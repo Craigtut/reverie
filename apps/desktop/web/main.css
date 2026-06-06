@@ -18,6 +18,40 @@ body,
   overscroll-behavior: none;
 }
 
+/* App-wide scrollbar treatment. Every real scroll surface in the shell (the nav
+ * list, settings, dashboard, command palette, session history) is an inner
+ * overflow:auto region. Left unstyled, WKWebView falls back to the system legacy
+ * scrollbar, which on a dark surface (and with macOS "Show scroll bars: Always")
+ * is a heavy black track that doesn't match the rest of the app. This replaces it
+ * everywhere with one calm, slim, monochrome bar: a transparent track and a
+ * rounded thumb in the warm-neutral palette, matching the terminal's custom
+ * scrollbar (TerminalScrollbar.tsx). Layered in `base` on purpose so the terminal
+ * viewport's own `::-webkit-scrollbar { width: 0 }` (emitted into the higher
+ * `utilities` layer, where it hides the native bar to draw its custom one) still
+ * wins. The thumb reads through `var(--text-2)`, so it flips with light/dark. */
+@layer base {
+  ::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    /* A ~5px pill centered in the channel: the transparent border insets it and
+     * background-clip keeps the fill off the border box (so it never touches the
+     * edges). Faint at rest, brighter on hover, mirroring the terminal thumb. */
+    background-color: color-mix(in srgb, var(--text-2, #b7aea1) 42%, transparent);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--text-2, #b7aea1) 68%, transparent);
+  }
+}
+
 /* Text-selection highlight. Warm, translucent neutral from the active theme
  * (see --selection in appShell.ts) so it honors the monochrome palette instead
  * of the browser's default blue. Unlayered, so it wins over Panda's preflight
