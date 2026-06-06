@@ -4,6 +4,18 @@ html,
 body,
 #root {
   background: transparent;
+  /* Lock the document so it can never scroll or rubber-band. The shell <main> is
+   * position:fixed inset:0 and owns every real scroll surface (the nav list, the
+   * terminal viewport) as inner overflow:auto regions. Without this, scrolling
+   * over a non-scrolling part of the chrome (the sidebar titlebar, search, or
+   * footer) had no scroll target, so macOS WKWebView ran its native elastic
+   * overscroll on the root: that bounce translates the fixed <main>, making the
+   * rounded app frame shrink and clip top/bottom against the transparent window.
+   * height:100% + overflow:hidden removes the root scroller; overscroll-behavior
+   * disables the elastic bounce. Inner overflow:auto regions still scroll. */
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 /* Text-selection highlight. Warm, translucent neutral from the active theme
