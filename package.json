@@ -75,7 +75,7 @@
     "lint-staged": "^17.0.5",
     "typescript": "^5.9.3",
     "vite": "^7.2.4",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.8"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc,css}": "biome check --write --no-errors-on-unmatched --files-ignore-unknown=true",
