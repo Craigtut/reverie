@@ -8,8 +8,10 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use reverie_core::{
-    CompletionRequest, WorkspaceService, activity::ActivityStatus,
-    codex_rollout::read_codex_title_context, complete_structured, string_object_schema,
+    CompletionRequest, WorkspaceService,
+    activity::ActivityStatus,
+    codex_rollout::{read_codex_rollout_state, read_codex_title_context},
+    complete_structured, string_object_schema,
 };
 use reverie_core::{domain::AgentKind, domain::SessionId};
 use serde::{Deserialize, Serialize};
@@ -24,8 +26,15 @@ const MAX_TITLE_CHARS: usize = 64;
 const MAX_TITLE_CONTEXT_MESSAGES: usize = 4;
 const MAX_TITLE_CONTEXT_CHARS: usize = 6_000;
 const GENERATED_REFRESH_MESSAGE_DELTA: u64 = 3;
+const CAPTURE_POLL_DELAYS: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+    Duration::from_secs(20),
+];
 
 static IN_FLIGHT: OnceLock<Mutex<HashSet<SessionId>>> = OnceLock::new();
+static CAPTURE_POLL_IN_FLIGHT: OnceLock<Mutex<HashSet<SessionId>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 struct CodexTitleTarget {
@@ -64,6 +73,38 @@ pub(crate) fn maybe_schedule_codex_title(
     let Some(target) = find_target(&app, &native_session_id) else {
         return;
     };
+    schedule_target(app, target);
+}
+
+pub(crate) fn maybe_schedule_codex_title_after_capture(app: &AppHandle, session_id: SessionId) {
+    let Some(target) = find_target_by_session(app, session_id) else {
+        return;
+    };
+    if rollout_is_at_rest(&target) {
+        schedule_target(app.clone(), target);
+        return;
+    }
+    if !mark_capture_poll_in_flight(session_id) {
+        return;
+    }
+
+    let app = app.clone();
+    thread::spawn(move || {
+        for delay in CAPTURE_POLL_DELAYS {
+            thread::sleep(*delay);
+            let Some(target) = find_target_by_session(&app, session_id) else {
+                break;
+            };
+            if rollout_is_at_rest(&target) {
+                schedule_target(app.clone(), target);
+                break;
+            }
+        }
+        clear_capture_poll_in_flight(session_id);
+    });
+}
+
+fn schedule_target(app: AppHandle, target: CodexTitleTarget) {
     if !mark_in_flight(target.session_id) {
         return;
     }
@@ -97,6 +138,36 @@ fn find_target(app: &AppHandle, native_session_id: &str) -> Option<CodexTitleTar
         current_title: session.title.clone(),
         marker: generated_marker(&native.adapter_payload),
     })
+}
+
+fn find_target_by_session(app: &AppHandle, session_id: SessionId) -> Option<CodexTitleTarget> {
+    let service = app.try_state::<WorkspaceService>()?;
+    let snapshot = service.snapshot().ok()?;
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id && session.agent_kind == AgentKind::CodexCli)?;
+    let native = session.native_session_ref.as_ref()?;
+    let rollout_path = native.metadata_path.clone()?;
+    Some(CodexTitleTarget {
+        session_id: session.id,
+        cwd: session.cwd.clone(),
+        rollout_path,
+        current_title: session.title.clone(),
+        marker: generated_marker(&native.adapter_payload),
+    })
+}
+
+fn rollout_is_at_rest(target: &CodexTitleTarget) -> bool {
+    read_codex_rollout_state(&target.rollout_path)
+        .ok()
+        .flatten()
+        .is_some_and(|state| {
+            matches!(
+                state.status,
+                ActivityStatus::AwaitingInput | ActivityStatus::Done
+            )
+        })
 }
 
 fn run_title_generation(app: &AppHandle, target: CodexTitleTarget) -> Result<()> {
@@ -269,6 +340,22 @@ fn clear_in_flight(session_id: SessionId) {
         .get_or_init(|| Mutex::new(HashSet::new()))
         .lock()
         .expect("title in-flight set lock poisoned");
+    sessions.remove(&session_id);
+}
+
+fn mark_capture_poll_in_flight(session_id: SessionId) -> bool {
+    let mut sessions = CAPTURE_POLL_IN_FLIGHT
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("title capture-poll set lock poisoned");
+    sessions.insert(session_id)
+}
+
+fn clear_capture_poll_in_flight(session_id: SessionId) {
+    let mut sessions = CAPTURE_POLL_IN_FLIGHT
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("title capture-poll set lock poisoned");
     sessions.remove(&session_id);
 }
 

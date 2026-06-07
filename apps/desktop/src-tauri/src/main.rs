@@ -223,6 +223,12 @@ fn main() {
                                     crate::terminal::runtime::watch_path_for_ref(reference)
                                 {
                                     control.register(path);
+                                    if reference.kind == reverie_core::AgentKind::CodexCli {
+                                        crate::codex_titles::maybe_schedule_codex_title_after_capture(
+                                            app.handle(),
+                                            session.id,
+                                        );
+                                    }
                                 }
                             }
                         }

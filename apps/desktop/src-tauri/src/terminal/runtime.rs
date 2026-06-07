@@ -1265,6 +1265,11 @@ fn spawn_launch_capture_poll(
                 Ok(true) => {
                     let _ = app.emit("session_record_changed", ());
                     register_active_file_watch(&app, &service, session_id, agent_kind);
+                    if agent_kind == AgentKind::CodexCli {
+                        crate::codex_titles::maybe_schedule_codex_title_after_capture(
+                            &app, session_id,
+                        );
+                    }
                     return;
                 }
                 // The ref already exists (a resume, or a prior poll iteration
@@ -1273,6 +1278,11 @@ fn spawn_launch_capture_poll(
                 Ok(false) => {
                     if session_native_ref_present(&service, session_id) {
                         register_active_file_watch(&app, &service, session_id, agent_kind);
+                        if agent_kind == AgentKind::CodexCli {
+                            crate::codex_titles::maybe_schedule_codex_title_after_capture(
+                                &app, session_id,
+                            );
+                        }
                         return;
                     }
                 }
