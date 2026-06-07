@@ -11,6 +11,7 @@ mod commands;
 #[cfg(unix)]
 mod connection_commands;
 mod correlator;
+mod path_env;
 mod state;
 mod terminal;
 
@@ -126,6 +127,12 @@ fn unix_time_millis_for_log() -> i64 {
 }
 
 fn main() {
+    // Must run before anything spawns a thread: a GUI launch (Finder/Dock) only
+    // carries launchd's minimal PATH, so without this neither agent detection
+    // nor the node-shebang CLIs can find their binaries. Rehydrates the process
+    // PATH from the user's login shell. See `path_env` for the full rationale.
+    path_env::hydrate_path_from_login_shell();
+
     install_dev_panic_logger();
 
     tauri::Builder::default()
