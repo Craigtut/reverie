@@ -2,11 +2,12 @@ import { motion } from 'motion/react';
 import { CheckCircle, Plus, Warning } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { groupSessionsByState } from '../../domain';
+import { groupSessionsByState, sortGroupByRecency } from '../../domain';
 import type {
   ActivityState,
   DashboardStatus,
   SessionState,
+  SessionStateTimeline,
   SessionTerminalBinding,
   ShellSession,
   WorkspaceShellSnapshot,
@@ -34,6 +35,7 @@ export function DashboardSurface({
   shell,
   sessionTerminalBindings,
   cortexActivity,
+  sessionTimelines,
   onOpenSession,
   onCreateProject,
   onCreateGeneralSession,
@@ -43,6 +45,7 @@ export function DashboardSurface({
   shell: WorkspaceShellSnapshot;
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
+  sessionTimelines: Record<string, SessionStateTimeline>;
   onOpenSession: (session: ShellSession) => void;
   onCreateProject: () => void;
   onCreateGeneralSession: () => void;
@@ -181,7 +184,12 @@ export function DashboardSurface({
               title={section.title}
               icon={section.attention ? <Warning size={13} weight="fill" /> : undefined}
               tone={section.tone}
-              sessions={groups[section.key]}
+              sessions={sortGroupByRecency(
+                groups[section.key],
+                section.key,
+                sessionTimelines,
+                cortexActivity,
+              )}
               shell={shell}
               bindings={sessionTerminalBindings}
               cortexActivity={cortexActivity}

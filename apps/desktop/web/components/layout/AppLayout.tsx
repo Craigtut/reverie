@@ -75,6 +75,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const terminalLiveFollow = useTerminalStore(s => s.terminalLiveFollow);
   const scrollbackRowCount = useTerminalStore(s => s.scrollbackRowCount);
   const cortexActivity = useActivityStore(s => s.cortexActivity);
+  const sessionTimelines = useActivityStore(s => s.sessionTimelines);
   const agentCliDetections = useShellStore(s => s.agentCliDetections);
 
   // Re-resolve the state cells' colors from the themed shell whenever the theme
@@ -238,6 +239,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             shell={shell}
             sessionTerminalBindings={sessionTerminalBindings}
             cortexActivity={cortexActivity}
+            sessionTimelines={sessionTimelines}
             onOpenSession={openSessionFromDashboard}
             onCreateProject={() => openCreation('project')}
             onCreateGeneralSession={startGeneralSession}
@@ -269,6 +271,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             archivedSessions={archivedFocusSessions}
             sessionTerminalBindings={sessionTerminalBindings}
             cortexActivity={cortexActivity}
+            sessionTimelines={sessionTimelines}
             onOpenSession={openSessionFromDashboard}
             onRestore={session =>
               restoreSessionTab(session).catch(error =>

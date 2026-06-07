@@ -6,14 +6,23 @@ import {
   classifyForDashboard,
   dashboardToneForState,
   deriveSessionState,
+  enteredCurrentStateAt,
   glyphStateFor,
   groupSessionsByState,
   lastTurnCompletedAtMs,
   plainLanguageStatus,
   rollupSessionStates,
+  sortGroupByRecency,
   statusDotColor,
+  timelineForSession,
 } from './activity';
-import type { ActivityError, ActivityState, SessionTerminalBinding, ShellSession } from './types';
+import type {
+  ActivityError,
+  ActivityState,
+  SessionStateTimeline,
+  SessionTerminalBinding,
+  ShellSession,
+} from './types';
 
 function makeSession(overrides: Partial<ShellSession> = {}): ShellSession {
   return {
@@ -593,5 +602,117 @@ describe('glyphStateFor', () => {
   it('returns idle for done/awaiting_input activity in a non-attention tone', () => {
     expect(glyphStateFor(makeActivity({ status: 'done' }), 'recent')).toBe('idle');
     expect(glyphStateFor(makeActivity({ status: 'awaiting_input' }), 'live')).toBe('idle');
+  });
+});
+
+function timeline(overrides: Partial<SessionStateTimeline> = {}): SessionStateTimeline {
+  return { ...overrides };
+}
+
+describe('enteredCurrentStateAt', () => {
+  it('keys each group off its own marker', () => {
+    const tl = timeline({
+      createdAt: '2026-06-06T10:00:00.000Z',
+      workingSince: '2026-06-06T11:00:00.000Z',
+      restingSince: '2026-06-06T12:00:00.000Z',
+      blockedSince: '2026-06-06T13:00:00.000Z',
+      exitedAt: '2026-06-06T12:30:00.000Z',
+    });
+    const session = makeSession();
+    expect(enteredCurrentStateAt('fresh', session, tl, null)).toBe(
+      Date.parse('2026-06-06T10:00:00.000Z'),
+    );
+    expect(enteredCurrentStateAt('active', session, tl, null)).toBe(
+      Date.parse('2026-06-06T11:00:00.000Z'),
+    );
+    expect(enteredCurrentStateAt('attention', session, tl, null)).toBe(
+      Date.parse('2026-06-06T13:00:00.000Z'),
+    );
+  });
+
+  it('uses the most recent of rest / exit / last-viewed for idle', () => {
+    const tl = timeline({
+      restingSince: '2026-06-06T12:00:00.000Z',
+      exitedAt: '2026-06-06T12:30:00.000Z',
+    });
+    const session = makeSession({ lastViewedAt: '2026-06-06T13:15:00.000Z' });
+    expect(enteredCurrentStateAt('idle', session, tl, null)).toBe(
+      Date.parse('2026-06-06T13:15:00.000Z'),
+    );
+  });
+
+  it('prefers the live turn-completion time for finished, falling back to restingSince', () => {
+    const session = makeSession();
+    const activity = makeActivity({
+      status: 'done',
+      turn: {
+        id: 't',
+        status: 'completed',
+        startedAt: '2026-06-06T11:00:00.000Z',
+        endedAt: '2026-06-06T14:00:00.000Z',
+      },
+    });
+    expect(enteredCurrentStateAt('finished', session, timeline(), activity)).toBe(
+      Date.parse('2026-06-06T14:00:00.000Z'),
+    );
+    // No live activity: fall back to the persisted marker.
+    expect(
+      enteredCurrentStateAt(
+        'finished',
+        session,
+        timeline({ restingSince: '2026-06-06T09:00:00.000Z' }),
+        null,
+      ),
+    ).toBe(Date.parse('2026-06-06T09:00:00.000Z'));
+  });
+
+  it('returns null when the relevant marker is missing', () => {
+    expect(enteredCurrentStateAt('active', makeSession(), timeline(), null)).toBeNull();
+    expect(enteredCurrentStateAt('fresh', makeSession(), null, null)).toBeNull();
+  });
+});
+
+describe('timelineForSession', () => {
+  it('falls back to the snapshot timeline when there is no live copy', () => {
+    const session = makeSession({ stateTimeline: timeline({ workingSince: 'a' }) });
+    expect(timelineForSession(session, {})).toEqual(timeline({ workingSince: 'a' }));
+  });
+
+  it('merges live and snapshot per-field, taking the later timestamp', () => {
+    const session = makeSession({
+      nativeSessionRef: { kind: 'claude_code', sessionId: 'native-1' },
+      // Snapshot is the only source of exitedAt; live is fresher for workingSince.
+      stateTimeline: timeline({
+        workingSince: '2026-06-06T11:00:00.000Z',
+        exitedAt: '2026-06-06T12:30:00.000Z',
+      }),
+    });
+    const live = { 'native-1': timeline({ workingSince: '2026-06-06T11:30:00.000Z' }) };
+    const merged = timelineForSession(session, live);
+    expect(merged?.workingSince).toBe('2026-06-06T11:30:00.000Z');
+    expect(merged?.exitedAt).toBe('2026-06-06T12:30:00.000Z');
+  });
+});
+
+describe('sortGroupByRecency', () => {
+  it('orders a group most-recent transition first', () => {
+    const older = makeSession({ id: 'older', stateTimeline: timeline({ workingSince: 'A' }) });
+    const newer = makeSession({ id: 'newer', stateTimeline: timeline({ workingSince: 'B' }) });
+    // 'A' < 'B' chronologically (ISO compares fine here for the assert).
+    const ordered = sortGroupByRecency([older, newer], 'active', {}, {});
+    expect(ordered.map(s => s.id)).toEqual(['newer', 'older']);
+  });
+
+  it('sorts sessions with no known time last, keeping their manual order', () => {
+    const withTime = makeSession({
+      id: 'with',
+      sortOrder: 30,
+      stateTimeline: timeline({ workingSince: '2026-06-06T12:00:00.000Z' }),
+    });
+    const noTimeA = makeSession({ id: 'a', sortOrder: 10 });
+    const noTimeB = makeSession({ id: 'b', sortOrder: 20 });
+    const ordered = sortGroupByRecency([noTimeB, withTime, noTimeA], 'active', {}, {});
+    // The timed one leads; the untimed ones follow in sortOrder order.
+    expect(ordered.map(s => s.id)).toEqual(['with', 'a', 'b']);
   });
 });

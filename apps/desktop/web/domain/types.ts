@@ -239,6 +239,30 @@ export interface ShellSession {
   // (treated as the epoch); the backend backfills existing rows on upgrade so a
   // fresh launch does not mass-badge long-finished sessions. See deriveSessionState.
   lastViewedAt?: string | null;
+  // When this session last entered each meaningful state. The dashboards order
+  // each status group by transition recency (most-recently-changed first); see
+  // enteredCurrentStateAt / sortGroupByRecency. Backend-owned, rides the snapshot;
+  // live updates arrive on the activity event. Absent in hand-built fixtures.
+  stateTimeline?: SessionStateTimeline | null;
+}
+
+// Reverie's record of when a session last entered each meaningful state. Mirrors
+// reverie-core's SessionStateTimeline. Every field is an ISO 8601 string in the
+// same format as ActivityState.updatedAt, or absent/null when not yet observed.
+export interface SessionStateTimeline {
+  // When the session record was created. Orders the `fresh` group.
+  createdAt?: string | null;
+  // When the agent last entered `working` (mid-turn). Orders the `active` group.
+  workingSince?: string | null;
+  // When the agent last came to rest (turn done / awaiting input / recoverable
+  // error). Orders the `finished` ("Ready for you") group and feeds the idle key.
+  restingSince?: string | null;
+  // When the session last entered an attention state (a blocking ask, a hard
+  // error, or a failed resume). Orders the `attention` group.
+  blockedSince?: string | null;
+  // When the session's process last exited into a resumable/ended state. Feeds
+  // the idle key for sessions with no activity feed.
+  exitedAt?: string | null;
 }
 
 // Mirrors reverie-core's ActivityStatus enum (snake_case wire format).
@@ -308,7 +332,15 @@ export type SessionActivitySource = 'cortex_code' | 'claude_code' | 'codex_cli';
 export type SessionActivityEventPayload =
   | {
       kind: 'updated';
-      payload: { source: SessionActivitySource; nativeSessionId: string; state: ActivityState };
+      payload: {
+        source: SessionActivitySource;
+        nativeSessionId: string;
+        state: ActivityState;
+        // The session's state timeline as of this update, so the dashboards can
+        // reorder a status group live without a snapshot refetch. Omitted when no
+        // session owns this native id yet.
+        stateTimeline?: SessionStateTimeline | null;
+      };
     }
   | { kind: 'removed'; payload: { source: SessionActivitySource; nativeSessionId: string } };
 

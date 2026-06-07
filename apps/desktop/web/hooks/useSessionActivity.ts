@@ -14,6 +14,7 @@ import { useActivityStore, useShellStore } from '../store';
 export function useSessionActivity(writeLog: (line: string) => void, reloadShell: () => void) {
   const sessions = useShellStore(s => s.shell.sessions);
   const setCortexActivity = useActivityStore(s => s.setCortexActivity);
+  const setSessionTimelines = useActivityStore(s => s.setSessionTimelines);
 
   // Keep the latest logger reachable without resubscribing the event stream.
   const writeLogRef = useRef(writeLog);
@@ -49,7 +50,7 @@ export function useSessionActivity(writeLog: (line: string) => void, reloadShell
           if (cancelled) return;
           const message = event.payload;
           if (message.kind === 'updated') {
-            const { nativeSessionId, state } = message.payload;
+            const { nativeSessionId, state, stateTimeline } = message.payload;
             setCortexActivity(current => {
               // Drop strictly-older updates by sequence so events that race
               // across threads can't roll us backwards.
@@ -57,9 +58,21 @@ export function useSessionActivity(writeLog: (line: string) => void, reloadShell
               if (prior && prior.sequence > state.sequence) return current;
               return { ...current, [nativeSessionId]: state };
             });
+            // Ride the freshly-stamped timeline so the dashboards reorder a group
+            // by transition recency without waiting for a snapshot refetch. The
+            // markers are monotonic, so even an out-of-order tick is harmless.
+            if (stateTimeline) {
+              setSessionTimelines(current => ({ ...current, [nativeSessionId]: stateTimeline }));
+            }
           } else {
             const { nativeSessionId } = message.payload;
             setCortexActivity(current => {
+              if (!(nativeSessionId in current)) return current;
+              const next = { ...current };
+              delete next[nativeSessionId];
+              return next;
+            });
+            setSessionTimelines(current => {
               if (!(nativeSessionId in current)) return current;
               const next = { ...current };
               delete next[nativeSessionId];
@@ -82,7 +95,7 @@ export function useSessionActivity(writeLog: (line: string) => void, reloadShell
       cancelled = true;
       unlisten?.();
     };
-  }, [setCortexActivity]);
+  }, [setCortexActivity, setSessionTimelines]);
 
   // When the backend captures a CLI's native session id for the first time, the
   // session record only then gains the `nativeSessionRef` this feed binds

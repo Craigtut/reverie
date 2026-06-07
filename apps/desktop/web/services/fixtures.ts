@@ -831,11 +831,12 @@ function makePopulatedFixtureSnapshot(
   const activity = (
     nativeId: string,
     status: 'working' | 'done',
+    at = '2026-06-02T09:00:00.000Z',
   ): WorkspaceShellSnapshot['sessions'][number]['latestActivity'] => ({
     version: 1,
     sessionId: nativeId,
     status,
-    updatedAt: '2026-06-02T09:00:00.000Z',
+    updatedAt: at,
     sequence: 1,
     cwd: project.path,
     turn:
@@ -844,16 +845,16 @@ function makePopulatedFixtureSnapshot(
             id: `${nativeId}-turn`,
             status: 'completed',
             startedAt: '2026-06-02T08:55:00.000Z',
-            endedAt: '2026-06-02T09:00:00.000Z',
+            endedAt: at,
           }
-        : { id: `${nativeId}-turn`, status: 'running', startedAt: '2026-06-02T09:00:00.000Z' },
+        : { id: `${nativeId}-turn`, status: 'running', startedAt: at },
     activeTools:
       status === 'working'
         ? [
             {
               toolCallId: 't1',
               toolName: 'bash',
-              startedAt: '2026-06-02T09:00:00.000Z',
+              startedAt: at,
               displaySummary: 'Running the auth test suite',
             },
           ]
@@ -887,6 +888,8 @@ function makePopulatedFixtureSnapshot(
         title: 'Session store spike',
         agentKind: 'codex_cli',
         status: 'not_started',
+        // Older of the two fresh sessions, so it sorts below the General one.
+        stateTimeline: { createdAt: '2026-06-02T07:00:00.000Z' },
       }),
       session({
         id: 'session-auth-done',
@@ -933,7 +936,10 @@ function makePopulatedFixtureSnapshot(
         agentKind: 'codex_cli',
         status: 'running',
         nativeSessionRef: { kind: 'codex_cli', sessionId: 'native-branding-done' },
-        latestActivity: activity('native-branding-done', 'done'),
+        // Came to rest earlier than the General "Ready for you" session below, so
+        // it sorts under it in the dashboard's "Ready for you" group.
+        latestActivity: activity('native-branding-done', 'done', '2026-06-02T09:00:00.000Z'),
+        stateTimeline: { restingSince: '2026-06-02T09:00:00.000Z' },
       }),
       session({
         id: 'session-general-fresh',
@@ -942,6 +948,8 @@ function makePopulatedFixtureSnapshot(
         agentKind: 'cortex_code',
         cwd: '/Users/user',
         status: 'not_started',
+        // Newer of the two fresh sessions, so it leads the "Fresh" group.
+        stateTimeline: { createdAt: '2026-06-02T10:00:00.000Z' },
       }),
       session({
         id: 'session-general-done',
@@ -951,7 +959,9 @@ function makePopulatedFixtureSnapshot(
         cwd: '/Users/user',
         status: 'restorable',
         nativeSessionRef: { kind: 'claude_code', sessionId: 'native-general-done' },
-        latestActivity: activity('native-general-done', 'done'),
+        // Most recent to come to rest, so it leads the "Ready for you" group.
+        latestActivity: activity('native-general-done', 'done', '2026-06-02T11:00:00.000Z'),
+        stateTimeline: { restingSince: '2026-06-02T11:00:00.000Z' },
       }),
     ],
   };

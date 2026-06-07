@@ -3,11 +3,12 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Archive, CaretRight, Plus, Trash, Warning } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { groupSessionsByState, sessionCanRestore } from '../../domain';
+import { groupSessionsByState, sessionCanRestore, sortGroupByRecency } from '../../domain';
 import type {
   ActivityState,
   DashboardStatus,
   SessionState,
+  SessionStateTimeline,
   SessionTerminalBinding,
   ShellFocus,
   ShellSession,
@@ -39,6 +40,7 @@ export function SessionHistorySurface({
   archivedSessions,
   sessionTerminalBindings,
   cortexActivity,
+  sessionTimelines,
   onOpenSession,
   onRestore,
   onDelete,
@@ -51,6 +53,7 @@ export function SessionHistorySurface({
   archivedSessions: ShellSession[];
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
+  sessionTimelines: Record<string, SessionStateTimeline>;
   onOpenSession: (session: ShellSession) => void;
   onRestore: (session: ShellSession) => void;
   onDelete: (session: ShellSession) => void;
@@ -121,7 +124,12 @@ export function SessionHistorySurface({
               title={section.title}
               icon={section.attention ? <Warning size={13} weight="fill" /> : undefined}
               tone={section.tone}
-              sessions={groups[section.key]}
+              sessions={sortGroupByRecency(
+                groups[section.key],
+                section.key,
+                sessionTimelines,
+                cortexActivity,
+              )}
               shell={shell}
               bindings={sessionTerminalBindings}
               cortexActivity={cortexActivity}

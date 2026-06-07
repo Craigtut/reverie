@@ -3,6 +3,7 @@ import type {
   DashboardStatus,
   GlyphState,
   SessionState,
+  SessionStateTimeline,
   SessionTerminalBinding,
   ShellSession,
 } from './types';
@@ -214,6 +215,127 @@ export function groupSessionsByState(
     );
   }
   return groups;
+}
+
+// --- Transition-recency ordering -------------------------------------------
+// The dashboards order each status group by when its sessions entered that
+// state, most recent first, so the session that just became "Ready for you"
+// (or just went idle, or just started working) sits at the top of its group.
+// The "entered at" times come from the backend's SessionStateTimeline: the
+// persisted copy rides the snapshot, and live updates arrive on the activity
+// event (held in the activity store, keyed by native id). We prefer the live
+// copy but merge per-field with the snapshot, because some markers (exitedAt,
+// createdAt) only ever arrive via the snapshot.
+
+function parseMs(value?: string | null): number | null {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function maxMs(...values: (number | null)[]): number | null {
+  const present = values.filter((value): value is number => value != null);
+  return present.length > 0 ? Math.max(...present) : null;
+}
+
+// The later of two ISO timestamps (by parsed time), tolerant of either being
+// absent or unparseable. Used to reconcile the live and snapshot timelines:
+// every marker only moves forward, so taking the later value is always correct.
+function laterOf(a?: string | null, b?: string | null): string | null {
+  const am = parseMs(a);
+  const bm = parseMs(b);
+  if (am == null) return b ?? null;
+  if (bm == null) return a ?? null;
+  return am >= bm ? (a ?? null) : (b ?? null);
+}
+
+function mergeTimeline(
+  live: SessionStateTimeline,
+  snapshot: SessionStateTimeline,
+): SessionStateTimeline {
+  return {
+    createdAt: laterOf(live.createdAt, snapshot.createdAt),
+    workingSince: laterOf(live.workingSince, snapshot.workingSince),
+    restingSince: laterOf(live.restingSince, snapshot.restingSince),
+    blockedSince: laterOf(live.blockedSince, snapshot.blockedSince),
+    exitedAt: laterOf(live.exitedAt, snapshot.exitedAt),
+  };
+}
+
+// The most complete state timeline for a session: the live copy from the
+// activity store (freshest for activity-driven markers) merged with the
+// persisted snapshot copy (the only source of lifecycle markers between
+// refetches). Returns null only when neither exists (hand-built fixtures).
+export function timelineForSession(
+  session: ShellSession,
+  liveTimelines: Record<string, SessionStateTimeline>,
+): SessionStateTimeline | null {
+  const snapshot = session.stateTimeline ?? null;
+  const nativeId = session.nativeSessionRef?.sessionId;
+  const live = nativeId ? liveTimelines[nativeId] : undefined;
+  if (!live) return snapshot;
+  if (!snapshot) return live;
+  return mergeTimeline(live, snapshot);
+}
+
+// When a session entered the state its group represents, as epoch ms, or null
+// when unknown. Each group keys off a different timeline marker; `idle` is the
+// most recent of came-to-rest, process exit, and when you last looked at it.
+export function enteredCurrentStateAt(
+  groupState: SessionState,
+  session: ShellSession,
+  timeline: SessionStateTimeline | null,
+  activity: ActivityState | null,
+): number | null {
+  const tl = timeline ?? {};
+  switch (groupState) {
+    case 'attention':
+      return parseMs(tl.blockedSince);
+    case 'active':
+      return parseMs(tl.workingSince);
+    case 'finished':
+      // The off-screen rest moment. The live turn-completion time is present
+      // whenever there is a feed; fall back to the persisted marker otherwise.
+      return lastTurnCompletedAtMs(activity) ?? parseMs(tl.restingSince);
+    case 'idle':
+      return maxMs(parseMs(tl.restingSince), parseMs(tl.exitedAt), parseMs(session.lastViewedAt));
+    case 'fresh':
+      return parseMs(tl.createdAt);
+    default:
+      return null;
+  }
+}
+
+// Order one status group's sessions by transition recency (most recent first).
+// Sessions with no known transition time sort last, preserving their manual
+// drag order (`sortOrder`) as the tiebreak so a deliberate arrangement and a
+// stable id still decide ties.
+export function sortGroupByRecency(
+  sessions: ShellSession[],
+  groupState: SessionState,
+  liveTimelines: Record<string, SessionStateTimeline>,
+  cortexActivity: Record<string, ActivityState>,
+): ShellSession[] {
+  return sessions
+    .map(session => ({
+      session,
+      key: enteredCurrentStateAt(
+        groupState,
+        session,
+        timelineForSession(session, liveTimelines),
+        activityForSession(session, cortexActivity),
+      ),
+    }))
+    .sort((a, b) => {
+      const ak = a.key ?? Number.NEGATIVE_INFINITY;
+      const bk = b.key ?? Number.NEGATIVE_INFINITY;
+      if (ak !== bk) return bk - ak;
+      const ao = a.session.sortOrder ?? 0;
+      const bo = b.session.sortOrder ?? 0;
+      if (ao !== bo) return ao - bo;
+      return a.session.id < b.session.id ? -1 : a.session.id > b.session.id ? 1 : 0;
+    })
+    .map(entry => entry.session);
 }
 
 // A short, product-meaningful status for a session card. Describes what the
