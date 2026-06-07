@@ -26,7 +26,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::activity::{
-    ActiveTool, ActivityError, ActivityState, ActivityStatus, ErrorCategory, PermissionRequest,
+    ActiveTool, ActivityError, ActivityState, ActivityStatus, ActivityTurn, ErrorCategory,
+    PermissionRequest, TurnStatus,
 };
 use crate::activity_source::{ActivitySourceKind, Fidelity};
 use crate::agents::{file_modified_ms, same_logical_path};
@@ -173,6 +174,12 @@ pub struct CodexRolloutFold {
     active: Vec<ActiveTool>,
     last_error: Option<ActivityError>,
     last_timestamp: Option<String>,
+    // The turn the rollout is currently narrating (from `task_started`/end
+    // records). Carried onto every emitted state so the cross-source reconciler
+    // can tell a current turn edge from a stale one (turn_ids are time-ordered
+    // UUIDv7), and so the rollout's `turn_aborted` can end the exact turn the
+    // `Stop` hook missed.
+    current_turn_id: Option<String>,
     sequence: u64,
     // Best-effort approval signal: Codex records the approval-triggering moment
     // as a `function_call` carrying `with_escalated_permissions: true`. While
@@ -193,6 +200,7 @@ impl CodexRolloutFold {
             active: Vec::new(),
             last_error: None,
             last_timestamp: None,
+            current_turn_id: None,
             sequence: 0,
             pending_escalation: None,
         }
@@ -231,6 +239,7 @@ impl CodexRolloutFold {
             // tools, pending approval, and any prior error.
             (_, "task_started") => {
                 self.status = ActivityStatus::Working;
+                self.current_turn_id = turn_id_from(&record.payload);
                 self.active.clear();
                 self.pending_escalation = None;
                 self.last_error = None;
@@ -275,8 +284,14 @@ impl CodexRolloutFold {
                 }
             }
             // The turn ended (cleanly or interrupted): idle, waiting on the user.
+            // Keep `current_turn_id` set to the turn that ended (preferring the
+            // record's own turn_id) so the reconciler ends exactly that turn,
+            // which is how `turn_aborted` backstops a missed `Stop` hook.
             (_, "task_complete") | (_, "turn_aborted") => {
                 self.status = ActivityStatus::AwaitingInput;
+                if let Some(id) = turn_id_from(&record.payload) {
+                    self.current_turn_id = Some(id);
+                }
                 self.active.clear();
                 self.pending_escalation = None;
             }
@@ -314,6 +329,19 @@ impl CodexRolloutFold {
         } else {
             self.status
         };
+        // Stamp the narrated turn so the reconciler can order this edge against
+        // the hook's. Its `status` reflects whether the turn is still running.
+        let turn = self.current_turn_id.as_ref().map(|id| ActivityTurn {
+            id: id.clone(),
+            status: match self.status {
+                ActivityStatus::AwaitingInput | ActivityStatus::Done | ActivityStatus::Error => {
+                    TurnStatus::Completed
+                }
+                _ => TurnStatus::Running,
+            },
+            started_at: self.last_timestamp.clone().unwrap_or_default(),
+            ended_at: None,
+        });
         Some(ActivityState {
             version: ACTIVITY_VERSION,
             session_id,
@@ -321,7 +349,7 @@ impl CodexRolloutFold {
             updated_at: self.last_timestamp.clone().unwrap_or_default(),
             sequence: self.sequence,
             cwd: self.cwd.clone(),
-            turn: None,
+            turn,
             active_tools: self.active.clone(),
             awaiting_permission: self.pending_escalation.clone(),
             last_error: self.last_error.clone(),
@@ -466,6 +494,15 @@ fn is_rollout_file(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with("rollout-"));
     is_jsonl && named_rollout
+}
+
+/// Extract a `turn_id` from a rollout event payload, when the record carries one
+/// (`task_started`, `task_complete`, `turn_aborted`).
+fn turn_id_from(payload: &Value) -> Option<String> {
+    payload
+        .get("turn_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 fn active_tool_from_call(
