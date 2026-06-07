@@ -151,8 +151,15 @@ export function useConnectionRequests() {
     void onConnectionRequestChange(() => {
       void refresh();
     }).then(fn => {
-      if (cancelled) fn();
-      else stop = fn;
+      if (cancelled) {
+        fn();
+        return;
+      }
+      stop = fn;
+      // Re-sync once the listener is live: a request that arrived between the
+      // initial fetch above and this subscription registering would otherwise
+      // be missed (there is no polling fallback). This closes that window.
+      void refresh();
     });
     return () => {
       cancelled = true;

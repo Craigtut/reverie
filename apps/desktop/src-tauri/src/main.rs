@@ -267,7 +267,15 @@ fn main() {
                 let socket_path = bridge::default_socket_path();
                 let repo_for_bridge: std::sync::Arc<dyn reverie_core::ConnectionRepository> =
                     repository.clone();
-                match bridge::start_bridge(socket_path, repo_for_bridge) {
+                // Forward every connection state change to the WebView so the
+                // accept/deny banner and connection panels stay live without
+                // polling. A new agent request reaches the banner through this.
+                let emit_handle = app.handle().clone();
+                let observer: reverie_core::ConnectionObserver =
+                    std::sync::Arc::new(move |event| {
+                        connection_commands::forward_connection_event(&emit_handle, event);
+                    });
+                match bridge::start_bridge(socket_path, repo_for_bridge, Some(observer)) {
                     Ok((service, info)) => {
                         let push = service.clone() as std::sync::Arc<dyn HookPushSource>;
                         app.manage(service);

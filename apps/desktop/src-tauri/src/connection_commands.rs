@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use reverie_core::connection::{Connection, ConnectionMessage, ConnectionPolicy, RequestId};
-use reverie_core::connection_service::DecisionBy;
+use reverie_core::connection_service::{ConnectionEvent, DecisionBy};
 use reverie_core::domain::{AgentKind, SessionId};
 use reverie_core::{ConnectionCaller, ConnectionId, ConnectionService, WorkspaceService};
 use serde::Serialize;
@@ -150,7 +150,6 @@ pub(crate) fn list_pending_connection_requests(
 
 #[tauri::command]
 pub(crate) fn accept_connection_request(
-    app: AppHandle,
     service: State<'_, Arc<ConnectionService>>,
     request_id: RequestId,
 ) -> Result<Connection, String> {
@@ -158,8 +157,7 @@ pub(crate) fn accept_connection_request(
     let id = service
         .accept_request(request_id, DecisionBy::User, now.clone())
         .map_err(|err| err.to_string())?;
-    emit_state_change(&app, id);
-    emit_request_change(&app);
+    // The service observer emits connection_state_changed / request_changed.
     let connection = service
         .get_connection(id)
         .map_err(|err| err.to_string())?
@@ -169,7 +167,6 @@ pub(crate) fn accept_connection_request(
 
 #[tauri::command]
 pub(crate) fn deny_connection_request(
-    app: AppHandle,
     service: State<'_, Arc<ConnectionService>>,
     request_id: RequestId,
     reason: Option<String>,
@@ -178,7 +175,7 @@ pub(crate) fn deny_connection_request(
     service
         .deny_request(request_id, DecisionBy::User, now, reason)
         .map_err(|err| err.to_string())?;
-    emit_request_change(&app);
+    // The service observer emits request_changed / state_changed.
     Ok(())
 }
 
@@ -194,7 +191,6 @@ pub(crate) fn list_session_connections(
 
 #[tauri::command]
 pub(crate) fn close_connection_command(
-    app: AppHandle,
     service: State<'_, Arc<ConnectionService>>,
     connection_id: ConnectionId,
     reason: Option<String>,
@@ -203,13 +199,12 @@ pub(crate) fn close_connection_command(
     service
         .close(ConnectionCaller::User, connection_id, now, reason)
         .map_err(|err| err.to_string())?;
-    emit_state_change(&app, connection_id);
+    // The service observer emits state_changed.
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn user_open_connection(
-    app: AppHandle,
     service: State<'_, Arc<ConnectionService>>,
     session_a: SessionId,
     session_b: SessionId,
@@ -219,7 +214,7 @@ pub(crate) fn user_open_connection(
     let id = service
         .user_open(session_a, session_b, reason, now)
         .map_err(|err| err.to_string())?;
-    emit_state_change(&app, id);
+    // The service observer emits state_changed.
     let connection = service
         .get_connection(id)
         .map_err(|err| err.to_string())?
@@ -313,15 +308,23 @@ pub(crate) fn clear_session_pair_block(
     Ok(())
 }
 
-fn emit_state_change(app: &AppHandle, connection_id: ConnectionId) {
-    let _ = app.emit(
-        CONNECTION_STATE_EVENT,
-        serde_json::json!({ "connectionId": connection_id.to_string() }),
-    );
-}
-
-fn emit_request_change(app: &AppHandle) {
-    let _ = app.emit(CONNECTION_REQUEST_EVENT, serde_json::json!({}));
+/// Translate a [`ConnectionEvent`] from the service observer into the Tauri
+/// events the React shell listens for. Registered as the service's observer at
+/// startup (see `main.rs`), so every connection state change, whether driven by
+/// a user command here or by an agent over the bridge, reaches the frontend.
+/// This single chokepoint is why the UI needs no polling.
+pub(crate) fn forward_connection_event(app: &AppHandle, event: ConnectionEvent) {
+    match event {
+        ConnectionEvent::RequestsChanged => {
+            let _ = app.emit(CONNECTION_REQUEST_EVENT, serde_json::json!({}));
+        }
+        ConnectionEvent::StateChanged { connection_id } => {
+            let _ = app.emit(
+                CONNECTION_STATE_EVENT,
+                serde_json::json!({ "connectionId": connection_id.to_string() }),
+            );
+        }
+    }
 }
 
 use tauri::Emitter;
@@ -345,7 +348,7 @@ pub(crate) fn resolve_bridge_binaries(app: &AppHandle) -> Result<BridgeBinaries>
 /// without staging still resolves. If nothing exists yet we return the
 /// next-to-exe path so callers can report it; `BridgeBinaries::ensure_present`
 /// is what stops a missing path from ever reaching a CLI config.
-fn locate_helper(name: &str) -> PathBuf {
+pub(crate) fn locate_helper(name: &str) -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {

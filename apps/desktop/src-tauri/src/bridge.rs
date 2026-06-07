@@ -26,7 +26,10 @@ use std::thread;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
-use reverie_core::{Clock, ConnectionRepository, ConnectionService, SystemClock, serve_connection};
+use reverie_core::{
+    Clock, ConnectionObserver, ConnectionRepository, ConnectionService, SystemClock,
+    serve_connection,
+};
 
 /// Managed Tauri state holding the path agent CLIs (via the
 /// `reverie-bridge` helper) should connect to. Injected into spawned-session
@@ -77,9 +80,15 @@ pub(crate) fn default_socket_path() -> PathBuf {
 /// the live [`ConnectionService`] plus a [`BridgeInfo`] for managed state.
 /// Errors only if the socket cannot be bound; per-connection errors are
 /// logged to stderr and do not propagate.
+///
+/// `observer`, when provided, is registered on the service *before* the accept
+/// loop starts, so a helper that connects and issues a request immediately
+/// cannot race ahead of the observer being wired. The desktop passes one that
+/// forwards every connection state change to the WebView as a Tauri event.
 pub(crate) fn start_bridge(
     socket_path: PathBuf,
     repository: Arc<dyn ConnectionRepository>,
+    observer: Option<ConnectionObserver>,
 ) -> Result<(Arc<ConnectionService>, BridgeInfo)> {
     // Clean up any stale socket file from a prior crash. Best-effort: a
     // missing path is fine; an `EACCES` here will surface immediately on the
@@ -94,6 +103,9 @@ pub(crate) fn start_bridge(
     })?;
 
     let service: Arc<ConnectionService> = Arc::new(ConnectionService::new(repository));
+    if let Some(observer) = observer {
+        service.set_observer(observer);
+    }
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
 
     let accept_service = Arc::clone(&service);
@@ -197,6 +209,7 @@ mod tests {
         let (service, info) = start_bridge(
             socket.clone(),
             Arc::new(InMemoryConnectionRepository::new()),
+            None,
         )
         .expect("start bridge");
         assert_eq!(info.socket_path, socket);

@@ -49,8 +49,9 @@ pub use connection::{
 };
 pub use connection_repository::{ConnectionRepository, InMemoryConnectionRepository};
 pub use connection_service::{
-    ConnectionCaller, ConnectionService, DecisionBy, PeerScope, PeerView, PolicyDecision,
-    RegisteredSession, RequestOutcome, SessionAddress, WaitOutcome,
+    ConnectionCaller, ConnectionEvent, ConnectionObserver, ConnectionService, DecisionBy,
+    PeerScope, PeerView, PolicyDecision, RegisteredSession, RequestOutcome, SessionAddress,
+    WaitOutcome,
 };
 pub use cortex_state::CortexStateSource;
 pub use domain::{

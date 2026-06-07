@@ -214,6 +214,33 @@ struct PairDenialRecord {
     block_until: Option<Instant>,
 }
 
+/// A change to [`ConnectionService`] state worth surfacing to the UI. The
+/// desktop registers an observer (via [`ConnectionService::set_observer`]) that
+/// translates these into Tauri events so the React banner and connection panels
+/// stay live. Headless and test builds leave the observer unset; the
+/// notifications are then dropped.
+///
+/// Every state transition the service performs emits one of these, which is
+/// what lets the frontend stay purely event-driven with no polling: there is no
+/// silent, time-based transition (requests do not auto-expire, and
+/// `unregister_session` leaves pending requests intact), so an observer that
+/// fires on each mutation sees the complete picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionEvent {
+    /// The set of pending (awaiting-user-decision) requests changed: a request
+    /// was created, accepted, or denied. Listeners re-read
+    /// [`ConnectionService::list_pending_requests`].
+    RequestsChanged,
+    /// One connection's lifecycle state changed (opened or closed). Carries the
+    /// affected id so a listener can refresh just that connection's panel.
+    StateChanged { connection_id: ConnectionId },
+}
+
+/// Observer invoked synchronously on the thread performing a state change.
+/// Implementations must be cheap and non-blocking (the desktop's just enqueues
+/// a Tauri event) and must not call back into [`ConnectionService`].
+pub type ConnectionObserver = Arc<dyn Fn(ConnectionEvent) + Send + Sync>;
+
 pub struct ConnectionService {
     repo: Arc<dyn ConnectionRepository>,
     sessions: Mutex<HashMap<SessionId, RegisteredSession>>,
@@ -222,6 +249,7 @@ pub struct ConnectionService {
     pending: Mutex<HashMap<RequestId, PendingState>>,
     pair_denials: Mutex<HashMap<(SessionId, SessionId), PairDenialRecord>>,
     decisions: Condvar,
+    observer: Mutex<Option<ConnectionObserver>>,
 }
 
 impl ConnectionService {
@@ -234,6 +262,25 @@ impl ConnectionService {
             pending: Mutex::new(HashMap::new()),
             pair_denials: Mutex::new(HashMap::new()),
             decisions: Condvar::new(),
+            observer: Mutex::new(None),
+        }
+    }
+
+    /// Register the observer that receives every [`ConnectionEvent`]. Replaces
+    /// any prior observer. The desktop wires this once at startup (before the
+    /// bridge accept loop goes live, so no request can race it); tests and
+    /// headless builds leave it unset.
+    pub fn set_observer(&self, observer: ConnectionObserver) {
+        *self.observer.lock().expect("observer mutex") = Some(observer);
+    }
+
+    /// Fire the observer, if one is registered. Always called *after* the
+    /// service's inner locks (`pending`, `sessions`, ...) have been released, so
+    /// the observer can never deadlock against the mutation that triggered it.
+    fn notify(&self, event: ConnectionEvent) {
+        let observer = self.observer.lock().expect("observer mutex").clone();
+        if let Some(observer) = observer {
+            observer(event);
         }
     }
 
@@ -478,6 +525,8 @@ impl ConnectionService {
             (caller.address, target.address)
         };
 
+        let now: String = now.into();
+
         // Deduplicate against any existing open or in-flight connection
         // between the pair. A concurrent second agent (or a slow one re-
         // issuing) must not stack a duplicate request.
@@ -489,15 +538,42 @@ impl ConnectionService {
                 connection_id: open.id,
             });
         }
-        if let Some(requested) = existing.iter().find(|c| {
+
+        // A `Requested` connection that is still `Waiting` in the in-memory map
+        // is a genuine in-flight duplicate: return it so we don't stack a
+        // second request. Any other `Requested` record for this pair is an
+        // orphan from a previous app session, because the in-memory waiter
+        // state and the requesting process are both gone. Left in place, an
+        // orphan poisons everything downstream: dedup returns it (masking the
+        // current policy, so auto-allow never applies and the TTL never
+        // refreshes), the banner never shows it (the banner reads the in-memory
+        // map), and `wait_for_decision` answers `Unknown`. So retire every
+        // orphan and only dedup onto a live one.
+        let mut live_pending: Option<(ConnectionId, RequestId)> = None;
+        for conn in existing.iter().filter(|c| {
             c.status == ConnectionStatus::Requested && c.involves(initiator) && c.involves(target)
         }) {
-            if let Some(pending) = requested.pending_request.as_ref() {
-                return Ok(RequestOutcome::Pending {
-                    connection_id: requested.id,
-                    request_id: pending.request_id,
-                });
+            let Some(pending) = conn.pending_request.as_ref() else {
+                continue;
+            };
+            let is_live = {
+                let map = self.pending.lock().expect("pending mutex");
+                matches!(
+                    map.get(&pending.request_id),
+                    Some(PendingState::Waiting { .. })
+                )
+            };
+            if is_live {
+                live_pending = Some((conn.id, pending.request_id));
+            } else {
+                self.retire_orphaned_request(conn, &now)?;
             }
+        }
+        if let Some((connection_id, request_id)) = live_pending {
+            return Ok(RequestOutcome::Pending {
+                connection_id,
+                request_id,
+            });
         }
 
         // Pair-level block: if the user previously chose "block further
@@ -520,7 +596,6 @@ impl ConnectionService {
         // wraps it.
         let policy = self.effective_policy_for(&caller_addr);
         let decision = self.evaluate_policy_with(policy, &caller_addr, &target_addr);
-        let now: String = now.into();
         let expires_at: String = expires_at.into();
         let reason: String = reason.into();
 
@@ -535,6 +610,9 @@ impl ConnectionService {
                 );
                 let conn_id = conn.id;
                 self.repo.upsert_connection(&conn)?;
+                self.notify(ConnectionEvent::StateChanged {
+                    connection_id: conn_id,
+                });
                 Ok(RequestOutcome::Allowed {
                     connection_id: conn_id,
                 })
@@ -547,19 +625,49 @@ impl ConnectionService {
                 let conn_id = conn.id;
                 self.repo.upsert_connection(&conn)?;
 
-                let mut pending = self.pending.lock().expect("pending mutex");
-                pending.insert(
-                    request_id,
-                    PendingState::Waiting {
-                        connection_id: conn_id,
-                    },
-                );
+                {
+                    let mut pending = self.pending.lock().expect("pending mutex");
+                    pending.insert(
+                        request_id,
+                        PendingState::Waiting {
+                            connection_id: conn_id,
+                        },
+                    );
+                }
+                // The decision-required path is the one that drives the
+                // accept/deny banner; this notify is what makes the banner
+                // appear the moment an agent issues a `request_connection`.
+                self.notify(ConnectionEvent::RequestsChanged);
                 Ok(RequestOutcome::Pending {
                     connection_id: conn_id,
                     request_id,
                 })
             }
         }
+    }
+
+    /// Retire a `Requested` connection left behind by a previous app session.
+    /// Its in-memory waiter and the requesting process are gone, so it can
+    /// never resolve on its own. Moving it to `Denied` (by policy) frees the
+    /// pair for a fresh request under the current policy and clears it from the
+    /// pending-request listing. Idempotent in effect: a connection that is no
+    /// longer `Requested` (a concurrent decision raced us) is left untouched.
+    fn retire_orphaned_request(&self, conn: &Connection, now: &str) -> Result<()> {
+        let mut conn = conn.clone();
+        if conn.status != ConnectionStatus::Requested {
+            return Ok(());
+        }
+        let connection_id = conn.id;
+        conn.deny(
+            now.to_owned(),
+            ConnectionClosedBy::Policy {
+                reason: "request retired: left over from a previous app session".to_owned(),
+            },
+            Some("retired stale request".to_owned()),
+        )?;
+        self.repo.upsert_connection(&conn)?;
+        self.notify(ConnectionEvent::StateChanged { connection_id });
+        Ok(())
     }
 
     /// Block until the named request is decided or `timeout` elapses.
@@ -653,21 +761,27 @@ impl ConnectionService {
         conn.accept(now)?;
         self.repo.upsert_connection(&conn)?;
 
-        let mut pending = self.pending.lock().expect("pending mutex");
-        // Defensive: if a concurrent caller raced us, prefer the existing
-        // Decided state over overwriting. Only commit when still Waiting.
-        if matches!(
-            pending.get(&request_id),
-            Some(PendingState::Waiting { .. }) | None
-        ) {
-            pending.insert(
-                request_id,
-                PendingState::Decided {
-                    decision: DecisionResult::Allowed(connection_id),
-                },
-            );
+        {
+            let mut pending = self.pending.lock().expect("pending mutex");
+            // Defensive: if a concurrent caller raced us, prefer the existing
+            // Decided state over overwriting. Only commit when still Waiting.
+            if matches!(
+                pending.get(&request_id),
+                Some(PendingState::Waiting { .. }) | None
+            ) {
+                pending.insert(
+                    request_id,
+                    PendingState::Decided {
+                        decision: DecisionResult::Allowed(connection_id),
+                    },
+                );
+            }
+            self.decisions.notify_all();
         }
-        self.decisions.notify_all();
+        // Both the banner (one fewer pending request) and any open-connection
+        // panel (the connection just went Open) need to refresh.
+        self.notify(ConnectionEvent::StateChanged { connection_id });
+        self.notify(ConnectionEvent::RequestsChanged);
         Ok(connection_id)
     }
 
@@ -740,6 +854,10 @@ impl ConnectionService {
             entry.last_denied_at = Instant::now();
         }
 
+        // Clear the banner card and refresh any panel showing this connection,
+        // which just moved to Denied.
+        self.notify(ConnectionEvent::StateChanged { connection_id });
+        self.notify(ConnectionEvent::RequestsChanged);
         Ok(())
     }
 
@@ -775,6 +893,7 @@ impl ConnectionService {
         let conn = Connection::user_opened(a, b, reason, self.current_policy(), now);
         let id = conn.id;
         self.repo.upsert_connection(&conn)?;
+        self.notify(ConnectionEvent::StateChanged { connection_id: id });
         Ok(id)
     }
 
@@ -892,6 +1011,7 @@ impl ConnectionService {
         }
         connection.close(now, caller.into_closed_by(), reason)?;
         self.repo.upsert_connection(&connection)?;
+        self.notify(ConnectionEvent::StateChanged { connection_id });
         Ok(())
     }
 
@@ -1378,6 +1498,207 @@ mod tests {
             }
             other => panic!("expected Pending, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn observer_is_notified_on_request_then_accept() {
+        let svc = service();
+        let focus = focus_id(0x10);
+        register(
+            &svc,
+            session_id(0x01),
+            address(AgentKind::ClaudeCode, None, (focus, "F"), "Claude"),
+        );
+        register(
+            &svc,
+            session_id(0x02),
+            address(AgentKind::CortexCode, None, (focus, "F"), "Cortex"),
+        );
+
+        let events: Arc<Mutex<Vec<ConnectionEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        svc.set_observer(Arc::new(move |event| {
+            sink.lock().expect("sink").push(event)
+        }));
+
+        // A new agent request fires RequestsChanged. This is the emit that was
+        // missing: without it the accept/deny banner never appeared.
+        let request_id = match svc
+            .request_connection(session_id(0x01), session_id(0x02), "r", "t0", "t10")
+            .unwrap()
+        {
+            RequestOutcome::Pending { request_id, .. } => request_id,
+            other => panic!("expected Pending, got {other:?}"),
+        };
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[ConnectionEvent::RequestsChanged],
+        );
+
+        // Accepting opens the connection (StateChanged) and clears the banner
+        // (RequestsChanged).
+        svc.accept_request(request_id, DecisionBy::User, "t1")
+            .unwrap();
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(seen.len(), 3, "request + accept = three events: {seen:?}");
+        assert!(matches!(seen[1], ConnectionEvent::StateChanged { .. }));
+        assert_eq!(seen[2], ConnectionEvent::RequestsChanged);
+    }
+
+    #[test]
+    fn observer_is_notified_on_deny() {
+        let svc = service();
+        let focus = focus_id(0x10);
+        register(
+            &svc,
+            session_id(0x01),
+            address(AgentKind::ClaudeCode, None, (focus, "F"), "Claude"),
+        );
+        register(
+            &svc,
+            session_id(0x02),
+            address(AgentKind::CortexCode, None, (focus, "F"), "Cortex"),
+        );
+
+        let request_id = match svc
+            .request_connection(session_id(0x01), session_id(0x02), "r", "t0", "t10")
+            .unwrap()
+        {
+            RequestOutcome::Pending { request_id, .. } => request_id,
+            other => panic!("expected Pending, got {other:?}"),
+        };
+
+        let events: Arc<Mutex<Vec<ConnectionEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        svc.set_observer(Arc::new(move |event| {
+            sink.lock().expect("sink").push(event)
+        }));
+
+        svc.deny_request(request_id, DecisionBy::User, "t1", None)
+            .unwrap();
+        let seen = events.lock().unwrap().clone();
+        assert!(matches!(seen[0], ConnectionEvent::StateChanged { .. }));
+        assert_eq!(seen[1], ConnectionEvent::RequestsChanged);
+        assert_eq!(seen.len(), 2, "deny = two events: {seen:?}");
+    }
+
+    #[test]
+    fn observer_is_notified_on_auto_allow() {
+        let svc = service();
+        let focus = focus_id(0x10);
+        register(
+            &svc,
+            session_id(0x01),
+            address(AgentKind::ClaudeCode, None, (focus, "F"), "Claude"),
+        );
+        register(
+            &svc,
+            session_id(0x02),
+            address(AgentKind::CortexCode, None, (focus, "F"), "Cortex"),
+        );
+        svc.set_policy(ConnectionPolicy::AutoAllowFocus);
+
+        let events: Arc<Mutex<Vec<ConnectionEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        svc.set_observer(Arc::new(move |event| {
+            sink.lock().expect("sink").push(event)
+        }));
+
+        // Auto-allow opens the connection directly: no banner, but a state
+        // change so the dashboard chip/panel updates live.
+        svc.request_connection(session_id(0x01), session_id(0x02), "r", "t0", "t10")
+            .unwrap();
+        let seen = events.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "auto-allow = one event: {seen:?}");
+        assert!(matches!(seen[0], ConnectionEvent::StateChanged { .. }));
+    }
+
+    // Simulate an app restart: a fresh service over the same durable repo, so
+    // it starts with an empty in-memory pending map but inherits the persisted
+    // connections. `register` re-registers the (stable) sessions, as the desktop
+    // does on relaunch.
+    fn restart_over(repo: &Arc<dyn ConnectionRepository>, focus: FocusId) -> ConnectionService {
+        let svc = ConnectionService::new(repo.clone());
+        register(
+            &svc,
+            session_id(0x01),
+            address(AgentKind::ClaudeCode, None, (focus, "F"), "Claude"),
+        );
+        register(
+            &svc,
+            session_id(0x02),
+            address(AgentKind::CortexCode, None, (focus, "F"), "Cortex"),
+        );
+        svc
+    }
+
+    #[test]
+    fn request_connection_retires_orphan_so_auto_allow_applies_after_restart() {
+        let repo: Arc<dyn ConnectionRepository> = Arc::new(InMemoryConnectionRepository::new());
+        let focus = focus_id(0x10);
+
+        // Process 1, AlwaysAsk: the request pends and persists.
+        let svc1 = restart_over(&repo, focus);
+        let orphan_id = match svc1
+            .request_connection(session_id(0x01), session_id(0x02), "r", "t0", "t10")
+            .unwrap()
+        {
+            RequestOutcome::Pending { connection_id, .. } => connection_id,
+            other => panic!("expected Pending, got {other:?}"),
+        };
+
+        // Process 2 (fresh in-memory map), now with auto-allow on. The orphan
+        // from process 1 must not mask the policy.
+        let svc2 = restart_over(&repo, focus);
+        svc2.set_policy(ConnectionPolicy::AutoAllowFocus);
+        let outcome = svc2
+            .request_connection(session_id(0x01), session_id(0x02), "r2", "t1", "t11")
+            .unwrap();
+        assert!(
+            matches!(outcome, RequestOutcome::Allowed { .. }),
+            "auto-allow should apply once the orphan is retired, got {outcome:?}",
+        );
+
+        // The orphan was retired, not left dangling as Requested.
+        let orphan = repo.get_connection(orphan_id).unwrap().unwrap();
+        assert_eq!(orphan.status, ConnectionStatus::Denied);
+    }
+
+    #[test]
+    fn request_connection_after_restart_creates_a_fresh_live_request() {
+        let repo: Arc<dyn ConnectionRepository> = Arc::new(InMemoryConnectionRepository::new());
+        let focus = focus_id(0x10);
+
+        let svc1 = restart_over(&repo, focus);
+        let orphan_request_id = match svc1
+            .request_connection(session_id(0x01), session_id(0x02), "r", "t0", "t10")
+            .unwrap()
+        {
+            RequestOutcome::Pending { request_id, .. } => request_id,
+            other => panic!("expected Pending, got {other:?}"),
+        };
+
+        // Re-request under AlwaysAsk after "restart": a fresh, live request,
+        // not the dead orphan id. This is what fixes the agent-visible bug where
+        // wait_for_decision answered Unknown on a re-issued request.
+        let svc2 = restart_over(&repo, focus);
+        let request_id = match svc2
+            .request_connection(session_id(0x01), session_id(0x02), "r2", "t1", "t11")
+            .unwrap()
+        {
+            RequestOutcome::Pending { request_id, .. } => request_id,
+            other => panic!("expected Pending, got {other:?}"),
+        };
+        assert_ne!(
+            request_id, orphan_request_id,
+            "re-request must mint a fresh request id, not reuse the orphan",
+        );
+        // The fresh request is live: pollable and listed for the banner.
+        assert!(
+            svc2.poll_decision(request_id).is_none(),
+            "fresh request waits"
+        );
+        assert_eq!(svc2.list_pending_requests().unwrap().len(), 1);
     }
 
     #[test]
