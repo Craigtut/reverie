@@ -11,6 +11,7 @@
 use reverie_core::WorkspaceService;
 use reverie_core::activity::ActivityState;
 use reverie_core::activity_source::{ActivitySourceKind, ActivityUpdate, SessionKey};
+use reverie_core::domain::SessionStateTimeline;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -40,6 +41,11 @@ enum SessionActivityEvent {
         source: ActivitySourceKind,
         native_session_id: String,
         state: ActivityState,
+        /// The session's state timeline as of this update, so the dashboards can
+        /// reorder a status group by transition recency without waiting for a
+        /// snapshot refetch. `None` when no session owns this native id yet.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state_timeline: Option<SessionStateTimeline>,
     },
     Removed {
         source: ActivitySourceKind,
@@ -52,9 +58,11 @@ enum SessionActivityEvent {
 /// momentarily unavailable, because the frontend keys on the native id either
 /// way.
 pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
-    let captured = app
-        .try_state::<WorkspaceService>()
-        .map(|service| apply_update(&service, &update))
+    let service = app.try_state::<WorkspaceService>();
+    let reconciler = app.try_state::<ActivityReconciler>();
+    let captured = service
+        .as_ref()
+        .map(|service| apply_update(service, reconciler.as_deref(), &update))
         .unwrap_or(false);
 
     match update {
@@ -63,12 +71,21 @@ pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
         } => {
             let native_session_id = native_id_for(&key, &state);
             let status = state.status;
+            // Read back the timeline the apply just stamped so it rides the live
+            // event (the session is bound by now, even on a first-sight capture).
+            let state_timeline = service.as_ref().and_then(|service| {
+                service
+                    .session_timeline_by_native_id(&native_session_id)
+                    .ok()
+                    .flatten()
+            });
             emit(
                 app,
                 SessionActivityEvent::Updated {
                     source,
                     native_session_id: native_session_id.clone(),
                     state,
+                    state_timeline,
                 },
             );
             if source == ActivitySourceKind::CodexCli {
@@ -354,6 +371,10 @@ mod tests {
             source: ActivitySourceKind::CodexCli,
             native_session_id: "n".to_owned(),
             state: state("n", 1, ActivityStatus::Working),
+            state_timeline: Some(SessionStateTimeline {
+                working_since: Some("2026-06-06T15:10:02.000Z".to_owned()),
+                ..SessionStateTimeline::default()
+            }),
         };
         let json = serde_json::to_value(&updated).unwrap();
         assert_eq!(json["kind"], "updated");
@@ -361,6 +382,10 @@ mod tests {
         assert_eq!(json["payload"]["nativeSessionId"], "n");
         assert_eq!(json["payload"]["state"]["sessionId"], "n");
         assert_eq!(json["payload"]["state"]["status"], "working");
+        assert_eq!(
+            json["payload"]["stateTimeline"]["workingSince"],
+            "2026-06-06T15:10:02.000Z"
+        );
 
         let removed = SessionActivityEvent::Removed {
             source: ActivitySourceKind::CortexCode,
