@@ -97,6 +97,10 @@ impl PtyProcess {
             .expect("PTY size lock should not be poisoned")
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
     /// Split blocking output reads from command/control operations.
     pub fn split(self) -> (PtyReader, PtyController) {
         let controller = PtyController {

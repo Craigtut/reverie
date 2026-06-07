@@ -3,7 +3,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError},
+    mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError},
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,6 +24,7 @@ use reverie_core::WorkspaceService;
 use reverie_core::session_log::SessionLogControl;
 
 const READ_BUFFER_BYTES: usize = 4096;
+const PTY_READ_QUEUE_CAPACITY: usize = 256;
 const PTY_DRAIN_MAX_BYTES: usize = 64 * 1024;
 const PTY_DRAIN_MAX_CHUNKS: usize = 64;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -67,6 +68,7 @@ pub struct TerminalSessionRuntime {
     sessions: Arc<Mutex<HashMap<TerminalId, TerminalSessionRecord>>>,
     controllers: Arc<Mutex<HashMap<TerminalId, PtyController>>>,
     command_senders: Arc<Mutex<HashMap<TerminalId, Sender<TerminalRuntimeCommand>>>>,
+    current_terminal_by_session: Arc<Mutex<HashMap<SessionId, TerminalId>>>,
     // The active shell theme's default terminal colors, pushed from the
     // frontend. Applied to each terminal at spawn and re-broadcast on change.
     default_colors: Arc<Mutex<TerminalThemeColors>>,
@@ -277,9 +279,15 @@ impl TerminalSessionRuntime {
                 Err(payload) => panic_payload_message(payload.as_ref()),
             };
 
+            if let Ok(controller) = runtime.controller_for(request.terminal_id) {
+                let _ = controller.terminate();
+            }
             runtime.remove_controller(request.terminal_id);
             runtime.register_failed(request.terminal_id);
-            persist_shell_session_failed(&app, request.session_id);
+            crate::terminal::orphans::clear_spawn(&app, request.terminal_id);
+            if runtime.is_current_terminal_for_session(request.session_id, request.terminal_id) {
+                persist_shell_session_failed(&app, request.session_id);
+            }
             eprintln!(
                 "[reverie-terminal] stream failed for {}: {}",
                 request.terminal_id, failure_message
@@ -469,8 +477,12 @@ impl TerminalSessionRuntime {
 
     fn run_stream_worker(&self, app: AppHandle, request: TerminalStreamRequest) -> Result<()> {
         let spec = request.spawn_spec;
+        let mut frame_channel = request.frame_channel;
         let launch_started_ms = unix_time_millis();
         let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows)?;
+        if !self.is_current_terminal_for_session(request.session_id, request.terminal_id) {
+            bail!("terminal stream was superseded before PTY spawn");
+        }
         // Seed the terminal's default colors from the active theme before any
         // PTY output arrives, so default-colored cells + the base background
         // match the shell instead of Ghostty's hardwired white-on-black.
@@ -478,19 +490,46 @@ impl TerminalSessionRuntime {
         terminal.set_default_colors(theme.foreground, theme.background);
         let process = PtyProcess::spawn(request.terminal_id, &spec)
             .context("failed to spawn terminal session PTY process")?;
+        crate::terminal::orphans::record_spawn(
+            &app,
+            request.session_id,
+            request.terminal_id,
+            process.pid(),
+            &spec,
+            launch_started_ms,
+        );
         let (reader, controller) = process.split();
-        let (read_tx, read_rx) = mpsc::channel();
-        spawn_pty_reader_thread(request.terminal_id, reader, read_tx)?;
+        let (read_tx, read_rx) = mpsc::sync_channel(PTY_READ_QUEUE_CAPACITY);
+        if let Err(error) = spawn_pty_reader_thread(request.terminal_id, reader, read_tx) {
+            let _ = controller.terminate();
+            crate::terminal::orphans::clear_spawn(&app, request.terminal_id);
+            return Err(error);
+        }
         let (command_tx, command_rx) = mpsc::channel();
         let response_controller = controller.clone();
-        terminal.on_pty_write(move |data| {
+        if let Err(error) = terminal.on_pty_write(move |data| {
             let _ = response_controller.write_input(data);
-        })?;
-        self.register_controller(request.terminal_id, controller)?;
+        }) {
+            let _ = controller.terminate();
+            crate::terminal::orphans::clear_spawn(&app, request.terminal_id);
+            return Err(error);
+        }
+        if let Err(error) = self.register_controller(request.terminal_id, controller.clone()) {
+            let _ = controller.terminate();
+            crate::terminal::orphans::clear_spawn(&app, request.terminal_id);
+            return Err(error);
+        }
+        if !self.is_current_terminal_for_session(request.session_id, request.terminal_id) {
+            let _ = controller.terminate();
+            crate::terminal::orphans::clear_spawn(&app, request.terminal_id);
+            bail!("terminal stream was superseded before it became running");
+        }
         self.register_command_sender(request.terminal_id, command_tx)?;
 
         self.mark_running(request.terminal_id)?;
-        persist_shell_session_running(&app, request.session_id);
+        if self.is_current_terminal_for_session(request.session_id, request.terminal_id) {
+            persist_shell_session_running(&app, request.session_id);
+        }
         // Launch-time native-session capture: poll the adapter's on-disk state
         // for a few seconds so the session binds its native ref (and its live
         // activity) as soon as the CLI has written its session file, instead of
@@ -499,7 +538,9 @@ impl TerminalSessionRuntime {
         // off-thread and is best-effort; exit-time capture stays the backstop.
         spawn_launch_capture_poll(
             app.clone(),
+            self.clone(),
             request.session_id,
+            request.terminal_id,
             request.agent_kind,
             launch_started_ms,
         );
@@ -551,7 +592,6 @@ impl TerminalSessionRuntime {
         // a Full snapshot carrying the new generation, which the frontend adopts
         // and rebuilds from. See `wire-protocol.md` (generation rules).
         let mut generation: u32 = 1;
-        let frame_channel = request.frame_channel.as_ref();
         let child_success = loop {
             // Drains resize/read-rows/theme/active commands. Resizes bump the
             // shared `generation` in place (so a history-range reply drained after
@@ -576,7 +616,7 @@ impl TerminalSessionRuntime {
                 &mut sync_output_started_at,
                 Instant::now(),
             )? {
-                let emit_ms = send_terminal_frame(frame_channel, generation, &mut terminal)?;
+                let emit_ms = send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
                 frames_emitted += 1;
@@ -649,7 +689,7 @@ impl TerminalSessionRuntime {
                 &mut sync_output_started_at,
                 Instant::now(),
             )? {
-                let emit_ms = send_terminal_frame(frame_channel, generation, &mut terminal)?;
+                let emit_ms = send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
                 total_emit_ms += emit_ms;
                 max_emit_ms = max_emit_ms.max(emit_ms);
                 frames_emitted += 1;
@@ -665,7 +705,7 @@ impl TerminalSessionRuntime {
         };
 
         if pending_frame {
-            let emit_ms = send_terminal_frame(frame_channel, generation, &mut terminal)?;
+            let emit_ms = send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
             total_emit_ms += emit_ms;
             max_emit_ms = max_emit_ms.max(emit_ms);
             frames_emitted += 1;
@@ -703,13 +743,16 @@ impl TerminalSessionRuntime {
             bytes_read,
             child_success,
         )?;
-        persist_native_session_after_launch(
-            &app,
-            request.session_id,
-            request.agent_kind,
-            launch_started_ms,
-        );
-        persist_shell_session_finished(&app, request.session_id, child_success);
+        crate::terminal::orphans::clear_spawn(&app, request.terminal_id);
+        if self.is_current_terminal_for_session(request.session_id, request.terminal_id) {
+            persist_native_session_after_launch(
+                &app,
+                request.session_id,
+                request.agent_kind,
+                launch_started_ms,
+            );
+            persist_shell_session_finished(&app, request.session_id, child_success);
+        }
         app.emit("terminal_exit", finished.clone())?;
         app.emit("session_status_changed", finished)?;
 
@@ -737,6 +780,12 @@ impl TerminalSessionRuntime {
                 last_active_at: Instant::now(),
             },
         );
+        if let Some(session_id) = request.session_id {
+            self.current_terminal_by_session
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal runtime current-session map is poisoned"))?
+                .insert(session_id, request.terminal_id);
+        }
         Ok(())
     }
 
@@ -776,6 +825,20 @@ impl TerminalSessionRuntime {
                 *foreground = None;
             }
         }
+    }
+
+    fn is_current_terminal_for_session(
+        &self,
+        session_id: Option<SessionId>,
+        terminal_id: TerminalId,
+    ) -> bool {
+        let Some(session_id) = session_id else {
+            return true;
+        };
+        let Ok(current) = self.current_terminal_by_session.lock() else {
+            return false;
+        };
+        current.get(&session_id) == Some(&terminal_id)
     }
 
     fn controller_for(&self, terminal_id: TerminalId) -> Result<PtyController> {
@@ -868,17 +931,20 @@ impl TerminalSessionRuntime {
 /// exactly one frame message to the WebView as an `ArrayBuffer`. Lifecycle and
 /// control events stay JSON `app.emit`; only the frame stream is binary here.
 fn send_terminal_frame(
-    frame_channel: Option<&Channel<InvokeResponseBody>>,
+    frame_channel: &mut Option<Channel<InvokeResponseBody>>,
     generation: u32,
     terminal: &mut GhosttyTerminalState<'_, '_>,
 ) -> Result<f64> {
     let frame = terminal.frame()?;
     let emit_started = Instant::now();
-    if let Some(channel) = frame_channel {
+    if let Some(channel) = frame_channel.as_ref() {
         let bytes = encode_frame(&frame, generation);
-        channel
-            .send(InvokeResponseBody::Raw(bytes))
-            .context("failed to send terminal frame over channel")?;
+        if let Err(error) = channel.send(InvokeResponseBody::Raw(bytes)) {
+            eprintln!(
+                "[reverie-terminal] terminal frame channel closed; detaching stream: {error:#}"
+            );
+            *frame_channel = None;
+        }
     }
     Ok(emit_started.elapsed().as_secs_f64() * 1000.0)
 }
@@ -922,7 +988,7 @@ fn drain_pty_read_batch(
 fn spawn_pty_reader_thread(
     terminal_id: TerminalId,
     mut reader: reverie_core::pty::PtyReader,
-    sender: Sender<PtyReadEvent>,
+    sender: SyncSender<PtyReadEvent>,
 ) -> Result<()> {
     thread::Builder::new()
         .name(format!("reverie-pty-reader-{terminal_id}"))
@@ -1222,7 +1288,9 @@ const CLAUDE_HOOK_CAPTURE_GRACE: Duration = Duration::from_secs(6);
 /// discovery) attaches the ref, and the rest become no-ops.
 fn spawn_launch_capture_poll(
     app: AppHandle,
+    runtime: TerminalSessionRuntime,
     session_id: Option<SessionId>,
+    terminal_id: TerminalId,
     agent_kind: Option<AgentKind>,
     launch_started_ms: i64,
 ) {
@@ -1239,6 +1307,9 @@ fn spawn_launch_capture_poll(
         while waited < LAUNCH_CAPTURE_TOTAL_WAIT {
             thread::sleep(interval);
             waited += interval;
+            if !runtime.is_current_terminal_for_session(Some(session_id), terminal_id) {
+                return;
+            }
             // Back off after the initial burst so a long-lived ref-less session
             // costs only an occasional cheap discovery scan.
             interval = interval.saturating_mul(2).min(LAUNCH_CAPTURE_MAX_INTERVAL);
@@ -1476,13 +1547,13 @@ mod tests {
     use super::*;
     use reverie_core::CommandSpec;
 
-    #[test]
-    fn runtime_registers_session_metadata_before_stream_starts() {
-        let runtime = TerminalSessionRuntime::default();
-        let terminal_id = TerminalId::new_v4();
+    fn test_request(
+        session_id: Option<SessionId>,
+        terminal_id: TerminalId,
+    ) -> TerminalStreamRequest {
         let cwd = std::env::current_dir().unwrap();
-        let request = TerminalStreamRequest {
-            session_id: None,
+        TerminalStreamRequest {
+            session_id,
             terminal_id,
             spawn_spec: TerminalSpawnSpec {
                 command: CommandSpec::new("/bin/echo", cwd),
@@ -1494,7 +1565,14 @@ mod tests {
             agent_kind: None,
             folder_name: None,
             frame_channel: None,
-        };
+        }
+    }
+
+    #[test]
+    fn runtime_registers_session_metadata_before_stream_starts() {
+        let runtime = TerminalSessionRuntime::default();
+        let terminal_id = TerminalId::new_v4();
+        let request = test_request(None, terminal_id);
 
         runtime.register_starting(&request).unwrap();
         let records = runtime.list_sessions().unwrap();
@@ -1504,6 +1582,29 @@ mod tests {
         assert_eq!(records[0].cols, 100);
         assert_eq!(records[0].rows, 24);
         assert_eq!(records[0].status, TerminalRuntimeStatus::Starting);
+    }
+
+    #[test]
+    fn current_terminal_guard_survives_newer_terminal_exit() {
+        let runtime = TerminalSessionRuntime::default();
+        let session_id = SessionId::new_v4();
+        let old_terminal_id = TerminalId::new_v4();
+        let new_terminal_id = TerminalId::new_v4();
+
+        runtime
+            .register_starting(&test_request(Some(session_id), old_terminal_id))
+            .unwrap();
+        assert!(runtime.is_current_terminal_for_session(Some(session_id), old_terminal_id));
+
+        runtime
+            .register_starting(&test_request(Some(session_id), new_terminal_id))
+            .unwrap();
+        runtime
+            .register_exited(new_terminal_id, 1, 16, true)
+            .unwrap();
+
+        assert!(runtime.is_current_terminal_for_session(Some(session_id), new_terminal_id));
+        assert!(!runtime.is_current_terminal_for_session(Some(session_id), old_terminal_id));
     }
 
     #[test]

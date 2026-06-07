@@ -14,6 +14,7 @@ mod correlator;
 mod state;
 mod terminal;
 
+#[cfg(debug_assertions)]
 use std::{env, fs::OpenOptions, io::Write};
 
 use reverie_core::WorkspaceService;
@@ -116,6 +117,7 @@ fn install_dev_panic_logger() {
 #[cfg(not(debug_assertions))]
 fn install_dev_panic_logger() {}
 
+#[cfg(debug_assertions)]
 fn unix_time_millis_for_log() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -152,6 +154,7 @@ fn main() {
             );
             let service = WorkspaceService::new(repository.clone());
             service.ensure_seeded()?;
+            crate::terminal::orphans::reap_stale_spawns(app.handle());
             // Reap scratch workspaces left by General sessions that no longer
             // exist (e.g. if a crash interrupted delete-time cleanup).
             commands::sweep_orphan_general_sessions(app.handle(), &service);
