@@ -356,7 +356,12 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
             return frame;
         }
 
-        let changed_rows = changed_rows(&previous.rows, &frame.rows);
+        let changed_rows = changed_rows(
+            &previous.rows,
+            previous.scrollback.viewport_offset,
+            &frame.rows,
+            frame.scrollback.viewport_offset,
+        );
         let cursor_changed = previous.cursor != frame.cursor;
         frame.rows = changed_rows;
         if frame.rows.is_empty() && !cursor_changed {
@@ -389,21 +394,26 @@ fn needs_full_frame(previous: &TerminalFrame, frame: &TerminalFrame) -> bool {
         || previous.cols != frame.cols
         || previous.modes != frame.modes
         || previous.rows.len() != frame.rows.len()
-        || previous.scrollback.viewport_offset != frame.scrollback.viewport_offset
         || previous.scrollback.viewport_rows != frame.scrollback.viewport_rows
         || frame.scrollback.total_rows < previous.scrollback.total_rows
 }
 
-fn changed_rows(previous: &[TerminalRow], current: &[TerminalRow]) -> Vec<TerminalRow> {
+fn changed_rows(
+    previous: &[TerminalRow],
+    previous_offset: usize,
+    current: &[TerminalRow],
+    current_offset: usize,
+) -> Vec<TerminalRow> {
     let previous_by_index = previous
         .iter()
-        .map(|row| (row.index, row))
+        .map(|row| (previous_offset.saturating_add(row.index as usize), row))
         .collect::<HashMap<_, _>>();
     current
         .iter()
         .filter_map(|row| {
+            let absolute = current_offset.saturating_add(row.index as usize);
             let changed = previous_by_index
-                .get(&row.index)
+                .get(&absolute)
                 .is_none_or(|previous| row_cells_changed(previous, row));
             changed.then(|| {
                 let mut row = row.clone();
@@ -901,12 +911,38 @@ mod tests {
         current.rows[1].cells.push(test_cell("new"));
         current.rows[2].dirty = true;
 
-        let rows = changed_rows(&previous.rows, &current.rows);
+        let rows = changed_rows(&previous.rows, 0, &current.rows, 0);
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].index, 1);
         assert!(rows[0].dirty);
         assert_eq!(rows[0].plain_text(), "new");
+    }
+
+    #[test]
+    fn changed_rows_matches_scrolled_rows_by_absolute_position() {
+        let mut previous = test_frame(TerminalDirtyState::Full, 3);
+        previous.scrollback.viewport_offset = 10;
+        previous.rows[0].cells.push(test_cell("ten"));
+        previous.rows[1].cells.push(test_cell("eleven"));
+        previous.rows[2].cells.push(test_cell("twelve"));
+
+        let mut current = test_frame(TerminalDirtyState::Full, 3);
+        current.scrollback.viewport_offset = 11;
+        current.rows[0].cells.push(test_cell("eleven"));
+        current.rows[1].cells.push(test_cell("twelve"));
+        current.rows[2].cells.push(test_cell("thirteen"));
+
+        let rows = changed_rows(
+            &previous.rows,
+            previous.scrollback.viewport_offset,
+            &current.rows,
+            current.scrollback.viewport_offset,
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].index, 2);
+        assert_eq!(rows[0].plain_text(), "thirteen");
     }
 
     #[test]
@@ -956,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_terminal_state_forces_full_frame_when_viewport_offset_changes() {
+    fn ghostty_terminal_state_sends_partial_rows_when_viewport_offset_changes() {
         let mut terminal = GhosttyTerminalState::new(24, 3).unwrap();
         for _ in 0..4 {
             terminal.write(b"repeat\r\n");
@@ -970,8 +1006,9 @@ mod tests {
             after.scrollback.viewport_offset > before.scrollback.viewport_offset,
             "test setup must advance the viewport offset"
         );
-        assert_eq!(after.dirty, TerminalDirtyState::Full);
-        assert_eq!(after.rows.len(), 3);
+        assert_eq!(after.dirty, TerminalDirtyState::Partial);
+        assert!(after.rows.len() < 3);
+        assert!(after.rows.iter().any(|row| row.index == 2));
         assert!(after.rows.iter().all(|row| row.dirty));
     }
 
