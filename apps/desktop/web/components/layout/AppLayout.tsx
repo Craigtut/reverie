@@ -92,6 +92,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     archivedFocusSessions,
     selectedSession,
     selectedTerminalBinding,
+    selectedTerminalContentReady,
     isLaunchingSelectedSession,
     selectedPermissionRequest,
     effectiveDangerousMode,
@@ -349,6 +350,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 <TerminalSurface
                   session={selectedSession}
                   terminalBinding={selectedTerminalBinding}
+                  terminalContentReady={selectedTerminalContentReady}
                   runningLabel={runningLabel}
                   terminalLiveFollow={terminalLiveFollow}
                   scrollbackRowCount={scrollbackRowCount}

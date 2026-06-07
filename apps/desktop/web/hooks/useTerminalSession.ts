@@ -638,13 +638,18 @@ export function useTerminalSession(params: {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: controller helpers are stable across this hook lifetime.
   useEffect(() => {
     if (surfaceMode !== 'terminal' || creationMode || !selectedSessionId) {
       controller.resetRenderer('terminal_inactive');
       return;
     }
     requestAnimationFrame(() => {
-      controller.paintCurrent(useNavigationStore.getState().selectedSessionId);
+      const sessionId = useNavigationStore.getState().selectedSessionId;
+      controller.paintCurrent(sessionId);
+      if (sessionId) {
+        markSessionTerminalContentReadyIfPainted(sessionId);
+      }
       controller.focusCanvas();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -848,6 +853,18 @@ export function useTerminalSession(params: {
     }
   }
 
+  function markSessionTerminalContentReady(sessionId: string) {
+    const store = useTerminalStore.getState();
+    if (store.terminalContentReadyBySession[sessionId]) return;
+    store.setSessionTerminalContentReady(sessionId, true);
+    store.setLaunchingSessionId(current => (current === sessionId ? null : current));
+  }
+
+  function markSessionTerminalContentReadyIfPainted(sessionId: string) {
+    if (!controller.hasRenderableContent(sessionId)) return;
+    markSessionTerminalContentReady(sessionId);
+  }
+
   async function attachRuntimeSessionListeners(
     terminalId: string,
     session: ShellSession,
@@ -903,6 +920,7 @@ export function useTerminalSession(params: {
         payloads.map(payload => payload.frame),
         isActive,
       );
+      if (isActive) markSessionTerminalContentReadyIfPainted(session.id);
       const frameEnded = performance.now();
       recordTerminalFrameBatch(frameBatchAggregate, payloads.length, frameEnded - frameStarted);
       for (const payload of payloads) {
@@ -932,6 +950,8 @@ export function useTerminalSession(params: {
         terminalInputArmedForActiveId(nextBindings, nextActiveTerminalId),
       );
       store.setRunningSessionId(current => (current === session.id ? null : current));
+      store.setLaunchingSessionId(current => (current === session.id ? null : current));
+      store.clearSessionTerminalContentReady(session.id);
       syncTerminalFrontendActivity(nextActiveTerminalId);
     }
 
@@ -1124,9 +1144,16 @@ export function useTerminalSession(params: {
     store.setRunningSessionId(session.id);
     store.setTerminalInputArmed(binding.inputArmed);
     syncTerminalFrontendActivity(binding.terminalId);
-    if (view) controller.applyView(view);
-    else controller.clear();
-    requestAnimationFrame(() => controller.focusCanvas());
+    if (view) {
+      controller.applyView(view);
+      markSessionTerminalContentReadyIfPainted(session.id);
+    } else {
+      controller.clear();
+    }
+    requestAnimationFrame(() => {
+      if (controller.isLiveFollow()) controller.scrollToTail();
+      controller.focusCanvas();
+    });
     return true;
   }
 
@@ -1150,6 +1177,7 @@ export function useTerminalSession(params: {
 
     useNavigationStore.getState().setSurfaceMode('terminal');
     if (options.manageBusy !== false) setBusy(true);
+    store.setSessionTerminalContentReady(session.id, false);
     store.setLaunchingSessionId(session.id);
     controller.resetScrollback();
     controller.applyView(controller.seedEmptyView(session.id));
@@ -1191,6 +1219,7 @@ export function useTerminalSession(params: {
       );
       store.setRunningSessionId(current => (current === session.id ? null : current));
       store.setLaunchingSessionId(current => (current === session.id ? null : current));
+      store.clearSessionTerminalContentReady(session.id);
       syncTerminalFrontendActivity(nextActiveTerminalId);
       writeLog(`Runtime session launch failed: ${errorMessage(error)}`);
       throw error;
@@ -1220,6 +1249,7 @@ export function useTerminalSession(params: {
     }
     store.setRunningSessionId(current => (current === sessionId ? null : current));
     store.setLaunchingSessionId(current => (current === sessionId ? null : current));
+    store.clearSessionTerminalContentReady(sessionId);
     controller.dropSession(sessionId);
   }
 

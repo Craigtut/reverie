@@ -2078,6 +2078,17 @@ export function createTerminalController(options: TerminalControllerOptions) {
     getRowCount(): number {
       return activeBuffer?.totalRows ?? lastComposite?.rows.length ?? 0;
     },
+    hasRenderableContent(sessionId?: string): boolean {
+      const targetSessionId = sessionId ?? activeSessionId;
+      const buffer = targetSessionId ? sessionBuffers[targetSessionId] : (activeBuffer ?? null);
+      if (buffer && terminalBufferHasRenderableRows(buffer)) return true;
+      const view = targetSessionId ? sessionViews[targetSessionId] : null;
+      if (view?.compositeFrame && terminalFrameHasRenderableCells(view.compositeFrame)) {
+        return true;
+      }
+      const frame = targetSessionId ? latestFrames[targetSessionId] : lastComposite;
+      return frame ? terminalFrameHasRenderableCells(frame) : false;
+    },
     getViewport(): HTMLDivElement | null {
       return els.viewport;
     },

@@ -23,6 +23,9 @@ export function SessionLaunchOverlay({
   if (!session) return null;
 
   if (launching) {
+    const actionLabel =
+      session.launchMode === 'resume' || session.nativeSessionRef ? 'Resuming' : 'Launching';
+
     return (
       <div
         className={launchOverlayClass}
@@ -35,14 +38,12 @@ export function SessionLaunchOverlay({
           </div>
           <Typography
             as="span"
-            variant="caption"
-            tone="muted"
-            uppercase
+            variant="smallBody"
+            tone="default"
             className={launchingLabelClass}
             data-testid="session-launching-label"
-            style={{ letterSpacing: '0.08em' }}
           >
-            Launching {agentLabel(session.agentKind)}
+            {actionLabel} {session.title}
           </Typography>
           <Typography
             as="span"
@@ -55,7 +56,7 @@ export function SessionLaunchOverlay({
               lineHeight: 1.5,
             }}
           >
-            {session.cwd}
+            {agentLabel(session.agentKind)} · {session.cwd}
           </Typography>
         </div>
       </div>
@@ -163,4 +164,5 @@ const launchFieldClass = css({
 const launchingLabelClass = css({
   position: 'relative',
   zIndex: 1,
+  overflowWrap: 'anywhere',
 });

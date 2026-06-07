@@ -33,6 +33,7 @@ type TerminalSurfaceHandle = Pick<
 export interface TerminalSurfaceProps {
   session: ShellSession;
   terminalBinding: SessionTerminalBinding | null;
+  terminalContentReady: boolean;
   runningLabel: string;
   terminalLiveFollow: boolean;
   scrollbackRowCount: number;
@@ -52,6 +53,7 @@ export interface TerminalSurfaceProps {
 export function TerminalSurface({
   session,
   terminalBinding,
+  terminalContentReady,
   runningLabel,
   terminalLiveFollow,
   scrollbackRowCount,
@@ -62,6 +64,10 @@ export function TerminalSurface({
   terminal,
   onLaunch,
 }: TerminalSurfaceProps) {
+  const waitingForTerminalContent = Boolean(terminalBinding && !terminalContentReady);
+  const showLaunchOverlay = !terminalBinding || waitingForTerminalContent;
+  const launchOverlayLaunching = launching || waitingForTerminalContent;
+
   return (
     <div className={terminalRowClass}>
       <div
@@ -129,6 +135,7 @@ export function TerminalSurface({
           <div
             ref={terminal.terminalScrollSpacerRef}
             className={terminalScrollSpacerClass}
+            data-content-ready={terminalBinding && terminalContentReady ? 'true' : 'false'}
             data-testid="terminal-scroll-spacer"
           >
             <canvas
@@ -159,11 +166,11 @@ export function TerminalSurface({
               onPaste={terminal.handleTerminalPaste}
             />
           </div>
-          {!terminalBinding ? (
+          {showLaunchOverlay ? (
             <SessionLaunchOverlay
               session={session}
-              launching={launching}
-              disabled={busy && !launching}
+              launching={launchOverlayLaunching}
+              disabled={Boolean(terminalBinding) || (busy && !launchOverlayLaunching)}
               onLaunch={onLaunch}
             />
           ) : null}
@@ -273,6 +280,15 @@ const terminalScrollSpacerClass = css({
   margin: '0 auto',
   overflow: 'hidden',
   background: 'var(--terminal-bg, #0B0A09)',
+  '& .terminal-canvas': {
+    transition: 'opacity 180ms ease',
+  },
+  '&[data-content-ready="false"] .terminal-canvas': {
+    opacity: 0,
+  },
+  '&[data-content-ready="true"] .terminal-canvas': {
+    opacity: 1,
+  },
 });
 
 const terminalTextInputClass = css({

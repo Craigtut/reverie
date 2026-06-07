@@ -17,6 +17,7 @@ interface TerminalStoreState {
   activeTerminalId: string | null;
   runningSessionId: string | null;
   launchingSessionId: string | null;
+  terminalContentReadyBySession: Record<string, boolean>;
   terminalInputArmed: boolean;
   terminalSurface: TerminalSurface;
   scrollbackRowCount: number;
@@ -28,6 +29,8 @@ interface TerminalStoreState {
   setActiveTerminalId: (action: SetStateAction<string | null>) => void;
   setRunningSessionId: (action: SetStateAction<string | null>) => void;
   setLaunchingSessionId: (action: SetStateAction<string | null>) => void;
+  setSessionTerminalContentReady: (sessionId: string, ready: boolean) => void;
+  clearSessionTerminalContentReady: (sessionId: string) => void;
   setTerminalInputArmed: (action: SetStateAction<boolean>) => void;
   setTerminalSurface: (action: SetStateAction<TerminalSurface>) => void;
   setScrollbackRowCount: (action: SetStateAction<number>) => void;
@@ -40,6 +43,7 @@ export const useTerminalStore = create<TerminalStoreState>(set => ({
   activeTerminalId: null,
   runningSessionId: null,
   launchingSessionId: null,
+  terminalContentReadyBySession: {},
   terminalInputArmed: false,
   terminalSurface: TERMINAL_SURFACE,
   scrollbackRowCount: 0,
@@ -55,6 +59,23 @@ export const useTerminalStore = create<TerminalStoreState>(set => ({
     set(s => ({ runningSessionId: resolveSetStateAction(action, s.runningSessionId) })),
   setLaunchingSessionId: action =>
     set(s => ({ launchingSessionId: resolveSetStateAction(action, s.launchingSessionId) })),
+  setSessionTerminalContentReady: (sessionId, ready) =>
+    set(s => {
+      if (s.terminalContentReadyBySession[sessionId] === ready) return {};
+      return {
+        terminalContentReadyBySession: {
+          ...s.terminalContentReadyBySession,
+          [sessionId]: ready,
+        },
+      };
+    }),
+  clearSessionTerminalContentReady: sessionId =>
+    set(s => {
+      if (!(sessionId in s.terminalContentReadyBySession)) return {};
+      const next = { ...s.terminalContentReadyBySession };
+      delete next[sessionId];
+      return { terminalContentReadyBySession: next };
+    }),
   setTerminalInputArmed: action =>
     set(s => ({ terminalInputArmed: resolveSetStateAction(action, s.terminalInputArmed) })),
   setTerminalSurface: action =>
@@ -75,6 +96,7 @@ preserveStoreAcrossHmr(useTerminalStore, import.meta.hot, s => ({
   activeTerminalId: s.activeTerminalId,
   runningSessionId: s.runningSessionId,
   launchingSessionId: s.launchingSessionId,
+  terminalContentReadyBySession: s.terminalContentReadyBySession,
   terminalInputArmed: s.terminalInputArmed,
   terminalSurface: s.terminalSurface,
   scrollbackRowCount: s.scrollbackRowCount,

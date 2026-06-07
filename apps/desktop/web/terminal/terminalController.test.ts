@@ -251,6 +251,64 @@ describe('createTerminalController', () => {
     expect(onLiveFollow).toHaveBeenLastCalledWith(false);
   });
 
+  it('does not report an empty seeded launch view as renderable content', () => {
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+
+    controller.seedEmptyView('session-1');
+
+    expect(controller.hasRenderableContent('session-1')).toBe(false);
+  });
+
+  it('reports renderable content after an active session ingests real rows', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+
+    controller.ingestFrames(
+      'session-1',
+      [liveFrameAtBottom(0, [row(0, ''), row(1, 'ready'), row(2, ''), row(3, '')])],
+      true,
+    );
+
+    expect(controller.hasRenderableContent('session-1')).toBe(true);
+  });
+
+  it('re-pins a cached live-following session when repainting it as current', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrames(
+      'session-1',
+      [liveFrameAtBottom(246, [row(0, 'one'), row(1, 'two'), row(2, 'three'), row(3, 'four')])],
+      true,
+    );
+    viewport.scrollTop = 0;
+
+    controller.paintCurrent('session-1');
+
+    expect(viewport.scrollTop).toBe(2470);
+  });
+
   it('coalesces scheduled scroll paints into one animation frame', () => {
     const rafCallbacks: FrameRequestCallback[] = [];
     vi.stubGlobal(

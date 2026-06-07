@@ -61,6 +61,7 @@ export function useWorkspaceModel() {
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
   const navHydrated = useNavigationStore(s => s.hydrated);
   const sessionTerminalBindings = useTerminalStore(s => s.sessionTerminalBindings);
+  const terminalContentReadyBySession = useTerminalStore(s => s.terminalContentReadyBySession);
   const terminalSurface = useTerminalStore(s => s.terminalSurface);
   const launchingSessionId = useTerminalStore(s => s.launchingSessionId);
   const setLaunchingSessionId = useTerminalStore(s => s.setLaunchingSessionId);
@@ -115,8 +116,13 @@ export function useWorkspaceModel() {
   const selectedTerminalBinding = selectedSession
     ? (sessionTerminalBindings[selectedSession.id] ?? null)
     : null;
+  const selectedTerminalContentReady = selectedSession
+    ? terminalContentReadyBySession[selectedSession.id] === true
+    : false;
   const isLaunchingSelectedSession = Boolean(
-    selectedSession && launchingSessionId === selectedSession.id && !selectedTerminalBinding,
+    selectedSession &&
+      launchingSessionId === selectedSession.id &&
+      !terminalContentReadyBySession[selectedSession.id],
   );
   const selectedSessionActivity: ActivityState | null = selectedSession
     ? activityForSession(selectedSession, cortexActivity)
@@ -235,13 +241,14 @@ export function useWorkspaceModel() {
     setTheme(workspaceTheme);
   }, [workspaceTheme, setTheme]);
 
-  // Clean up the launchingSessionId once the live binding arrives (the breathing
-  // overlay disappears as soon as the real terminal surface takes over).
+  // Clean up the launch guard once the terminal has actually painted content.
+  // A binding can exist before the CLI has resumed and produced its first rows,
+  // so visual readiness is tracked separately from process ownership.
   useEffect(() => {
-    if (launchingSessionId && sessionTerminalBindings[launchingSessionId]) {
+    if (launchingSessionId && terminalContentReadyBySession[launchingSessionId]) {
       setLaunchingSessionId(null);
     }
-  }, [launchingSessionId, sessionTerminalBindings]);
+  }, [launchingSessionId, terminalContentReadyBySession, setLaunchingSessionId]);
 
   // Keep the persisted focus selection pointed at a focus that actually exists
   // in the current view, falling back to the first visible one.
@@ -297,6 +304,7 @@ export function useWorkspaceModel() {
     archivedFocusSessions,
     selectedSession,
     selectedTerminalBinding,
+    selectedTerminalContentReady,
     isLaunchingSelectedSession,
     selectedPermissionRequest,
     effectiveDangerousMode,
