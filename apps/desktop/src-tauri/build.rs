@@ -58,7 +58,11 @@ fn main() {
 /// Ensure `binaries/<name>-<target-triple>` exists for each bridge helper so
 /// Tauri's compile-time `externalBin` validation passes for any desktop build.
 fn ensure_bridge_external_bins() -> std::io::Result<()> {
-    const NAMES: [&str; 2] = ["reverie-bridge", "reverie-bridge-preturn-hook"];
+    const NAMES: [&str; 3] = [
+        "reverie-bridge",
+        "reverie-bridge-preturn-hook",
+        "reverie-codex-hook",
+    ];
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let triple = env::var("TARGET").expect("TARGET must be set in build scripts");
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());

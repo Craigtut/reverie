@@ -18,6 +18,12 @@ path = "src/main.rs"
 name = "reverie-bridge-preturn-hook"
 path = "src/preturn_hook.rs"
 
+# Codex lifecycle-hook forwarder: reads hook JSON on stdin, POSTs it to the
+# desktop app's localhost hook server. std-only, no crate deps.
+[[bin]]
+name = "reverie-codex-hook"
+path = "src/codex_hook.rs"
+
 [dependencies]
 anyhow.workspace = true
 reverie-core.workspace = true

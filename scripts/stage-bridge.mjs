@@ -47,9 +47,9 @@ const profile = flag('profile', 'debug'); // debug | release
 const host = hostTriple();
 const triple = flag('triple', host);
 
-const BINS = ['reverie-bridge', 'reverie-bridge-preturn-hook'];
+const BINS = ['reverie-bridge', 'reverie-bridge-preturn-hook', 'reverie-codex-hook'];
 
-// Build the helper crate (produces both bins). When a non-host triple is
+// Build the helper crate (produces all its bins). When a non-host triple is
 // requested, build for it so the artifact's arch matches the externalBin label.
 const crossTriple = triple !== host ? triple : null;
 const buildArgs = ['build', '-p', 'reverie-bridge'];
