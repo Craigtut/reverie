@@ -43,7 +43,6 @@ function makeSession(overrides: Partial<ShellSession> = {}): ShellSession {
     launchMode: 'new',
     dangerousModeOverride: null,
     status: 'running',
-    tabVisible: true,
     ...overrides,
   };
 }
@@ -138,25 +137,36 @@ describe('buildPaletteEntries', () => {
     );
   });
 
-  it('excludes hidden sessions (tabVisible === false) from session entries', () => {
+  it('excludes archived sessions from session entries', () => {
     const shell = makeShell({
       projects: [makeProject()],
       focuses: [makeFocus()],
-      sessions: [makeSession({ id: 'visible' }), makeSession({ id: 'hidden', tabVisible: false })],
+      sessions: [makeSession({ id: 'visible' }), makeSession({ id: 'hidden', archived: true })],
     });
     const sessionEntries = buildPaletteEntries(shell, {}).filter(e => e.kind === 'session');
     expect(sessionEntries).toHaveLength(1);
     expect(sessionEntries[0].kind === 'session' && sessionEntries[0].session.id).toBe('visible');
   });
 
-  it('counts only visible sessions in a focus sessionCount', () => {
+  it('excludes sessions inside an archived project (effective archive)', () => {
+    const shell = makeShell({
+      projects: [makeProject({ archived: true })],
+      focuses: [makeFocus()],
+      sessions: [makeSession({ id: 'under-archived-project' })],
+    });
+    const entries = buildPaletteEntries(shell, {});
+    // Both the topic and its session are hidden because their project is archived.
+    expect(entries).toHaveLength(0);
+  });
+
+  it('counts only active sessions in a focus sessionCount', () => {
     const shell = makeShell({
       projects: [makeProject()],
       focuses: [makeFocus()],
       sessions: [
         makeSession({ id: 'a' }),
         makeSession({ id: 'b' }),
-        makeSession({ id: 'hidden', tabVisible: false }),
+        makeSession({ id: 'hidden', archived: true }),
       ],
     });
     const focusEntry = buildPaletteEntries(shell, {}).find(e => e.kind === 'focus');

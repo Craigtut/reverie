@@ -63,8 +63,6 @@ export async function invokeBrowserFixture<T>(
       return createFixtureFocus(args) as T;
     case 'create_session':
       return createFixtureSession(args) as T;
-    case 'update_session_tab_visibility':
-      return updateFixtureSessionTabVisibility(args) as T;
     case 'set_session_archived':
       return updateFixtureSessionArchived(args) as T;
     case 'mark_session_viewed':
@@ -73,8 +71,14 @@ export async function invokeBrowserFixture<T>(
       return removeFixtureSession(args) as T;
     case 'archive_focus':
       return archiveFixtureFocus(args) as T;
+    case 'restore_focus':
+      return restoreFixtureFocus(args) as T;
+    case 'delete_focus':
+      return deleteFixtureFocus(args) as T;
     case 'archive_project':
       return archiveFixtureProject(args) as T;
+    case 'delete_project':
+      return deleteFixtureProject(args) as T;
     case 'reorder_focuses':
       return reorderFixtureFocuses(args) as T;
     case 'reorder_projects':
@@ -240,7 +244,6 @@ function createFixtureSession(args?: Record<string, unknown>) {
     dangerousModeOverride: request.dangerousModeOverride ?? null,
     status: 'not_started' as const,
     lastExitCode: null,
-    tabVisible: true,
     archived: false,
   };
 
@@ -253,21 +256,11 @@ function createFixtureSession(args?: Record<string, unknown>) {
   return clone(fixtureShell);
 }
 
-function updateFixtureSessionTabVisibility(args?: Record<string, unknown>) {
-  const request = readRequest<{ shellSessionId: string; tabVisible: boolean }>(args);
-  const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
-  if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
-  session.tabVisible = request.tabVisible;
-  persistFixtureShellSnapshot();
-  return clone(fixtureShell);
-}
-
 function updateFixtureSessionArchived(args?: Record<string, unknown>) {
   const request = readRequest<{ shellSessionId: string; archived: boolean }>(args);
   const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
   if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
   session.archived = request.archived;
-  session.tabVisible = !request.archived;
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
@@ -298,10 +291,31 @@ function archiveFixtureFocus(args?: Record<string, unknown>) {
   const focusId = readDirectArg<string>(args, 'focusId');
   const focus = fixtureShell.focuses.find(item => item.id === focusId);
   if (!focus) throw new Error(`Unknown fixture focus: ${focusId}`);
+  // Single-bit model: only the topic's own bit moves; its sessions are hidden by
+  // ancestry, so restoring the topic brings them back untouched.
   focus.archived = true;
-  for (const session of fixtureShell.sessions.filter(item => item.focusId === focusId)) {
-    session.tabVisible = false;
-  }
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function restoreFixtureFocus(args?: Record<string, unknown>) {
+  const focusId = readDirectArg<string>(args, 'focusId');
+  const focus = fixtureShell.focuses.find(item => item.id === focusId);
+  if (!focus) throw new Error(`Unknown fixture focus: ${focusId}`);
+  focus.archived = false;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function deleteFixtureFocus(args?: Record<string, unknown>) {
+  const focusId = readDirectArg<string>(args, 'focusId');
+  if (!fixtureShell.focuses.some(item => item.id === focusId))
+    throw new Error(`Unknown fixture focus: ${focusId}`);
+  fixtureShell = {
+    ...fixtureShell,
+    focuses: fixtureShell.focuses.filter(item => item.id !== focusId),
+    sessions: fixtureShell.sessions.filter(item => item.focusId !== focusId),
+  };
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
@@ -361,16 +375,26 @@ function archiveFixtureProject(args?: Record<string, unknown>) {
   const projectId = readDirectArg<string>(args, 'projectId');
   const project = fixtureShell.projects.find(item => item.id === projectId);
   if (!project) throw new Error(`Unknown fixture project: ${projectId}`);
+  // Single-bit model: only the project's own bit moves; its topics and sessions
+  // are hidden by ancestry, so re-adding the folder restores the whole subtree.
   project.archived = true;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function deleteFixtureProject(args?: Record<string, unknown>) {
+  const projectId = readDirectArg<string>(args, 'projectId');
+  if (!fixtureShell.projects.some(item => item.id === projectId))
+    throw new Error(`Unknown fixture project: ${projectId}`);
   const focusIds = new Set(
     fixtureShell.focuses.filter(focus => focus.projectId === projectId).map(focus => focus.id),
   );
-  for (const focus of fixtureShell.focuses.filter(item => focusIds.has(item.id))) {
-    focus.archived = true;
-  }
-  for (const session of fixtureShell.sessions.filter(item => focusIds.has(item.focusId))) {
-    session.tabVisible = false;
-  }
+  fixtureShell = {
+    ...fixtureShell,
+    projects: fixtureShell.projects.filter(item => item.id !== projectId),
+    focuses: fixtureShell.focuses.filter(item => item.projectId !== projectId),
+    sessions: fixtureShell.sessions.filter(item => !focusIds.has(item.focusId)),
+  };
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
@@ -721,7 +745,6 @@ function persistFixtureShellSnapshot(snapshot = fixtureShell) {
 
 function normalizeFixtureShellSnapshot(snapshot: WorkspaceShellSnapshot) {
   for (const session of snapshot.sessions) {
-    session.tabVisible ??= true;
     session.archived ??= false;
   }
   // Mirror the backend `ensure_seeded`: a workspace always has a General focus so
@@ -819,7 +842,6 @@ function makePopulatedFixtureSnapshot(
     dangerousModeOverride: false,
     status: 'not_started',
     lastExitCode: null,
-    tabVisible: true,
     archived: false,
     ...overrides,
   });
@@ -906,7 +928,6 @@ function makePopulatedFixtureSnapshot(
         // Exited with no captured native id: the conversation is gone, so this
         // is the one archived row that earns the "Can't restore" tag.
         status: 'exited',
-        tabVisible: false,
         archived: true,
       }),
       session({
@@ -916,7 +937,6 @@ function makePopulatedFixtureSnapshot(
         agentKind: 'claude_code',
         status: 'restorable',
         nativeSessionRef: { kind: 'claude_code', sessionId: 'native-auth-archived-claude' },
-        tabVisible: false,
         archived: true,
       }),
       session({
@@ -926,7 +946,6 @@ function makePopulatedFixtureSnapshot(
         agentKind: 'codex_cli',
         status: 'restorable',
         nativeSessionRef: { kind: 'codex_cli', sessionId: 'native-auth-archived-codex' },
-        tabVisible: false,
         archived: true,
       }),
       session({

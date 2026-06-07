@@ -177,7 +177,16 @@ export function useWorkspaceMutations({
     const cleaned = paths.map(path => path.trim()).filter(Boolean);
     if (cleaned.length === 0) return;
     setBusy(true);
+    // Dropping a folder Reverie already knew (archived) reconnects that project
+    // with its topics and sessions instead of making a duplicate; track those
+    // separately from genuinely new projects so the toast reads right. The set is
+    // captured once and pruned as each reconnect is detected, so a second drop in
+    // the same batch can't re-count the same project.
+    const archivedBefore = new Set(
+      shell.projects.filter(project => project.archived).map(project => project.id),
+    );
     const created: string[] = [];
+    const reconnected: string[] = [];
     const failures: string[] = [];
     try {
       for (const path of cleaned) {
@@ -186,8 +195,17 @@ export function useWorkspaceMutations({
             path,
           });
           setShell(snapshot);
-          created.push(folderNameFromPath(path) || 'project');
-          appendLog(`Added project from dropped folder: ${path}.`);
+          const reconnectedProject = snapshot.projects.find(
+            project => archivedBefore.has(project.id) && !project.archived,
+          );
+          if (reconnectedProject) {
+            archivedBefore.delete(reconnectedProject.id);
+            reconnected.push(reconnectedProject.name);
+            appendLog(`Reconnected archived project from dropped folder: ${path}.`);
+          } else {
+            created.push(folderNameFromPath(path) || 'project');
+            appendLog(`Added project from dropped folder: ${path}.`);
+          }
         } catch (error) {
           const message = errorMessage(error);
           failures.push(message);
@@ -202,6 +220,11 @@ export function useWorkspaceMutations({
       pushToast({ message: `Added project “${created[0]}”` });
     } else if (created.length > 1) {
       pushToast({ message: `Added ${created.length} projects` });
+    }
+    if (reconnected.length === 1) {
+      pushToast({ message: `Reconnected “${reconnected[0]}” with its topics and sessions` });
+    } else if (reconnected.length > 1) {
+      pushToast({ message: `Reconnected ${reconnected.length} projects` });
     }
     if (failures.length > 0) {
       // Most drops are a single folder, so surface the first problem; the rest
@@ -293,7 +316,7 @@ export function useWorkspaceMutations({
   async function restoreSessionTab(session: ShellSession) {
     await setSessionArchived(session, false);
     setSurfaceMode('terminal');
-    selectSessionTab({ ...session, tabVisible: true, archived: false });
+    selectSessionTab({ ...session, archived: false });
     appendLog(`Restored ${session.title} to active tabs.`);
   }
 
@@ -372,6 +395,39 @@ export function useWorkspaceMutations({
     appendLog(`Removed focus from navigation: ${focus.title}.`);
   }
 
+  // Restore an archived topic: flip its bit back so it (and its sessions, by
+  // ancestry) returns to the project. Safe and reversible, so no confirm.
+  async function restoreFocusRecord(focus: ShellFocus) {
+    const snapshot = await invoke<WorkspaceShellSnapshot>('restore_focus', { focusId: focus.id });
+    setShell(snapshot);
+    appendLog(`Restored topic: ${focus.title}.`);
+    useOverlayStore.getState().pushToast({ message: `Restored “${focus.title}”` });
+  }
+
+  // Permanently delete an archived topic and its sessions. Always confirms.
+  async function deleteFocusRecord(focus: ShellFocus) {
+    const count = shell.sessions.filter(session => session.focusId === focus.id).length;
+    useOverlayStore.getState().requestConfirm({
+      title: `Delete topic “${focus.title}”?`,
+      body: `This permanently deletes the topic and its ${count} ${count === 1 ? 'session' : 'sessions'} and cannot be undone.`,
+      confirmLabel: 'Delete topic',
+      danger: true,
+      onConfirm: () => void performDeleteFocus(focus),
+    });
+  }
+
+  async function performDeleteFocus(focus: ShellFocus) {
+    await terminateBoundSessions(shell.sessions.filter(session => session.focusId === focus.id));
+    const snapshot = await invoke<WorkspaceShellSnapshot>('delete_focus', { focusId: focus.id });
+    setShell(snapshot);
+    if (selectedFocusId === focus.id) {
+      setSelectedFocusId(null);
+      setSelectedSessionId(null);
+      terminal.clearSurface();
+    }
+    appendLog(`Deleted topic: ${focus.title}.`);
+  }
+
   async function archiveProjectRecord(project: ShellProject) {
     const projectFocusIds = new Set(
       shell.focuses.filter(focus => focus.projectId === project.id).map(focus => focus.id),
@@ -413,6 +469,46 @@ export function useWorkspaceMutations({
     appendLog(`Removed project from navigation: ${project.name}.`);
   }
 
+  // Permanently purge an archived project and everything under it. Used by the
+  // Settings "Archived projects" list; there is no restore button there because
+  // re-adding the folder reconnects, so this is the one destructive action.
+  async function deleteProjectRecord(project: ShellProject) {
+    const projectFocusIds = new Set(
+      shell.focuses.filter(focus => focus.projectId === project.id).map(focus => focus.id),
+    );
+    const topicCount = projectFocusIds.size;
+    const sessionCount = shell.sessions.filter(session =>
+      projectFocusIds.has(session.focusId),
+    ).length;
+    useOverlayStore.getState().requestConfirm({
+      title: `Delete “${project.name}” and its data?`,
+      body: `This permanently deletes ${topicCount} ${topicCount === 1 ? 'topic' : 'topics'} and ${sessionCount} ${sessionCount === 1 ? 'session' : 'sessions'}. The folder on disk is left untouched. This cannot be undone.`,
+      confirmLabel: 'Delete project data',
+      danger: true,
+      onConfirm: () => void performDeleteProject(project),
+    });
+  }
+
+  async function performDeleteProject(project: ShellProject) {
+    const projectFocusIds = new Set(
+      shell.focuses.filter(focus => focus.projectId === project.id).map(focus => focus.id),
+    );
+    await terminateBoundSessions(
+      shell.sessions.filter(session => projectFocusIds.has(session.focusId)),
+    );
+    const snapshot = await invoke<WorkspaceShellSnapshot>('delete_project', {
+      projectId: project.id,
+    });
+    setShell(snapshot);
+    if (selectedProjectId === project.id) {
+      setSelectedProjectId(null);
+      setSelectedFocusId(null);
+      setSelectedSessionId(null);
+      terminal.clearSurface();
+    }
+    appendLog(`Deleted project data: ${project.name}.`);
+  }
+
   return {
     setWorkspaceDefaultDangerousMode,
     setWorkspaceTheme,
@@ -424,7 +520,10 @@ export function useWorkspaceMutations({
     restoreSessionTab,
     removeSessionRecord,
     archiveFocusRecord,
+    restoreFocusRecord,
+    deleteFocusRecord,
     archiveProjectRecord,
+    deleteProjectRecord,
   };
 }
 

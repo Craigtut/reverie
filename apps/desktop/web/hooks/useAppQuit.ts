@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import { activityForSession, errorMessage } from '../domain';
+import { activeWorkspaceSessions, activityForSession, errorMessage } from '../domain';
 import type { ShellSession } from '../domain';
 import { listen, type UnlistenFn } from '../services/runtime';
 import { confirmQuit } from '../services/terminalApi';
@@ -30,9 +30,7 @@ export function useAppQuit(writeLog: (line: string) => void) {
       try {
         const fn = await listen('app_quit_requested', () => {
           if (cancelled) return;
-          const sessions = useShellStore
-            .getState()
-            .shell.sessions.filter(session => !session.archived);
+          const sessions = activeWorkspaceSessions(useShellStore.getState().shell);
           const bindings = useTerminalStore.getState().sessionTerminalBindings;
           const cortexActivity = useActivityStore.getState().cortexActivity;
 

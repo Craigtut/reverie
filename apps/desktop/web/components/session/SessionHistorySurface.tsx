@@ -3,30 +3,19 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Archive, CaretRight, Plus, Trash, Warning } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { groupSessionsByState, sessionCanRestore, sortGroupByRecency } from '../../domain';
+import { groupSessionsByState, sessionCanRestore } from '../../domain';
 import type {
   ActivityState,
-  DashboardStatus,
-  SessionState,
   SessionStateTimeline,
   SessionTerminalBinding,
   ShellFocus,
   ShellSession,
   WorkspaceShellSnapshot,
 } from '../../domain';
-import { DashboardRail } from '../dashboard';
+import { DashboardStateRails } from '../dashboard';
 import { AgentGlyph } from '../glyphs';
 import { primaryComposerButtonClass } from '../primitives/buttons';
 import { Typography } from '../primitives/Typography';
-
-const SECTIONS: { key: SessionState; title: string; tone: DashboardStatus; attention?: boolean }[] =
-  [
-    { key: 'attention', title: 'Needs your attention', tone: 'attention', attention: true },
-    { key: 'finished', title: 'Ready for you', tone: 'recent' },
-    { key: 'active', title: 'Working', tone: 'live' },
-    { key: 'idle', title: 'Idle', tone: 'recent' },
-    { key: 'fresh', title: 'Fresh', tone: 'recent' },
-  ];
 
 // The focus view: a dashboard scoped to one focus. Non-archived sessions are
 // grouped into the same state sections as Home. Archived sessions are tucked
@@ -117,26 +106,14 @@ export function SessionHistorySurface({
           </button>
         </header>
 
-        {SECTIONS.map(section =>
-          groups[section.key].length > 0 ? (
-            <DashboardRail
-              key={section.key}
-              title={section.title}
-              icon={section.attention ? <Warning size={13} weight="fill" /> : undefined}
-              tone={section.tone}
-              sessions={sortGroupByRecency(
-                groups[section.key],
-                section.key,
-                sessionTimelines,
-                cortexActivity,
-              )}
-              shell={shell}
-              bindings={sessionTerminalBindings}
-              cortexActivity={cortexActivity}
-              onOpenSession={onOpenSession}
-            />
-          ) : null,
-        )}
+        <DashboardStateRails
+          groups={groups}
+          shell={shell}
+          bindings={sessionTerminalBindings}
+          cortexActivity={cortexActivity}
+          sessionTimelines={sessionTimelines}
+          onOpenSession={onOpenSession}
+        />
 
         {activeSessions.length === 0 ? (
           <Typography

@@ -5,6 +5,7 @@ import { rimLitPanelClass } from '../../themes/surfaces';
 import {
   activeGeneralSessions,
   activeSessionsInFocus,
+  activeWorkspaceSessions,
   activityForSession,
   cellStateFor,
   primaryGeneralFocus,
@@ -53,6 +54,7 @@ export interface SidebarProps {
   canUseAppServices: boolean;
   onOpenCommandPalette: () => void;
   onGoToDashboard: () => void;
+  onOpenProject: (projectId: string) => void;
   onOpenFocus: (projectId: string | null, focusId: string) => void;
   onOpenSession: (session: ShellSession) => void;
   onCloseSession: (session: ShellSession) => void;
@@ -79,6 +81,7 @@ export function Sidebar({
   canUseAppServices,
   onOpenCommandPalette,
   onGoToDashboard,
+  onOpenProject,
   onOpenFocus,
   onOpenSession,
   onCloseSession,
@@ -95,6 +98,7 @@ export function Sidebar({
   // The nav list scroller, reflected by the auto-hiding OverlayScrollbar beside it.
   const navScrollRef = useRef<HTMLElement | null>(null);
   const selectedSessionId = useNavigationStore(s => s.selectedSessionId);
+  const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
   const collapsedProjectIds = useNavigationStore(s => s.collapsedProjectIds);
   const expandedFocusIds = useNavigationStore(s => s.expandedFocusIds);
   const generalCollapsed = useNavigationStore(s => s.generalCollapsed);
@@ -178,7 +182,7 @@ export function Sidebar({
   // than a running-process tally. When nothing needs you and nothing is ready,
   // the row carries no badge at all.
   const workspaceRollup = rollupSessionStates(
-    shell.sessions.filter(session => !session.archived),
+    activeWorkspaceSessions(shell),
     sessionTerminalBindings,
     cortexActivity,
     viewedSessionId,
@@ -338,7 +342,11 @@ export function Sidebar({
                       finished={projectRollup.finished}
                       tone={projectRollup.tone}
                       expanded={expanded}
+                      active={
+                        surfaceMode === 'project-dashboard' && selectedProjectId === project.id
+                      }
                       onToggle={() => toggleProjectCollapsed(project.id)}
+                      onOpen={() => onOpenProject(project.id)}
                       onRemove={(event: MouseEvent<HTMLElement>) => {
                         event.stopPropagation();
                         onArchiveProject(project);
@@ -370,7 +378,11 @@ export function Sidebar({
                               <FocusRow
                                 focus={focus}
                                 rollup={focusRollup}
-                                active={focus.id === selectedFocusId && surfaceMode !== 'dashboard'}
+                                active={
+                                  focus.id === selectedFocusId &&
+                                  surfaceMode !== 'dashboard' &&
+                                  surfaceMode !== 'project-dashboard'
+                                }
                                 expanded={expandedFocusIds.has(focus.id)}
                                 onToggle={() => toggleFocusExpanded(focus.id)}
                                 onOpen={() => onOpenFocus(project.id, focus.id)}

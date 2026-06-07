@@ -6,7 +6,16 @@ import type { TerminalFrame, TerminalRow } from '../terminalTypes';
 // are plain data shapes with no React or Tauri coupling.
 
 export type ProjectFilter = string | null;
-export type SurfaceMode = 'dashboard' | 'terminal' | 'settings' | 'session-history';
+// The surface on stage. `dashboard` is Home (the whole workspace), `project-dashboard`
+// is one project's overview (its topics intermingled, grouped by state), and
+// `session-history` is one topic's overview. Together they form the zoom ladder
+// Home -> Project -> Topic -> Session(terminal).
+export type SurfaceMode =
+  | 'dashboard'
+  | 'project-dashboard'
+  | 'terminal'
+  | 'settings'
+  | 'session-history';
 export type AgentKind = 'claude_code' | 'codex_cli' | 'cortex_code';
 export type CreationMode = 'project' | 'focus' | 'session' | null;
 
@@ -223,10 +232,12 @@ export interface ShellSession {
   dangerousModeOverride?: boolean | null;
   status: 'not_started' | 'running' | 'exited' | 'restorable' | 'restore_failed';
   lastExitCode?: number | null;
-  tabVisible?: boolean;
   // Whether the user archived this session. Archived sessions leave Home and the
   // sidebar focus lists and live only in the focus's archived list (restorable
-  // anytime). Closing a session archives it. Absent/false means not archived.
+  // anytime). Closing a session archives it. A session is also *effectively*
+  // archived (hidden the same way) when its focus or project is archived; that is
+  // computed by ancestry (see domain/archive.ts), not stored, so restoring the
+  // ancestor brings it back. Absent/false means not archived.
   archived?: boolean;
   // Persisted last-observed activity for this session (from the Cortex
   // filesystem watcher, eventually also Claude/Codex hooks). Seeds the

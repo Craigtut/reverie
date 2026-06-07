@@ -3,7 +3,7 @@ import { CaretRight, Minus, Moon, Plus, Sun } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
-import type { CreateSessionRecordRequest } from '../../domain';
+import type { CreateSessionRecordRequest, ShellProject } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
 import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
 import { useShellStore } from '../../store';
@@ -12,6 +12,7 @@ import { SegmentedTabs, type SegmentedTabItem } from '../primitives/SegmentedTab
 import { Switch } from '../primitives/Switch';
 import { Typography } from '../primitives/Typography';
 import { AgentsSection } from './AgentsSection';
+import { ArchivedProjectsSection } from './ArchivedProjectsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
 import { ShortcutsPanel } from './ShortcutsPanel';
 
@@ -35,6 +36,7 @@ export function SettingsSurface({
   onSetDefaultDangerousMode,
   terminalFontSize,
   onSetTerminalFontSize,
+  onDeleteProject,
 }: {
   // The persisted workspace theme; the handler flips the live UI and persists.
   theme: 'light' | 'dark';
@@ -54,6 +56,9 @@ export function SettingsSurface({
   // terminals.
   terminalFontSize: number;
   onSetTerminalFontSize: (value: number) => void;
+  // Permanently purge an archived project and its data (no restore: re-adding
+  // the folder reconnects). Wired to the workspace mutation in AppLayout.
+  onDeleteProject: (project: ShellProject) => void;
 }) {
   const clampedFontSize = Math.min(
     MAX_TERMINAL_FONT_SIZE,
@@ -332,6 +337,7 @@ export function SettingsSurface({
             {anyReverieToolsInstalled(detections, bridge.status) ? (
               <ConnectionPolicySection />
             ) : null}
+            <ArchivedProjectsSection onDeleteProject={onDeleteProject} />
           </div>
         )}
       </div>

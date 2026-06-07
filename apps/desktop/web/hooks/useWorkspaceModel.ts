@@ -1,7 +1,13 @@
 import { useEffect, useMemo } from 'react';
 
 import { invoke } from '../services/runtime';
-import { activityForSession, dangerousLabel, errorMessage, setUserHome } from '../domain';
+import {
+  activityForSession,
+  dangerousLabel,
+  errorMessage,
+  isFocusEffectivelyArchived,
+  setUserHome,
+} from '../domain';
 import type {
   ActivityPermissionRequest,
   ActivityState,
@@ -108,7 +114,10 @@ export function useWorkspaceModel() {
     [focusSessions],
   );
   const selectedSession =
-    creationMode || surfaceMode === 'session-history' || surfaceMode === 'dashboard'
+    creationMode ||
+    surfaceMode === 'session-history' ||
+    surfaceMode === 'dashboard' ||
+    surfaceMode === 'project-dashboard'
       ? null
       : (visibleSessions.find(session => session.id === selectedSessionId) ??
         visibleSessions[0] ??
@@ -276,23 +285,31 @@ export function useWorkspaceModel() {
     // the first focus over a saved selection we are about to restore.
     if (!navHydrated) return;
     if (creationMode) return;
+    // The project dashboard owns its own project selection across all its topics;
+    // seeding a global first focus here would clobber it (and, for an empty
+    // project, bounce the view onto a different project's first focus).
+    if (surfaceMode === 'project-dashboard') return;
     if (shell.focuses.length === 0) return;
     if (
       selectedFocusId &&
-      shell.focuses.some(focus => focus.id === selectedFocusId && !focus.archived)
+      shell.focuses.some(
+        focus => focus.id === selectedFocusId && !isFocusEffectivelyArchived(focus, shell),
+      )
     )
       return;
 
     const firstFocus = shell.focuses
-      .filter(focus => !focus.archived)
+      .filter(focus => !isFocusEffectivelyArchived(focus, shell))
       .sort((left, right) => left.sortOrder - right.sortOrder)[0];
     if (!firstFocus) return;
 
-    const firstSession = shell.sessions.find(session => session.focusId === firstFocus.id) ?? null;
+    const firstSession =
+      shell.sessions.find(session => session.focusId === firstFocus.id && !session.archived) ??
+      null;
     setSelectedProjectId(firstFocus.projectId ?? null);
     setSelectedFocusId(firstFocus.id);
     setSelectedSessionId(firstSession?.id ?? null);
-  }, [navHydrated, creationMode, selectedFocusId, shell.focuses, shell.sessions]);
+  }, [navHydrated, creationMode, surfaceMode, selectedFocusId, shell.focuses, shell.sessions]);
 
   return {
     shell,

@@ -7,6 +7,7 @@ import { CloseGlyph } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 import {
   caretIconClass,
+  rowAccentClass,
   rowActionClass,
   rowAttentionBadgeClass,
   rowCaretButtonClass,
@@ -20,13 +21,17 @@ import {
 } from './navStyles';
 
 // A collapsible top-level group in the left nav (a project, or the General
-// group). The whole header toggles the accordion; both the caret and the row
-// body are toggle targets, so the user can hit anywhere across the row. The
-// trailing session count crossfades to the remove action on hover. Children
-// render under a hairline guide rail when expanded. The leading folder icon
-// doubles as a status light: it rolls the worst session state inside the
-// project upward, going green while an agent is working and amber when one needs
-// you, so a collapsed project still signals what is happening beneath it.
+// group). The caret always toggles the accordion. The row body's job depends on
+// whether the group is openable: a project (with `onOpen`) opens its dashboard
+// and reveals its topics, mirroring how a topic row opens its own dashboard,
+// while the General group (no `onOpen`) simply toggles since it has no overview
+// of its own. The trailing session count crossfades to the remove action on
+// hover. Children render under a hairline guide rail when expanded. The leading
+// folder icon doubles as a status light: it rolls the worst session state inside
+// the project upward, going green while an agent is working and amber when one
+// needs you, so a collapsed project still signals what is happening beneath it.
+// When the project's dashboard is the active surface a short accent lights its
+// left gutter.
 export function ProjectGroup({
   icon,
   title,
@@ -35,7 +40,9 @@ export function ProjectGroup({
   finished = 0,
   tone = 'recent',
   expanded,
+  active = false,
   onToggle,
+  onOpen,
   onRemove,
   removeTitle,
   removeTestId = 'remove-project-button',
@@ -49,22 +56,33 @@ export function ProjectGroup({
   finished?: number;
   tone?: DashboardStatus;
   expanded: boolean;
+  active?: boolean;
   onToggle: () => void;
+  onOpen?: () => void;
   onRemove?: (event: MouseEvent<HTMLElement>) => void;
   removeTitle?: string;
   removeTestId?: string;
   testId?: string;
   children: ReactNode;
 }) {
+  // Openable groups (projects) split the row: the caret toggles, the body opens.
+  // The General group has no dashboard, so its body falls back to toggling.
+  const opens = Boolean(onOpen);
   return (
     <div className={projectGroupClass}>
-      <div className={rowShellClass} data-active="false">
+      <div className={rowShellClass} data-active={active ? 'true' : 'false'}>
+        {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
         <button
           className={rowCaretButtonClass}
           type="button"
           onClick={onToggle}
-          tabIndex={-1}
-          aria-hidden="true"
+          {...(opens
+            ? {
+                'aria-expanded': expanded,
+                title: expanded ? `Collapse ${title}` : `Expand ${title}`,
+                'data-testid': 'project-toggle-button',
+              }
+            : { tabIndex: -1, 'aria-hidden': true })}
         >
           <span className={caretIconClass(expanded)}>
             <CaretRight size={11} weight="bold" />
@@ -73,10 +91,11 @@ export function ProjectGroup({
         <button
           className={rowPrimaryClass}
           type="button"
-          onClick={onToggle}
-          aria-expanded={expanded}
-          data-testid={testId}
+          onClick={onOpen ?? onToggle}
+          aria-expanded={opens ? undefined : expanded}
+          data-testid={opens ? 'nav-project-open' : testId}
           data-expanded={expanded ? 'true' : 'false'}
+          data-project-title={opens ? title : undefined}
         >
           {icon ? (
             <span

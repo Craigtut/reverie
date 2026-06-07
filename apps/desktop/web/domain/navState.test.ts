@@ -36,7 +36,6 @@ function makeSession(overrides: Partial<ShellSession> = {}): ShellSession {
     launchMode: 'new',
     dangerousModeOverride: null,
     status: 'not_started',
-    tabVisible: true,
     ...overrides,
   };
 }
@@ -164,6 +163,52 @@ describe('reconcilePersistedView', () => {
     const view = reconcilePersistedView(makeView(), shell, { isSoftReload: true });
     expect(view.selectedFocusId).toBe('focus-1');
     expect(view.selectedSessionId).toBeNull();
+    expect(view.surfaceMode).toBe('dashboard');
+  });
+
+  it('soft reload restores the project dashboard from the stored project', () => {
+    const view = reconcilePersistedView(
+      makeView({ surfaceMode: 'project-dashboard', selectedSessionId: null }),
+      makeShell(),
+      { isSoftReload: true },
+    );
+    expect(view.surfaceMode).toBe('project-dashboard');
+    expect(view.selectedProjectId).toBe('project-1');
+    expect(view.selectedFocusId).toBeNull();
+    expect(view.selectedSessionId).toBeNull();
+  });
+
+  it('restores the project dashboard for an empty project (no focuses)', () => {
+    const shell = makeShell({ focuses: [], sessions: [] });
+    const view = reconcilePersistedView(
+      makeView({
+        surfaceMode: 'project-dashboard',
+        selectedFocusId: null,
+        selectedSessionId: null,
+      }),
+      shell,
+      { isSoftReload: true },
+    );
+    expect(view.surfaceMode).toBe('project-dashboard');
+    expect(view.selectedProjectId).toBe('project-1');
+  });
+
+  it('falls back to Home when the project dashboard target is gone', () => {
+    const shell = makeShell({ projects: [makeProject({ archived: true })] });
+    const view = reconcilePersistedView(
+      makeView({ surfaceMode: 'project-dashboard', selectedSessionId: null }),
+      shell,
+      { isSoftReload: true },
+    );
+    expect(view.surfaceMode).toBe('dashboard');
+  });
+
+  it('cold open lands on Home even from a saved project dashboard', () => {
+    const view = reconcilePersistedView(
+      makeView({ surfaceMode: 'project-dashboard', selectedSessionId: null }),
+      makeShell(),
+      { isSoftReload: false },
+    );
     expect(view.surfaceMode).toBe('dashboard');
   });
 

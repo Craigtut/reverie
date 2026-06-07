@@ -5,6 +5,7 @@
 export * from './constants';
 export * from './types';
 export * from './format';
+export * from './archive';
 export * from './session';
 export * from './navState';
 export * from './activity';

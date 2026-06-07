@@ -39,6 +39,9 @@ interface NavigationState {
   // Force a focus (and its project) open, e.g. when navigating to one of its
   // sessions, so the active item is always visible in the tree.
   revealFocus: (projectId: string | null, focusId: string) => void;
+  // Force a project's accordion open (e.g. when opening its dashboard), so its
+  // topics are visible in the tree. Never collapses; the caret owns collapsing.
+  revealProject: (projectId: string) => void;
   // Apply a restored view in one atomic write and mark navigation hydrated.
   // Only the provided fields are set; the rest keep their defaults. Used once on
   // load by useNavPersistence. Passing nothing just marks hydrated (e.g. a fresh
@@ -104,6 +107,13 @@ export const useNavigationStore = create<NavigationState>(set => ({
         collapsedProjectIds.delete(projectId);
       }
       return { expandedFocusIds, collapsedProjectIds, generalCollapsed };
+    }),
+  revealProject: projectId =>
+    set(s => {
+      if (!s.collapsedProjectIds.has(projectId)) return s;
+      const collapsedProjectIds = new Set(s.collapsedProjectIds);
+      collapsedProjectIds.delete(projectId);
+      return { collapsedProjectIds };
     }),
   hydrate: restored => set(() => ({ ...restored, hydrated: true })),
 }));

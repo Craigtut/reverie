@@ -12,7 +12,7 @@ import type {
   ShellFocus,
   WorkspaceShellSnapshot,
 } from '../domain';
-import { useNavigationStore, useShellStore, useUiStore } from '../store';
+import { useNavigationStore, useOverlayStore, useShellStore, useUiStore } from '../store';
 import type { TerminalSession } from './useTerminalSession';
 import type { WorkspaceModel } from './useWorkspaceModel';
 
@@ -174,8 +174,18 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
         path: newProjectPath.trim(),
       };
       const before = new Set(shell.projects.map(project => project.id));
+      const archivedBefore = new Set(
+        shell.projects.filter(project => project.archived).map(project => project.id),
+      );
       const snapshot = await invoke<WorkspaceShellSnapshot>('create_project', { request });
+      // A folder Reverie already knew (archived) reconnects rather than creating a
+      // new row: the same id is active again. Detect that so we land the user on
+      // the restored project instead of forcing a first-topic creation.
+      const reconnected =
+        snapshot.projects.find(project => archivedBefore.has(project.id) && !project.archived) ??
+        null;
       const created =
+        reconnected ??
         snapshot.projects.find(project => !before.has(project.id)) ??
         snapshot.projects[snapshot.projects.length - 1];
       const nextProjectId = created?.id ?? selectedProjectId;
@@ -188,9 +198,24 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
       setNewFocusTitle('');
       setNewFocusDangerousMode(snapshot.workspace.defaultDangerousMode);
       setNewSessionAgentKind(snapshot.workspace.defaultAgentKind);
-      // A fresh project has no topics yet, so go straight to creating the first.
-      setCreationMode('focus');
-      appendLog(`Created project: ${created?.name ?? request.name}.`);
+      if (reconnected) {
+        const topicCount = snapshot.focuses.filter(
+          focus => focus.projectId === reconnected.id && !focus.archived,
+        ).length;
+        setCreationMode(null);
+        setSurfaceMode('project-dashboard');
+        useOverlayStore.getState().pushToast({
+          message:
+            topicCount > 0
+              ? `Reconnected “${reconnected.name}” with ${topicCount} ${topicCount === 1 ? 'topic' : 'topics'}`
+              : `Reconnected “${reconnected.name}”`,
+        });
+        appendLog(`Reconnected archived project: ${reconnected.name}.`);
+      } else {
+        // A fresh project has no topics yet, so go straight to creating the first.
+        setCreationMode('focus');
+        appendLog(`Created project: ${created?.name ?? request.name}.`);
+      }
     } catch (error) {
       appendLog(`Create project failed: ${errorMessage(error)}`);
       throw error;

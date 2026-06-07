@@ -36,7 +36,7 @@ import {
 } from '../session';
 import { CommandPalette } from '../palette';
 import { EmptyState } from '../onboarding';
-import { DashboardSurface } from '../dashboard';
+import { DashboardSurface, ProjectDashboardSurface } from '../dashboard';
 import { CreationComposer } from '../creation';
 import { SettingsSurface } from '../settings';
 import { ConnectionPanel, ConnectionRequestBanner } from '../connections';
@@ -101,7 +101,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     runningLabel,
     scrollbackContract,
   } = model;
-  const { selectSessionTab, goToDashboard, openSessionFromDashboard, openFocus } = nav;
+  const { selectSessionTab, goToDashboard, openSessionFromDashboard, openProject, openFocus } = nav;
   const {
     newProjectName,
     newProjectPath,
@@ -134,7 +134,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     restoreSessionTab,
     removeSessionRecord,
     archiveFocusRecord,
+    restoreFocusRecord,
+    deleteFocusRecord,
     archiveProjectRecord,
+    deleteProjectRecord,
   } = mutations;
 
   // Theme: flip the live uiStore value for an instant UI change, then persist it
@@ -185,6 +188,12 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   // background, no dot field, and the top-left glow over the terminal.
   const terminalView = surfaceMode === 'terminal' && Boolean(selectedSession) && !creationMode;
 
+  // A project dashboard with no resolvable project (the project was archived
+  // while it was open) reads as Home until navigation catches up, rather than
+  // falling through the surface router to the empty terminal stage.
+  const effectiveSurfaceMode =
+    surfaceMode === 'project-dashboard' && !selectedProject ? 'dashboard' : surfaceMode;
+
   return (
     <main
       className={appShellClass}
@@ -220,6 +229,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         canUseAppServices={canUseAppServices}
         onOpenCommandPalette={() => setPaletteOpen(true)}
         onGoToDashboard={goToDashboard}
+        onOpenProject={openProject}
         onOpenFocus={openFocus}
         onOpenSession={openSessionFromDashboard}
         onCloseSession={session => void archiveSession(session)}
@@ -234,7 +244,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
       <ConnectionPanelHost />
       <section className={canvasStageClass} aria-label="Focus view" data-testid="focus-stage">
         <ConnectionRequestBanner />
-        {surfaceMode === 'dashboard' ? (
+        {effectiveSurfaceMode === 'dashboard' ? (
           <DashboardSurface
             shell={shell}
             sessionTerminalBindings={sessionTerminalBindings}
@@ -245,6 +255,17 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             onCreateGeneralSession={startGeneralSession}
             onOpenSettings={() => setSurfaceMode('settings')}
             onSetWorkspaceDefaultDangerousMode={next => void setWorkspaceDefaultDangerousMode(next)}
+          />
+        ) : effectiveSurfaceMode === 'project-dashboard' && selectedProject ? (
+          <ProjectDashboardSurface
+            shell={shell}
+            project={selectedProject}
+            sessionTerminalBindings={sessionTerminalBindings}
+            cortexActivity={cortexActivity}
+            sessionTimelines={sessionTimelines}
+            onOpenSession={openSessionFromDashboard}
+            onRestoreTopic={focus => void restoreFocusRecord(focus)}
+            onDeleteTopic={focus => void deleteFocusRecord(focus)}
           />
         ) : surfaceMode === 'settings' ? (
           <SettingsSurface
@@ -262,6 +283,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             }}
             terminalFontSize={shell.workspace.terminalFontSize ?? DEFAULT_TERMINAL_FONT_SIZE}
             onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
+            onDeleteProject={project => void deleteProjectRecord(project)}
           />
         ) : surfaceMode === 'session-history' ? (
           <SessionHistorySurface

@@ -48,7 +48,6 @@ function makeSession(overrides: Partial<ShellSession> = {}): ShellSession {
     launchMode: 'new',
     dangerousModeOverride: null,
     status: 'not_started',
-    tabVisible: true,
     ...overrides,
   };
 }

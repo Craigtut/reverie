@@ -1,3 +1,4 @@
+import { isFocusEffectivelyArchived, isSessionEffectivelyArchived } from './archive';
 import type { ActivityState, PaletteEntry, WorkspaceShellSnapshot } from './types';
 
 // Pure command-palette index: flatten the shell snapshot into focus + session
@@ -9,23 +10,23 @@ export function buildPaletteEntries(
 ): PaletteEntry[] {
   const entries: PaletteEntry[] = [];
   for (const focus of shell.focuses) {
-    if (focus.archived) continue;
+    if (isFocusEffectivelyArchived(focus, shell)) continue;
     const project = focus.projectId
       ? (shell.projects.find(p => p.id === focus.projectId) ?? null)
       : null;
-    if (project?.archived) continue;
     entries.push({
       kind: 'focus',
       id: focus.id,
       title: focus.title,
       projectId: focus.projectId ?? null,
       projectName: project?.name ?? null,
-      sessionCount: shell.sessions.filter(s => s.focusId === focus.id && s.tabVisible !== false)
-        .length,
+      // The focus is active here, so an effectively-archived session under it is
+      // exactly one the user archived on its own.
+      sessionCount: shell.sessions.filter(s => s.focusId === focus.id && !s.archived).length,
     });
   }
   for (const session of shell.sessions) {
-    if (session.tabVisible === false) continue;
+    if (isSessionEffectivelyArchived(session, shell)) continue;
     const focus = shell.focuses.find(f => f.id === session.focusId);
     if (!focus) continue;
     const project = focus.projectId

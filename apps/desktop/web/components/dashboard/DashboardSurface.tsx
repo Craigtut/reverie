@@ -1,12 +1,10 @@
 import { motion } from 'motion/react';
-import { CheckCircle, Plus, Warning } from '@phosphor-icons/react';
+import { CheckCircle, Plus } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { groupSessionsByState, sortGroupByRecency } from '../../domain';
+import { activeWorkspaceSessions, groupSessionsByState } from '../../domain';
 import type {
   ActivityState,
-  DashboardStatus,
-  SessionState,
   SessionStateTimeline,
   SessionTerminalBinding,
   ShellSession,
@@ -14,18 +12,8 @@ import type {
 } from '../../domain';
 import { EmptyState } from '../onboarding';
 import { Typography } from '../primitives/Typography';
-import { DashboardRail } from './DashboardRail';
-
-// Order and presentation of the state sections, top (most demanding of the user)
-// to bottom.
-const SECTIONS: { key: SessionState; title: string; tone: DashboardStatus; attention?: boolean }[] =
-  [
-    { key: 'attention', title: 'Needs your attention', tone: 'attention', attention: true },
-    { key: 'finished', title: 'Ready for you', tone: 'recent' },
-    { key: 'active', title: 'Working', tone: 'live' },
-    { key: 'idle', title: 'Idle', tone: 'recent' },
-    { key: 'fresh', title: 'Fresh', tone: 'recent' },
-  ];
+import { DashboardCountPills } from './DashboardCountPills';
+import { DashboardStateRails } from './DashboardStateRails';
 
 // The default surface (Home): every non-archived session across the workspace,
 // grouped by state. Archived sessions are excluded here and live in each focus's
@@ -52,7 +40,11 @@ export function DashboardSurface({
   onOpenSettings: () => void;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
 }) {
-  const active = shell.sessions.filter(s => !s.archived);
+  // Home shows every *effectively* active session: not archived, and not inside
+  // an archived topic or project (see activeWorkspaceSessions). Filtering on the
+  // session's own bit alone is what used to leak a deleted project's sessions
+  // onto Home, since archiving a project hides its sessions by ancestry.
+  const active = activeWorkspaceSessions(shell);
   const groups = groupSessionsByState(active, sessionTerminalBindings, cortexActivity);
 
   if (shell.sessions.length === 0) {
@@ -123,80 +115,17 @@ export function DashboardSurface({
               {shell.workspace.name}
             </Typography>
           </div>
-          <div className={dashboardCountsClass}>
-            <Typography
-              as="span"
-              variant="caption"
-              tone="muted"
-              data-tone={groups.active.length > 0 ? 'live' : 'idle'}
-              data-testid="dashboard-live-count"
-            >
-              <i
-                style={{ background: groups.active.length > 0 ? 'var(--good)' : 'var(--text-4)' }}
-              />
-              {groups.active.length} working
-            </Typography>
-            <Typography
-              as="span"
-              variant="caption"
-              tone="muted"
-              data-tone={groups.attention.length > 0 ? 'attention' : 'idle'}
-              data-testid="dashboard-attention-count"
-            >
-              <i
-                style={{
-                  background: groups.attention.length > 0 ? 'var(--warn)' : 'var(--text-4)',
-                }}
-              />
-              {groups.attention.length} need attention
-            </Typography>
-            <Typography
-              as="span"
-              variant="caption"
-              tone="muted"
-              data-tone="recent"
-              data-testid="dashboard-ready-count"
-            >
-              <i
-                style={{
-                  background: groups.finished.length > 0 ? 'var(--text-2)' : 'var(--text-4)',
-                }}
-              />
-              {groups.finished.length} ready
-            </Typography>
-            <Typography
-              as="span"
-              variant="caption"
-              tone="muted"
-              data-tone="recent"
-              data-testid="dashboard-recent-count"
-            >
-              <i style={{ background: 'var(--text-4)' }} />
-              {groups.idle.length} idle
-            </Typography>
-          </div>
+          <DashboardCountPills groups={groups} />
         </header>
 
-        {SECTIONS.map(section =>
-          groups[section.key].length > 0 ? (
-            <DashboardRail
-              key={section.key}
-              title={section.title}
-              icon={section.attention ? <Warning size={13} weight="fill" /> : undefined}
-              tone={section.tone}
-              sessions={sortGroupByRecency(
-                groups[section.key],
-                section.key,
-                sessionTimelines,
-                cortexActivity,
-              )}
-              shell={shell}
-              bindings={sessionTerminalBindings}
-              cortexActivity={cortexActivity}
-              onOpenSession={onOpenSession}
-            />
-          ) : null,
-        )}
+        <DashboardStateRails
+          groups={groups}
+          shell={shell}
+          bindings={sessionTerminalBindings}
+          cortexActivity={cortexActivity}
+          sessionTimelines={sessionTimelines}
+          onOpenSession={onOpenSession}
+        />
       </motion.div>
     </div>
   );
@@ -239,29 +168,6 @@ const dashboardHeaderClass = css({
 // Layout only; the title's size + color come from the Typography variant + tone.
 const dashboardTitleClass = css({
   margin: '4px 0 0',
-});
-
-const dashboardCountsClass = css({
-  display: 'flex',
-  alignItems: 'center',
-  gap: '10px',
-  flexWrap: 'wrap',
-  '& span': {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '7px',
-    padding: '5px 11px',
-    background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
-    border: '1px solid var(--line)',
-    borderRadius: '999px',
-    fontVariantNumeric: 'tabular-nums',
-  },
-  '& span i': {
-    width: '6px',
-    height: '6px',
-    borderRadius: '50%',
-    display: 'inline-block',
-  },
 });
 
 const caughtUpClass = css({

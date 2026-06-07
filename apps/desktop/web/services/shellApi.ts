@@ -47,12 +47,6 @@ export function createSession(request: CreateSessionRecordRequest) {
   return invoke<WorkspaceShellSnapshot>('create_session', { request });
 }
 
-export function setSessionTabVisibility(shellSessionId: string, tabVisible: boolean) {
-  return invoke<WorkspaceShellSnapshot>('update_session_tab_visibility', {
-    request: { shellSessionId, tabVisible },
-  });
-}
-
 export function removeSession(sessionId: string) {
   return invoke<WorkspaceShellSnapshot>('remove_session', { sessionId });
 }
@@ -61,8 +55,20 @@ export function archiveFocus(focusId: string) {
   return invoke<WorkspaceShellSnapshot>('archive_focus', { focusId });
 }
 
+export function restoreFocus(focusId: string) {
+  return invoke<WorkspaceShellSnapshot>('restore_focus', { focusId });
+}
+
+export function deleteFocus(focusId: string) {
+  return invoke<WorkspaceShellSnapshot>('delete_focus', { focusId });
+}
+
 export function archiveProject(projectId: string) {
   return invoke<WorkspaceShellSnapshot>('archive_project', { projectId });
+}
+
+export function deleteProject(projectId: string) {
+  return invoke<WorkspaceShellSnapshot>('delete_project', { projectId });
 }
 
 export function setWorkspaceDefaultDangerousMode(defaultDangerousMode: boolean) {

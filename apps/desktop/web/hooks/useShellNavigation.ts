@@ -24,6 +24,7 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
   const setCreationMode = useNavigationStore(s => s.setCreationMode);
   const setSurfaceMode = useNavigationStore(s => s.setSurfaceMode);
   const revealFocus = useNavigationStore(s => s.revealFocus);
+  const revealProject = useNavigationStore(s => s.revealProject);
   const appendLog = useUiStore(s => s.appendLog);
 
   // The session id we've already auto-launched for the current selection.
@@ -60,6 +61,21 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
     setSurfaceMode('terminal');
     revealFocus(focus.projectId ?? null, session.focusId);
     selectSessionTab(session);
+  }
+
+  // Opening a project shows its dashboard: every active session across the
+  // project's topics, intermingled and grouped by state, one zoom level below
+  // Home. It also reveals the project's accordion in the tree, so clicking the
+  // row both opens the overview and drops the topics open beneath it. No focus
+  // or session selection (the surface spans all of them); like a focus, it never
+  // launches a process.
+  function openProject(projectId: string) {
+    setSelectedProjectId(projectId);
+    setSelectedSessionId(null);
+    revealProject(projectId);
+    setCreationMode(null);
+    setSurfaceMode('project-dashboard');
+    terminal.clearSurface();
   }
 
   // Opening a focus shows its dashboard (active sessions grouped by state, plus
@@ -113,6 +129,7 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
     selectSessionTab,
     goToDashboard,
     openSessionFromDashboard,
+    openProject,
     openFocus,
     openSessionHistory,
   };

@@ -3,10 +3,12 @@
 // current shell. The effectful side (when to hydrate/write, soft-reload vs cold
 // open) lives in hooks/useNavPersistence.
 
+import { isFocusEffectivelyArchived } from './archive';
 import type { PersistedNavState, SurfaceMode, WorkspaceShellSnapshot } from './types';
 
 const SURFACE_MODES: ReadonlySet<string> = new Set<SurfaceMode>([
   'dashboard',
+  'project-dashboard',
   'terminal',
   'settings',
   'session-history',
@@ -69,7 +71,9 @@ export function reconcilePersistedView(
   options: { isSoftReload: boolean },
 ): PersistedNavState {
   const focus = persisted.selectedFocusId
-    ? (shell.focuses.find(f => f.id === persisted.selectedFocusId && !f.archived) ?? null)
+    ? (shell.focuses.find(
+        f => f.id === persisted.selectedFocusId && !isFocusEffectivelyArchived(f, shell),
+      ) ?? null)
     : null;
 
   let selectedFocusId: string | null = null;
@@ -92,6 +96,22 @@ export function reconcilePersistedView(
   let surfaceMode: SurfaceMode = options.isSoftReload ? persisted.surfaceMode : 'dashboard';
   if (surfaceMode === 'terminal' && !selectedSessionId) surfaceMode = 'dashboard';
   if (surfaceMode === 'session-history' && !selectedFocusId) surfaceMode = 'dashboard';
+
+  // The project dashboard owns a project selection of its own, independent of any
+  // focus (an empty project still has a dashboard). Restore it from the stored
+  // project, validated against what still exists, and fall back to Home if that
+  // project is gone. A focus selection is irrelevant to this surface.
+  if (surfaceMode === 'project-dashboard') {
+    const storedProject = persisted.selectedProjectId
+      ? (shell.projects.find(p => p.id === persisted.selectedProjectId && !p.archived) ?? null)
+      : null;
+    if (storedProject) {
+      selectedProjectId = storedProject.id;
+      selectedFocusId = null;
+    } else {
+      surfaceMode = 'dashboard';
+    }
+  }
 
   // Only the terminal surface owns a session selection; every other surface keeps
   // selectedSessionId null (the app's standing invariant). If we restored a
