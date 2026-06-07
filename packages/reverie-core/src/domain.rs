@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::activity::ActivityState;
+use crate::activity::{ActivityState, ActivityStatus};
 
 pub type WorkspaceId = Uuid;
 pub type ProjectId = Uuid;
@@ -286,6 +286,89 @@ pub struct Session {
     /// launch does not mass-badge sessions that finished long ago.
     #[serde(default)]
     pub last_viewed_at: Option<String>,
+    /// When the session last entered each meaningful state. The dashboards order
+    /// each status group by transition recency (most-recently-changed first); see
+    /// [`SessionStateTimeline`]. Reverie-owned bookkeeping, not part of any CLI
+    /// contract. `Default` (all `None`) for pre-timeline persisted rows.
+    #[serde(default)]
+    pub state_timeline: SessionStateTimeline,
+}
+
+/// Reverie's durable record of when a session last entered each meaningful
+/// state. Used to order the dashboards by transition recency (the session that
+/// most recently became "Ready for you" sits at the top of that group, and so
+/// on) and available for future "since when" displays. Distinct from the
+/// producer's [`ActivityState`]: these are Reverie's interpretation of the
+/// transitions it observes, persisted so ordering survives restarts. Every field
+/// is an ISO 8601 / RFC 3339 string in the same format as `ActivityState.updated_at`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStateTimeline {
+    /// When the session record was created. Orders the `fresh` group.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// When the agent last entered `working` (mid-turn). Orders the `active` group.
+    #[serde(default)]
+    pub working_since: Option<String>,
+    /// When the agent last came to rest: a turn finished (`done`), it paused for
+    /// input (`awaiting_input`), or it hit a recoverable error. Orders the
+    /// `finished` ("Ready for you") group and feeds the `idle` key.
+    #[serde(default)]
+    pub resting_since: Option<String>,
+    /// When the session last entered an attention state: a blocking ask
+    /// (permission / question / plan), a hard (unrecoverable) error, or a failed
+    /// resume. Orders the `attention` group.
+    #[serde(default)]
+    pub blocked_since: Option<String>,
+    /// When the session's process last exited into a resumable/ended state. Feeds
+    /// the `idle` key for sessions with no activity feed.
+    #[serde(default)]
+    pub exited_at: Option<String>,
+}
+
+/// Coarse class an activity snapshot falls into, used only to decide which
+/// timeline marker a transition advances. Two statuses in the same class are not
+/// a transition (e.g. `awaiting_input` -> `done` are both at rest), so moving
+/// between them does not restamp.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StateClass {
+    Working,
+    Resting,
+    Blocked,
+}
+
+impl StateClass {
+    fn of(activity: &ActivityState) -> Self {
+        match activity.status {
+            ActivityStatus::Working => Self::Working,
+            ActivityStatus::AwaitingInput | ActivityStatus::Done => Self::Resting,
+            ActivityStatus::AwaitingPermission | ActivityStatus::AwaitingResponse => Self::Blocked,
+            // A recoverable error reads as a rest state (idle), a hard one as
+            // attention, mirroring the dashboard's classification.
+            ActivityStatus::Error => {
+                if activity
+                    .last_error
+                    .as_ref()
+                    .map(|error| error.recoverable)
+                    .unwrap_or(false)
+                {
+                    Self::Resting
+                } else {
+                    Self::Blocked
+                }
+            }
+        }
+    }
+}
+
+impl SessionStateTimeline {
+    fn enter(&mut self, class: StateClass, at: String) {
+        match class {
+            StateClass::Working => self.working_since = Some(at),
+            StateClass::Resting => self.resting_since = Some(at),
+            StateClass::Blocked => self.blocked_since = Some(at),
+        }
+    }
 }
 
 impl Session {
@@ -311,7 +394,48 @@ impl Session {
             latest_activity: None,
             sort_order: 0,
             last_viewed_at: None,
+            state_timeline: SessionStateTimeline {
+                created_at: Some(crate::time::now_iso8601()),
+                ..SessionStateTimeline::default()
+            },
         }
+    }
+
+    /// Advance the state timeline from an incoming activity snapshot, stamping the
+    /// marker for the class it just entered. Idempotent: a snapshot in the same
+    /// class as the last one (including a relaunch re-read of the persisted state)
+    /// does not restamp, so dashboard ordering survives restarts. Call BEFORE
+    /// replacing `latest_activity`, since it compares against the prior snapshot.
+    pub fn note_activity_transition(&mut self, incoming: &ActivityState) {
+        let new_class = StateClass::of(incoming);
+        let prior_class = self.latest_activity.as_ref().map(StateClass::of);
+        if prior_class == Some(new_class) {
+            return;
+        }
+        self.state_timeline
+            .enter(new_class, incoming.updated_at.clone());
+    }
+
+    /// Stamp the moment the session came to rest. Used by boot reconciliation
+    /// when a crashed mid-turn session is forced from a live state to rest:
+    /// `note_activity_transition` cannot apply there (it compares against the very
+    /// activity being normalized), so the caller stamps it directly. `at` should
+    /// be the activity's own last-update time, so the session orders by when it
+    /// was last active rather than floating to "just now" on every reboot.
+    pub fn note_resting(&mut self, at: String) {
+        self.state_timeline.resting_since = Some(at);
+    }
+
+    /// Stamp the moment the session's process exited into a resumable/ended
+    /// (idle) state. `at` is a backend wall-clock ISO 8601 string.
+    pub fn note_exited(&mut self, at: String) {
+        self.state_timeline.exited_at = Some(at);
+    }
+
+    /// Stamp the moment the session entered an attention state via a lifecycle
+    /// failure (e.g. a failed resume), distinct from an activity-driven block.
+    pub fn note_blocked(&mut self, at: String) {
+        self.state_timeline.blocked_since = Some(at);
     }
 
     /// Resolve the effective dangerous mode: the session's own override
