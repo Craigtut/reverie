@@ -52,6 +52,12 @@ pub struct AgentLaunch {
     /// The session working-directory basename, used to suppress CLIs that
     /// default their title to the folder name (e.g. Codex).
     pub folder_name: String,
+    /// The native session id Reverie minted and injected for a brand-new launch
+    /// (`--session-id` for Claude), or `None` on resume and for CLIs that cannot
+    /// accept an injected id. The caller persists it with
+    /// [`WorkspaceService::attach_native_session_id`] after a successful spawn so
+    /// the pairing is recorded deterministically, without a filesystem guess.
+    pub injected_native_id: Option<String>,
 }
 
 impl WorkspaceService {
@@ -854,6 +860,17 @@ impl WorkspaceService {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // For a brand-new launch of an adapter that accepts an injected id
+        // (Claude `--session-id`), mint the native id here so Reverie owns the
+        // pairing from t=0. The caller persists it after a successful spawn. On
+        // resume, or for CLIs without an inject flag, this stays None and
+        // identity comes from the token-bound hook (or, last, a folder scan).
+        let injected_native_id =
+            if !crate::agents::session_should_resume(session) && adapter.mints_new_session_id() {
+                Some(uuid::Uuid::new_v4().to_string())
+            } else {
+                None
+            };
         let spec = build_spawn_spec(
             session,
             focus_or_workspace_default,
@@ -861,12 +878,46 @@ impl WorkspaceService {
             rows,
             executable_path,
             adapter.as_ref(),
+            injected_native_id.clone(),
         )?;
         Ok(AgentLaunch {
             spec,
             agent_kind,
             folder_name,
+            injected_native_id,
         })
+    }
+
+    /// Persist a native session id Reverie injected at spawn (Claude's
+    /// `--session-id <uuid>`), recording the Reverie-session <-> CLI-session
+    /// pairing deterministically instead of discovering it from disk. Called
+    /// after a successful launch.
+    ///
+    /// Returns whether the claim was applied: `false` if the session already
+    /// carries a native ref (a token-bound hook captured the same id first, a
+    /// benign race since both sides use the id we injected) or the id is somehow
+    /// already owned by another session (impossible for a freshly minted uuid).
+    /// A successful claim flips the session onto its resume path.
+    pub fn attach_native_session_id(
+        &self,
+        session_id: SessionId,
+        native_session_id: &str,
+    ) -> Result<bool> {
+        let Some(session) = self.repo.get_session(session_id)? else {
+            return Ok(false);
+        };
+        if session.native_session_ref.is_some() {
+            return Ok(false);
+        }
+        let native_session_ref = NativeSessionRef {
+            kind: session.agent_kind,
+            session_id: Some(native_session_id.to_owned()),
+            metadata_path: None,
+            adapter_payload: serde_json::Value::Null,
+        };
+        Ok(self
+            .repo
+            .claim_native_session(session_id, native_session_ref)?)
     }
 
     fn update_session(
@@ -1029,6 +1080,55 @@ mod tests {
         let snapshot = service.snapshot().unwrap();
         assert_eq!(snapshot.workspace.id, seed_workspace_id());
         assert_eq!(snapshot.workspace.general_label, "General");
+    }
+
+    #[test]
+    fn attach_native_session_id_records_injected_pairing_and_flips_to_resume() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let snapshot = service
+            .create_session(
+                focus,
+                "Injected".to_owned(),
+                AgentKind::ClaudeCode,
+                PathBuf::from("/tmp/reverie"),
+                None,
+            )
+            .unwrap();
+        let session_id = snapshot.sessions[0].id;
+        assert!(snapshot.sessions[0].native_session_ref.is_none());
+        assert_eq!(snapshot.sessions[0].launch_mode, LaunchMode::New);
+
+        // First attach records the minted id and flips onto the resume path, so
+        // the next launch is `claude --resume <id>` rather than a folder guess.
+        assert!(
+            service
+                .attach_native_session_id(session_id, "minted-uuid")
+                .unwrap()
+        );
+        let session = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == session_id)
+            .unwrap();
+        assert_eq!(
+            session
+                .native_session_ref
+                .and_then(|r| r.session_id)
+                .as_deref(),
+            Some("minted-uuid")
+        );
+        assert_eq!(session.launch_mode, LaunchMode::Resume);
+
+        // A later token-bound hook capturing the same injected id must be a
+        // benign no-op, never a rebind or error.
+        assert!(
+            !service
+                .attach_native_session_id(session_id, "minted-uuid")
+                .unwrap()
+        );
     }
 
     #[test]

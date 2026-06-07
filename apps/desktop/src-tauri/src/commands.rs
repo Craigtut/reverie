@@ -20,7 +20,7 @@ use reverie_core::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
 #[cfg(unix)]
@@ -877,8 +877,8 @@ pub(crate) fn start_session(
     // apply this CLI's title rule and suppress folder-name defaults. The
     // caller-supplied-spec path (bench/proof) has no session, so both stay
     // `None` and the worker skips title derivation. One snapshot load builds all.
-    let (mut spawn_spec, agent_kind, folder_name) = match request.spawn_spec {
-        Some(spawn_spec) => (spawn_spec, None, None),
+    let (mut spawn_spec, agent_kind, folder_name, injected_native_id) = match request.spawn_spec {
+        Some(spawn_spec) => (spawn_spec, None, None, None),
         None => {
             let shell_session_id = session_id.ok_or_else(|| {
                 "start_session requires sessionId when spawnSpec is omitted".to_owned()
@@ -894,6 +894,7 @@ pub(crate) fn start_session(
                 launch.spec,
                 Some(launch.agent_kind),
                 Some(launch.folder_name),
+                launch.injected_native_id,
             )
         }
     };
@@ -936,7 +937,10 @@ pub(crate) fn start_session(
     // The scrollback budget is a fixed 100 MB dial applied at terminal
     // construction (see ghostty::SCROLLBACK_LIMIT_BYTES, decisions.md D7), so the
     // request carries no per-session row count.
-    runtime
+    // `spawn_session_stream` consumes the app handle; keep a clone so we can
+    // nudge the frontend to refetch once the pairing is recorded.
+    let app_for_record = app.clone();
+    let terminal_id = runtime
         .spawn_session_stream(
             app,
             TerminalStreamRequest {
@@ -949,7 +953,26 @@ pub(crate) fn start_session(
                 frame_channel: Some(on_frame),
             },
         )
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+
+    // The launch succeeded with our injected `--session-id`, so record the
+    // pairing now, deterministically, instead of leaving it to a filesystem
+    // guess. Idempotent with the token-bound SessionStart hook: whichever runs
+    // first wins, and both carry the exact id we injected. Best-effort: a
+    // failure here only means we fall back to the hook capturing the same id.
+    if let (Some(shell_session_id), Some(native_id)) = (session_id, injected_native_id) {
+        match service.attach_native_session_id(shell_session_id, &native_id) {
+            Ok(true) => {
+                let _ = app_for_record.emit("session_record_changed", ());
+            }
+            Ok(false) => {}
+            Err(err) => {
+                eprintln!("[reverie] failed to persist injected native session id: {err:#}");
+            }
+        }
+    }
+
+    Ok(terminal_id)
 }
 
 #[tauri::command]

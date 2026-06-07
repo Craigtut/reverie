@@ -46,6 +46,13 @@ pub struct LaunchContext {
     pub dangerous_mode: bool,
     pub model: Option<String>,
     pub executable_path: Option<PathBuf>,
+    /// A native session id Reverie minted for a brand-new launch, to be passed
+    /// to the CLI so Reverie owns the Reverie-session <-> CLI-session pairing
+    /// from t=0 instead of guessing it from the filesystem afterward. Only set
+    /// for new launches of adapters that report [`AgentAdapter::mints_new_session_id`];
+    /// it is left `None` on resume and ignored by adapters that cannot accept an
+    /// injected id.
+    pub new_session_id: Option<String>,
 }
 
 /// Inputs for adapter-driven native-session discovery after a launch.
@@ -114,6 +121,18 @@ pub trait AgentAdapter: Send + Sync {
 
     fn dangerous_mode_arg(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Whether this adapter can be told to use a Reverie-minted session id for a
+    /// brand-new session, so the pairing is injected at spawn instead of guessed
+    /// from disk afterward. Adapters that support it read
+    /// [`LaunchContext::new_session_id`] in [`AgentAdapter::build_new_command`].
+    ///
+    /// Defaults to false: the CLI generates its own id and Reverie captures it
+    /// through a token-bound hook (Claude/Codex SessionStart) or, only as a last
+    /// resort, a folder scan. Claude Code overrides this to true (`--session-id`).
+    fn mints_new_session_id(&self) -> bool {
+        false
     }
 
     /// Discover the native session this CLI created for `ctx.cwd`, if any.
@@ -449,6 +468,18 @@ impl AgentAdapter for ClaudeCodeAdapter {
     fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(program_or_default(ctx, "claude"), &ctx.cwd);
 
+        // Own the pairing from t=0: when Reverie minted a session id for this
+        // launch, force Claude to use it with `--session-id <uuid>`. This makes
+        // the native id deterministic and removes any need to guess it from the
+        // transcript directory afterward (a guess that adopts whichever session,
+        // including one started outside Reverie, most recently wrote in this
+        // folder). Verified honored in the interactive TUI on claude 2.1.x.
+        if let Some(new_session_id) = &ctx.new_session_id {
+            command
+                .args
+                .extend(["--session-id".to_owned(), new_session_id.clone()]);
+        }
+
         if ctx.dangerous_mode {
             command
                 .args
@@ -460,6 +491,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
         }
 
         Ok(command)
+    }
+
+    fn mints_new_session_id(&self) -> bool {
+        true
     }
 
     fn build_resume_command(
@@ -506,20 +541,17 @@ impl AgentAdapter for ClaudeCodeAdapter {
         vec!["--settings".to_owned(), config_file.display().to_string()]
     }
 
-    /// Hook-independent fallback capture: if the SessionStart hook never fired
-    /// (hooks misconfigured, an older CLI, etc.) so `native_session_ref` stays
-    /// empty after launch, find this launch's transcript under `~/.claude` and
-    /// capture its session id so `claude --resume <id>` still works.
-    fn discover_native_session(&self, ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
-        let Some(claude_home) = ctx.agent_home.as_ref() else {
-            return Ok(None);
-        };
-        discover_latest_claude_transcript_for_cwd(
-            claude_home,
-            &ctx.cwd,
-            ctx.launched_after_ms,
-            &ctx.claimed_native_ids,
-        )
+    /// Retired on purpose. Claude identity is injected at spawn
+    /// (`--session-id <uuid>`, persisted by the shell after a successful launch)
+    /// and corroborated by the token-bound SessionStart hook. Both are immune to
+    /// other Claude sessions sharing the folder. The old fallback scanned the
+    /// transcript directory and adopted the newest file by mtime, which would
+    /// bind a Reverie session to a conversation started outside Reverie in the
+    /// same folder, so it is no longer used.
+    /// [`discover_latest_claude_transcript_for_cwd`] is kept for tests and
+    /// possible future backfill but is not part of the live identity path.
+    fn discover_native_session(&self, _ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
+        Ok(None)
     }
     // Title normalization uses the default: Claude's `✳` idle mark and `⠂ ⠐ ...`
     // working spinner are both handled by `is_status_decoration`.
@@ -633,10 +665,21 @@ pub fn built_in_adapters() -> Vec<Box<dyn AgentAdapter>> {
     ]
 }
 
+/// Whether a session launches via its adapter's resume path: it has either been
+/// flagged for resume or already carries the CLI's native session id.
+pub(crate) fn session_should_resume(session: &Session) -> bool {
+    session.launch_mode == LaunchMode::Resume || session.native_session_ref.is_some()
+}
+
 /// Build the terminal spawn spec for a session, choosing the adapter's resume
 /// or new-launch command. Pure given the session, the workspace dangerous-mode
-/// default, the terminal dimensions, the resolved executable, and the adapter:
-/// it lives next to the adapters it drives, not in the persistence layer.
+/// default, the terminal dimensions, the resolved executable, the adapter, and
+/// any Reverie-minted native id for a fresh launch: it lives next to the
+/// adapters it drives, not in the persistence layer.
+///
+/// `new_session_id` is the id Reverie minted for this launch (see
+/// [`AgentAdapter::mints_new_session_id`]); it is applied only on the new-launch
+/// path and ignored on resume.
 pub fn build_spawn_spec(
     session: &Session,
     workspace_default_dangerous_mode: bool,
@@ -644,6 +687,7 @@ pub fn build_spawn_spec(
     rows: u16,
     executable_path: PathBuf,
     adapter: &dyn AgentAdapter,
+    new_session_id: Option<String>,
 ) -> Result<TerminalSpawnSpec> {
     if cols == 0 || rows == 0 {
         bail!("terminal launch requires non-zero dimensions");
@@ -656,6 +700,7 @@ pub fn build_spawn_spec(
         );
     }
 
+    let should_resume = session_should_resume(session);
     let context = LaunchContext {
         session_id: session.id,
         cwd: session.cwd.clone(),
@@ -664,9 +709,8 @@ pub fn build_spawn_spec(
             .unwrap_or(workspace_default_dangerous_mode),
         model: None,
         executable_path: Some(executable_path),
+        new_session_id: if should_resume { None } else { new_session_id },
     };
-    let should_resume =
-        session.launch_mode == LaunchMode::Resume || session.native_session_ref.is_some();
     let command = if should_resume {
         let native = session.native_session_ref.as_ref().ok_or_else(|| {
             anyhow!(
@@ -916,6 +960,7 @@ mod tests {
             dangerous_mode: true,
             model: Some("gpt-test".to_owned()),
             executable_path: Some(PathBuf::from("/bin/cortex")),
+            new_session_id: None,
         };
 
         let command = adapter.build_new_command(&ctx).unwrap();
@@ -934,6 +979,7 @@ mod tests {
             dangerous_mode: false,
             model: None,
             executable_path: None,
+            new_session_id: None,
         };
         let native = NativeSessionRef::cortex("session-123", None);
 
@@ -952,6 +998,7 @@ mod tests {
             dangerous_mode: true,
             model: Some("sonnet".to_owned()),
             executable_path: Some(PathBuf::from("/bin/claude")),
+            new_session_id: None,
         };
 
         let new_command = adapter.build_new_command(&ctx).unwrap();
@@ -982,6 +1029,79 @@ mod tests {
                 "sonnet"
             ]
         );
+    }
+
+    #[test]
+    fn claude_new_command_injects_minted_session_id_first() {
+        let adapter = ClaudeCodeAdapter;
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: true,
+            model: Some("sonnet".to_owned()),
+            executable_path: Some(PathBuf::from("/bin/claude")),
+            new_session_id: Some("11111111-2222-4333-8444-555555555555".to_owned()),
+        };
+
+        let command = adapter.build_new_command(&ctx).unwrap();
+        // The injected id leads so Reverie owns the pairing from t=0; the other
+        // flags follow unchanged.
+        assert_eq!(
+            command.args,
+            vec![
+                "--session-id",
+                "11111111-2222-4333-8444-555555555555",
+                "--dangerously-skip-permissions",
+                "--model",
+                "sonnet",
+            ]
+        );
+    }
+
+    #[test]
+    fn only_claude_mints_a_new_session_id_and_others_ignore_an_injected_one() {
+        assert!(ClaudeCodeAdapter.mints_new_session_id());
+        assert!(!CodexCliAdapter.mints_new_session_id());
+        assert!(!CortexAdapter.mints_new_session_id());
+
+        // A non-minting adapter must never emit `--session-id` even if a caller
+        // (incorrectly) threads one in: it cannot honor an injected id.
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: false,
+            model: None,
+            executable_path: Some(PathBuf::from("/bin/codex")),
+            new_session_id: Some("should-be-ignored".to_owned()),
+        };
+        let codex = CodexCliAdapter.build_new_command(&ctx).unwrap();
+        assert!(!codex.args.iter().any(|arg| arg == "--session-id"));
+        assert!(!codex.args.iter().any(|arg| arg == "should-be-ignored"));
+    }
+
+    #[test]
+    fn claude_adapter_no_longer_discovers_native_session_from_disk() {
+        // Identity is injected + hook-captured now; the folder scan is retired so
+        // a transcript written by a session started outside Reverie can never be
+        // adopted. Even with a populated home, the adapter discovers nothing.
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join("projects").join("-tmp-reverie");
+        fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("outsider.jsonl"),
+            "{\"cwd\":\"/tmp/reverie\",\"sessionId\":\"outsider\"}\n",
+        )
+        .unwrap();
+
+        let discovered = ClaudeCodeAdapter
+            .discover_native_session(&DiscoveryContext {
+                cwd: PathBuf::from("/tmp/reverie"),
+                launched_after_ms: None,
+                agent_home: Some(home.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(discovered.is_none());
     }
 
     #[test]

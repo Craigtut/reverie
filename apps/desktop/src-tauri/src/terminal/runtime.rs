@@ -1270,13 +1270,24 @@ const LAUNCH_CAPTURE_INITIAL_INTERVAL: Duration = Duration::from_millis(500);
 const LAUNCH_CAPTURE_MAX_INTERVAL: Duration = Duration::from_secs(5);
 const LAUNCH_CAPTURE_TOTAL_WAIT: Duration = Duration::from_secs(300);
 
-/// Claude reports its native session id through a per-launch, token-bound
-/// SessionStart hook that is immune to how many sessions share a folder. The
-/// filesystem scan cannot tell apart several Claude sessions in one cwd by
-/// mtime, so we let the hook win: for this grace window after launch the poll
-/// only checks whether the hook has captured, and runs the (exclusion-guarded)
-/// scan afterward solely as a backstop for launches whose hook never fired.
-const CLAUDE_HOOK_CAPTURE_GRACE: Duration = Duration::from_secs(6);
+/// Claude and Codex both report their native session id through a per-launch,
+/// token-bound SessionStart hook that is immune to how many sessions share a
+/// folder. The filesystem scan cannot tell apart several same-CLI sessions in
+/// one cwd by mtime (and would even adopt a session started outside Reverie), so
+/// we let the hook win: for this grace window after launch the poll only checks
+/// whether the hook has captured, and runs the (exclusion-guarded) scan
+/// afterward solely as a backstop for launches whose hook never fired. Claude
+/// additionally injects `--session-id` and is captured synchronously at spawn,
+/// so for it the scan is effectively never reached.
+const HOOK_CAPTURE_GRACE: Duration = Duration::from_secs(6);
+
+/// CLIs whose native id arrives over a token-bound SessionStart hook, so the
+/// folder scan must be deferred behind [`HOOK_CAPTURE_GRACE`] rather than racing
+/// it. Cortex has no such hook (it writes an authoritative per-session
+/// `meta.json`), so it is not listed and scans immediately.
+fn has_token_bound_hook(kind: AgentKind) -> bool {
+    matches!(kind, AgentKind::ClaudeCode | AgentKind::CodexCli)
+}
 
 /// Poll adapter-driven native-session discovery for a short window after launch
 /// so a session binds its native ref (and the dashboard binds its live activity)
@@ -1317,9 +1328,10 @@ fn spawn_launch_capture_poll(
             let Some((service, session_id)) = workspace_service(&app, Some(session_id)) else {
                 return;
             };
-            // Prefer Claude's collision-proof hook over the racy cwd scan: during
-            // the grace window only stop if the hook has already captured.
-            if matches!(agent_kind, AgentKind::ClaudeCode) && waited < CLAUDE_HOOK_CAPTURE_GRACE {
+            // Prefer the collision-proof token-bound hook over the racy cwd scan:
+            // during the grace window only stop if the hook (or, for Claude, the
+            // synchronous `--session-id` capture) has already recorded the ref.
+            if has_token_bound_hook(agent_kind) && waited < HOOK_CAPTURE_GRACE {
                 if session_native_ref_present(&service, session_id) {
                     return;
                 }
