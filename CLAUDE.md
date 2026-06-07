@@ -16,7 +16,7 @@ Start here, then drill down. `docs/README.md` is the full index.
 | Languages, frameworks, build constraints | [`docs/technical/tech-stack.md`](docs/technical/tech-stack.md) |
 | Backend/domain/persistence/adapters, the system's seams | [`docs/technical/technical-architecture.md`](docs/technical/technical-architecture.md) |
 | React/Panda shell and the terminal-renderer boundary | [`docs/technical/frontend-architecture.md`](docs/technical/frontend-architecture.md) |
-| Ghostty/libghostty terminal strategy | [`docs/technical/terminal-strategy.md`](docs/technical/terminal-strategy.md) |
+| The terminal pipeline: libghostty-vt core, the wire, the WebGL2 renderer, scrollback and reflow | [`docs/technical/terminal/`](docs/technical/terminal/README.md) |
 | What to build next + the canonical "checks to keep green" | [`docs/technical/implementation-queue.md`](docs/technical/implementation-queue.md) |
 | Bundling, the Ghostty dylib/rpath story, signing, and how to cut a release | [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md) |
 

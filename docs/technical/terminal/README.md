@@ -26,10 +26,9 @@ See [`decisions.md`](decisions.md) (D2) for why, and the Non-goals section in [`
 - [`frontend.md`](frontend.md) — the WebView side: the row mirror, the viewport, driving scrolling and topping up rows, the WebGL2 glyph-atlas renderer, and input.
 - [`scrollback-coverage-design.md`](scrollback-coverage-design.md) — the scroll-back rework: how the frontend decides render-vs-fetch per row (coverage by provenance, the fix for the Ink scroll-stops bug) and how rows keep a stable id across trim and reflow (the backend-computed StableRowIndex model, D8).
 - [`libghostty-history-limits.md`](libghostty-history-limits.md) — how far back `libghostty`'s buffer reaches, how it stores and serves rows, row identity across trim and reflow, and the caveats.
+- [`why-libghostty.md`](why-libghostty.md) — background: what `libghostty-vt` is, what it gives us versus what we still own, and the Rust binding plus build landscape (the still-valid research from the original strategy spike).
 - [`resize-reflow-anchoring.md`](resize-reflow-anchoring.md) — why resizing while scrolled back reflows cleanly for line-oriented CLIs but jumbles a TUI's (Ink/Claude) hard-wrapped history, why that is inherent (even Ghostty's app does it), the viewport-pin position re-anchor we found but deferred, and the v0 decision to accept it (D9).
 - [`performance-and-acceptance.md`](performance-and-acceptance.md) — the budgets and the acceptance checklist: the yardstick for "is the implementation faithful to this architecture".
 - [`decisions.md`](decisions.md) — the log of pivotal decisions and why.
 
-## Older terminal docs (historical)
-
-[`../terminal-strategy.md`](../terminal-strategy.md) and [`../terminal-overhaul-handoff.md`](../terminal-overhaul-handoff.md) predate heavy changes and are kept only for history. This folder supersedes them as the design source of truth.
+This folder is the source of truth. The original strategy spike and the overhaul handoff that predated the v0 rebuild were removed; the still-relevant `libghostty` background from the spike lives in [`why-libghostty.md`](why-libghostty.md), and the rest is recoverable from git history.

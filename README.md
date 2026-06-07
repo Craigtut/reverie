@@ -8,7 +8,7 @@ The product thesis: people increasingly use terminal-based agents for many kinds
 
 - macOS desktop app (Apple Silicon) built with Tauri v2 and a Rust-first backend.
 - Local-only persistence: no accounts, sync, or cloud services in v1.
-- Core hierarchy: `Workspace → Project → Focus → Session`.
+- Core hierarchy: `Workspace → Project → Topic → Session`.
 - Projects are optional folder-backed contexts and must not require git.
 - General workspace sessions live outside any project for non-folder-specific work.
 - Supported agent CLIs from v1:
@@ -22,12 +22,12 @@ The product thesis: people increasingly use terminal-based agents for many kinds
 
 See [`docs/README.md`](docs/README.md) for the full index. Highlights:
 
-- [`docs/product-vision.md`](docs/product-vision.md) — the agentic-workspace thesis, personas, and the Workspace → Project → Focus → Session model.
+- [`docs/product-vision.md`](docs/product-vision.md) — the agentic-workspace thesis, personas, and the Workspace → Project → Topic → Session model.
 - [`docs/design-vision.md`](docs/design-vision.md) — warm-neutral monochrome visual language, light + dark, and the ambient dot field.
 - [`docs/product/v1-product-spec.md`](docs/product/v1-product-spec.md) — product direction, users, v1 scope, UX flows, and non-goals.
 - [`docs/technical/tech-stack.md`](docs/technical/tech-stack.md) — languages, frameworks, and build constraints.
 - [`docs/technical/technical-architecture.md`](docs/technical/technical-architecture.md) — Rust/Tauri architecture, data model, persistence, terminal boundaries, and CLI adapter contracts.
-- [`docs/technical/terminal-strategy.md`](docs/technical/terminal-strategy.md) — Ghostty/libghostty research and terminal implementation strategy.
+- [`docs/technical/terminal/`](docs/technical/terminal/README.md) — canonical terminal design: the libghostty-vt core, the binary wire, the WebGL2 renderer, and in-memory scrollback.
 - [`docs/technical/frontend-architecture.md`](docs/technical/frontend-architecture.md) — React/Panda shell direction and terminal renderer boundary.
 - [`docs/technical/implementation-queue.md`](docs/technical/implementation-queue.md) — immediate build queue after the terminal-quality spike.
 

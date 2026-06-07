@@ -70,7 +70,7 @@ The unit of value is parallelism plus continuity. A user might have a security a
 2. **No git requirement, ever, in the core flow.** Folders can be projects; git is optional.
 3. **Projects are helpful, not mandatory.** First run must not force a project.
 4. **Session continuity over feature sprawl.** The product is a resumable map of agent work, not an IDE.
-5. **A fast, native-quality terminal is core product value**, not a nice-to-have. See [`technical/terminal-strategy.md`](technical/terminal-strategy.md).
+5. **A fast, native-quality terminal is core product value**, not a nice-to-have. See [`technical/terminal/`](technical/terminal/README.md).
 6. **Local-first trust.** v1 stores state locally; no accounts, no cloud sync.
 7. **Dangerous / YOLO mode is explicit.** Off by default, opt-in, overridable per session.
 8. **Calm by default.** The interface should feel quiet and focused; the work is the agent output, not our chrome. See [`design-vision.md`](design-vision.md).

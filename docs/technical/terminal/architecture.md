@@ -102,4 +102,4 @@ There is no deferred "deep history" or "transcript" milestone hiding behind thes
 - [`backend.md`](backend.md), [`wire-protocol.md`](wire-protocol.md), [`frontend.md`](frontend.md) — the three owners in detail.
 - [`libghostty-history-limits.md`](libghostty-history-limits.md) — how far back `libghostty`'s buffer reaches, and the reflow caveat.
 - [`performance-and-acceptance.md`](performance-and-acceptance.md) — the yardstick.
-- The older [`../terminal-strategy.md`](../terminal-strategy.md) and [`../terminal-overhaul-handoff.md`](../terminal-overhaul-handoff.md) are historical and superseded by this folder.
+- [`why-libghostty.md`](why-libghostty.md) — background on the `libghostty-vt` choice and the Rust binding/build landscape.

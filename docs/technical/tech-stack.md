@@ -1,6 +1,6 @@
 # Reverie Tech Stack
 
-> A factual map of what Reverie is built with, derived from `Cargo.toml`, `package.json`, and the configs in the repo root. For *why* and *how the layers fit together*, see [`technical-architecture.md`](technical-architecture.md), [`frontend-architecture.md`](frontend-architecture.md), and [`terminal-strategy.md`](terminal-strategy.md).
+> A factual map of what Reverie is built with, derived from `Cargo.toml`, `package.json`, and the configs in the repo root. For *why* and *how the layers fit together*, see [`technical-architecture.md`](technical-architecture.md), [`frontend-architecture.md`](frontend-architecture.md), and the [`terminal/`](terminal/README.md) design folder.
 
 ## Shape of the repo
 
