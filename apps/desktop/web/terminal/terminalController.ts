@@ -1794,7 +1794,13 @@ export function createTerminalController(options: TerminalControllerOptions) {
   function scrollBufferedRows(deltaRows: number): boolean {
     const viewport = els.viewport;
     if (!viewport || deltaRows === 0) return false;
-    return scrollBufferedToTop(viewport.scrollTop + deltaRows * surface.cellHeight);
+    return scrollBufferedPixels(deltaRows * surface.cellHeight);
+  }
+
+  function scrollBufferedPixels(deltaPixels: number): boolean {
+    const viewport = els.viewport;
+    if (!viewport || !Number.isFinite(deltaPixels) || deltaPixels === 0) return false;
+    return scrollBufferedToTop(viewport.scrollTop + deltaPixels);
   }
 
   function scrollBufferedToRow(row: number): boolean {
@@ -2151,6 +2157,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     },
     mergeLiveRows,
     scrollBufferedRows,
+    scrollBufferedPixels,
     scrollBufferedToRow,
   };
 }

@@ -28,6 +28,7 @@ import {
   errorMessage,
   shortId,
   terminalInputForKey,
+  terminalWheelDeltaPixels,
   terminalWheelDeltaRows,
 } from '../domain';
 import type {
@@ -51,7 +52,6 @@ import { createSession } from '../services/shellApi';
 import {
   SCROLL_FOLLOW_EPSILON_PX,
   defaultTerminalSurface,
-  terminalInsetPx,
   terminalSurfaceForBounds,
   terminalSurfaceForFontSize,
 } from '../terminalScrollback';
@@ -1572,19 +1572,6 @@ export function useTerminalSession(params: {
       viewport.scrollTop + viewport.clientHeight >=
       viewport.scrollHeight - SCROLL_FOLLOW_EPSILON_PX;
     controller.setLiveFollow(following);
-    if (!following) {
-      // Scrolled up off the live tail: paint from the mirror at the viewport's
-      // top row. When the mirror runs low near the top, the controller prefetches
-      // a band straight from libghostty's buffer via `onMissingLiveRows`
-      // (decisions.md D6/D7); scrolling itself never round-trips.
-      const surface = controller.getSurface();
-      const inset = terminalInsetPx(surface);
-      const targetRow = Math.max(
-        0,
-        Math.floor((viewport.scrollTop - inset.top) / surface.cellHeight),
-      );
-      controller.scrollBufferedToRow(targetRow);
-    }
   }
 
   // Apply a wheel delta to the terminal. Mouse-tracking apps consume the wheel as
@@ -1601,7 +1588,8 @@ export function useTerminalSession(params: {
   }): boolean {
     const surface = controller.getSurface();
     const deltaRows = terminalWheelDeltaRows(delta, surface);
-    if (deltaRows === 0) return false;
+    const deltaPixels = terminalWheelDeltaPixels(delta, surface);
+    if (deltaRows === 0 || deltaPixels === 0) return false;
     const terminalId = useTerminalStore.getState().activeTerminalId;
     const modes = controller.getLastFrameModes();
     if (!terminalId) return false;
@@ -1626,19 +1614,7 @@ export function useTerminalSession(params: {
       // is nothing to scroll back into.
       return true;
     }
-    const metrics = useTerminalStore.getState().terminalScroll;
-    const totalRows = Math.max(metrics?.totalRows ?? controller.getRowCount(), surface.rows);
-    const maxStartRow = Math.max(0, totalRows - surface.rows);
-    if (deltaRows > 0) {
-      const offsetRows = metrics?.offsetRows ?? controller.getStartRow();
-      if (offsetRows + surface.rows >= maxStartRow + surface.rows) {
-        followLiveTerminalOutput();
-        return true;
-      }
-    } else if (controller.isLiveFollow()) {
-      controller.setLiveFollow(false);
-    }
-    controller.scrollBufferedRows(deltaRows);
+    controller.scrollBufferedPixels(deltaPixels);
     return true;
   }
 

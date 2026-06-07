@@ -4,7 +4,11 @@ import { describe, it, expect } from 'vitest';
 
 import type { TerminalSurface } from '../terminalScrollback';
 import type { TerminalModes } from '../terminalTypes';
-import { terminalInputForKey, terminalWheelDeltaRows } from './terminalInput';
+import {
+  terminalInputForKey,
+  terminalWheelDeltaPixels,
+  terminalWheelDeltaRows,
+} from './terminalInput';
 
 interface FakeKey {
   key: string;
@@ -196,5 +200,51 @@ describe('terminalWheelDeltaRows', () => {
     expect(
       terminalWheelDeltaRows(wheelEvent({ deltaY: -99, deltaMode: 1 }), surface({ rows: 24 })),
     ).toBe(-96);
+  });
+});
+
+describe('terminalWheelDeltaPixels', () => {
+  it('returns 0 for a zero or invalid deltaY', () => {
+    expect(terminalWheelDeltaPixels(wheelEvent({ deltaY: 0 }), surface())).toBe(0);
+    expect(terminalWheelDeltaPixels(wheelEvent({ deltaY: Number.NaN }), surface())).toBe(0);
+  });
+
+  it('preserves pixel deltas without row rounding', () => {
+    expect(terminalWheelDeltaPixels(wheelEvent({ deltaY: 4 }), surface({ cellHeight: 16 }))).toBe(
+      4,
+    );
+    expect(
+      terminalWheelDeltaPixels(wheelEvent({ deltaY: -0.75 }), surface({ cellHeight: 16 })),
+    ).toBe(-0.75);
+  });
+
+  it('converts line and page deltas to pixels', () => {
+    expect(
+      terminalWheelDeltaPixels(
+        wheelEvent({ deltaY: 2.5, deltaMode: 1 }),
+        surface({ cellHeight: 16 }),
+      ),
+    ).toBe(40);
+    expect(
+      terminalWheelDeltaPixels(
+        wheelEvent({ deltaY: -1, deltaMode: 2 }),
+        surface({ rows: 24, cellHeight: 16 }),
+      ),
+    ).toBe(-384);
+  });
+
+  it('clamps large wheel flings to four surface pages in pixels', () => {
+    expect(
+      terminalWheelDeltaPixels(
+        wheelEvent({ deltaY: 10_000 }),
+        surface({ rows: 24, cellHeight: 16 }),
+      ),
+    ).toBe(1536);
+    expect(
+      terminalWheelDeltaPixels(
+        wheelEvent({ deltaY: -10_000 }),
+        surface({ rows: 24, cellHeight: 16 }),
+      ),
+    ).toBe(-1536);
   });
 });

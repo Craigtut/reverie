@@ -2441,6 +2441,44 @@ describe('createTerminalController', () => {
     expect(viewport.scrollTop).toBe(1010);
   });
 
+  it('scrolls a live buffered viewport by pixel deltas below one row', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onLiveFollow = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2510, scrollTop: 1010 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 250,
+      viewportRows: surface.rows,
+      viewportOffset: 246,
+      rowsById: rowRange(96, 108),
+      cachedRanges: [{ start: 96, end: 108 }],
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 246,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(controller.scrollBufferedPixels(3.5)).toBe(true);
+    expect(viewport.scrollTop).toBe(1013.5);
+    expect(controller.isLiveFollow()).toBe(false);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(false);
+  });
+
   it('requests a history jump when live painting lands on uncached buffer rows', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 

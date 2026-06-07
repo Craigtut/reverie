@@ -118,3 +118,23 @@ export function terminalWheelDeltaRows(
   const maxRowsPerWheel = Math.max(1, surface.rows * 4);
   return sign * Math.max(1, Math.min(maxRowsPerWheel, rows));
 }
+
+export function terminalWheelDeltaPixels(
+  event: { deltaY: number; deltaMode: number },
+  surface: TerminalSurface,
+) {
+  if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return 0;
+
+  const sign = event.deltaY > 0 ? 1 : -1;
+  let pixels: number;
+  if (event.deltaMode === 1) {
+    pixels = Math.abs(event.deltaY) * surface.cellHeight;
+  } else if (event.deltaMode === 2) {
+    pixels = surface.rows * surface.cellHeight;
+  } else {
+    pixels = Math.abs(event.deltaY);
+  }
+
+  const maxPixelsPerWheel = Math.max(surface.cellHeight, surface.rows * 4 * surface.cellHeight);
+  return sign * Math.min(maxPixelsPerWheel, pixels);
+}

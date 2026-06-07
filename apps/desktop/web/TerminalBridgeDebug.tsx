@@ -16,7 +16,11 @@ import {
   type TerminalBridgeFramePayload,
   type TerminalBridgeStartedPayload,
 } from './services/terminalBridge';
-import { terminalInputForKey, terminalWheelDeltaRows } from './domain/terminalInput';
+import {
+  terminalInputForKey,
+  terminalWheelDeltaPixels,
+  terminalWheelDeltaRows,
+} from './domain/terminalInput';
 import {
   createTerminalController,
   type TimedTerminalControllerTraceEvent,
@@ -396,16 +400,12 @@ export function TerminalBridgeDebug() {
 
   function handleWheel(event: globalThis.WheelEvent) {
     const rows = terminalWheelDeltaRows(event, surface);
-    if (rows === 0) return;
+    const pixels = terminalWheelDeltaPixels(event, surface);
+    if (rows === 0 || pixels === 0) return;
     event.preventDefault();
     const modes = controller.getLastFrameModes();
     if (modes?.alternateScreen) return;
-    if (rows > 0 && controller.isLiveFollow()) {
-      followLiveForUserInput();
-      return;
-    }
-    if (rows < 0 && controller.isLiveFollow()) controller.setLiveFollow(false);
-    controller.scrollBufferedRows(rows);
+    controller.scrollBufferedPixels(pixels);
   }
   wheelHandlerRef.current = handleWheel;
 
