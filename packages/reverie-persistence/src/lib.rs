@@ -398,52 +398,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
     }
 
     fn upsert_session(&self, session: &Session) -> RepoResult<()> {
-        let native_session_ref_json = native_session_ref_to_db(&session.native_session_ref)?;
-        let latest_activity_json = match &session.latest_activity {
-            Some(state) => Some(
-                serde_json::to_string(state)
-                    .map_err(|err| PersistenceError::Serialization(err.to_string()))?,
-            ),
-            None => None,
-        };
         let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO sessions (
-                id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
-                dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json,
-                archived, sort_order, last_viewed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-             ON CONFLICT(id) DO UPDATE SET
-                focus_id = excluded.focus_id, title = excluded.title,
-                agent_kind = excluded.agent_kind, cwd = excluded.cwd,
-                native_session_ref_json = excluded.native_session_ref_json,
-                launch_mode = excluded.launch_mode,
-                dangerous_mode_override = excluded.dangerous_mode_override,
-                status = excluded.status, last_exit_code = excluded.last_exit_code,
-                tab_visible = excluded.tab_visible,
-                latest_activity_json = excluded.latest_activity_json,
-                archived = excluded.archived,
-                sort_order = excluded.sort_order,
-                last_viewed_at = excluded.last_viewed_at",
-            params![
-                session.id.to_string(),
-                session.focus_id.to_string(),
-                session.title,
-                agent_kind_to_db(session.agent_kind)?,
-                path_to_db(&session.cwd),
-                native_session_ref_json,
-                launch_mode_to_db(session.launch_mode)?,
-                session.dangerous_mode_override.map(bool_to_int),
-                session_status_to_db(session.status)?,
-                session.last_exit_code,
-                bool_to_int(session.tab_visible),
-                latest_activity_json,
-                bool_to_int(session.archived),
-                session.sort_order,
-                session.last_viewed_at,
-            ],
-        )
-        .map_err(backend)?;
+        upsert_session_row(&conn, session)?;
         Ok(())
     }
 
@@ -484,6 +440,46 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 .and_then(|reference| reference.session_id.as_deref())
                 == Some(native_session_id)
         }))
+    }
+
+    fn claim_native_session(
+        &self,
+        session_id: SessionId,
+        native_session_ref: NativeSessionRef,
+    ) -> RepoResult<bool> {
+        let mut conn = self.conn()?;
+        let tx = conn.transaction().map_err(backend)?;
+        let sessions = load_sessions(&tx)?;
+        let Some(mut session) = sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .cloned()
+        else {
+            return Err(PersistenceError::NotFound {
+                kind: "session",
+                id: session_id.to_string(),
+            });
+        };
+        if let Some(native_session_id) = native_session_ref.session_id.as_deref() {
+            if sessions.iter().any(|other| {
+                other.id != session_id
+                    && other
+                        .native_session_ref
+                        .as_ref()
+                        .and_then(|reference| reference.session_id.as_deref())
+                        == Some(native_session_id)
+            }) {
+                return Ok(false);
+            }
+        }
+        session.native_session_ref = Some(native_session_ref);
+        session.launch_mode = LaunchMode::Resume;
+        if session.status != SessionStatus::Running {
+            session.status = SessionStatus::Restorable;
+        }
+        upsert_session_row(&tx, &session)?;
+        tx.commit().map_err(backend)?;
+        Ok(true)
     }
 
     fn archive_project_cascade(&self, id: ProjectId) -> RepoResult<()> {
@@ -539,6 +535,55 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         tx.commit().map_err(backend)?;
         Ok(())
     }
+}
+
+fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
+    let native_session_ref_json = native_session_ref_to_db(&session.native_session_ref)?;
+    let latest_activity_json = match &session.latest_activity {
+        Some(state) => Some(
+            serde_json::to_string(state)
+                .map_err(|err| PersistenceError::Serialization(err.to_string()))?,
+        ),
+        None => None,
+    };
+    conn.execute(
+        "INSERT INTO sessions (
+            id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
+            dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json,
+            archived, sort_order, last_viewed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ON CONFLICT(id) DO UPDATE SET
+            focus_id = excluded.focus_id, title = excluded.title,
+            agent_kind = excluded.agent_kind, cwd = excluded.cwd,
+            native_session_ref_json = excluded.native_session_ref_json,
+            launch_mode = excluded.launch_mode,
+            dangerous_mode_override = excluded.dangerous_mode_override,
+            status = excluded.status, last_exit_code = excluded.last_exit_code,
+            tab_visible = excluded.tab_visible,
+            latest_activity_json = excluded.latest_activity_json,
+            archived = excluded.archived,
+            sort_order = excluded.sort_order,
+            last_viewed_at = excluded.last_viewed_at",
+        params![
+            session.id.to_string(),
+            session.focus_id.to_string(),
+            session.title,
+            agent_kind_to_db(session.agent_kind)?,
+            path_to_db(&session.cwd),
+            native_session_ref_json,
+            launch_mode_to_db(session.launch_mode)?,
+            session.dangerous_mode_override.map(bool_to_int),
+            session_status_to_db(session.status)?,
+            session.last_exit_code,
+            bool_to_int(session.tab_visible),
+            latest_activity_json,
+            bool_to_int(session.archived),
+            session.sort_order,
+            session.last_viewed_at,
+        ],
+    )
+    .map_err(backend)?;
+    Ok(())
 }
 
 impl ConnectionRepository for SqliteWorkspaceRepository {
@@ -1109,6 +1154,42 @@ mod tests {
 
         let by_native = repo.find_session_by_native_id("native-42").unwrap();
         assert_eq!(by_native.map(|s| s.id), Some(session.id));
+    }
+
+    #[test]
+    fn claim_native_session_rejects_cross_session_collision() {
+        let repo = seeded();
+        let focus = Focus::general("General", 0);
+        repo.upsert_focus(&focus).unwrap();
+        let first = Session::new(
+            focus.id,
+            "First",
+            AgentKind::CortexCode,
+            PathBuf::from("/repo"),
+        );
+        let second = Session::new(
+            focus.id,
+            "Second",
+            AgentKind::CortexCode,
+            PathBuf::from("/repo"),
+        );
+        repo.upsert_session(&first).unwrap();
+        repo.upsert_session(&second).unwrap();
+
+        assert!(
+            repo.claim_native_session(first.id, NativeSessionRef::cortex("native-42", None))
+                .unwrap()
+        );
+        assert!(
+            !repo
+                .claim_native_session(second.id, NativeSessionRef::cortex("native-42", None))
+                .unwrap()
+        );
+
+        let loaded_second = repo.get_session(second.id).unwrap().unwrap();
+        assert!(loaded_second.native_session_ref.is_none());
+        let by_native = repo.find_session_by_native_id("native-42").unwrap();
+        assert_eq!(by_native.map(|session| session.id), Some(first.id));
     }
 
     #[test]

@@ -14,7 +14,8 @@
 use std::sync::Mutex;
 
 use crate::domain::{
-    Focus, FocusId, Project, ProjectId, Session, SessionId, Workspace, WorkspaceSnapshot,
+    Focus, FocusId, NativeSessionRef, Project, ProjectId, Session, SessionId, Workspace,
+    WorkspaceSnapshot,
 };
 
 /// Errors surfaced by a [`WorkspaceRepository`]. Backend-specific failures
@@ -59,6 +60,14 @@ pub trait WorkspaceRepository: Send + Sync {
 
     /// Find the session whose attached native session id matches, if any.
     fn find_session_by_native_id(&self, native_session_id: &str) -> RepoResult<Option<Session>>;
+
+    /// Attach a native session ref to `session_id` only if no different session
+    /// owns that native id. Returns `false` on a cross-session collision.
+    fn claim_native_session(
+        &self,
+        session_id: SessionId,
+        native_session_ref: NativeSessionRef,
+    ) -> RepoResult<bool>;
 
     /// Archive a project, archive its focuses, and hide the tabs of sessions in
     /// those focuses, atomically. Errors NotFound if the project is unknown.
@@ -209,6 +218,43 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
             .cloned())
     }
 
+    fn claim_native_session(
+        &self,
+        session_id: SessionId,
+        native_session_ref: NativeSessionRef,
+    ) -> RepoResult<bool> {
+        let mut state = self.lock()?;
+        let native_session_id = native_session_ref.session_id.as_deref();
+        if let Some(native_session_id) = native_session_id {
+            if state.sessions.iter().any(|session| {
+                session.id != session_id
+                    && session
+                        .native_session_ref
+                        .as_ref()
+                        .and_then(|reference| reference.session_id.as_deref())
+                        == Some(native_session_id)
+            }) {
+                return Ok(false);
+            }
+        }
+        let Some(session) = state
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        else {
+            return Err(PersistenceError::NotFound {
+                kind: "session",
+                id: session_id.to_string(),
+            });
+        };
+        session.native_session_ref = Some(native_session_ref);
+        session.launch_mode = crate::domain::LaunchMode::Resume;
+        if session.status != crate::domain::SessionStatus::Running {
+            session.status = crate::domain::SessionStatus::Restorable;
+        }
+        Ok(true)
+    }
+
     fn archive_project_cascade(&self, id: ProjectId) -> RepoResult<()> {
         let mut state = self.lock()?;
         let Some(project) = state.projects.iter_mut().find(|p| p.id == id) else {
@@ -337,6 +383,42 @@ mod tests {
         let found = repo.find_session_by_native_id("native-7").unwrap();
         assert_eq!(found.map(|s| s.id), Some(session.id));
         assert!(repo.find_session_by_native_id("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn claim_native_session_rejects_cross_session_collision() {
+        let repo = seeded();
+        let focus = Focus::general("General", 0);
+        repo.upsert_focus(&focus).unwrap();
+        let a = Session::new(focus.id, "A", AgentKind::CortexCode, PathBuf::from("/repo"));
+        let b = Session::new(focus.id, "B", AgentKind::CortexCode, PathBuf::from("/repo"));
+        repo.upsert_session(&a).unwrap();
+        repo.upsert_session(&b).unwrap();
+
+        assert!(
+            repo.claim_native_session(
+                a.id,
+                crate::domain::NativeSessionRef::cortex("native-7", None),
+            )
+            .unwrap()
+        );
+        assert!(
+            !repo
+                .claim_native_session(
+                    b.id,
+                    crate::domain::NativeSessionRef::cortex("native-7", None),
+                )
+                .unwrap()
+        );
+        assert!(
+            repo.claim_native_session(
+                a.id,
+                crate::domain::NativeSessionRef::cortex("native-8", None),
+            )
+            .unwrap()
+        );
+        let found = repo.find_session_by_native_id("native-8").unwrap();
+        assert_eq!(found.map(|session| session.id), Some(a.id));
     }
 
     #[test]

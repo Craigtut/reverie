@@ -591,7 +591,7 @@ impl WorkspaceService {
         native_session_ref: NativeSessionRef,
         expected_kind: AgentKind,
     ) -> Result<()> {
-        let mut session = self
+        let session = self
             .repo
             .get_session(session_id)?
             .ok_or_else(|| anyhow!("unknown Reverie session {session_id}"))?;
@@ -609,12 +609,12 @@ impl WorkspaceService {
                 expected_cwd.display()
             );
         }
-        session.native_session_ref = Some(native_session_ref);
-        session.launch_mode = LaunchMode::Resume;
-        if session.status != SessionStatus::Running {
-            session.status = SessionStatus::Restorable;
+        if !self
+            .repo
+            .claim_native_session(session_id, native_session_ref)?
+        {
+            bail!("native session id is already attached to a different Reverie session");
         }
-        self.repo.upsert_session(&session)?;
         Ok(())
     }
 
@@ -676,13 +676,9 @@ impl WorkspaceService {
                 }
             }
         }
-        self.attach_native_session(
-            session_id,
-            session.cwd.clone(),
-            native_session_ref,
-            session.agent_kind,
-        )?;
-        Ok(true)
+        Ok(self
+            .repo
+            .claim_native_session(session_id, native_session_ref)?)
     }
 
     /// Persist the latest activity for whichever session owns `native_session_id`.
@@ -742,12 +738,22 @@ impl WorkspaceService {
         }
         let captured_native_session = session.native_session_ref.is_none();
         if captured_native_session {
-            session.native_session_ref = Some(NativeSessionRef {
+            let native_session_ref = NativeSessionRef {
                 kind: session.agent_kind,
                 session_id: Some(native_session_id.to_owned()),
                 metadata_path: None,
                 adapter_payload: serde_json::Value::Null,
-            });
+            };
+            if !self
+                .repo
+                .claim_native_session(reverie_session_id, native_session_ref)?
+            {
+                return Ok(false);
+            }
+            session = match self.repo.get_session(reverie_session_id)? {
+                Some(session) => session,
+                None => return Ok(false),
+            };
         }
         session.latest_activity = Some(activity);
         self.repo.upsert_session(&session)?;
