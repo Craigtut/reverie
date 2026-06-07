@@ -3,12 +3,14 @@ import { Play } from '@phosphor-icons/react';
 import { css } from '../../styled-system/css';
 import { agentLabel, agentTabLabel, launchButtonLabel } from '../../domain';
 import type { ShellSession } from '../../domain';
-import { DotField } from '../chrome';
+import { ResumeBloom } from '../chrome';
 import { Typography } from '../primitives/Typography';
 
 // Covers the terminal surface for a selected-but-not-running session: an idle
-// state with a launch/resume button, and a launching state with the breathing
-// dot field. Returns null when no session is selected.
+// state with a launch/resume button, and a launching state where the session
+// "comes back to life" as a radial dot bloom on the bare terminal surface, with
+// the action word and the session title sitting directly on the background.
+// Returns null when no session is selected.
 export function SessionLaunchOverlay({
   session,
   launching,
@@ -25,38 +27,32 @@ export function SessionLaunchOverlay({
   if (launching) {
     const actionLabel =
       session.launchMode === 'resume' || session.nativeSessionRef ? 'Resuming' : 'Launching';
+    const title = session.title?.trim() || agentTabLabel(session);
 
     return (
       <div
-        className={launchOverlayClass}
+        className={resumeOverlayClass}
         data-testid="session-launch-overlay"
         data-state="launching"
       >
-        <div className={launchCardClass} data-state="launching">
-          <div className={launchFieldClass}>
-            <DotField variant="launching" />
-          </div>
+        <ResumeBloom />
+        <div className={resumeCopyClass}>
           <Typography
             as="span"
-            variant="smallBody"
+            variant="title2"
             tone="default"
-            className={launchingLabelClass}
             data-testid="session-launching-label"
           >
-            {actionLabel} {session.title}
+            {actionLabel}
           </Typography>
           <Typography
             as="span"
-            variant="caption"
+            variant="smallBody"
             tone="faint"
-            selectable
-            className={launchCardMetaClass}
-            style={{
-              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-              lineHeight: 1.5,
-            }}
+            className={resumeTitleClass}
+            data-testid="session-launching-title"
           >
-            {agentLabel(session.agentKind)} · {session.cwd}
+            {title}
           </Typography>
         </div>
       </div>
@@ -154,15 +150,33 @@ const primaryLaunchButtonClass = css({
   '& svg': { color: 'var(--bg)' },
 });
 
-const launchFieldClass = css({
+// The resume moment lives directly on the terminal surface, not in a panel: a
+// full-cover bloom canvas with the copy floating on the background below it.
+const resumeOverlayClass = css({
   position: 'absolute',
   inset: 0,
+  overflow: 'hidden',
   pointerEvents: 'none',
-  opacity: 0.85,
+  zIndex: 5,
 });
 
-const launchingLabelClass = css({
-  position: 'relative',
-  zIndex: 1,
+const resumeCopyClass = css({
+  position: 'absolute',
+  left: 0,
+  right: 0,
+  // Sit just below the bloom, which is lifted slightly above the surface center.
+  top: 'calc(50% + 38px)',
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  gap: '7px',
+  padding: '0 24px',
+  textAlign: 'center',
+  // Rise in a beat after the bloom sparks to life; reduced-motion flattens it.
+  animation: 'reverieRiseIn 560ms cubic-bezier(0.16, 1, 0.3, 1) 220ms both',
+});
+
+const resumeTitleClass = css({
+  maxWidth: '420px',
   overflowWrap: 'anywhere',
 });

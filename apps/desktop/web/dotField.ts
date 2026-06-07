@@ -1,19 +1,17 @@
 // Shared canvas dot-field renderer.
 //
-// The product's signature texture: dots represent agents and activity. One
-// primitive is configured by variant for every surface that needs the motif
-// (ambient background, launching hero, dashboard constellation, card glyphs).
-// Performance is non-negotiable, and this surface is full-window, so it must
-// never repaint when nothing is moving. A static dot layer is cached on an
-// offscreen canvas. The ambient field is event-driven: it draws the static
-// layer once, then runs a rAF loop only while a dash is alive, and even then it
-// repaints just the row-band each dash occupies (never the whole window). Dash
-// spawns are scheduled with a timer instead of polling every frame. The
-// breathing launch variant animates the full field, so it keeps a continuous
-// loop while visible. DPR is capped at 2, both loops stop when the tab is
-// hidden, and prefers-reduced-motion disables all movement (static only).
+// The product's signature texture: dots represent agents and activity. This
+// primitive renders the ambient background field; the resume "bloom" hero lives
+// in its sibling resumeBloom.ts. Performance is non-negotiable, and this surface
+// is full-window, so it must never repaint when nothing is moving. A static dot
+// layer is cached on an offscreen canvas. The field is event-driven: it draws
+// the static layer once, then runs a rAF loop only while a dash is alive, and
+// even then it repaints just the row-band each dash occupies (never the whole
+// window). Dash spawns are scheduled with a timer instead of polling every
+// frame. DPR is capped at 2, the loop stops when the tab is hidden, and
+// prefers-reduced-motion disables all movement (static only).
 
-export type DotFieldVariant = 'ambient' | 'launching';
+export type DotFieldVariant = 'ambient';
 
 export interface DotFieldOptions {
   variant?: DotFieldVariant;
@@ -49,7 +47,6 @@ interface Band {
 
 const MAX_DPR = 2;
 const MAX_DASHES = 3;
-const BREATH_PERIOD_HZ = 0.9; // ~1.1 s breath
 
 interface VariantTuning {
   spacing: number;
@@ -60,7 +57,6 @@ interface VariantTuning {
   accentAlphaMin: number;
   accentAlphaRange: number;
   dashesPerSecond: number;
-  breath: boolean;
 }
 
 const TUNING: Record<DotFieldVariant, VariantTuning> = {
@@ -73,18 +69,6 @@ const TUNING: Record<DotFieldVariant, VariantTuning> = {
     accentAlphaMin: 0.32,
     accentAlphaRange: 0.18,
     dashesPerSecond: 0.32,
-    breath: false,
-  },
-  launching: {
-    spacing: 16,
-    dotSize: 2.0,
-    accentChance: 0,
-    baseAlphaMin: 0.18,
-    baseAlphaRange: 0.1,
-    accentAlphaMin: 0,
-    accentAlphaRange: 0,
-    dashesPerSecond: 0,
-    breath: true,
   },
 };
 
@@ -292,34 +276,6 @@ export function createDotField(
     }
   }
 
-  // Launching loop: the breath touches the full field, so this redraws the
-  // whole surface each frame. It only runs while visible and not reduced.
-  function breathFrame(now: number) {
-    raf = 0;
-    if (hidden || cssWidth === 0) return;
-
-    drawStaticFull();
-
-    const cx = cssWidth / 2;
-    const cy = cssHeight / 2;
-    const radius = Math.min(cssWidth, cssHeight) * 0.45;
-    const pulse = 0.5 + 0.5 * Math.sin((now / 1000) * BREATH_PERIOD_HZ * 2 * Math.PI);
-    const color = readDotColor();
-    ctx.fillStyle = `rgba(${color.r},${color.g},${color.b},${0.18 + 0.32 * pulse})`;
-    const baseSize = tuning.dotSize;
-    for (const cell of cells) {
-      const dx = cell.x - cx;
-      const dy = cell.y - cy;
-      const d = Math.hypot(dx, dy);
-      if (d > radius) continue;
-      const k = 1 - d / radius;
-      const size = baseSize + 2.2 * k * pulse;
-      ctx.fillRect(cell.x - size / 2, cell.y - size / 2, size, size);
-    }
-
-    raf = requestAnimationFrame(breathFrame);
-  }
-
   function mergeBands(bands: Band[]): Band[] {
     const merged: Band[] = [];
     for (const band of bands) {
@@ -330,15 +286,11 @@ export function createDotField(
     return merged;
   }
 
-  // Pick the right loop/timer for the variant and current state. Idempotent.
+  // Draw the static base, then schedule the ambient dash loop. Idempotent.
   function start() {
     drawStaticFull();
     if (hidden) return;
-    if (tuning.breath) {
-      if (!reducedMotion && !raf) raf = requestAnimationFrame(breathFrame);
-    } else {
-      scheduleNextDash();
-    }
+    scheduleNextDash();
   }
 
   function stop() {
