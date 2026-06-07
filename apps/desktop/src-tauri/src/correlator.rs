@@ -10,6 +10,7 @@
 
 use reverie_core::WorkspaceService;
 use reverie_core::activity::ActivityState;
+use reverie_core::activity_reconciler::ActivityReconciler;
 use reverie_core::activity_source::{ActivitySourceKind, ActivityUpdate, SessionKey};
 use reverie_core::domain::SessionStateTimeline;
 use serde::Serialize;
@@ -131,15 +132,58 @@ fn native_id_for(key: &SessionKey, state: &ActivityState) -> String {
 /// time (which the caller turns into a `session_record_changed`). Pure of Tauri,
 /// so it is unit-testable against an in-memory [`WorkspaceService`].
 ///
-/// Multi-source fidelity merge (deferred): when a single session gains a second
-/// source at a different fidelity (the planned Codex `PermissionRequest` hook
-/// layered over the rollout watcher), this is where a definitive update must be
-/// kept from being clobbered by a stale, lower-fidelity one. Today every session
-/// has exactly one source, and `record_session_activity*` already drops
-/// out-of-order updates by sequence, so no extra merge state is needed yet; the
-/// `fidelity` carried on each [`ActivityUpdate`] is the hook for that rule.
-fn apply_update(service: &WorkspaceService, update: &ActivityUpdate) -> bool {
+/// Codex is the one dual-source CLI (lifecycle hooks + rollout watcher), so its
+/// updates run through the [`ActivityReconciler`] first: that turn-ordered merge
+/// is the single writer, which both fixes the cross-source sequence fight and
+/// lets the rollout's `turn_aborted` backstop the `Stop` hook on Esc/error. The
+/// single-source CLIs (Claude hooks, Cortex snapshots) take the direct path, as
+/// they have no second source to reconcile against. `record_session_activity*`
+/// still drops out-of-order updates by sequence, which for Codex is now a plain
+/// monotonic dedup on the reconciler's own sequence.
+fn apply_update(
+    service: &WorkspaceService,
+    reconciler: Option<&ActivityReconciler>,
+    update: &ActivityUpdate,
+) -> bool {
     match update {
+        // Codex: merge both sources, then persist. Reverie-keyed (hook) updates
+        // still capture the native id on first sight via record_session_activity_by_id.
+        ActivityUpdate::State {
+            source: ActivitySourceKind::CodexCli,
+            key,
+            state,
+            fidelity,
+        } => {
+            let native_id = match key {
+                SessionKey::Native(native_id) => native_id.clone(),
+                SessionKey::Reverie(_) => state.session_id.clone(),
+            };
+            let merged = match reconciler {
+                Some(reconciler) => reconciler.merge(&native_id, *fidelity, state),
+                None => state.clone(),
+            };
+            match key {
+                SessionKey::Reverie(reverie_id) => {
+                    match service.record_session_activity_by_id(*reverie_id, &native_id, merged) {
+                        Ok(captured) => captured,
+                        Err(error) => {
+                            eprintln!(
+                                "[reverie] failed to persist Codex hook activity for {reverie_id}: {error:#}"
+                            );
+                            false
+                        }
+                    }
+                }
+                SessionKey::Native(_) => {
+                    if let Err(error) = service.record_session_activity(&native_id, merged) {
+                        eprintln!(
+                            "[reverie] failed to persist Codex activity for {native_id}: {error:#}"
+                        );
+                    }
+                    false
+                }
+            }
+        }
         ActivityUpdate::State {
             key: SessionKey::Reverie(reverie_id),
             state,
@@ -162,6 +206,28 @@ fn apply_update(service: &WorkspaceService, update: &ActivityUpdate) -> bool {
         } => {
             if let Err(error) = service.record_session_activity(native_id, state.clone()) {
                 eprintln!("[reverie] failed to persist activity for {native_id}: {error:#}");
+            }
+            false
+        }
+        // Codex source removed: drop the merge state, then clear the record.
+        ActivityUpdate::Removed {
+            source: ActivitySourceKind::CodexCli,
+            key,
+            native_session_id,
+        } => {
+            if let Some(reconciler) = reconciler {
+                reconciler.forget(native_session_id);
+            }
+            let cleared = match key {
+                SessionKey::Reverie(reverie_id) => {
+                    service.clear_session_activity_by_id(*reverie_id)
+                }
+                SessionKey::Native(native_id) => service.clear_session_activity(native_id),
+            };
+            if let Err(error) = cleared {
+                eprintln!(
+                    "[reverie] failed to clear Codex activity for {native_session_id}: {error:#}"
+                );
             }
             false
         }
@@ -265,6 +331,7 @@ mod tests {
         assert!(
             apply_update(
                 &service,
+                None,
                 &reverie_state(session_id, "native-1", 1, ActivityStatus::Working)
             ),
             "first sight captures the native id"
@@ -291,6 +358,7 @@ mod tests {
         assert!(
             !apply_update(
                 &service,
+                None,
                 &reverie_state(session_id, "native-1", 2, ActivityStatus::AwaitingInput)
             ),
             "the ref is already captured, so no second capture"
@@ -300,9 +368,11 @@ mod tests {
     #[test]
     fn native_keyed_binds_to_the_session_with_that_ref() {
         let (service, session_id) = service_with_session();
+        let reconciler = ActivityReconciler::new();
         // Capture the native ref first (as the hook path would).
         apply_update(
             &service,
+            None,
             &reverie_state(session_id, "native-2", 1, ActivityStatus::Working),
         );
 
@@ -312,7 +382,7 @@ mod tests {
             fidelity: Fidelity::Inferred,
             state: state("native-2", 2, ActivityStatus::AwaitingPermission),
         };
-        assert!(!apply_update(&service, &native_update));
+        assert!(!apply_update(&service, Some(&reconciler), &native_update));
 
         let snapshot = service.snapshot().unwrap();
         let session = snapshot
@@ -331,6 +401,7 @@ mod tests {
         let (service, session_id) = service_with_session();
         apply_update(
             &service,
+            None,
             &reverie_state(session_id, "native-3", 1, ActivityStatus::Working),
         );
 
@@ -339,7 +410,7 @@ mod tests {
             key: SessionKey::Native("native-3".to_owned()),
             native_session_id: "native-3".to_owned(),
         };
-        apply_update(&service, &removed);
+        apply_update(&service, None, &removed);
 
         let snapshot = service.snapshot().unwrap();
         let session = snapshot

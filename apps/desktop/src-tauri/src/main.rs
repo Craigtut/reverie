@@ -19,6 +19,7 @@ mod terminal;
 use std::{env, fs::OpenOptions, io::Write};
 
 use reverie_core::WorkspaceService;
+use reverie_core::activity_reconciler::ActivityReconciler;
 use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
 use reverie_core::session_log::start_session_log_watcher;
 use reverie_core::{CodexLogSource, CompositeLogSource, CortexStateSource};
@@ -233,7 +234,9 @@ fn main() {
                                     crate::terminal::runtime::watch_path_for_ref(reference)
                                 {
                                     control.register(path);
-                                    if reference.kind == reverie_core::AgentKind::CodexCli {
+                                    if reference.kind == reverie_core::AgentKind::CodexCli
+                                        && session.status == reverie_core::SessionStatus::Running
+                                    {
                                         crate::codex_titles::maybe_schedule_codex_title_after_capture(
                                             app.handle(),
                                             session.id,
@@ -336,6 +339,9 @@ fn main() {
         .manage(TerminalSessionRuntime::default())
         .manage(WorkspaceBoot::default())
         .manage(ShutdownState::default())
+        // Shared cross-source merge for Codex (hooks + rollout), read by the
+        // correlator on every Codex activity update.
+        .manage(ActivityReconciler::new())
         .invoke_handler(tauri::generate_handler![
             commands::app_status,
             commands::ghostty_frame_sequence,

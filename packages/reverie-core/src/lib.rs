@@ -5,10 +5,12 @@
 //! testable and independent from whichever terminal renderer wins the v1 spike.
 
 pub mod activity;
+pub mod activity_reconciler;
 pub mod activity_source;
 pub mod agents;
 pub mod bridge_protocol;
 pub mod bridge_server;
+pub mod codex_hooks;
 pub mod codex_rollout;
 pub mod completion;
 pub mod connection;
@@ -22,6 +24,7 @@ pub mod pty;
 pub mod repository;
 pub mod session_log;
 pub mod terminal;
+mod time;
 pub mod workspace_service;
 
 pub use activity::{
@@ -58,7 +61,7 @@ pub use domain::{
     AgentKind, Focus, NativeSessionRef, Project, Session, SessionStatus, Workspace,
     WorkspaceSnapshot,
 };
-pub use hook_config::{WrittenHookConfig, hook_url, write_claude_settings, write_codex_config};
+pub use hook_config::{WrittenHookConfig, hook_url, write_claude_settings};
 pub use hook_server::{HookServerControl, HookServerHandle, HookSource, start_hook_server};
 pub use repository::{
     InMemoryWorkspaceRepository, PersistenceError, RepoResult, WorkspaceRepository,

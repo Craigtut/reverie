@@ -918,6 +918,8 @@ pub(crate) fn start_session(
         }
         if agent_kind == Some(AgentKind::ClaudeCode) {
             attach_claude_hooks(&app, shell_session_id, &mut spawn_spec);
+        } else if agent_kind == Some(AgentKind::CodexCli) {
+            attach_codex_hooks(&app, shell_session_id, &mut spawn_spec);
         }
     }
 
@@ -1265,6 +1267,77 @@ fn attach_claude_hooks(
         .command
         .args
         .extend(ClaudeCodeAdapter.hook_config_args(&written.config_file));
+}
+
+/// Attach Reverie's per-session Codex CLI lifecycle hooks to the spawn.
+///
+/// Codex is instrumented entirely through `-c` overrides (its highest-precedence
+/// "SessionFlags" config layer): no files written, no `CODEX_HOME` redirect, and
+/// additive to the user's own `~/.codex` config/hooks. We mint a token, register
+/// it with the hook server, then inject (a) the hook definitions plus their
+/// pre-computed trust state as `-c` args (so the hooks run Trusted without the
+/// blunt `--dangerously-bypass-hook-trust`), and (b) the per-session token + port
+/// in the spawn env, which the staged `reverie-codex-hook` forwarder reads to
+/// POST each event to our localhost hook server. The token/port live in the env,
+/// never the command string, so the forwarder command stays byte-identical across
+/// launches (its bytes are what Codex's hook trust hash is computed over).
+///
+/// Best-effort: if the hook server is unmanaged or the forwarder isn't staged,
+/// the session still launches and the rollout-JSONL watcher remains the fallback
+/// signal. We never set `CODEX_HOME`, so `assert_safe_cli_env` keeps passing.
+fn attach_codex_hooks(
+    app: &AppHandle,
+    shell_session_id: SessionId,
+    spawn_spec: &mut TerminalSpawnSpec,
+) {
+    let (control, registry) = match (
+        app.try_state::<HookServerControl>(),
+        app.try_state::<HookTokenRegistry>(),
+    ) {
+        (Some(control), Some(registry)) => (control, registry),
+        _ => return,
+    };
+
+    // The hook command is the staged forwarder's absolute path, and that exact
+    // string is what the trust hash is computed over. If it isn't present we
+    // can't forward, so install nothing rather than dead, untrusted hooks.
+    let forwarder = crate::connection_commands::locate_helper("reverie-codex-hook");
+    if !forwarder.exists() {
+        eprintln!(
+            "[reverie-hooks] reverie-codex-hook not found at {}; Codex hooks disabled (rollout fallback remains)",
+            forwarder.display()
+        );
+        return;
+    }
+
+    let token = uuid::Uuid::new_v4().to_string();
+
+    // Commit the token: revoke any token left from a previous launch of this
+    // session (so a stale forwarder can't keep pushing), then authorize the new
+    // one.
+    if let Some((prev_source, prev_token)) =
+        registry.replace(shell_session_id, HookSource::CodexCli, token.clone())
+    {
+        control.revoke_session(prev_source, &prev_token);
+    }
+    control.register_session(HookSource::CodexCli, token.clone(), shell_session_id);
+
+    // (a) Hook definitions + pre-seeded trust, injected as `-c` overrides.
+    spawn_spec
+        .command
+        .args
+        .extend(reverie_core::codex_hooks::codex_hook_config_args(
+            &forwarder,
+        ));
+    // (b) The forwarder reads these from the env to address + authorize its POST.
+    spawn_spec
+        .command
+        .env
+        .insert("REVERIE_HOOK_PORT".to_owned(), control.port.to_string());
+    spawn_spec
+        .command
+        .env
+        .insert("REVERIE_HOOK_TOKEN".to_owned(), token);
 }
 
 /// Refuse launches that would redirect a CLI's credential or config home.

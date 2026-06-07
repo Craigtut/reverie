@@ -1,4 +1,4 @@
-//! Per-session hook config writers for Claude Code (and, later, Codex CLI).
+//! Per-session hook config writer for Claude Code.
 //!
 //! Each launched Claude session gets a private settings file (under Reverie's
 //! cache root, never the user's `~/.claude`) declaring HTTP lifecycle hooks
@@ -10,10 +10,9 @@
 //! whole config + credential tree and force a fresh login.
 //!
 //! Codex is intentionally different: it has no HTTP hook type (command-only)
-//! and its command hooks are trust-gated, so Codex lifecycle state comes from a
-//! rollout-JSONL watcher plus an opt-in, user-trusted command hook (see the
-//! Codex phase). `write_codex_config` below is a placeholder slated for that
-//! rework and is not on the Claude launch path.
+//! and its command hooks are trust-gated, so it is instrumented entirely through
+//! `-c` overrides rather than a written file. That lives in
+//! [`crate::codex_hooks`]; this module is Claude-only.
 //!
 //! This module only writes the files; minting tokens, registering them with
 //! the hook server, and attaching them onto the spawn live in the Tauri shell
@@ -62,15 +61,6 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
 /// sessions constantly, so it must fire for every start source.
 const CLAUDE_TOOL_MATCHED_EVENTS: &[&str] = &["PermissionRequest", "PreToolUse", "PostToolUse"];
 
-const CODEX_HOOK_EVENTS: &[&str] = &[
-    "PermissionRequest",
-    "PreToolUse",
-    "PostToolUse",
-    "Stop",
-    "SessionStart",
-    "UserPromptSubmit",
-];
-
 /// Outcome of a successful config write. The launch path attaches
 /// `config_file` to the spawn (Claude: `--settings <config_file>`). We do not
 /// return an env var to set: redirecting the credential home is exactly what
@@ -105,22 +95,6 @@ pub fn write_claude_settings(config_dir: &Path, hook_url: &str) -> Result<Writte
         serde_json::to_string_pretty(&settings).context("serializing Claude Code settings.json")?;
     let target = config_dir.join("settings.json");
     write_private_file(&target, json.as_bytes())
-        .with_context(|| format!("writing {}", target.display()))?;
-    Ok(WrittenHookConfig {
-        config_dir: config_dir.to_path_buf(),
-        config_file: target,
-    })
-}
-
-/// Placeholder Codex config writer. Codex has no HTTP hook type and trust-gates
-/// command hooks, so this is slated to be reworked into a command-hook forwarder
-/// for the Codex phase and is not on any live launch path today. Kept compiling
-/// so the rework is a focused change rather than a new module.
-pub fn write_codex_config(config_dir: &Path, hook_url: &str) -> Result<WrittenHookConfig> {
-    ensure_private_dir(config_dir)?;
-    let toml = build_codex_config_toml(hook_url);
-    let target = config_dir.join("config.toml");
-    write_private_file(&target, toml.as_bytes())
         .with_context(|| format!("writing {}", target.display()))?;
     Ok(WrittenHookConfig {
         config_dir: config_dir.to_path_buf(),
@@ -170,23 +144,6 @@ fn build_claude_settings(hook_url: &str) -> ClaudeSettings<'_> {
         );
     }
     ClaudeSettings { hooks }
-}
-
-fn build_codex_config_toml(hook_url: &str) -> String {
-    // Codex's hook syntax (per its config-advanced docs at this writing) uses
-    // a `[[hooks.<event>]]` array-of-tables with `type` + `url`. The exact
-    // schema is version-sensitive; this is the conservative shape known to
-    // work for the codex-cli 0.133.x line we ship against. Add/move events
-    // here together with new translator arms in hook_server.rs.
-    let mut out = String::new();
-    out.push_str("# Reverie-managed Codex hook config (per-session).\n");
-    out.push_str("# Do not edit by hand; this file is rewritten on every launch.\n\n");
-    for event in CODEX_HOOK_EVENTS {
-        out.push_str(&format!("[[hooks.{event}]]\n"));
-        out.push_str("type = \"http\"\n");
-        out.push_str(&format!("url  = \"{hook_url}\"\n\n"));
-    }
-    out
 }
 
 fn ensure_private_dir(dir: &Path) -> Result<()> {
@@ -273,29 +230,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn write_codex_config_emits_one_http_entry_per_event() {
-        let dir = TempDir::new().unwrap();
-        let url = "http://127.0.0.1:9000/hooks/codex/tok-2";
-        let written = write_codex_config(dir.path(), url).expect("writes");
-        assert_eq!(written.config_file, dir.path().join("config.toml"));
-
-        let body = fs::read_to_string(&written.config_file).expect("read config.toml");
-        for event in CODEX_HOOK_EVENTS {
-            let needle = format!("[[hooks.{event}]]");
-            assert!(
-                body.contains(&needle),
-                "config.toml missing section for {event}: {body}"
-            );
-        }
-        let url_occurrences = body.matches(url).count();
-        assert_eq!(
-            url_occurrences,
-            CODEX_HOOK_EVENTS.len(),
-            "every event should reference the hook URL: {body}"
-        );
     }
 
     #[cfg(unix)]

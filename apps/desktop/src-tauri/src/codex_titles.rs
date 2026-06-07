@@ -1,9 +1,11 @@
 use std::{
     collections::HashSet,
+    fs::OpenOptions,
+    io::Write,
     path::PathBuf,
     sync::{Mutex, OnceLock},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Result, anyhow};
@@ -13,19 +15,23 @@ use reverie_core::{
     codex_rollout::{read_codex_rollout_state, read_codex_title_context},
     complete_structured, string_object_schema,
 };
-use reverie_core::{domain::AgentKind, domain::SessionId};
+use reverie_core::{
+    domain::SessionId,
+    domain::{AgentKind, SessionStatus},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
 
 const TITLE_CHANGED_EVENT: &str = "terminal_title_changed";
 const SESSION_RECORD_CHANGED_EVENT: &str = "session_record_changed";
+const TITLE_DIAGNOSTICS_FILE: &str = "codex-title-diagnostics.jsonl";
 const TITLE_FIELD: &str = "title";
 const TITLE_SOURCE: &str = "codex_completion";
 const MAX_TITLE_CHARS: usize = 64;
 const MAX_TITLE_CONTEXT_MESSAGES: usize = 4;
 const MAX_TITLE_CONTEXT_CHARS: usize = 6_000;
-const GENERATED_REFRESH_MESSAGE_DELTA: u64 = 3;
+const GENERATED_REFRESH_MESSAGE_DELTA: u64 = 5;
 const CAPTURE_POLL_DELAYS: &[Duration] = &[
     Duration::from_secs(1),
     Duration::from_secs(3),
@@ -78,6 +84,12 @@ pub(crate) fn maybe_schedule_codex_title(
 
 pub(crate) fn maybe_schedule_codex_title_after_capture(app: &AppHandle, session_id: SessionId) {
     let Some(target) = find_target_by_session(app, session_id) else {
+        record_title_diagnostic(
+            app,
+            "target_missing_after_capture",
+            None,
+            json!({ "sessionId": session_id }),
+        );
         return;
     };
     if rollout_is_at_rest(&target) {
@@ -93,9 +105,16 @@ pub(crate) fn maybe_schedule_codex_title_after_capture(app: &AppHandle, session_
         for delay in CAPTURE_POLL_DELAYS {
             thread::sleep(*delay);
             let Some(target) = find_target_by_session(&app, session_id) else {
+                record_title_diagnostic(
+                    &app,
+                    "capture_poll_target_missing",
+                    None,
+                    json!({ "sessionId": session_id }),
+                );
                 break;
             };
             if rollout_is_at_rest(&target) {
+                record_title_diagnostic(&app, "capture_poll_ready", Some(&target), json!({}));
                 schedule_target(app.clone(), target);
                 break;
             }
@@ -106,12 +125,20 @@ pub(crate) fn maybe_schedule_codex_title_after_capture(app: &AppHandle, session_
 
 fn schedule_target(app: AppHandle, target: CodexTitleTarget) {
     if !mark_in_flight(target.session_id) {
+        record_title_diagnostic(&app, "skipped_in_flight", Some(&target), json!({}));
         return;
     }
+    record_title_diagnostic(&app, "scheduled", Some(&target), json!({}));
 
     thread::spawn(move || {
         let session_id = target.session_id;
-        if let Err(error) = run_title_generation(&app, target) {
+        if let Err(error) = run_title_generation(&app, &target) {
+            record_title_diagnostic(
+                &app,
+                "failed",
+                Some(&target),
+                json!({ "error": format!("{error:#}") }),
+            );
             eprintln!("[reverie] Codex title generation failed: {error:#}");
         }
         clear_in_flight(session_id);
@@ -123,6 +150,7 @@ fn find_target(app: &AppHandle, native_session_id: &str) -> Option<CodexTitleTar
     let snapshot = service.snapshot().ok()?;
     let session = snapshot.sessions.iter().find(|session| {
         session.agent_kind == AgentKind::CodexCli
+            && session.status == SessionStatus::Running
             && session
                 .native_session_ref
                 .as_ref()
@@ -143,10 +171,11 @@ fn find_target(app: &AppHandle, native_session_id: &str) -> Option<CodexTitleTar
 fn find_target_by_session(app: &AppHandle, session_id: SessionId) -> Option<CodexTitleTarget> {
     let service = app.try_state::<WorkspaceService>()?;
     let snapshot = service.snapshot().ok()?;
-    let session = snapshot
-        .sessions
-        .iter()
-        .find(|session| session.id == session_id && session.agent_kind == AgentKind::CodexCli)?;
+    let session = snapshot.sessions.iter().find(|session| {
+        session.id == session_id
+            && session.agent_kind == AgentKind::CodexCli
+            && session.status == SessionStatus::Running
+    })?;
     let native = session.native_session_ref.as_ref()?;
     let rollout_path = native.metadata_path.clone()?;
     Some(CodexTitleTarget {
@@ -170,13 +199,14 @@ fn rollout_is_at_rest(target: &CodexTitleTarget) -> bool {
         })
 }
 
-fn run_title_generation(app: &AppHandle, target: CodexTitleTarget) -> Result<()> {
+fn run_title_generation(app: &AppHandle, target: &CodexTitleTarget) -> Result<()> {
     let Some(context) = read_codex_title_context(
         &target.rollout_path,
         MAX_TITLE_CONTEXT_MESSAGES,
         MAX_TITLE_CONTEXT_CHARS,
     )?
     else {
+        record_title_diagnostic(app, "skipped_no_context", Some(target), json!({}));
         return Ok(());
     };
     if context.user_messages.is_empty()
@@ -186,13 +216,33 @@ fn run_title_generation(app: &AppHandle, target: CodexTitleTarget) -> Result<()>
             context.user_message_count,
         )
     {
+        record_title_diagnostic(
+            app,
+            "skipped_not_eligible",
+            Some(target),
+            json!({
+                "userMessageCount": context.user_message_count,
+                "sequence": context.sequence,
+                "hasUserMessages": !context.user_messages.is_empty(),
+            }),
+        );
         return Ok(());
     }
 
+    record_title_diagnostic(
+        app,
+        "completion_started",
+        Some(target),
+        json!({
+            "userMessageCount": context.user_message_count,
+            "sequence": context.sequence,
+        }),
+    );
     let schema = string_object_schema(TITLE_FIELD, "A short title for this agent session.");
     let prompt = build_title_prompt(&context.user_messages);
-    let request = CompletionRequest::structured(AgentKind::CodexCli, target.cwd, prompt, schema)
-        .with_timeout(Duration::from_secs(45));
+    let request =
+        CompletionRequest::structured(AgentKind::CodexCli, target.cwd.clone(), prompt, schema)
+            .with_timeout(Duration::from_secs(45));
     let value = complete_structured(&request)?;
     let title = sanitize_title(value.get(TITLE_FIELD).and_then(Value::as_str))
         .ok_or_else(|| anyhow!("completion did not return a usable title"))?;
@@ -212,8 +262,73 @@ fn run_title_generation(app: &AppHandle, target: CodexTitleTarget) -> Result<()>
         title.clone(),
         generated_payload,
     )?;
+    record_title_diagnostic(
+        app,
+        "title_updated",
+        Some(target),
+        json!({
+            "title": title,
+            "userMessageCount": context.user_message_count,
+            "sequence": context.sequence,
+        }),
+    );
     emit_title_changed(app, target.session_id, title);
     Ok(())
+}
+
+fn record_title_diagnostic(
+    app: &AppHandle,
+    event: &str,
+    target: Option<&CodexTitleTarget>,
+    details: Value,
+) {
+    if !crate::commands::is_dev_channel(app) {
+        return;
+    }
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(TITLE_DIAGNOSTICS_FILE);
+    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+
+    let mut entry = serde_json::Map::new();
+    entry.insert("atMs".to_owned(), json!(unix_time_millis()));
+    entry.insert("event".to_owned(), json!(event));
+    if let Some(target) = target {
+        entry.insert("sessionId".to_owned(), json!(target.session_id));
+        entry.insert("cwd".to_owned(), json!(target.cwd.display().to_string()));
+        entry.insert(
+            "rolloutPath".to_owned(),
+            json!(target.rollout_path.display().to_string()),
+        );
+        entry.insert("currentTitle".to_owned(), json!(target.current_title));
+        entry.insert(
+            "generatedUserMessageCount".to_owned(),
+            json!(
+                target
+                    .marker
+                    .as_ref()
+                    .and_then(|marker| marker.user_message_count)
+            ),
+        );
+    }
+    entry.insert("details".to_owned(), details);
+
+    if let Ok(encoded) = serde_json::to_string(&Value::Object(entry)) {
+        let _ = writeln!(file, "{encoded}");
+    }
+}
+
+fn unix_time_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 fn should_generate_title(
@@ -376,8 +491,8 @@ mod tests {
             title: Some("Fix Parser".to_owned()),
             user_message_count: Some(2),
         };
-        assert!(!should_generate_title("Fix Parser", Some(&marker), 4));
-        assert!(should_generate_title("Fix Parser", Some(&marker), 5));
+        assert!(!should_generate_title("Fix Parser", Some(&marker), 6));
+        assert!(should_generate_title("Fix Parser", Some(&marker), 7));
         assert!(!should_generate_title("User Renamed", Some(&marker), 8));
     }
 

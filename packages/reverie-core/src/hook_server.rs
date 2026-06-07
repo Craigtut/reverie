@@ -35,11 +35,14 @@ use serde_json::Value;
 use tiny_http::{Method, Response, Server, StatusCode};
 
 use crate::activity::{
-    ActiveTool, ActivityError, ActivityState, ActivityStatus, ErrorCategory, ExitReason, FinalExit,
-    PermissionRequest,
+    ActiveTool, ActivityError, ActivityState, ActivityStatus, ActivityTurn, ErrorCategory,
+    ExitReason, FinalExit, PermissionRequest, TurnStatus,
 };
 use crate::activity_source::{ActivitySourceKind, ActivityUpdate, Fidelity, SessionKey};
 use crate::domain::SessionId;
+// Producer hook payloads carry their own timestamps in practice; the shared
+// helper supplies a dependency-free ISO 8601 fallback for the rare omission.
+use crate::time::now_iso8601;
 
 const ACTIVITY_VERSION: u32 = 1;
 
@@ -382,6 +385,11 @@ struct HookEnvelope {
     tool_name: Option<String>,
     #[serde(default)]
     tool_input: Option<Value>,
+    /// The turn this event belongs to (Codex turn-scoped hooks; a time-ordered
+    /// UUIDv7). The reconciler keys turn lifecycle off it so a stale end edge
+    /// can't idle a newer working turn. Absent on non-turn events (SessionStart).
+    #[serde(default)]
+    turn_id: Option<String>,
     #[serde(default)]
     error_type: Option<String>,
     #[serde(default)]
@@ -572,37 +580,61 @@ fn translate_codex(
     let sequence = next_sequence(sequences, &session_id);
     let cwd = envelope.cwd.clone().unwrap_or_default();
 
+    let turn_id = envelope.turn_id.as_deref();
     let state = match envelope.hook_event_name.as_str() {
-        "PermissionRequest" => build_state_awaiting_permission(
-            &session_id,
-            timestamp,
-            sequence,
-            cwd,
-            envelope.tool_name.as_deref().unwrap_or("tool"),
-            envelope.tool_input.as_ref(),
-        ),
-        "PreToolUse" | "PostToolUse" | "SessionStart" | "UserPromptSubmit" => build_simple_state(
+        // Blocked on an approval for this turn.
+        "PermissionRequest" => {
+            let mut state = build_state_awaiting_permission(
+                &session_id,
+                timestamp.clone(),
+                sequence,
+                cwd,
+                envelope.tool_name.as_deref().unwrap_or("tool"),
+                envelope.tool_input.as_ref(),
+            );
+            state.turn = codex_turn(turn_id, &timestamp, ActivityStatus::AwaitingPermission);
+            state
+        }
+        // Turn start, and (defensively) the tool edges we don't normally install:
+        // the agent is working on `turn_id`.
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => build_codex_turn_state(
             &session_id,
             timestamp,
             sequence,
             cwd,
             ActivityStatus::Working,
+            turn_id,
         ),
-        "Stop" => build_simple_state(
+        // Turn end (clean completion only). Esc/interrupt and turn errors never
+        // fire Stop; the rollout's turn_aborted edge backstops those.
+        "Stop" => build_codex_turn_state(
             &session_id,
             timestamp,
             sequence,
             cwd,
             ActivityStatus::AwaitingInput,
+            turn_id,
+        ),
+        // Session (re)start: not a turn. Its job is to capture the native id the
+        // instant the session starts; the resting state is idle-at-the-prompt,
+        // NOT working (a fresh/just-resumed session has no turn yet).
+        "SessionStart" => build_codex_turn_state(
+            &session_id,
+            timestamp,
+            sequence,
+            cwd,
+            ActivityStatus::AwaitingInput,
+            None,
         ),
         // Mirror translate_claude: unknown but well-formed events become a
         // Working heartbeat instead of being silently dropped.
-        _ => build_simple_state(
+        _ => build_codex_turn_state(
             &session_id,
             timestamp,
             sequence,
             cwd,
             ActivityStatus::Working,
+            turn_id,
         ),
     };
 
@@ -628,6 +660,52 @@ fn build_simple_state(
         sequence,
         cwd,
         turn: None,
+        active_tools: Vec::new(),
+        awaiting_permission: None,
+        last_error: None,
+        final_exit: None,
+    }
+}
+
+/// The turn descriptor for a Codex turn-scoped event, or `None` for a turn-less
+/// event (SessionStart). The reconciler keys turn lifecycle off `turn.id`, so
+/// carrying it is what lets a stale end edge be told apart from a current one.
+fn codex_turn(
+    turn_id: Option<&str>,
+    timestamp: &str,
+    status: ActivityStatus,
+) -> Option<ActivityTurn> {
+    turn_id.map(|id| ActivityTurn {
+        id: id.to_owned(),
+        status: match status {
+            ActivityStatus::AwaitingInput | ActivityStatus::Done | ActivityStatus::Error => {
+                TurnStatus::Completed
+            }
+            _ => TurnStatus::Running,
+        },
+        started_at: timestamp.to_owned(),
+        ended_at: None,
+    })
+}
+
+/// A Codex status state stamped with its turn, so the reconciler can order it.
+fn build_codex_turn_state(
+    session_id: &str,
+    timestamp: String,
+    sequence: u64,
+    cwd: String,
+    status: ActivityStatus,
+    turn_id: Option<&str>,
+) -> ActivityState {
+    let turn = codex_turn(turn_id, &timestamp, status);
+    ActivityState {
+        version: ACTIVITY_VERSION,
+        session_id: session_id.to_owned(),
+        status,
+        updated_at: timestamp,
+        sequence,
+        cwd,
+        turn,
         active_tools: Vec::new(),
         awaiting_permission: None,
         last_error: None,
@@ -784,70 +862,6 @@ fn error_category_from_claude_label(label: &str) -> ErrorCategory {
         "cancelled" => ErrorCategory::Cancelled,
         _ => ErrorCategory::Other,
     }
-}
-
-fn now_iso8601() -> String {
-    // Producer hook payloads carry their own timestamps in practice; this
-    // fallback uses seconds-since-epoch in ISO 8601 form so the output still
-    // sorts correctly when a producer omits the field. We deliberately keep
-    // this dependency-free.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let secs = now;
-    // Cheap UTC formatter for "YYYY-MM-DDTHH:MM:SSZ"; correct for all dates
-    // 1970..year 9999. Avoids pulling in `chrono`/`time` just for a fallback.
-    let (year, month, day, hour, minute, second) = unix_secs_to_ymdhms(secs);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
-}
-
-fn unix_secs_to_ymdhms(mut secs: u64) -> (u64, u32, u32, u32, u32, u32) {
-    let second = (secs % 60) as u32;
-    secs /= 60;
-    let minute = (secs % 60) as u32;
-    secs /= 60;
-    let hour = (secs % 24) as u32;
-    let mut days = secs / 24;
-    let mut year: u64 = 1970;
-    loop {
-        let leap = is_leap_year(year);
-        let year_days = if leap { 366 } else { 365 };
-        if days < year_days {
-            break;
-        }
-        days -= year_days;
-        year += 1;
-    }
-    let leap = is_leap_year(year);
-    let month_lengths = [
-        31,
-        if leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month: u32 = 1;
-    for (idx, length) in month_lengths.iter().enumerate() {
-        if days < *length as u64 {
-            month = idx as u32 + 1;
-            break;
-        }
-        days -= *length as u64;
-    }
-    let day = days as u32 + 1;
-    (year, month, day, hour, minute, second)
-}
-
-fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 #[cfg(test)]

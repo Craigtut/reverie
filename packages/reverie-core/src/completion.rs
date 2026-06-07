@@ -23,6 +23,19 @@ use crate::{
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_COMPLETION_DISABLED_FEATURES: &[&str] = &[
+    "hooks",
+    "plugins",
+    "image_generation",
+    "browser_use",
+    "browser_use_external",
+    "computer_use",
+    "in_app_browser",
+    "standalone_web_search",
+    "web_search_cached",
+    "web_search_request",
+    "search_tool",
+];
 
 #[derive(Clone, Debug)]
 pub struct CompletionRequest {
@@ -94,28 +107,39 @@ fn detect_executable(agent_kind: AgentKind) -> Result<PathBuf> {
 
 fn complete_with_codex(executable: &Path, request: &CompletionRequest) -> Result<Value> {
     let schema_file = write_schema_file(&request.schema)?;
-    let mut args = vec![
+    let args = codex_completion_args(schema_file.path(), request);
+
+    let output = run_with_timeout(executable, &args, &request.cwd, request.timeout)?;
+    ensure_success("Codex completion", output)
+        .and_then(|stdout| parse_json_stdout(&stdout).context("parse Codex structured output"))
+}
+
+fn codex_completion_args(schema_path: &Path, request: &CompletionRequest) -> Vec<String> {
+    let mut args = vec!["--ask-for-approval".to_owned(), "never".to_owned()];
+    for feature in CODEX_COMPLETION_DISABLED_FEATURES {
+        args.push("--disable".to_owned());
+        args.push((*feature).to_owned());
+    }
+    args.extend([
         "exec".to_owned(),
         "--ephemeral".to_owned(),
         "--skip-git-repo-check".to_owned(),
         "--sandbox".to_owned(),
         "read-only".to_owned(),
-        "--ask-for-approval".to_owned(),
-        "never".to_owned(),
+        "--ignore-rules".to_owned(),
         "-c".to_owned(),
-        "model_reasoning_effort=\"minimal\"".to_owned(),
+        "model_reasoning_effort=\"low\"".to_owned(),
+        "--color".to_owned(),
+        "never".to_owned(),
         "--output-schema".to_owned(),
-        schema_file.path().to_string_lossy().into_owned(),
-    ];
+        schema_path.to_string_lossy().into_owned(),
+    ]);
     if let Some(model) = &request.model {
         args.push("--model".to_owned());
         args.push(model.clone());
     }
     args.push(request.prompt.clone());
-
-    let output = run_with_timeout(executable, &args, &request.cwd, request.timeout)?;
-    ensure_success("Codex completion", output)
-        .and_then(|stdout| parse_json_stdout(&stdout).context("parse Codex structured output"))
+    args
 }
 
 fn complete_with_claude(executable: &Path, request: &CompletionRequest) -> Result<Value> {
@@ -217,9 +241,37 @@ fn ensure_success(label: &str, output: CommandOutput) -> Result<String> {
     let stderr = output.stderr.trim();
     let stdout = output.stdout.trim();
     if stderr.is_empty() {
-        bail!("{label} failed: {stdout}");
+        bail!("{label} failed: {}", summarize_completion_error(stdout));
     }
-    bail!("{label} failed: {stderr}");
+    bail!("{label} failed: {}", summarize_completion_error(stderr));
+}
+
+fn summarize_completion_error(text: &str) -> String {
+    let messages: Vec<_> = text
+        .lines()
+        .filter_map(|line| {
+            let marker_index = line.find("\"message\":")?;
+            let raw = line[marker_index + "\"message\":".len()..]
+                .trim()
+                .trim_end_matches(',');
+            serde_json::from_str::<String>(raw).ok()
+        })
+        .collect();
+    if !messages.is_empty() {
+        return messages.join("; ");
+    }
+
+    let lines: Vec<_> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .rev()
+        .take(6)
+        .collect();
+    if lines.is_empty() {
+        return "completion process failed without output".to_owned();
+    }
+    lines.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
 fn parse_json_stdout(stdout: &str) -> Result<Value> {
@@ -357,5 +409,69 @@ mod tests {
         assert!(
             validate_schema_subset(&serde_json::json!({"name":"Fix parser"}), &schema).is_err()
         );
+    }
+
+    #[test]
+    fn codex_completion_args_put_approval_before_exec() {
+        let request = CompletionRequest::structured(
+            AgentKind::CodexCli,
+            "/tmp",
+            "Return a title",
+            string_object_schema("title", "short title"),
+        );
+        let args = codex_completion_args(Path::new("/tmp/schema.json"), &request);
+        let approval_index = args
+            .iter()
+            .position(|arg| arg == "--ask-for-approval")
+            .unwrap();
+        let exec_index = args.iter().position(|arg| arg == "exec").unwrap();
+        assert!(approval_index < exec_index);
+        assert!(
+            args.windows(2)
+                .any(|window| { window[0] == "--disable" && window[1] == "image_generation" })
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "--disable" && window[1] == "hooks")
+        );
+        assert!(!args.iter().any(|arg| arg == "image_gen"));
+        assert!(!args.iter().any(|arg| arg == "web_search"));
+        assert!(args.iter().any(|arg| arg == "--ignore-rules"));
+        assert!(
+            args.windows(2).any(|window| {
+                window[0] == "-c" && window[1] == "model_reasoning_effort=\"low\""
+            })
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "--color" && window[1] == "never")
+        );
+        assert!(
+            args.windows(2).any(|window| {
+                window[0] == "--output-schema" && window[1] == "/tmp/schema.json"
+            })
+        );
+    }
+
+    #[test]
+    fn completion_error_summary_keeps_api_message_only() {
+        let stderr = r#"OpenAI Codex v0.137.0
+user
+private prompt text
+ERROR: {
+  "type": "error",
+  "error": {
+    "type": "invalid_request_error",
+    "message": "The following tools cannot be used with reasoning.effort 'minimal': image_gen, web_search.",
+    "param": "tools"
+  },
+  "status": 400
+}"#;
+        let summary = summarize_completion_error(stderr);
+        assert_eq!(
+            summary,
+            "The following tools cannot be used with reasoning.effort 'minimal': image_gen, web_search."
+        );
+        assert!(!summary.contains("private prompt text"));
     }
 }
