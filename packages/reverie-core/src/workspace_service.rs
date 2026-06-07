@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde_json::{Map, Value};
 
 use crate::activity::{ActivityState, ActivityStatus, TurnStatus};
 use crate::agents::{
@@ -496,6 +497,42 @@ impl WorkspaceService {
         self.update_session(session_id, |session| {
             session.title = title;
         })
+    }
+
+    /// Persist a generated title and its adapter-specific generation metadata in
+    /// one write. Generated title callers use the metadata to avoid repeating
+    /// cheap completion calls for the same transcript state.
+    pub fn set_generated_session_title(
+        &self,
+        session_id: SessionId,
+        expected_kind: AgentKind,
+        title: String,
+        generated_title_payload: Value,
+    ) -> Result<WorkspaceSnapshot> {
+        let title = required_text(title, "session title")?;
+        let mut session = self
+            .repo
+            .get_session(session_id)?
+            .ok_or_else(|| anyhow!("unknown Reverie session {session_id}"))?;
+        if session.agent_kind != expected_kind {
+            bail!(
+                "cannot set {:?} generated title on {:?} session",
+                expected_kind,
+                session.agent_kind
+            );
+        }
+        session.title = title;
+        let Some(native) = session.native_session_ref.as_mut() else {
+            bail!("cannot set generated title without a native session ref");
+        };
+        let mut payload = match std::mem::take(&mut native.adapter_payload) {
+            Value::Object(object) => object,
+            _ => Map::new(),
+        };
+        payload.insert("generatedTitle".to_owned(), generated_title_payload);
+        native.adapter_payload = Value::Object(payload);
+        self.repo.upsert_session(&session)?;
+        Ok(self.repo.load_snapshot()?)
     }
 
     /// Explicit Cortex capture (FE-triggered): read the session's `meta.json`,
@@ -1331,6 +1368,54 @@ mod tests {
         assert!(service.set_session_title(id, "   ".to_owned()).is_err());
         let after = service.snapshot().unwrap();
         assert_eq!(after.sessions[0].title, "Fixing the parser");
+    }
+
+    #[test]
+    fn set_generated_session_title_merges_native_payload() {
+        let (repo, service) = service();
+        let focus = make_focus(&service);
+        let snapshot = service
+            .create_session(
+                focus,
+                "Codex".to_owned(),
+                AgentKind::CodexCli,
+                "/tmp".into(),
+                None,
+            )
+            .unwrap();
+        let mut session = snapshot.sessions[0].clone();
+        session.native_session_ref = Some(NativeSessionRef {
+            kind: AgentKind::CodexCli,
+            session_id: Some("codex-native".to_owned()),
+            metadata_path: None,
+            adapter_payload: serde_json::json!({ "kept": true }),
+        });
+        repo.upsert_session(&session).unwrap();
+
+        let updated = service
+            .set_generated_session_title(
+                session.id,
+                AgentKind::CodexCli,
+                "Fix parser tests".to_owned(),
+                serde_json::json!({
+                    "source": "codex_completion",
+                    "title": "Fix parser tests",
+                    "userMessageCount": 2,
+                }),
+            )
+            .unwrap();
+        let session = updated
+            .sessions
+            .iter()
+            .find(|candidate| candidate.id == session.id)
+            .unwrap();
+        assert_eq!(session.title, "Fix parser tests");
+        let payload = &session.native_session_ref.as_ref().unwrap().adapter_payload;
+        assert_eq!(payload["kept"], true);
+        assert_eq!(
+            payload["generatedTitle"]["userMessageCount"],
+            serde_json::json!(2)
+        );
     }
 
     #[test]

@@ -14,6 +14,8 @@ use reverie_core::activity_source::{ActivitySourceKind, ActivityUpdate, SessionK
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::codex_titles::maybe_schedule_codex_title;
+
 const SESSION_ACTIVITY_EVENT: &str = "session_activity_changed";
 /// Emitted when an update captures a CLI's native session id into a session
 /// record for the first time. The frontend refetches the workspace snapshot on
@@ -60,14 +62,18 @@ pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
             source, key, state, ..
         } => {
             let native_session_id = native_id_for(&key, &state);
+            let status = state.status;
             emit(
                 app,
                 SessionActivityEvent::Updated {
                     source,
-                    native_session_id,
+                    native_session_id: native_session_id.clone(),
                     state,
                 },
             );
+            if source == ActivitySourceKind::CodexCli {
+                maybe_schedule_codex_title(app, &native_session_id, status);
+            }
             // First sight of this session's native id: the record only now
             // carries the ref the dashboard binds activity against, so prompt a
             // snapshot refetch.

@@ -10,6 +10,7 @@ pub mod agents;
 pub mod bridge_protocol;
 pub mod bridge_server;
 pub mod codex_rollout;
+pub mod completion;
 pub mod connection;
 pub mod connection_repository;
 pub mod connection_service;
@@ -40,6 +41,7 @@ pub use bridge_server::{
     dispatch_request, handle_handshake, serve_connection,
 };
 pub use codex_rollout::CodexLogSource;
+pub use completion::{CompletionRequest, complete_structured, string_object_schema};
 pub use connection::{
     Connection, ConnectionClosedBy, ConnectionId, ConnectionInitiator, ConnectionMessage,
     ConnectionPolicy, ConnectionStatus, ConnectionTransitionError, MessageId, PendingRequest,

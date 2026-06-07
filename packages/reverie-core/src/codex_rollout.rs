@@ -59,6 +59,13 @@ pub struct CodexRolloutMeta {
     pub cwd: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexTitleContext {
+    pub user_messages: Vec<String>,
+    pub user_message_count: u64,
+    pub sequence: u64,
+}
+
 /// Read the `session_meta` identity (native id + cwd) from a rollout file, or
 /// `None` if it has not been written yet. Metadata-only: stops at the first
 /// `session_meta` (the first record) within a small line budget.
@@ -86,6 +93,44 @@ pub fn read_codex_rollout_meta(path: &Path) -> Option<CodexRolloutMeta> {
         }
     }
     None
+}
+
+pub fn read_codex_title_context(
+    path: &Path,
+    max_messages: usize,
+    max_total_chars: usize,
+) -> Result<Option<CodexTitleContext>> {
+    let reader = BufReader::new(
+        fs::File::open(path).with_context(|| format!("open Codex rollout {}", path.display()))?,
+    );
+    let mut sequence = 0_u64;
+    let mut user_messages = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<RolloutLine>(line) else {
+            continue;
+        };
+        sequence += 1;
+        if let Some(message) = extract_user_message_text(&record.payload) {
+            user_messages.push(message);
+        }
+    }
+
+    if user_messages.is_empty() {
+        return Ok(None);
+    }
+    let user_message_count = user_messages.len() as u64;
+    let user_messages = recent_messages_with_budget(user_messages, max_messages, max_total_chars);
+    Ok(Some(CodexTitleContext {
+        user_messages,
+        user_message_count,
+        sequence,
+    }))
 }
 
 /// The Codex source: recognizes `rollout-*.jsonl` files and makes folds. This is
@@ -119,7 +164,7 @@ pub fn is_rollout_path(path: &Path) -> bool {
 /// (an appended tail may end mid-line): complete lines are processed, the
 /// remainder is kept for the next chunk. `sequence` counts processed records so
 /// a later read is always strictly newer. This is the whole reason the watcher
-/// is cheap — it folds only new records, never the accumulated history.
+/// is cheap, it folds only new records, never the accumulated history.
 pub struct CodexRolloutFold {
     partial: String,
     session_id: Option<String>,
@@ -510,6 +555,116 @@ fn command_to_string(command: &Value) -> String {
     }
 }
 
+fn extract_user_message_text(payload: &Value) -> Option<String> {
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    if payload_type == "message" && payload.get("role").and_then(Value::as_str) == Some("user") {
+        return message_text_from_value(payload.get("content")?);
+    }
+    if payload_type == "user_message" {
+        if let Some(text) = payload
+            .get("text_elements")
+            .and_then(message_text_from_value)
+        {
+            return Some(text);
+        }
+        if let Some(text) = payload.get("content").and_then(message_text_from_value) {
+            return Some(text);
+        }
+        return payload.get("text").and_then(message_text_from_value);
+    }
+    if payload
+        .get("message")
+        .and_then(|message| message.get("role").and_then(Value::as_str))
+        == Some("user")
+    {
+        return payload
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(message_text_from_value);
+    }
+    None
+}
+
+fn message_text_from_value(value: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    collect_message_text(value, &mut parts);
+    let text = parts.join("\n\n");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn collect_message_text(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::String(text) => push_message_part(text, parts),
+        Value::Array(items) => {
+            for item in items {
+                collect_message_text(item, parts);
+            }
+        }
+        Value::Object(object) => {
+            for key in ["text", "content", "text_elements", "parts"] {
+                if let Some(child) = object.get(key) {
+                    collect_message_text(child, parts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_message_part(text: &str, parts: &mut Vec<String>) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || is_codex_context_injection(trimmed) {
+        return;
+    }
+    parts.push(trimmed.to_owned());
+}
+
+fn is_codex_context_injection(text: &str) -> bool {
+    text.starts_with("# AGENTS.md instructions")
+        || text.starts_with("<environment_context>")
+        || text.starts_with("<developer_context>")
+        || text.contains("<INSTRUCTIONS>")
+}
+
+fn recent_messages_with_budget(
+    user_messages: Vec<String>,
+    max_messages: usize,
+    max_total_chars: usize,
+) -> Vec<String> {
+    if max_messages == 0 || max_total_chars == 0 {
+        return Vec::new();
+    }
+    let mut remaining = max_total_chars;
+    let mut recent = Vec::new();
+    for message in user_messages.into_iter().rev().take(max_messages) {
+        if remaining == 0 {
+            break;
+        }
+        let clipped = truncate_chars(&message, remaining);
+        remaining = remaining.saturating_sub(clipped.chars().count());
+        recent.push(clipped);
+    }
+    recent.reverse();
+    recent
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars <= 3 {
+        return text.chars().take(max_chars).collect();
+    }
+    let mut clipped: String = text.chars().take(max_chars - 3).collect();
+    clipped.push_str("...");
+    clipped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +761,58 @@ mod tests {
     }
 
     const META: &str = r#"{"timestamp":"2026-05-30T02:35:54.030Z","type":"session_meta","payload":{"id":"019e-codex","cwd":"/Users/dev/proj","cli_version":"0.135.0"}}"#;
+
+    #[test]
+    fn title_context_reads_recent_user_messages_and_skips_context_injections() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-title.jsonl",
+            &[
+                META,
+                r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\n<INSTRUCTIONS>ignore</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n<cwd>/tmp</cwd>"}]}}"##,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the parser tests"}]}}"#,
+                r#"{"type":"event_msg","payload":{"type":"user_message","text_elements":[{"text":"Add Codex title generation"}]}}"#,
+            ],
+        );
+
+        let context = read_codex_title_context(&path, 4, 10_000)
+            .unwrap()
+            .expect("title context");
+        assert_eq!(context.user_message_count, 2);
+        assert_eq!(
+            context.user_messages,
+            vec![
+                "Fix the parser tests".to_owned(),
+                "Add Codex title generation".to_owned(),
+            ]
+        );
+        assert_eq!(context.sequence, 4);
+    }
+
+    #[test]
+    fn title_context_applies_message_and_char_budgets_from_the_end() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-title-budget.jsonl",
+            &[
+                META,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first message"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second message"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"third message with extra detail"}]}}"#,
+            ],
+        );
+
+        let context = read_codex_title_context(&path, 2, 20)
+            .unwrap()
+            .expect("title context");
+        assert_eq!(context.user_message_count, 3);
+        assert_eq!(
+            context.user_messages,
+            vec!["third message wit...".to_owned()]
+        );
+    }
 
     #[test]
     fn folds_working_then_idle_with_tool_detail() {

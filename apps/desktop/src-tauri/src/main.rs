@@ -6,6 +6,7 @@ mod agent_trust;
 mod bridge;
 #[cfg(unix)]
 mod bridge_installer;
+mod codex_titles;
 mod commands;
 #[cfg(unix)]
 mod connection_commands;
