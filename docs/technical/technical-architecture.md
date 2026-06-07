@@ -62,7 +62,7 @@ Fields:
 - created_at
 - updated_at
 - last_opened_at
-- archived_at nullable
+- archived (curation bit; see [Curation lifecycle](#curation-lifecycle-archive--restore--delete))
 
 Constraints:
 
@@ -82,7 +82,7 @@ Fields:
 - sort_order
 - created_at
 - updated_at
-- archived_at nullable
+- archived (curation bit; see [Curation lifecycle](#curation-lifecycle-archive--restore--delete))
 
 A null `project_id` means the focus belongs to the general workspace.
 
@@ -102,6 +102,7 @@ Fields:
 - dangerous_mode_override nullable
 - status: `not_started`, `running`, `exited`, `restorable`, `restore_failed`
 - last_exit_code nullable
+- archived (curation bit; see [Curation lifecycle](#curation-lifecycle-archive--restore--delete))
 - created_at
 - updated_at
 - last_started_at nullable
@@ -122,6 +123,43 @@ Common shape:
 ```
 
 Adapter-specific data should be stored as JSON so Reverie can support different restore mechanisms without schema churn.
+
+### Curation lifecycle (archive / restore / delete)
+
+Where a node lives in the user's map is **one axis**, separate from a session's
+runtime/activity state (`fresh / active / finished / idle / attention`, derived,
+not stored). Every project, focus, and session carries a single boolean
+`archived` bit, and three operations move a node along the axis:
+
+- **Archive** (soft, reversible): set the node's own `archived` bit. Closing a
+  session archives it; "Remove" archives a topic or project. Archiving a parent
+  stops any running descendant processes but does **not** write the descendants'
+  bits.
+- **Restore**: clear the bit. Sessions restore from a focus's archived list;
+  topics from the project dashboard's "Archived topics"; a project reconnects
+  when its folder is re-added (see below).
+- **Delete** (hard, permanent, always confirmed): `delete_session` /
+  `delete_focus` (cascade to its sessions) / `delete_project` (cascade to its
+  topics and their sessions). The project purge lives in Settings → Archived
+  projects.
+
+**Visibility is computed by walking ancestry, never by writing children.** A
+node is *effectively archived* when its own bit is set OR any ancestor is
+archived; Home, the sidebar, the dashboards, navigation, and the command palette
+all show exactly the not-effectively-archived set (frontend `domain/archive.ts`).
+Archiving a project therefore hides its whole subtree by flipping one bit, and
+restoring it reveals the subtree exactly as it was, with any individually
+archived descendant correctly staying archived. This is what keeps restore
+lossless and stops the class of bug where a soft-hidden descendant leaks onto one
+surface but not another. There is no separate per-session visibility flag.
+
+**Project re-add reconnects.** A project is anchored to a folder, so re-adding
+that folder is its restore: `create_project` compares the new path against
+existing projects by canonical path and, if it matches an **archived** one,
+clears that record's bit (reviving its topics and sessions) and floats it to the
+top of the rail instead of creating a duplicate. An active-path match still
+errors ("already in Reverie"). Because re-add is the restore path, archived
+projects have no Restore button; Settings lists them with a permanent purge only.
 
 ## Persistence
 
@@ -346,12 +384,15 @@ Initial command candidates:
 - `set_onboarding_preferences`
 - `detect_agent_clis`
 - `list_projects`
-- `add_project`
+- `add_project` (reconnects an archived project when its folder is re-added)
 - `archive_project`
+- `delete_project` (permanent purge of an archived project + its subtree)
 - `list_foci`
 - `create_focus`
 - `update_focus`
 - `archive_focus`
+- `restore_focus`
+- `delete_focus`
 - `list_sessions`
 - `create_session`
 - `start_session`

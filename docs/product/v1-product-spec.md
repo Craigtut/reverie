@@ -251,4 +251,9 @@ Needs dedicated adapter research for:
 2. Whether `Focus` is final product language or should be softened further in UI copy.
 3. How much terminal chrome to expose around each session tab.
 4. Whether a session can move between foci/projects in v1.
-5. Whether closing a session tab means hide, stop process, archive, or user-selectable behavior.
+
+Resolved:
+
+- Closing a session tab **archives** it: a soft delete that stops the process and
+  is restorable from the focus's history. Archive / restore / delete is one
+  curation axis shared by projects, focuses, and sessions; see [Curation lifecycle](../technical/technical-architecture.md#curation-lifecycle-archive--restore--delete).
