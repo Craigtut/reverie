@@ -58,8 +58,8 @@ pub use connection_service::{
 };
 pub use cortex_state::CortexStateSource;
 pub use domain::{
-    AgentKind, Focus, NativeSessionRef, Project, Session, SessionStatus, Workspace,
-    WorkspaceSnapshot,
+    AgentKind, Focus, NativeSessionRef, Project, Session, SessionStateTimeline, SessionStatus,
+    Workspace, WorkspaceSnapshot,
 };
 pub use hook_config::{WrittenHookConfig, hook_url, write_claude_settings};
 pub use hook_server::{HookServerControl, HookServerHandle, HookSource, start_hook_server};

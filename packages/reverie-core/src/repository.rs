@@ -69,13 +69,24 @@ pub trait WorkspaceRepository: Send + Sync {
         native_session_ref: NativeSessionRef,
     ) -> RepoResult<bool>;
 
-    /// Archive a project, archive its focuses, and hide the tabs of sessions in
-    /// those focuses, atomically. Errors NotFound if the project is unknown.
-    fn archive_project_cascade(&self, id: ProjectId) -> RepoResult<()>;
+    /// Set a project's own archived bit. Its focuses and sessions are not
+    /// touched: they are hidden (or revealed) by walking ancestry, so restoring
+    /// the project brings everything back exactly as it was, with any
+    /// individually-archived descendant correctly staying archived. Errors
+    /// NotFound if the project is unknown.
+    fn set_project_archived(&self, id: ProjectId, archived: bool) -> RepoResult<()>;
 
-    /// Archive a focus and hide the tabs of its sessions, atomically. Errors
+    /// Set a focus's own archived bit. Its sessions are not touched (see
+    /// [`Self::set_project_archived`]). Errors NotFound if the focus is unknown.
+    fn set_focus_archived(&self, id: FocusId, archived: bool) -> RepoResult<()>;
+
+    /// Permanently delete a project together with its focuses and their
+    /// sessions, atomically. Errors NotFound if the project is unknown.
+    fn delete_project_cascade(&self, id: ProjectId) -> RepoResult<()>;
+
+    /// Permanently delete a focus together with its sessions, atomically. Errors
     /// NotFound if the focus is unknown.
-    fn archive_focus_cascade(&self, id: FocusId) -> RepoResult<()>;
+    fn delete_focus_cascade(&self, id: FocusId) -> RepoResult<()>;
 }
 
 #[derive(Default)]
@@ -255,7 +266,7 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
         Ok(true)
     }
 
-    fn archive_project_cascade(&self, id: ProjectId) -> RepoResult<()> {
+    fn set_project_archived(&self, id: ProjectId, archived: bool) -> RepoResult<()> {
         let mut state = self.lock()?;
         let Some(project) = state.projects.iter_mut().find(|p| p.id == id) else {
             return Err(PersistenceError::NotFound {
@@ -263,29 +274,11 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
                 id: id.to_string(),
             });
         };
-        project.archived = true;
-
-        let focus_ids: Vec<FocusId> = state
-            .focuses
-            .iter_mut()
-            .filter(|focus| focus.project_id == Some(id))
-            .map(|focus| {
-                focus.archived = true;
-                focus.id
-            })
-            .collect();
-
-        for session in state
-            .sessions
-            .iter_mut()
-            .filter(|session| focus_ids.contains(&session.focus_id))
-        {
-            session.tab_visible = false;
-        }
+        project.archived = archived;
         Ok(())
     }
 
-    fn archive_focus_cascade(&self, id: FocusId) -> RepoResult<()> {
+    fn set_focus_archived(&self, id: FocusId, archived: bool) -> RepoResult<()> {
         let mut state = self.lock()?;
         let Some(focus) = state.focuses.iter_mut().find(|focus| focus.id == id) else {
             return Err(PersistenceError::NotFound {
@@ -293,15 +286,42 @@ impl WorkspaceRepository for InMemoryWorkspaceRepository {
                 id: id.to_string(),
             });
         };
-        focus.archived = true;
+        focus.archived = archived;
+        Ok(())
+    }
 
-        for session in state
-            .sessions
-            .iter_mut()
-            .filter(|session| session.focus_id == id)
-        {
-            session.tab_visible = false;
+    fn delete_project_cascade(&self, id: ProjectId) -> RepoResult<()> {
+        let mut state = self.lock()?;
+        if !state.projects.iter().any(|project| project.id == id) {
+            return Err(PersistenceError::NotFound {
+                kind: "project",
+                id: id.to_string(),
+            });
         }
+        let focus_ids: Vec<FocusId> = state
+            .focuses
+            .iter()
+            .filter(|focus| focus.project_id == Some(id))
+            .map(|focus| focus.id)
+            .collect();
+        state
+            .sessions
+            .retain(|session| !focus_ids.contains(&session.focus_id));
+        state.focuses.retain(|focus| focus.project_id != Some(id));
+        state.projects.retain(|project| project.id != id);
+        Ok(())
+    }
+
+    fn delete_focus_cascade(&self, id: FocusId) -> RepoResult<()> {
+        let mut state = self.lock()?;
+        if !state.focuses.iter().any(|focus| focus.id == id) {
+            return Err(PersistenceError::NotFound {
+                kind: "focus",
+                id: id.to_string(),
+            });
+        }
+        state.sessions.retain(|session| session.focus_id != id);
+        state.focuses.retain(|focus| focus.id != id);
         Ok(())
     }
 }
@@ -422,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_project_cascade_hides_descendant_sessions() {
+    fn set_project_archived_flips_only_the_projects_own_bit() {
         let repo = seeded();
         let project = Project::new("Reverie", PathBuf::from("/repo"));
         repo.upsert_project(&project).unwrap();
@@ -431,19 +451,42 @@ mod tests {
         let session = Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/repo"));
         repo.upsert_session(&session).unwrap();
 
-        repo.archive_project_cascade(project.id).unwrap();
+        repo.set_project_archived(project.id, true).unwrap();
 
+        // Only the project carries the bit; descendants are hidden by ancestry,
+        // not by writes, so restoring the project brings them back untouched.
         let snapshot = repo.load_snapshot().unwrap();
         assert!(snapshot.projects[0].archived);
-        assert!(snapshot.focuses[0].archived);
-        assert!(!snapshot.sessions[0].tab_visible);
+        assert!(!snapshot.focuses[0].archived);
+        assert!(!snapshot.sessions[0].archived);
+
+        repo.set_project_archived(project.id, false).unwrap();
+        assert!(!repo.load_snapshot().unwrap().projects[0].archived);
     }
 
     #[test]
-    fn archive_project_cascade_reports_not_found() {
+    fn delete_project_cascade_removes_focuses_and_sessions() {
+        let repo = seeded();
+        let project = Project::new("Reverie", PathBuf::from("/repo"));
+        repo.upsert_project(&project).unwrap();
+        let focus = Focus::for_project(project.id, "Terminal", 10);
+        repo.upsert_focus(&focus).unwrap();
+        let session = Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/repo"));
+        repo.upsert_session(&session).unwrap();
+
+        repo.delete_project_cascade(project.id).unwrap();
+
+        let snapshot = repo.load_snapshot().unwrap();
+        assert!(snapshot.projects.is_empty());
+        assert!(snapshot.focuses.is_empty());
+        assert!(snapshot.sessions.is_empty());
+    }
+
+    #[test]
+    fn set_project_archived_reports_not_found() {
         let repo = seeded();
         let err = repo
-            .archive_project_cascade(ProjectId::new_v4())
+            .set_project_archived(ProjectId::new_v4(), true)
             .unwrap_err();
         assert!(matches!(
             err,

@@ -259,14 +259,14 @@ pub struct Session {
     pub dangerous_mode_override: Option<bool>,
     pub status: SessionStatus,
     pub last_exit_code: Option<i32>,
-    /// Whether this session currently has a visible tab in the workspace.
-    #[serde(default = "default_true")]
-    pub tab_visible: bool,
     /// Whether the user has archived this session. Archived sessions leave the
     /// Home dashboard and the left-nav focus lists; they live only in the
     /// focus's archived list and can be restored at any time. Closing a session
-    /// (from the tab bar or the sidebar) archives it. Defaults to false so
-    /// pre-archive persisted sessions surface on the dashboard after upgrade.
+    /// (from the tab bar or the sidebar) archives it. A session is also
+    /// *effectively* archived (hidden the same way) when its focus or project is
+    /// archived; that is computed by walking ancestry on the frontend, not stored
+    /// here, so restoring the ancestor brings the session back exactly as it was.
+    /// Defaults to false so pre-archive persisted sessions surface after upgrade.
     #[serde(default)]
     pub archived: bool,
     /// Last observed activity-state snapshot from whichever adapter owns this
@@ -389,7 +389,6 @@ impl Session {
             dangerous_mode_override: None,
             status: SessionStatus::NotStarted,
             last_exit_code: None,
-            tab_visible: true,
             archived: false,
             latest_activity: None,
             sort_order: 0,
@@ -455,12 +454,6 @@ impl Session {
         self.launch_mode = LaunchMode::Resume;
         self.status = SessionStatus::Restorable;
     }
-}
-
-/// Default for `Session::tab_visible` when absent from persisted or serialized
-/// data: sessions are visible unless explicitly hidden.
-fn default_true() -> bool {
-    true
 }
 
 /// Full workspace state served to the frontend on every workspace command.
@@ -606,7 +599,6 @@ mod tests {
             "launchMode",
             "dangerousModeOverride",
             "lastExitCode",
-            "tabVisible",
             "archived",
             "latestActivity",
         ] {
@@ -619,7 +611,6 @@ mod tests {
             "launch_mode",
             "dangerous_mode_override",
             "last_exit_code",
-            "tab_visible",
             "latest_activity",
         ] {
             assert!(
@@ -627,8 +618,6 @@ mod tests {
                 "leaked snake_case key {snake}"
             );
         }
-        // tab_visible defaults true and serializes as a bool, not null.
-        assert_eq!(encoded["tabVisible"], serde_json::json!(true));
         // The struct rename does not touch enum values: agentKind stays snake_case.
         assert_eq!(encoded["agentKind"], serde_json::json!("cortex_code"));
     }
@@ -649,7 +638,7 @@ mod tests {
 
     #[test]
     fn session_decodes_with_defaults_for_omitted_fields() {
-        // The persistence and wire layers may omit tabVisible / nativeSessionRef /
+        // The persistence and wire layers may omit nativeSessionRef /
         // latestActivity; serde defaults must fill them in rather than error.
         let decoded: Session = serde_json::from_value(serde_json::json!({
             "id": Uuid::new_v4().to_string(),
@@ -663,7 +652,6 @@ mod tests {
             "lastExitCode": null
         }))
         .expect("session decodes with defaults");
-        assert!(decoded.tab_visible);
         assert!(decoded.native_session_ref.is_none());
         assert!(decoded.latest_activity.is_none());
     }

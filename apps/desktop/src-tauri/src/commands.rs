@@ -104,13 +104,6 @@ pub(crate) struct CreateSessionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UpdateSessionTabVisibilityRequest {
-    shell_session_id: SessionId,
-    tab_visible: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct SetSessionArchivedRequest {
     shell_session_id: SessionId,
     archived: bool,
@@ -496,16 +489,6 @@ pub(crate) fn create_session(
 }
 
 #[tauri::command]
-pub(crate) fn update_session_tab_visibility(
-    service: State<'_, WorkspaceService>,
-    request: UpdateSessionTabVisibilityRequest,
-) -> Result<WorkspaceSnapshot, String> {
-    service
-        .set_session_tab_visibility(request.shell_session_id, request.tab_visible)
-        .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
 pub(crate) fn set_session_archived(
     service: State<'_, WorkspaceService>,
     runtime: State<'_, TerminalSessionRuntime>,
@@ -534,19 +517,6 @@ pub(crate) fn remove_session(
     // Stop any live process for this session before deleting the record, so a
     // removed session can never leave an orphaned CLI behind (the frontend may
     // have lost its terminal binding and skipped its own terminate call).
-    runtime.terminate_for_session(session_id);
-    // Revoke any hook token tied to this session before deleting the record
-    // so a still-running CLI can't keep authorizing against a now-orphaned id.
-    if let (Some(control), Some(registry)) = (
-        app.try_state::<HookServerControl>(),
-        app.try_state::<HookTokenRegistry>(),
-    ) {
-        if let Some((source, token)) = registry.take(session_id) {
-            control.revoke_session(source, &token);
-        }
-    }
-    cleanup_session_hook_config(&app, session_id);
-    unregister_session_from_bridge(&app, session_id);
     // Capture the session's cwd before the record is gone so we can remove its
     // scratch workspace afterward (General sessions only; see
     // `cleanup_general_workspace`).
@@ -557,6 +527,7 @@ pub(crate) fn remove_session(
             .find(|session| session.id == session_id)
             .map(|session| session.cwd)
     });
+    reap_session_runtime(&app, &runtime, session_id);
     let snapshot = service
         .remove_session(session_id)
         .map_err(|err| err.to_string())?;
@@ -564,6 +535,25 @@ pub(crate) fn remove_session(
         cleanup_general_workspace(&app, &cwd);
     }
     Ok(snapshot)
+}
+
+/// Stop a session's live process and tear down its hook + bridge wiring ahead of
+/// deleting its record. Shared by `remove_session` and the focus/project cascade
+/// deletes, so purging a subtree can never leave an orphaned CLI running or a
+/// live hook token authorizing against a now-gone session id. Does not touch the
+/// record itself or its scratch workspace; the caller owns those.
+fn reap_session_runtime(app: &AppHandle, runtime: &TerminalSessionRuntime, session_id: SessionId) {
+    runtime.terminate_for_session(session_id);
+    if let (Some(control), Some(registry)) = (
+        app.try_state::<HookServerControl>(),
+        app.try_state::<HookTokenRegistry>(),
+    ) {
+        if let Some((source, token)) = registry.take(session_id) {
+            control.revoke_session(source, &token);
+        }
+    }
+    cleanup_session_hook_config(app, session_id);
+    unregister_session_from_bridge(app, session_id);
 }
 
 /// Delete the per-session hook config directory written under the app cache at
@@ -782,6 +772,40 @@ pub(crate) fn archive_focus(
         .map_err(|err| err.to_string())
 }
 
+/// Restore an archived topic (flip its own `archived` bit back). Its sessions
+/// reappear via ancestry, except any that were individually archived.
+#[tauri::command]
+pub(crate) fn restore_focus(
+    service: State<'_, WorkspaceService>,
+    focus_id: FocusId,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .restore_focus(focus_id)
+        .map_err(|err| err.to_string())
+}
+
+/// Permanently delete a topic and its sessions. Reaps each session's process and
+/// hook/bridge wiring first so the purge leaves nothing orphaned.
+#[tauri::command]
+pub(crate) fn delete_focus(
+    app: AppHandle,
+    service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
+    focus_id: FocusId,
+) -> Result<WorkspaceSnapshot, String> {
+    let doomed = sessions_under(&service, |session| session.focus_id == focus_id);
+    for (id, _) in &doomed {
+        reap_session_runtime(&app, &runtime, *id);
+    }
+    let snapshot = service
+        .delete_focus(focus_id)
+        .map_err(|err| err.to_string())?;
+    for (_, cwd) in doomed {
+        cleanup_general_workspace(&app, &cwd);
+    }
+    Ok(snapshot)
+}
+
 #[tauri::command]
 pub(crate) fn archive_project(
     service: State<'_, WorkspaceService>,
@@ -790,6 +814,63 @@ pub(crate) fn archive_project(
     service
         .archive_project(project_id)
         .map_err(|err| err.to_string())
+}
+
+/// Permanently delete a project together with its topics and sessions. Used by
+/// the Settings purge for an archived project. Reaps each session's runtime
+/// first; an archived project's sessions are already stopped, but this stays
+/// defensive in case a process slipped through.
+#[tauri::command]
+pub(crate) fn delete_project(
+    app: AppHandle,
+    service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
+    project_id: ProjectId,
+) -> Result<WorkspaceSnapshot, String> {
+    let focus_ids: Vec<FocusId> = service
+        .snapshot()
+        .ok()
+        .map(|snapshot| {
+            snapshot
+                .focuses
+                .into_iter()
+                .filter(|focus| focus.project_id == Some(project_id))
+                .map(|focus| focus.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let doomed = sessions_under(&service, |session| focus_ids.contains(&session.focus_id));
+    for (id, _) in &doomed {
+        reap_session_runtime(&app, &runtime, *id);
+    }
+    let snapshot = service
+        .delete_project(project_id)
+        .map_err(|err| err.to_string())?;
+    for (_, cwd) in doomed {
+        cleanup_general_workspace(&app, &cwd);
+    }
+    Ok(snapshot)
+}
+
+/// Collect (id, cwd) for the sessions matching `predicate` from one snapshot, so a
+/// cascade delete can reap each session's runtime and clean its scratch workspace
+/// after the records are gone. Returns empty if the snapshot can't be read.
+fn sessions_under(
+    service: &WorkspaceService,
+    predicate: impl Fn(&reverie_core::domain::Session) -> bool,
+) -> Vec<(SessionId, PathBuf)> {
+    service
+        .snapshot()
+        .ok()
+        .map(|snapshot| {
+            snapshot
+                .sessions
+                .into_iter()
+                .filter(|session| predicate(session))
+                .map(|session| (session.id, session.cwd))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[tauri::command]

@@ -21,8 +21,9 @@ use reverie_core::connection::{
 };
 use reverie_core::connection_repository::ConnectionRepository;
 use reverie_core::domain::{
-    AgentKind, Focus, LaunchMode, NativeSessionRef, Project, ProjectId, Session, SessionId,
-    SessionStatus, ThemeMode, Workspace, WorkspaceId, WorkspaceSnapshot,
+    AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, Session,
+    SessionId, SessionStateTimeline, SessionStatus, ThemeMode, Workspace, WorkspaceId,
+    WorkspaceSnapshot,
 };
 use reverie_core::repository::{PersistenceError, RepoResult, WorkspaceRepository};
 
@@ -181,6 +182,22 @@ const MIGRATIONS: &[&str] = &[
     // stamped the first time the user views them.
     "ALTER TABLE sessions ADD COLUMN last_viewed_at TEXT;
      UPDATE sessions SET last_viewed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now');",
+    // v14 -> v15: per-session state timeline (JSON), the marker timestamps behind
+    // the dashboards' transition-recency ordering (most-recently-changed first
+    // within each status group). Backfill existing rows with a created_at of
+    // upgrade time so the `fresh` group has a sane order; transition markers stay
+    // null and populate on the next activity update / lifecycle change.
+    "ALTER TABLE sessions ADD COLUMN state_timeline_json TEXT;
+     UPDATE sessions SET state_timeline_json =
+        json_object('createdAt', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+    // v15 -> v16: retire the per-session `tab_visible` column. It was a second
+    // visibility axis used only so cascade-archiving a project/focus could hide
+    // descendant sessions without marking them archived; that left those sessions
+    // half-archived (hidden from the sidebar but leaking onto Home) and made
+    // restore ambiguous. The model is now a single `archived` bit per node with
+    // visibility computed by ancestry (a session is hidden when its focus or
+    // project is archived), so the column is dead weight. Drop it.
+    "ALTER TABLE sessions DROP COLUMN tab_visible;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -191,8 +208,8 @@ const CONNECTION_MESSAGE_COLUMNS: &str =
     "id, connection_id, from_session, to_session, body, sent_at, delivered_at, sequence";
 
 const SESSION_COLUMNS: &str = "id, focus_id, title, agent_kind, cwd, native_session_ref_json, \
-     launch_mode, dangerous_mode_override, status, last_exit_code, tab_visible, \
-     latest_activity_json, archived, sort_order, last_viewed_at";
+     launch_mode, dangerous_mode_override, status, last_exit_code, \
+     latest_activity_json, archived, sort_order, last_viewed_at, state_timeline_json";
 
 pub struct SqliteWorkspaceRepository {
     conn: Mutex<Connection>,
@@ -482,12 +499,61 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
         Ok(true)
     }
 
-    fn archive_project_cascade(&self, id: ProjectId) -> RepoResult<()> {
+    fn set_project_archived(&self, id: ProjectId, archived: bool) -> RepoResult<()> {
+        let conn = self.conn()?;
+        let changed = conn
+            .execute(
+                "UPDATE projects SET archived = ?2 WHERE id = ?1",
+                params![id.to_string(), bool_to_int(archived)],
+            )
+            .map_err(backend)?;
+        if changed == 0 {
+            return Err(PersistenceError::NotFound {
+                kind: "project",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn set_focus_archived(&self, id: FocusId, archived: bool) -> RepoResult<()> {
+        let conn = self.conn()?;
+        let changed = conn
+            .execute(
+                "UPDATE focuses SET archived = ?2 WHERE id = ?1",
+                params![id.to_string(), bool_to_int(archived)],
+            )
+            .map_err(backend)?;
+        if changed == 0 {
+            return Err(PersistenceError::NotFound {
+                kind: "focus",
+                id: id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn delete_project_cascade(&self, id: ProjectId) -> RepoResult<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction().map_err(backend)?;
+        // Delete descendants explicitly rather than leaning on a foreign key: the
+        // focuses -> projects FK is ON DELETE SET NULL (it deliberately orphans a
+        // focus to General when only the project row goes), which is the wrong
+        // shape for a purge. Sessions go first, then focuses, then the project.
+        tx.execute(
+            "DELETE FROM sessions
+             WHERE focus_id IN (SELECT id FROM focuses WHERE project_id = ?1)",
+            params![id.to_string()],
+        )
+        .map_err(backend)?;
+        tx.execute(
+            "DELETE FROM focuses WHERE project_id = ?1",
+            params![id.to_string()],
+        )
+        .map_err(backend)?;
         let changed = tx
             .execute(
-                "UPDATE projects SET archived = 1 WHERE id = ?1",
+                "DELETE FROM projects WHERE id = ?1",
                 params![id.to_string()],
             )
             .map_err(backend)?;
@@ -497,29 +563,20 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 id: id.to_string(),
             });
         }
-        tx.execute(
-            "UPDATE focuses SET archived = 1 WHERE project_id = ?1",
-            params![id.to_string()],
-        )
-        .map_err(backend)?;
-        tx.execute(
-            "UPDATE sessions SET tab_visible = 0
-             WHERE focus_id IN (SELECT id FROM focuses WHERE project_id = ?1)",
-            params![id.to_string()],
-        )
-        .map_err(backend)?;
         tx.commit().map_err(backend)?;
         Ok(())
     }
 
-    fn archive_focus_cascade(&self, id: reverie_core::domain::FocusId) -> RepoResult<()> {
+    fn delete_focus_cascade(&self, id: FocusId) -> RepoResult<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction().map_err(backend)?;
+        tx.execute(
+            "DELETE FROM sessions WHERE focus_id = ?1",
+            params![id.to_string()],
+        )
+        .map_err(backend)?;
         let changed = tx
-            .execute(
-                "UPDATE focuses SET archived = 1 WHERE id = ?1",
-                params![id.to_string()],
-            )
+            .execute("DELETE FROM focuses WHERE id = ?1", params![id.to_string()])
             .map_err(backend)?;
         if changed == 0 {
             return Err(PersistenceError::NotFound {
@@ -527,11 +584,6 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 id: id.to_string(),
             });
         }
-        tx.execute(
-            "UPDATE sessions SET tab_visible = 0 WHERE focus_id = ?1",
-            params![id.to_string()],
-        )
-        .map_err(backend)?;
         tx.commit().map_err(backend)?;
         Ok(())
     }
@@ -546,11 +598,12 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
         ),
         None => None,
     };
+    let state_timeline_json = state_timeline_to_db(&session.state_timeline)?;
     conn.execute(
         "INSERT INTO sessions (
             id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
-            dangerous_mode_override, status, last_exit_code, tab_visible, latest_activity_json,
-            archived, sort_order, last_viewed_at
+            dangerous_mode_override, status, last_exit_code, latest_activity_json,
+            archived, sort_order, last_viewed_at, state_timeline_json
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(id) DO UPDATE SET
             focus_id = excluded.focus_id, title = excluded.title,
@@ -559,11 +612,11 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             launch_mode = excluded.launch_mode,
             dangerous_mode_override = excluded.dangerous_mode_override,
             status = excluded.status, last_exit_code = excluded.last_exit_code,
-            tab_visible = excluded.tab_visible,
             latest_activity_json = excluded.latest_activity_json,
             archived = excluded.archived,
             sort_order = excluded.sort_order,
-            last_viewed_at = excluded.last_viewed_at",
+            last_viewed_at = excluded.last_viewed_at,
+            state_timeline_json = excluded.state_timeline_json",
         params![
             session.id.to_string(),
             session.focus_id.to_string(),
@@ -575,11 +628,11 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             session.dangerous_mode_override.map(bool_to_int),
             session_status_to_db(session.status)?,
             session.last_exit_code,
-            bool_to_int(session.tab_visible),
             latest_activity_json,
             bool_to_int(session.archived),
             session.sort_order,
             session.last_viewed_at,
+            state_timeline_json,
         ],
     )
     .map_err(backend)?;
@@ -916,11 +969,11 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         dangerous_mode_override: row.get::<_, Option<i64>>(7)?.map(int_to_bool),
         status: session_status_from_db(&row.get::<_, String>(8)?)?,
         last_exit_code: row.get(9)?,
-        tab_visible: int_to_bool(row.get::<_, i64>(10)?),
-        latest_activity: activity_state_from_db(row.get::<_, Option<String>>(11)?)?,
-        archived: int_to_bool(row.get::<_, i64>(12)?),
-        sort_order: row.get(13)?,
-        last_viewed_at: row.get::<_, Option<String>>(14)?,
+        latest_activity: activity_state_from_db(row.get::<_, Option<String>>(10)?)?,
+        archived: int_to_bool(row.get::<_, i64>(11)?),
+        sort_order: row.get(12)?,
+        last_viewed_at: row.get::<_, Option<String>>(13)?,
+        state_timeline: state_timeline_from_db(row.get::<_, Option<String>>(14)?)?,
     })
 }
 
@@ -1029,6 +1082,23 @@ fn activity_state_from_db(value: Option<String>) -> rusqlite::Result<Option<Acti
     }
 }
 
+fn state_timeline_to_db(value: &SessionStateTimeline) -> RepoResult<Option<String>> {
+    serde_json::to_string(value)
+        .map(Some)
+        .map_err(|err| PersistenceError::Serialization(err.to_string()))
+}
+
+fn state_timeline_from_db(value: Option<String>) -> rusqlite::Result<SessionStateTimeline> {
+    match value {
+        Some(text) if !text.is_empty() => {
+            serde_json::from_str::<SessionStateTimeline>(&text).map_err(conversion_failure)
+        }
+        // Pre-timeline rows (NULL) and empty strings read as an all-`None`
+        // timeline; the migration backfills `created_at` for existing rows.
+        _ => Ok(SessionStateTimeline::default()),
+    }
+}
+
 fn path_to_db(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -1118,7 +1188,7 @@ mod tests {
         );
         assert_eq!(snapshot.sessions.len(), 1);
         assert_eq!(snapshot.sessions[0].id, session.id);
-        assert!(snapshot.sessions[0].tab_visible);
+        assert!(!snapshot.sessions[0].archived);
     }
 
     #[test]
@@ -1141,6 +1211,8 @@ mod tests {
             )
             .unwrap(),
         );
+        session.state_timeline.working_since = Some("2026-06-06T15:10:02.000Z".to_owned());
+        session.state_timeline.resting_since = Some("2026-06-06T15:12:40.000Z".to_owned());
         repo.upsert_session(&session).unwrap();
 
         let loaded = repo.get_session(session.id).unwrap().unwrap();
@@ -1151,6 +1223,16 @@ mod tests {
             Some("native-42".to_owned())
         );
         assert_eq!(loaded.latest_activity.unwrap().sequence, 4);
+        // created_at is stamped by Session::new; the transition markers round-trip.
+        assert!(loaded.state_timeline.created_at.is_some());
+        assert_eq!(
+            loaded.state_timeline.working_since.as_deref(),
+            Some("2026-06-06T15:10:02.000Z")
+        );
+        assert_eq!(
+            loaded.state_timeline.resting_since.as_deref(),
+            Some("2026-06-06T15:12:40.000Z")
+        );
 
         let by_native = repo.find_session_by_native_id("native-42").unwrap();
         assert_eq!(by_native.map(|s| s.id), Some(session.id));
@@ -1226,7 +1308,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_project_cascade_hides_sessions_atomically() {
+    fn set_project_archived_flips_only_the_project_row() {
         let repo = seeded();
         let project = Project::new("Reverie", PathBuf::from("/repo"));
         repo.upsert_project(&project).unwrap();
@@ -1235,19 +1317,57 @@ mod tests {
         let session = Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/repo"));
         repo.upsert_session(&session).unwrap();
 
-        repo.archive_project_cascade(project.id).unwrap();
+        repo.set_project_archived(project.id, true).unwrap();
 
+        // Only the project's own bit moves; descendants are hidden by ancestry, so
+        // un-archiving (e.g. re-adding the folder) restores them untouched.
         let snapshot = repo.load_snapshot().unwrap();
         assert!(snapshot.projects[0].archived);
-        assert!(snapshot.focuses[0].archived);
-        assert!(!snapshot.sessions[0].tab_visible);
+        assert!(!snapshot.focuses[0].archived);
+        assert!(!snapshot.sessions[0].archived);
+
+        repo.set_project_archived(project.id, false).unwrap();
+        assert!(!repo.load_snapshot().unwrap().projects[0].archived);
     }
 
     #[test]
-    fn archive_project_cascade_reports_not_found() {
+    fn delete_project_cascade_purges_focuses_and_sessions() {
+        let repo = seeded();
+        let project = Project::new("Reverie", PathBuf::from("/repo"));
+        repo.upsert_project(&project).unwrap();
+        let focus = Focus::for_project(project.id, "Terminal", 10);
+        repo.upsert_focus(&focus).unwrap();
+        let session = Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/repo"));
+        repo.upsert_session(&session).unwrap();
+
+        repo.delete_project_cascade(project.id).unwrap();
+
+        let snapshot = repo.load_snapshot().unwrap();
+        assert!(snapshot.projects.is_empty());
+        assert!(snapshot.focuses.is_empty());
+        assert!(snapshot.sessions.is_empty());
+    }
+
+    #[test]
+    fn delete_focus_cascade_purges_sessions() {
+        let repo = seeded();
+        let focus = Focus::general("General", 0);
+        repo.upsert_focus(&focus).unwrap();
+        let session = Session::new(focus.id, "S", AgentKind::CortexCode, PathBuf::from("/tmp"));
+        repo.upsert_session(&session).unwrap();
+
+        repo.delete_focus_cascade(focus.id).unwrap();
+
+        let snapshot = repo.load_snapshot().unwrap();
+        assert!(snapshot.focuses.is_empty());
+        assert!(snapshot.sessions.is_empty());
+    }
+
+    #[test]
+    fn set_project_archived_reports_not_found() {
         let repo = seeded();
         let err = repo
-            .archive_project_cascade(ProjectId::new_v4())
+            .set_project_archived(ProjectId::new_v4(), true)
             .unwrap_err();
         assert!(matches!(
             err,

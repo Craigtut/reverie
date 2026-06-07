@@ -8,7 +8,7 @@
 //! or a real database, and it is `Send + Sync` for use as Tauri managed state.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,7 +20,8 @@ use crate::agents::{
 };
 use crate::domain::{
     AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, Session,
-    SessionId, SessionStatus, ThemeMode, Workspace, WorkspaceId, WorkspaceSnapshot,
+    SessionId, SessionStateTimeline, SessionStatus, ThemeMode, Workspace, WorkspaceId,
+    WorkspaceSnapshot,
 };
 use crate::repository::WorkspaceRepository;
 use crate::terminal::TerminalSpawnSpec;
@@ -114,22 +115,42 @@ impl WorkspaceService {
             bail!("project path is required");
         }
         let snapshot = self.repo.load_snapshot()?;
-        if snapshot
+        // An active project already points at this folder: surface the clash.
+        if let Some(active) = snapshot
             .projects
             .iter()
-            .any(|project| !project.archived && project.path == path)
+            .find(|project| !project.archived && paths_equivalent(&project.path, &path))
         {
-            bail!("project path is already in Reverie: {}", path.display());
+            bail!(
+                "project path is already in Reverie: {}",
+                active.path.display()
+            );
         }
-        let sort_order = snapshot
+        let next_sort_order = snapshot
             .projects
             .iter()
             .filter(|project| !project.archived)
             .map(|project| project.sort_order)
             .max()
             .map_or(0, |current| current + 10);
+        // Re-adding the folder of an archived project reconnects it rather than
+        // spawning a duplicate: flip its own bit back (its topics and sessions
+        // return by ancestry, untouched) and float it to the top of the rail. We
+        // keep the existing record's name (preserving any rename the user made)
+        // and only refresh its position.
+        if let Some(existing) = snapshot
+            .projects
+            .iter()
+            .find(|project| project.archived && paths_equivalent(&project.path, &path))
+        {
+            let mut project = existing.clone();
+            project.archived = false;
+            project.sort_order = next_sort_order;
+            self.repo.upsert_project(&project)?;
+            return Ok(self.repo.load_snapshot()?);
+        }
         let mut project = Project::new(name, path);
-        project.sort_order = sort_order;
+        project.sort_order = next_sort_order;
         self.repo.upsert_project(&project)?;
         Ok(self.repo.load_snapshot()?)
     }
@@ -208,16 +229,7 @@ impl WorkspaceService {
         Ok(self.repo.load_snapshot()?)
     }
 
-    pub fn set_session_tab_visibility(
-        &self,
-        session_id: SessionId,
-        tab_visible: bool,
-    ) -> Result<WorkspaceSnapshot> {
-        self.update_session(session_id, |session| session.tab_visible = tab_visible)
-    }
-
-    /// Archive or restore a session. Archiving also drops its tab; restoring
-    /// brings the tab back so reopening lands the user on the live surface.
+    /// Archive or restore a session by flipping its single `archived` bit.
     /// Closing a session (tab bar or sidebar) archives it; the focus's archived
     /// list is the only place it shows afterward, and restore reverses this.
     pub fn set_session_archived(
@@ -227,7 +239,6 @@ impl WorkspaceService {
     ) -> Result<WorkspaceSnapshot> {
         self.update_session(session_id, |session| {
             session.archived = archived;
-            session.tab_visible = !archived;
         })
     }
 
@@ -345,13 +356,38 @@ impl WorkspaceService {
         Ok(self.repo.load_snapshot()?)
     }
 
+    /// Archive a topic: set its own `archived` bit. Its sessions stay untouched
+    /// and are hidden by ancestry, so restoring the topic brings them back.
     pub fn archive_focus(&self, focus_id: FocusId) -> Result<WorkspaceSnapshot> {
-        self.repo.archive_focus_cascade(focus_id)?;
+        self.repo.set_focus_archived(focus_id, true)?;
         Ok(self.repo.load_snapshot()?)
     }
 
+    /// Restore an archived topic. Its sessions reappear exactly as they were,
+    /// except any session that was individually archived (own bit still set).
+    pub fn restore_focus(&self, focus_id: FocusId) -> Result<WorkspaceSnapshot> {
+        self.repo.set_focus_archived(focus_id, false)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Permanently delete a topic and its sessions. Not reversible.
+    pub fn delete_focus(&self, focus_id: FocusId) -> Result<WorkspaceSnapshot> {
+        self.repo.delete_focus_cascade(focus_id)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Archive a project: set its own `archived` bit. Its topics and sessions are
+    /// hidden by ancestry, not by writes, so re-adding the folder (which restores
+    /// the project) brings the whole subtree back as it was.
     pub fn archive_project(&self, project_id: ProjectId) -> Result<WorkspaceSnapshot> {
-        self.repo.archive_project_cascade(project_id)?;
+        self.repo.set_project_archived(project_id, true)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Permanently delete a project together with its topics and sessions. Used
+    /// by the Settings purge for an archived project; not reversible.
+    pub fn delete_project(&self, project_id: ProjectId) -> Result<WorkspaceSnapshot> {
+        self.repo.delete_project_cascade(project_id)?;
         Ok(self.repo.load_snapshot()?)
     }
 
@@ -474,6 +510,8 @@ impl WorkspaceService {
                 SessionStatus::Exited
             };
             session.last_exit_code = Some(if child_success { 0 } else { 1 });
+            // Exited/Restorable both read as idle; stamp the moment it became so.
+            session.note_exited(crate::time::now_iso8601());
         })
     }
 
@@ -487,6 +525,13 @@ impl WorkspaceService {
                 SessionStatus::Exited
             };
             session.last_exit_code = Some(1);
+            // A failed resume reads as attention (blocked); a plain exit as idle.
+            let now = crate::time::now_iso8601();
+            if session.status == SessionStatus::RestoreFailed {
+                session.note_blocked(now);
+            } else {
+                session.note_exited(now);
+            }
         })
     }
 
@@ -702,6 +747,7 @@ impl WorkspaceService {
                 return Ok(false);
             }
         }
+        session.note_activity_transition(&activity);
         session.latest_activity = Some(activity);
         self.repo.upsert_session(&session)?;
         Ok(true)
@@ -717,6 +763,20 @@ impl WorkspaceService {
         session.latest_activity = None;
         self.repo.upsert_session(&session)?;
         Ok(true)
+    }
+
+    /// The current state timeline for whichever session owns `native_session_id`,
+    /// if any. The activity correlator reads this right after persisting an
+    /// update so it can ride the freshly-stamped timeline on the live event,
+    /// letting the dashboards reorder a status group without a snapshot refetch.
+    pub fn session_timeline_by_native_id(
+        &self,
+        native_session_id: &str,
+    ) -> Result<Option<SessionStateTimeline>> {
+        Ok(self
+            .repo
+            .find_session_by_native_id(native_session_id)?
+            .map(|session| session.state_timeline))
     }
 
     /// Persist activity for a session looked up by its Reverie id, capturing the
@@ -761,6 +821,7 @@ impl WorkspaceService {
                 None => return Ok(false),
             };
         }
+        session.note_activity_transition(&activity);
         session.latest_activity = Some(activity);
         self.repo.upsert_session(&session)?;
         Ok(captured_native_session)
@@ -962,6 +1023,23 @@ fn optional_text(value: String) -> Option<String> {
     }
 }
 
+/// Whether two project folders are the same on disk, used to dedupe a re-added
+/// folder against existing (and archived) projects. Compares raw paths first,
+/// then falls back to canonical (symlink- and `.`/`..`-resolved) paths so two
+/// spellings of the same folder match. Canonicalization needs the folder to
+/// exist; if either side cannot be resolved (e.g. a stored project whose folder
+/// was since deleted) we fall back to the raw comparison, never matching by
+/// accident.
+fn paths_equivalent(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(canonical_a), Ok(canonical_b)) => canonical_a == canonical_b,
+        _ => false,
+    }
+}
+
 fn seed_workspace_id() -> WorkspaceId {
     WorkspaceId::parse_str(SEED_WORKSPACE_ID).expect("seed workspace id is a valid uuid")
 }
@@ -997,6 +1075,9 @@ fn normalize_session(session: &mut Session) -> bool {
         // a dead Exited record the user can neither resume nor cleanly restart.
         if session.native_session_ref.is_some() {
             session.status = SessionStatus::Restorable;
+            // It died (uncleanly) and is now resumable/idle; stamp so it orders by
+            // recency. Resetting to NotStarted (fresh) instead leaves no exit mark.
+            session.note_exited(crate::time::now_iso8601());
         } else {
             session.status = SessionStatus::NotStarted;
             session.last_exit_code = None;
@@ -1014,10 +1095,23 @@ fn normalize_session(session: &mut Session) -> bool {
         changed = true;
     }
 
-    if let Some(activity) = session.latest_activity.as_mut() {
+    // Forcing a stale live state to rest is itself a transition into the resting
+    // class, but `note_activity_transition` cannot see it (it would compare the
+    // activity against itself), so stamp the timeline here. Use the activity's own
+    // last-update time, not boot time, so a session that crashed mid-turn days ago
+    // does not float to the top of the idle/finished order on the next launch.
+    let rested_at = if let Some(activity) = session.latest_activity.as_mut() {
         if normalize_stale_activity(activity) {
-            changed = true;
+            Some(activity.updated_at.clone())
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    if let Some(at) = rested_at {
+        session.note_resting(at);
+        changed = true;
     }
 
     changed
@@ -1292,6 +1386,57 @@ mod tests {
     }
 
     #[test]
+    fn re_adding_an_archived_project_folder_reconnects_it() {
+        let (_repo, service) = service();
+        let snapshot = service
+            .create_project("Reverie".to_owned(), "/repo".into())
+            .unwrap();
+        let project_id = snapshot.projects[0].id;
+        let focus_snapshot = service
+            .create_focus(Some(project_id), "Terminal".to_owned(), None, None)
+            .unwrap();
+        let focus_id = focus_snapshot
+            .focuses
+            .iter()
+            .find(|f| f.project_id == Some(project_id))
+            .unwrap()
+            .id;
+        service
+            .create_session(
+                focus_id,
+                "S".to_owned(),
+                AgentKind::CortexCode,
+                "/repo".into(),
+                None,
+            )
+            .unwrap();
+        service.archive_project(project_id).unwrap();
+
+        // Re-adding the same folder reconnects the existing record instead of
+        // creating a duplicate: same id, now active, with its subtree restored.
+        let reconnected = service
+            .create_project("Reverie".to_owned(), "/repo".into())
+            .unwrap();
+        assert_eq!(reconnected.projects.len(), 1, "no duplicate project row");
+        assert_eq!(reconnected.projects[0].id, project_id);
+        assert!(!reconnected.projects[0].archived);
+        assert!(
+            reconnected
+                .focuses
+                .iter()
+                .any(|f| f.id == focus_id && !f.archived)
+        );
+        assert_eq!(
+            reconnected
+                .sessions
+                .iter()
+                .filter(|s| s.focus_id == focus_id)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn create_focus_assigns_increasing_sort_order_and_checks_project() {
         let (_repo, service) = service();
         let unknown = service.create_focus(Some(ProjectId::new_v4()), "X".to_owned(), None, None);
@@ -1419,7 +1564,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(snapshot.sessions.len(), 1);
-        assert!(snapshot.sessions[0].tab_visible);
+        assert!(!snapshot.sessions[0].archived);
         assert_eq!(snapshot.sessions[0].status, SessionStatus::NotStarted);
     }
 
@@ -1650,15 +1795,24 @@ mod tests {
         assert!(work.active_tools.is_empty());
         assert_eq!(work.turn.as_ref().unwrap().status, TurnStatus::Aborted);
 
-        let rest = snapshot
+        // The forced rest advances the timeline's resting marker to the activity's
+        // own last-update time (here "t"), so the dashboard orders it by recency.
+        let work_session = snapshot
             .sessions
             .iter()
-            .find(|s| s.id == done.id)
-            .unwrap()
-            .latest_activity
-            .as_ref()
+            .find(|s| s.id == working.id)
             .unwrap();
+        assert_eq!(
+            work_session.state_timeline.resting_since.as_deref(),
+            Some("t")
+        );
+
+        let rest_record = snapshot.sessions.iter().find(|s| s.id == done.id).unwrap();
+        let rest = rest_record.latest_activity.as_ref().unwrap();
         assert_eq!(rest.status, ActivityStatus::Done);
+        // A `done` activity is a real outcome, not a stale live state, so
+        // normalization leaves it (and the timeline) untouched.
+        assert!(rest_record.state_timeline.resting_since.is_none());
     }
 
     #[test]
@@ -1843,7 +1997,126 @@ mod tests {
     }
 
     #[test]
-    fn archive_project_cascade_hides_sessions() {
+    fn activity_transitions_stamp_state_timeline_markers() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(
+                focus,
+                "Claude".to_owned(),
+                AgentKind::ClaudeCode,
+                "/tmp".into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        // created_at is stamped at construction.
+        assert!(
+            service.snapshot().unwrap().sessions[0]
+                .state_timeline
+                .created_at
+                .is_some()
+        );
+
+        let state = |seq: u64, status: &str, at: &str| {
+            crate::activity::parse_state(&format!(
+                r#"{{"version":1,"sessionId":"claude-native","status":"{status}","updatedAt":"{at}","sequence":{seq},"cwd":"/tmp"}}"#
+            ))
+            .unwrap()
+        };
+        let timeline = |service: &WorkspaceService| {
+            service.snapshot().unwrap().sessions[0]
+                .state_timeline
+                .clone()
+        };
+
+        // Enter working -> working_since stamped with the event's updatedAt.
+        service
+            .record_session_activity_by_id(id, "claude-native", state(1, "working", "T1"))
+            .unwrap();
+        assert_eq!(timeline(&service).working_since.as_deref(), Some("T1"));
+        assert_eq!(timeline(&service).resting_since, None);
+
+        // Still working (new updatedAt) is not a transition: working_since holds.
+        service
+            .record_session_activity_by_id(id, "claude-native", state(2, "working", "T2"))
+            .unwrap();
+        assert_eq!(
+            timeline(&service).working_since.as_deref(),
+            Some("T1"),
+            "the same class must not restamp"
+        );
+
+        // Come to rest -> resting_since stamped.
+        service
+            .record_session_activity_by_id(id, "claude-native", state(3, "awaiting_input", "T3"))
+            .unwrap();
+        assert_eq!(timeline(&service).resting_since.as_deref(), Some("T3"));
+
+        // awaiting_input -> done share the resting class, so no restamp.
+        service
+            .record_session_activity_by_id(id, "claude-native", state(4, "done", "T4"))
+            .unwrap();
+        assert_eq!(
+            timeline(&service).resting_since.as_deref(),
+            Some("T3"),
+            "done and awaiting_input are both at rest"
+        );
+
+        // Block on a question -> blocked_since stamped (the attention key).
+        service
+            .record_session_activity_by_id(id, "claude-native", state(5, "awaiting_response", "T5"))
+            .unwrap();
+        assert_eq!(timeline(&service).blocked_since.as_deref(), Some("T5"));
+
+        // Relaunch idempotency: reset the ordering baseline, then a re-read of the
+        // same (blocked) class at a fresh updatedAt must NOT restamp, so ordering
+        // survives a restart.
+        assert!(service.reset_session_activity_sequence(id).unwrap());
+        service
+            .record_session_activity_by_id(id, "claude-native", state(1, "awaiting_response", "T9"))
+            .unwrap();
+        assert_eq!(
+            timeline(&service).blocked_since.as_deref(),
+            Some("T5"),
+            "a relaunch re-read of the same class must not restamp"
+        );
+    }
+
+    #[test]
+    fn mark_session_finished_stamps_exited_at() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(
+                focus,
+                "S".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp".into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        assert!(
+            service.snapshot().unwrap().sessions[0]
+                .state_timeline
+                .exited_at
+                .is_none()
+        );
+
+        service.mark_session_finished(id, true).unwrap();
+        assert!(
+            service.snapshot().unwrap().sessions[0]
+                .state_timeline
+                .exited_at
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn archive_project_sets_only_its_own_bit_and_restores_clean() {
         let (_repo, service) = service();
         let snapshot = service
             .create_project("Reverie".to_owned(), "/repo".into())
@@ -1871,30 +2144,29 @@ mod tests {
             .id;
 
         let snapshot = service.archive_project(project_id).unwrap();
-        assert!(
-            snapshot
-                .projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .unwrap()
-                .archived
-        );
-        assert!(
-            snapshot
-                .focuses
-                .iter()
-                .find(|f| f.id == focus_id)
-                .unwrap()
-                .archived
-        );
-        assert!(
-            !snapshot
-                .sessions
-                .iter()
-                .find(|s| s.id == session_id)
-                .unwrap()
-                .tab_visible
-        );
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .unwrap();
+        let focus = snapshot.focuses.iter().find(|f| f.id == focus_id).unwrap();
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .unwrap();
+        // Only the project's own bit moves; the topic and session are hidden by
+        // ancestry (computed on the frontend), so their own bits stay false.
+        assert!(project.archived);
+        assert!(!focus.archived);
+        assert!(!session.archived);
+
+        // Deleting the archived project purges its whole subtree (the General
+        // focus seeded by `service()` is untouched: it is not under the project).
+        let purged = service.delete_project(project_id).unwrap();
+        assert!(!purged.projects.iter().any(|p| p.id == project_id));
+        assert!(!purged.focuses.iter().any(|f| f.id == focus_id));
+        assert!(!purged.sessions.iter().any(|s| s.id == session_id));
     }
 
     #[test]
