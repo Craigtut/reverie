@@ -206,7 +206,7 @@ describe('createTerminalGpuRenderer', () => {
       gpuAccelerated: true,
       fallback: false,
       explicitResourceManagement: true,
-      retainedPartialPaint: false,
+      retainedPartialPaint: true,
     });
     expect(canvas.width).toBe(64);
     expect(canvas.height).toBe(40);

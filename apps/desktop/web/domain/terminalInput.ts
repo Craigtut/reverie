@@ -10,6 +10,7 @@ export interface TerminalKeyInput {
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  shiftKey?: boolean;
   nativeEvent?: {
     isComposing?: boolean;
   };
@@ -35,12 +36,10 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
   }
 
   if (event.ctrlKey) {
-    const key = event.key.toLowerCase();
-    if (key === 'c') return '\x03';
-    if (key === 'd') return '\x04';
-    if (key === 'l') return '\x0c';
-    if (key === 'u') return '\x15';
-    if (key === 'w') return '\x17';
+    const modified = modifiedControlSequence(event.key, modifierCode(event));
+    if (modified) return modified;
+    const control = controlCodeForKey(event.key);
+    if (control !== null) return control;
     return null;
   }
 
@@ -63,8 +62,82 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
   const cursorApplication = Boolean(modes?.cursorKeyApplication);
   const cursorSequence = (normal: string, application: string) =>
     cursorApplication ? application : normal;
+  const modified = modifierCode(event);
+  const modifiedCsi = modified > 1 ? `;${modified}` : '';
 
   switch (event.key) {
+    case 'Enter':
+      return '\r';
+    case 'Backspace':
+      return '\x7f';
+    case 'Tab':
+      return event.shiftKey ? '\x1b[Z' : '\t';
+    case 'Escape':
+      return '\x1b';
+    case 'ArrowUp':
+      if (modified > 1) return `\x1b[1${modifiedCsi}A`;
+      return cursorSequence('\x1b[A', '\x1bOA');
+    case 'ArrowDown':
+      if (modified > 1) return `\x1b[1${modifiedCsi}B`;
+      return cursorSequence('\x1b[B', '\x1bOB');
+    case 'ArrowRight':
+      if (modified > 1) return `\x1b[1${modifiedCsi}C`;
+      return cursorSequence('\x1b[C', '\x1bOC');
+    case 'ArrowLeft':
+      if (modified > 1) return `\x1b[1${modifiedCsi}D`;
+      return cursorSequence('\x1b[D', '\x1bOD');
+    case 'Delete':
+      return `\x1b[3${modifiedCsi}~`;
+    case 'Home':
+      if (modified > 1) return `\x1b[1${modifiedCsi}H`;
+      return cursorSequence('\x1b[H', '\x1bOH');
+    case 'End':
+      if (modified > 1) return `\x1b[1${modifiedCsi}F`;
+      return cursorSequence('\x1b[F', '\x1bOF');
+    case 'PageUp':
+      return `\x1b[5${modifiedCsi}~`;
+    case 'PageDown':
+      return `\x1b[6${modifiedCsi}~`;
+    default:
+      if (event.key.startsWith('F')) {
+        return functionKeySequence(event.key, modified);
+      }
+      return event.key.length === 1 ? event.key : null;
+  }
+}
+
+function controlCodeForKey(key: string): string | null {
+  if (key.length === 1) {
+    const lower = key.toLowerCase();
+    const code = lower.charCodeAt(0);
+    if (code >= 97 && code <= 122) {
+      return String.fromCharCode(code - 96);
+    }
+    switch (key) {
+      case ' ':
+      case '2':
+        return '\x00';
+      case '[':
+      case '3':
+        return '\x1b';
+      case '\\':
+      case '4':
+        return '\x1c';
+      case ']':
+      case '5':
+        return '\x1d';
+      case '^':
+      case '6':
+        return '\x1e';
+      case '_':
+      case '7':
+        return '\x1f';
+      case '?':
+      case '8':
+        return '\x7f';
+    }
+  }
+  switch (key) {
     case 'Enter':
       return '\r';
     case 'Backspace':
@@ -73,27 +146,64 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
       return '\t';
     case 'Escape':
       return '\x1b';
-    case 'ArrowUp':
-      return cursorSequence('\x1b[A', '\x1bOA');
-    case 'ArrowDown':
-      return cursorSequence('\x1b[B', '\x1bOB');
-    case 'ArrowRight':
-      return cursorSequence('\x1b[C', '\x1bOC');
-    case 'ArrowLeft':
-      return cursorSequence('\x1b[D', '\x1bOD');
-    case 'Delete':
-      return '\x1b[3~';
-    case 'Home':
-      return cursorSequence('\x1b[H', '\x1bOH');
-    case 'End':
-      return cursorSequence('\x1b[F', '\x1bOF');
-    case 'PageUp':
-      return '\x1b[5~';
-    case 'PageDown':
-      return '\x1b[6~';
     default:
-      return event.key.length === 1 ? event.key : null;
+      return null;
   }
+}
+
+function modifiedControlSequence(key: string, modifier: number): string | null {
+  const suffix = `;${modifier}`;
+  switch (key) {
+    case 'ArrowUp':
+      return `\x1b[1${suffix}A`;
+    case 'ArrowDown':
+      return `\x1b[1${suffix}B`;
+    case 'ArrowRight':
+      return `\x1b[1${suffix}C`;
+    case 'ArrowLeft':
+      return `\x1b[1${suffix}D`;
+    case 'Home':
+      return `\x1b[1${suffix}H`;
+    case 'End':
+      return `\x1b[1${suffix}F`;
+    case 'Delete':
+      return `\x1b[3${suffix}~`;
+    case 'PageUp':
+      return `\x1b[5${suffix}~`;
+    case 'PageDown':
+      return `\x1b[6${suffix}~`;
+    default:
+      if (key.startsWith('F')) return functionKeySequence(key, modifier);
+      return null;
+  }
+}
+
+function modifierCode(event: Pick<TerminalKeyInput, 'altKey' | 'ctrlKey' | 'shiftKey'>) {
+  let code = 1;
+  if (event.shiftKey) code += 1;
+  if (event.altKey) code += 2;
+  if (event.ctrlKey) code += 4;
+  return code;
+}
+
+function functionKeySequence(key: string, modifier = 1): string | null {
+  const number = Number(key.slice(1));
+  if (!Number.isInteger(number) || number < 1 || number > 12) return null;
+  const ss3 = ['P', 'Q', 'R', 'S'][number - 1];
+  if (ss3) return modifier > 1 ? `\x1b[1;${modifier}${ss3}` : `\x1bO${ss3}`;
+  const csiByKey: Record<number, number> = {
+    5: 15,
+    6: 17,
+    7: 18,
+    8: 19,
+    9: 20,
+    10: 21,
+    11: 23,
+    12: 24,
+  };
+  const code = csiByKey[number];
+  if (!code) return null;
+  return modifier > 1 ? `\x1b[${code};${modifier}~` : `\x1b[${code}~`;
 }
 
 // Accepts any wheel-like delta (a React WheelEvent or a plain {deltaY, deltaMode})

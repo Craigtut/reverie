@@ -648,6 +648,8 @@ export function useTerminalSession(params: {
       const sessionId = useNavigationStore.getState().selectedSessionId;
       controller.paintCurrent(sessionId);
       if (sessionId) {
+        const binding = useTerminalStore.getState().sessionTerminalBindings[sessionId];
+        if (binding) ensureBackendTerminalSurface(binding.terminalId);
         markSessionTerminalContentReadyIfPainted(sessionId);
       }
       controller.focusCanvas();
@@ -736,6 +738,11 @@ export function useTerminalSession(params: {
       flushPendingBackendResize,
       TERMINAL_BACKEND_RESIZE_FLUSH_MS,
     );
+  }
+
+  function ensureBackendTerminalSurface(terminalId: string) {
+    const current = controller.getSurface();
+    scheduleBackendTerminalResize(terminalId, current.cols, current.rows);
   }
 
   function flushSettledViewportSize() {
@@ -1144,6 +1151,7 @@ export function useTerminalSession(params: {
     store.setRunningSessionId(session.id);
     store.setTerminalInputArmed(binding.inputArmed);
     syncTerminalFrontendActivity(binding.terminalId);
+    ensureBackendTerminalSurface(binding.terminalId);
     if (view) {
       controller.applyView(view);
       markSessionTerminalContentReadyIfPainted(session.id);

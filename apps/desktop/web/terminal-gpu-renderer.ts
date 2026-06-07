@@ -46,7 +46,7 @@ const WEBGL2_RENDERER_CAPABILITIES: TerminalRendererCapabilities = {
   gpuAccelerated: true,
   fallback: false,
   explicitResourceManagement: true,
-  retainedPartialPaint: false,
+  retainedPartialPaint: true,
 };
 
 export interface TerminalRendererFactoryOptions extends TerminalCanvasOptions {

@@ -15,6 +15,7 @@ interface FakeKey {
   metaKey?: boolean;
   ctrlKey?: boolean;
   altKey?: boolean;
+  shiftKey?: boolean;
   isComposing?: boolean;
 }
 
@@ -23,6 +24,7 @@ function keyEvent(parts: FakeKey) {
     metaKey: false,
     ctrlKey: false,
     altKey: false,
+    shiftKey: false,
     nativeEvent: { isComposing: parts.isComposing ?? false },
     ...parts,
   };
@@ -75,7 +77,8 @@ describe('terminalInputForKey', () => {
   });
 
   describe('ctrl combinations', () => {
-    it('maps the supported control letters to control codes', () => {
+    it('maps control letters to control codes', () => {
+      expect(terminalInputForKey(keyEvent({ key: 'a', ctrlKey: true }))).toBe('\x01');
       expect(terminalInputForKey(keyEvent({ key: 'c', ctrlKey: true }))).toBe('\x03');
       expect(terminalInputForKey(keyEvent({ key: 'd', ctrlKey: true }))).toBe('\x04');
       expect(terminalInputForKey(keyEvent({ key: 'l', ctrlKey: true }))).toBe('\x0c');
@@ -87,9 +90,17 @@ describe('terminalInputForKey', () => {
       expect(terminalInputForKey(keyEvent({ key: 'C', ctrlKey: true }))).toBe('\x03');
     });
 
-    it('returns null for an unmapped ctrl combination', () => {
-      expect(terminalInputForKey(keyEvent({ key: 'a', ctrlKey: true }))).toBeNull();
-      expect(terminalInputForKey(keyEvent({ key: 'Enter', ctrlKey: true }))).toBeNull();
+    it('maps non-letter control combinations used by shells', () => {
+      expect(terminalInputForKey(keyEvent({ key: ' ', ctrlKey: true }))).toBe('\x00');
+      expect(terminalInputForKey(keyEvent({ key: '[', ctrlKey: true }))).toBe('\x1b');
+      expect(terminalInputForKey(keyEvent({ key: ']', ctrlKey: true }))).toBe('\x1d');
+      expect(terminalInputForKey(keyEvent({ key: 'Enter', ctrlKey: true }))).toBe('\r');
+      expect(terminalInputForKey(keyEvent({ key: 'Backspace', ctrlKey: true }))).toBe('\x7f');
+    });
+
+    it('maps control navigation to modified xterm sequences', () => {
+      expect(terminalInputForKey(keyEvent({ key: 'ArrowLeft', ctrlKey: true }))).toBe('\x1b[1;5D');
+      expect(terminalInputForKey(keyEvent({ key: 'Delete', ctrlKey: true }))).toBe('\x1b[3;5~');
     });
   });
 
@@ -106,6 +117,7 @@ describe('terminalInputForKey', () => {
     expect(terminalInputForKey(keyEvent({ key: 'Enter' }))).toBe('\r');
     expect(terminalInputForKey(keyEvent({ key: 'Backspace' }))).toBe('\x7f');
     expect(terminalInputForKey(keyEvent({ key: 'Tab' }))).toBe('\t');
+    expect(terminalInputForKey(keyEvent({ key: 'Tab', shiftKey: true }))).toBe('\x1b[Z');
     expect(terminalInputForKey(keyEvent({ key: 'Escape' }))).toBe('\x1b');
     expect(terminalInputForKey(keyEvent({ key: 'Delete' }))).toBe('\x1b[3~');
     expect(terminalInputForKey(keyEvent({ key: 'PageUp' }))).toBe('\x1b[5~');
@@ -130,13 +142,23 @@ describe('terminalInputForKey', () => {
     expect(terminalInputForKey(keyEvent({ key: 'End' }), appModes)).toBe('\x1bOF');
   });
 
+  it('emits modified navigation sequences', () => {
+    expect(terminalInputForKey(keyEvent({ key: 'ArrowUp', shiftKey: true }))).toBe('\x1b[1;2A');
+    expect(terminalInputForKey(keyEvent({ key: 'PageDown', altKey: true }))).toBe('\x1b[6;3~');
+  });
+
+  it('emits function-key sequences', () => {
+    expect(terminalInputForKey(keyEvent({ key: 'F1' }))).toBe('\x1bOP');
+    expect(terminalInputForKey(keyEvent({ key: 'F5' }))).toBe('\x1b[15~');
+    expect(terminalInputForKey(keyEvent({ key: 'F12', ctrlKey: true }))).toBe('\x1b[24;5~');
+  });
+
   it('passes through a single printable character', () => {
     expect(terminalInputForKey(keyEvent({ key: 'a' }))).toBe('a');
     expect(terminalInputForKey(keyEvent({ key: ' ' }))).toBe(' ');
   });
 
   it('returns null for an unknown multi-character key', () => {
-    expect(terminalInputForKey(keyEvent({ key: 'F5' }))).toBeNull();
     expect(terminalInputForKey(keyEvent({ key: 'CapsLock' }))).toBeNull();
   });
 });

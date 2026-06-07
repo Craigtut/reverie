@@ -2955,7 +2955,7 @@ describe('createTerminalController', () => {
     expect(merged).toBe(false);
   });
 
-  it('paints cached stale-width rows while a shape-correct live cache fill is requested', () => {
+  it('paints cached stale-width rows while waiting for backend resize', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
     const onMissingLiveRows = vi.fn(() => true);
@@ -3011,16 +3011,7 @@ describe('createTerminalController', () => {
     controller.setSurface(resized);
     controller.applyView(view, resized, buffer);
 
-    // The request carries the backend-synced live generation, which is the
-    // un-synced default 0 here: `setSurface` no longer bumps a frontend-only
-    // generation on a column change (the backend bumps on resize and re-seeds
-    // with a Full frame that the hook adopts via `setLiveGeneration`).
-    expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 0,
-      rowCount: 20,
-      totalRows: 20,
-      generation: 0,
-    });
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
     expect(createRenderer).toHaveBeenCalledTimes(1);
     expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 100 }));
     expect((paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
@@ -3097,16 +3088,7 @@ describe('createTerminalController', () => {
     controller.setSurface(resized);
     controller.applyView(view, resized, buffer);
 
-    // Generation is the un-synced default 0: a column-change resize no longer
-    // bumps a frontend-only generation (see the boundary test for why the live
-    // generation is backend-synced instead). The uncached miss fetches the
-    // aligned prefetch band, which on this 80-row buffer spans the whole history.
-    expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 0,
-      rowCount: 80,
-      totalRows: 80,
-      generation: 0,
-    });
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
     expect(createRenderer).toHaveBeenCalledTimes(1);
     expect(createRenderer.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ cols: 100 }));
     expect(canvas.style.top).toBe('570px');
@@ -3208,14 +3190,7 @@ describe('createTerminalController', () => {
     controller.setSurface(resized);
     controller.applyView(shortTailView, resized, shortTailBuffer);
 
-    // Generation is the un-synced default 0: a column-change resize no longer
-    // bumps a frontend-only generation.
-    expect(onMissingLiveRows).toHaveBeenCalledWith({
-      startRow: 38,
-      rowCount: 123,
-      totalRows: 161,
-      generation: 0,
-    });
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
     expect(createRenderer).not.toHaveBeenCalled();
     expect(paintFrame).not.toHaveBeenCalled();
   });

@@ -909,7 +909,15 @@ export function createTerminalController(options: TerminalControllerOptions) {
         cachedRange: terminalBufferCachedRangeForRows(buffer, visibleStartRow, visibleRequiredRows),
       };
     }
-    if (!cachedRange || shapeStale) {
+    if (shapeStale) {
+      // The backend owns reflow after a column change. Keep painting from the
+      // stale-width cache until the resize-seeded Full frame arrives instead of
+      // asking libghostty for rows at the old shape and generation.
+      lastBufferCacheMissTraceKey = '';
+      lastHistoryRowsRequestTraceKey = '';
+      return { cached: false, requested: false, shapeStale, cachedRange };
+    }
+    if (!cachedRange) {
       // Pull a big aligned band (paint window + lead above), not just the window,
       // so one round-trip warms the next stretch of scroll-up instead of stalling
       // per screen. The band reduces to the paint window at the live tail.
@@ -921,10 +929,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
       // fetch loop that saturates the worker and wedges scrolling. This holds at the
       // live tail too: blank lines at the bottom of a Cortex/Claude conversation would
       // otherwise loop a viewport-band fetch every frame (each one a blocking
-      // main-thread round-trip, so the loop eats scroll input). A width change still
-      // re-fetches reflowed rows.
-      const needsFetch =
-        shapeStale || !terminalBufferRowsPresent(buffer, band.startRow, band.rowCount);
+      // main-thread round-trip, so the loop eats scroll input). Column changes
+      // wait for the resize-seeded Full frame above, then normal gaps fetch here.
+      const needsFetch = !terminalBufferRowsPresent(buffer, band.startRow, band.rowCount);
       let requested = false;
       if (needsFetch) {
         const request = {
@@ -2484,7 +2491,7 @@ function nowMs() {
 }
 
 function defaultTerminalRendererBackends(): TerminalRendererBackend[] {
-  if (typeof window === 'undefined') return ['canvas2d', 'webgl2'];
+  if (typeof window === 'undefined') return ['webgl2', 'canvas2d'];
   const params =
     typeof window.location?.search === 'string'
       ? new URLSearchParams(window.location.search)
@@ -2493,5 +2500,5 @@ function defaultTerminalRendererBackends(): TerminalRendererBackend[] {
     params?.get('terminalRenderer') ??
     window.localStorage?.getItem('reverie.terminal.renderer') ??
     undefined;
-  return requested === 'webgl2' ? ['webgl2', 'canvas2d'] : ['canvas2d', 'webgl2'];
+  return requested === 'canvas2d' ? ['canvas2d', 'webgl2'] : ['webgl2', 'canvas2d'];
 }
