@@ -65,3 +65,36 @@ jobs:
           releaseName: Reverie ${{ github.ref_name }}
           releaseDraft: true
           prerelease: false
+
+      # tauri-action notarizes and staples the .app but leaves the .dmg wrapper
+      # signed-but-unnotarized, which makes recent macOS show a one-time "cannot
+      # verify" prompt when the user first opens the downloaded DMG. Notarize and
+      # staple the DMG too, then replace the asset on the draft release. Skips
+      # cleanly (ad-hoc build) when the Apple credentials are absent.
+      - name: Notarize and staple the DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_PASSWORD:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ]; then
+            echo "Apple credentials absent; skipping DMG notarization (ad-hoc build)."
+            exit 0
+          fi
+          DMG=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)
+          if [ -z "$DMG" ]; then
+            echo "No DMG found to notarize." >&2
+            exit 1
+          fi
+          echo "Notarizing DMG: $DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "Re-uploading stapled DMG to release ${GITHUB_REF_NAME}"
+          gh release upload "${GITHUB_REF_NAME}" "$DMG" --clobber
