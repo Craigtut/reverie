@@ -2,6 +2,11 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Reverie Dev",
   "identifier": "com.animus.reverie.dev",
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420 ws://localhost:1420 http://127.0.0.1:17777; object-src 'none'"
+    }
+  },
   "bundle": {
     "icon": [
       "icons-dev/32x32.png",
