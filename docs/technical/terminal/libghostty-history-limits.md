@@ -71,5 +71,5 @@ This is what makes D3 (dozens, no hard cap, shed under pressure) affordable, and
 - History reads are order-of-pages expensive, so the backend resolves a requested band once, copies rows out under the lock, and caches them. Never read history per cell per frame. This matches the wire protocol's "prefetch a band, not a row at a time" rule.
 - Budget memory in bytes (Reverie sets 100 MB per session, lazy), not rows. The levers for many sessions are shedding background buffers under pressure and the `scrollback-limit` dial.
 - Re-seed on any resize; never trust an absolute row index across a width change.
-- Suppress scroll-back on the alternate screen; re-seed when the agent returns to the primary screen.
+- Suppress scroll-back on the alternate screen from the frontend: the backend keeps serving rows and only reports the `alternate_screen` mode, while the renderer holds a separate alternate-screen view and returns to its primary-screen view when the agent leaves it. No backend gating, no backend re-seed.
 - Reach ends at the byte cap, which is a dial we can raise. Past it, the oldest rows have evicted and are gone; we persist nothing. A restart resumes the CLI, not stored history.

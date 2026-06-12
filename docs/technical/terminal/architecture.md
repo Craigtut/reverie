@@ -38,7 +38,7 @@ The frontend's row mirror and scroll state are **view-state**, not domain logic.
 
 Backend to frontend:
 
-1. **Seed snapshot.** On attach, focus, or resize. The current screen plus a margin of rows around it (not the whole buffer), with a generation marker. Lets the frontend render and scroll immediately.
+1. **Seed snapshot.** On attach, focus, or resize. The current viewport rows only (not the whole buffer, and no surrounding margin), with a generation marker. Lets the frontend render immediately; older history arrives on demand via history-range row bands, never in the seed.
 2. **Frame diff.** The rows that changed since the last update. The frequent, tiny message.
 3. **Control.** Cursor position and shape, title, bell, size.
 
@@ -53,7 +53,7 @@ Three things never cross the wire: pixels or images of text; fonts or glyph bitm
 
 The history-range request reaches only as far as `libghostty`'s in-memory buffer. Once rows scroll past the oldest the buffer holds, they have evicted and are gone; we do not persist them. That is acceptable: a restart uses the CLI's resume, not stored history.
 
-Transport: Tauri 2's binary-capable, ordered transports (the streaming Channel and Raw Requests), not the JSON event system, which Tauri documents as unsuitable for low-latency, high-throughput streams. See [`wire-protocol.md`](wire-protocol.md).
+Transport: Tauri 2's binary-capable, ordered transports (the streaming Channel for frames, and a Tauri command returning binary for the history-range reply), not the JSON event system, which Tauri documents as unsuitable for low-latency, high-throughput streams. See [`wire-protocol.md`](wire-protocol.md).
 
 ## How the frontend paints (and why it hits 60fps)
 

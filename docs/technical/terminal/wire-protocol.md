@@ -6,7 +6,7 @@
 
 Backend to frontend:
 
-1. **Seed snapshot.** On attach, focus, or resize. The current screen plus a margin of rows around it (not the whole buffer), with a generation marker. Lets the frontend render and scroll immediately.
+1. **Seed snapshot.** On attach, focus, or resize. The current viewport rows only (not the whole buffer, and no surrounding margin), with a generation marker. Lets the frontend render immediately; older history is fetched on demand via history-range row bands, never carried in the seed.
 2. **Frame diff.** The rows that changed since the last update. The frequent, tiny message.
 3. **History-range reply.** Rows the frontend asked for, read from `libghostty`'s buffer, tagged with the generation they belong to.
 4. **Control.** Cursor position and shape, title, bell, size.
@@ -70,7 +70,7 @@ Generation rules: the frontend tracks the latest generation it has seen. A `Full
 Use Tauri 2's binary-capable, ordered transports:
 
 - a streaming **Channel** for the backend-to-frontend stream (it is ordered, fast, and is what Tauri uses internally for streaming child-process output),
-- **Raw Requests** for the request/reply shapes (history-range request and reply fit this well, in binary).
+- **a Tauri command returning binary** for the request/reply shapes (the history-range request and reply ride the `read_terminal_rows` command, which returns a `Vec<u8>` the frontend receives as an `ArrayBuffer`).
 
 Do not use the JSON event system for frames or rows. Tauri documents events as JSON strings, not designed for low-latency or high-throughput streams, and the Rust-to-frontend event path cannot send binary. One ordered stream per session, or a single multiplexed stream keyed by session id.
 
