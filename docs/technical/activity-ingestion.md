@@ -92,6 +92,19 @@ keyed `Reverie(id)` at `Definitive`. The native CLI id rides along in
 `state.session_id` and is captured into the record on first sight. This is how
 Claude works (via `claude --settings <file>`, no credential-home redirect).
 
+The captured native id is **not immutable**. A CLI can switch the active
+conversation inside one running process (Claude `/resume` of an externally
+started session, or `/clear`), which surfaces as a `SessionStart` edge carrying a
+*new* native id under the same token. The translator flags such edges with
+`session_boundary: true` on the `ActivityUpdate::State`, and the correlator's
+`record_session_activity_by_id_at_boundary` **re-points** the session's
+`native_session_ref` to follow them. This is safe (not a folder-scan guess)
+because the token authenticates the owning Reverie session directly, so the edge
+is the live process telling us, authenticated, which conversation it now holds.
+Without it the dashboard would freeze (activity routes by native id) and a later
+resume would target the abandoned conversation. The re-point is CLI-agnostic: any
+future push-hook CLI only has to set `session_boundary` on its own start edge.
+
 ### File: the session-log engine
 
 [`session_log.rs`](../../packages/reverie-core/src/session_log.rs) watches only the
