@@ -210,32 +210,44 @@ The Reverie Bridge is the in-process MCP server that each agent CLI talks to. Th
 These types live in `packages/reverie-core` alongside the existing `domain.rs` and `activity.rs`.
 
 ```rust
-pub struct ConnectionId(pub Uuid);
+// ConnectionId / RequestId / MessageId are bare type aliases, not newtypes.
+pub type ConnectionId = Uuid;
+pub type RequestId = Uuid;
+pub type MessageId = Uuid;
 
 pub struct Connection {
     pub id: ConnectionId,
-    pub participants: [SessionId; 2],
+    // Participants are stored as two named fields in canonical (sorted) order,
+    // not an array; either may have initiated.
+    pub participant_a: SessionId,
+    pub participant_b: SessionId,
     pub initiator: ConnectionInitiator,
     pub status: ConnectionStatus,
     pub reason_opened: String,
     pub policy_at_open: ConnectionPolicy,
-    pub opened_at: DateTime<Utc>,
-    pub closed_at: Option<DateTime<Utc>>,
+    pub topic: Option<String>,
+    pub created_at: String,          // ISO-8601 string; request time, or open time for user-opened
+    pub accepted_at: Option<String>, // set once the connection has ever opened
+    pub closed_at: Option<String>,
     pub closed_by: Option<ConnectionClosedBy>,
     pub reason_closed: Option<String>,
-    pub topic: Option<String>,
+    // Request metadata lives in a separate struct, populated only while Requested.
+    pub pending_request: Option<PendingRequest>,
     pub sequence: u64,
 }
 
+// A flat enum; the request metadata is carried by Connection.pending_request.
 pub enum ConnectionStatus {
-    Requested {
-        request_id: RequestId,
-        requested_at: DateTime<Utc>,
-        expires_at: DateTime<Utc>,
-    },
+    Requested,
     Open,
     Closed,
     Denied,
+}
+
+pub struct PendingRequest {
+    pub request_id: RequestId,
+    pub requested_at: String,
+    pub expires_at: String,
 }
 
 pub enum ConnectionInitiator {
@@ -267,8 +279,8 @@ pub struct ConnectionMessage {
     pub from_session: SessionId,
     pub to_session: SessionId,
     pub body: String,
-    pub sent_at: DateTime<Utc>,
-    pub delivered_at: Option<DateTime<Utc>>,
+    pub sent_at: String,                 // ISO-8601 string, matching the rest of the crate
+    pub delivered_at: Option<String>,
     pub sequence: u64,
 }
 ```
@@ -277,44 +289,40 @@ pub struct ConnectionMessage {
 
 ### Connection service contract
 
-The service exposes a narrow API. UI, MCP bridge, and adapters all use the same surface.
+The service exposes a narrow API. UI, MCP bridge, and adapters all use the same surface. `ConnectionService` is a concrete struct over an `Arc<dyn ConnectionRepository>` (the repository is the trait seam, swapped for an in-memory impl in tests), not a trait itself. Time is passed in at each call (`now: impl Into<String>`) so the crate stays free of a time source.
 
 ```rust
-pub trait ConnectionService: Send + Sync {
-    fn list_peers(&self, caller: SessionId, filter: PeerFilter) -> Vec<PeerView>;
-    fn peer_status(&self, caller: SessionId, peer: SessionId) -> Option<PeerView>;
+pub struct ConnectionService { /* repo, registry, policy, pending, observer */ }
 
-    fn request_connection(
-        &self,
-        caller: SessionId,
-        target: SessionId,
-        reason: String,
-    ) -> ConnectionRequestOutcome;
+impl ConnectionService {
+    pub fn list_peers(&self, caller: SessionId, scope: PeerScope) -> Result<Vec<PeerView>>;
+    pub fn peer_status(&self, caller: SessionId, peer: SessionId) -> Result<Option<PeerView>>;
 
-    fn accept_request(&self, request_id: RequestId, decision_by: DecisionBy) -> Result<ConnectionId>;
-    fn deny_request(&self, request_id: RequestId, decision_by: DecisionBy) -> Result<()>;
+    pub fn request_connection(
+        &self, initiator: SessionId, target: SessionId,
+        reason: impl Into<String>, now: impl Into<String>,
+    ) -> Result<RequestOutcome>;
 
-    fn user_open(&self, a: SessionId, b: SessionId, reason: String) -> Result<ConnectionId>;
+    // Long-poll for the decision; poll_decision is the non-blocking fallback.
+    pub fn wait_for_decision(&self, request_id: RequestId, timeout: Duration) -> WaitOutcome;
+    pub fn poll_decision(&self, request_id: RequestId) -> Option<WaitOutcome>;
 
-    fn send_message(
-        &self,
-        caller: SessionId,
-        connection_id: ConnectionId,
-        body: String,
-    ) -> Result<MessageId>;
-    fn pending_messages(&self, caller: SessionId, connection_id: ConnectionId)
-        -> Vec<ConnectionMessage>;
+    pub fn accept_request(&self, request_id: RequestId, by: DecisionBy, now: impl Into<String>) -> Result<ConnectionId>;
+    pub fn deny_request(&self, request_id: RequestId, by: DecisionBy, now: impl Into<String>, reason: Option<String>) -> Result<()>;
 
-    fn close(
-        &self,
-        caller: ConnectionCaller,
-        connection_id: ConnectionId,
-        reason: Option<String>,
-    ) -> Result<()>;
+    pub fn user_open(&self, a: SessionId, b: SessionId, reason: impl Into<String>, now: impl Into<String>) -> Result<ConnectionId>;
+
+    pub fn send_message(&self, caller: SessionId, connection_id: ConnectionId, body: impl Into<String>, now: impl Into<String>) -> Result<MessageId>;
+    // Read-only view from a sequence cursor; does not stamp delivery.
+    pub fn list_messages(&self, caller: SessionId, connection_id: ConnectionId, since_sequence: u64) -> Result<Vec<ConnectionMessage>>;
+    // Returns undelivered inbound messages and stamps them delivered.
+    pub fn pending_messages(&self, caller: SessionId, connection_id: ConnectionId, since_sequence: u64, now: impl Into<String>) -> Result<Vec<ConnectionMessage>>;
+
+    pub fn close(&self, caller: ConnectionCaller, connection_id: ConnectionId, now: impl Into<String>, reason: Option<String>) -> Result<()>;
 }
 ```
 
-`ConnectionRequestOutcome` is either an immediate `Open(connection_id)` (when policy auto-allows), an `Allow(connection_id)` (after a banner accept), `Deny`, or `Pending(request_id)` so the caller can re-query later.
+`request_connection` returns a `RequestOutcome`, one of: `Allowed { connection_id }` (policy auto-allowed, already `Open`), `Pending { connection_id, request_id }` (the user must decide; the bridge then `wait_for_decision`s on `request_id`), `AlreadyOpen { connection_id }` (the pair already has an open connection, reused), or `BlockedByPair { blocked_until_secs, reason }` (the user blocked this initiator-target pair for a window). `wait_for_decision` / `poll_decision` return a `WaitOutcome` (`Allowed`, `Denied`, `Timeout`, `Unknown`).
 
 ### The Reverie Bridge: MCP server surface
 
@@ -324,11 +332,14 @@ The bridge is the call surface every agent CLI sees. It exposes a small set of t
 | --- | --- |
 | `reverie.list_peers(scope?)` | Returns currently active sibling sessions visible to the caller, by address and current activity summary. `scope` defaults to "focus" and may widen to "project" or "workspace". |
 | `reverie.peer_status(peer)` | Returns richer state for one peer: current activity, last meaningful line, whether the caller already has an open connection to it. |
-| `reverie.request_connection(target, reason)` | Long-poll. Returns `allowed`, `denied`, or `pending(request_id)` if the user has not decided within the configured wall-clock window. |
-| `reverie.check_connection(request_id)` | Poll fallback for the same. |
-| `reverie.send_to_connection(connection_id, message)` | Sends a message through an open connection. |
-| `reverie.recv_from_connection(connection_id, since?)` | Returns inbound messages. The caller may pass a `since` sequence to fetch only what is new. |
+| `reverie.request_connection(target, reason)` | Returns `allowed`, `pending(request_id)` (the user has not decided yet), `already_open`, or `blocked_by_pair`. |
+| `reverie.wait_for_decision(request_id)` | Long-poll for a pending request's outcome: blocks up to the configured wall-clock window, returning `allowed`, `denied`, or `timeout`. |
+| `reverie.poll_decision(request_id)` | Non-blocking poll fallback for the same outcome. |
+| `reverie.send_message(connection_id, message)` | Sends a message through an open connection. |
+| `reverie.pending_messages(connection_id)` | Returns undelivered inbound messages and marks them delivered. |
 | `reverie.close_connection(connection_id, reason?)` | Closes a connection. |
+| `reverie.list_connections()` | Lists every connection the caller participates in, in every status. |
+| `reverie.get_connection(connection_id)` | Fetches one connection by id, including its full record. |
 
 Tool descriptions, which the model reads every turn, carry the behavioral hints. Examples:
 
@@ -372,13 +383,13 @@ This identity model is sufficient for v1. It assumes the desktop trusts subproce
 
 ### Long-poll with progress heartbeat
 
-`reverie.request_connection` is the only tool that blocks waiting on a human. The pattern:
+`reverie.request_connection` returns immediately (`allowed` when policy auto-allows, otherwise `pending(request_id)`, plus `already_open` / `blocked_by_pair`). `reverie.wait_for_decision` is the tool that blocks waiting on a human. The pattern:
 
-1. The bridge writes a `requested` row, computes `expires_at = now + 0.8 * configured_tool_timeout`, and starts the request flow.
-2. While waiting, the bridge emits MCP `notifications/progress` with a "still waiting" message every 10 seconds. Any CLI that surfaces progress will show the user "still waiting on connection accept."
-3. If the user accepts within the window, the tool returns `allowed(connection_id)`.
-4. If the user denies, the tool returns `denied`.
-5. If the window elapses without a decision, the tool returns `pending(request_id)`. The connection remains `requested`; the agent may call `check_connection(request_id)` on later turns to retrieve the eventual outcome.
+1. `request_connection` writes a `requested` row, computes `expires_at = now + 0.8 * configured_tool_timeout`, and returns `pending(request_id)`.
+2. The agent calls `wait_for_decision(request_id)`, which blocks up to the window. While waiting, the bridge emits MCP `notifications/progress` with a "still waiting" message every 10 seconds. Any CLI that surfaces progress will show the user "still waiting on connection accept."
+3. If the user accepts within the window, `wait_for_decision` returns `allowed(connection_id)`.
+4. If the user denies, it returns `denied`.
+5. If the window elapses without a decision, it returns `timeout`. The connection remains `requested`; the agent may call `poll_decision(request_id)` on later turns to retrieve the eventual outcome.
 
 The configured tool timeouts (set per CLI at first-run consent, see below) determine the wall-clock window. Recommended values are 600s (Claude Code, Codex CLI) and the default-via-patch-plus-override for Cortex.
 
@@ -388,11 +399,13 @@ The receiving agent does not poll for messages on its own. The system tells it a
 
 | CLI | Mechanism | Source |
 | --- | --- | --- |
-| Claude Code | `UserPromptSubmit` hook returns `additionalContext` saying "You have N unread messages from connection `<id>` with `<peer>`. Call `reverie.recv_from_connection` to read." | Reverie hook server (`hook_server.rs`), reusing the existing translator pattern |
+| Claude Code | `UserPromptSubmit` hook returns `additionalContext` saying "You have N unread messages on connection `<label>` (id `<id>`). Call `reverie.pending_messages` with that connection id to read them." | Reverie hook server (`hook_server.rs`), reusing the existing translator pattern |
 | Codex CLI | Same: `UserPromptSubmit` hook with `additionalContext` injection | Reverie hook server, same path |
 | Cortex Code | A new generic Cortex pre-turn hook surface (see Cortex changes below), with the same payload | Cortex Code |
 
-The agent then calls `recv_from_connection` and gets the message bodies. The body itself is prefixed `[from <peer_address>] <message>` so the model reads it as inter-agent context, distinct from user input, even when no styling is available.
+The agent then calls `reverie.pending_messages` and gets the message bodies (which also stamps them delivered). The body itself is prefixed `[from <peer_address>] <message>` so the model reads it as inter-agent context, distinct from user input, even when no styling is available.
+
+The Claude/Codex `UserPromptSubmit` path is built: the hook server consults a `HookPushSource` (implemented by `ConnectionService`) on every `UserPromptSubmit` and returns the unread-message nudge as `additionalContext` (`hook_server.rs`). The Cortex pre-turn hook surface is the remaining producer-side piece.
 
 Claude Code's MCP "channels" feature is available as an opt-in optimization for Claude users: when enabled, message delivery is push-immediate rather than next-turn. This is purely additive and not relied on by the core design, since channels are Claude-only and gated on Anthropic auth.
 
@@ -459,7 +472,7 @@ The registration writes per CLI:
 | CLI | Where Reverie writes | How |
 | --- | --- | --- |
 | Cortex Code | `~/.cortex/mcp.json` | Reverie writes the file directly (Cortex's expected config). Hot-reload in Cortex Code picks up changes in running sessions. |
-| Claude Code | `~/.claude.json` | Reverie shells out to `claude mcp add-json reverie_bridge '<json>' --scope user`, so the change uses Claude Code's own registration path and is reversible with `claude mcp remove`. |
+| Claude Code | `~/.claude.json` | Reverie merges a `reverie_bridge` entry directly into the top-level `mcpServers` object (`write_claude_mcp_entry` in `bridge_installer.rs`), preserving the user's other keys. Uninstall is a direct file edit that removes only that key. |
 | Codex CLI | `~/.codex/config.toml` | Reverie appends a `[mcp_servers.reverie_bridge]` entry with a clear Reverie-managed marker comment. |
 
 Each write is preceded by an explicit consent prompt in Reverie's onboarding, with the exact text and file path shown. The prompt is one-time per CLI. Reverie also provides an "uninstall bridge from `<cli>`" affordance in settings that removes the entry.
@@ -517,7 +530,7 @@ For inbound delivery on Cortex, the receiving agent needs a system-injected note
 
 The right architectural move is to add a generic Cortex pre-turn hook surface, configured in a hooks file:
 
-- Hooks defined in `~/.cortex/hooks.toml` (user scope) and `.cortex/hooks.toml` (project scope).
+- Hooks defined in `~/.cortex/hooks.json` (user scope) and `.cortex/hooks.json` (project scope).
 - Event names: `pre_turn`, `post_turn`, `pre_tool_use`, `post_tool_use`, `session_start`, `session_end`. v1 ships at least `pre_turn`; the others can land later.
 - Handlers run as subprocesses receiving JSON on stdin and emitting JSON on stdout, mirroring Claude Code's contract for portability of mental model.
 - A `pre_turn` handler may return `additional_context: string` that is prepended to the next user prompt as opaque context.
@@ -577,7 +590,7 @@ Goal: two Cortex sessions in the same focus can open a connection, exchange a fe
 Work:
 
 - Onboarding consent flow for Cortex bridge registration: write `~/.cortex/mcp.json` after consent.
-- Bridge tools `request_connection`, `accept_request` (driven from a temporary CLI in the desktop process), `send_to_connection`, `recv_from_connection`, `close_connection`.
+- Bridge tools `request_connection`, `wait_for_decision` / `poll_decision`, `accept_request` (driven from a temporary CLI in the desktop process), `send_message`, `pending_messages`, `close_connection`.
 - Reverie's bridge ships the pre-turn hook handler installed alongside its config; consent extends to installing the hook.
 - Persistence: connections and messages written to the existing JSON store; SQLite migration deferred until Phase 5.
 - Activity events emitted to both participant sessions.
@@ -592,7 +605,7 @@ Gate:
 Work:
 
 - Onboarding consent for Codex bridge registration: append `[mcp_servers.reverie_bridge]` to `~/.codex/config.toml`.
-- Codex hook integration via the existing `hook_server.rs`: extend the translator to emit a `UserPromptSubmit` hook payload that calls `recv_from_connection` and returns `additionalContext`. Tool timeout in the bridge entry set to 600s.
+- Codex hook integration via the existing `hook_server.rs`: extend the translator to emit a `UserPromptSubmit` hook payload that nudges the agent to call `pending_messages` and returns `additionalContext`. Tool timeout in the bridge entry set to 600s.
 - Configuration: per-session env injection mirrors Cortex.
 
 Gate:
@@ -603,7 +616,7 @@ Gate:
 
 Work:
 
-- Onboarding consent for Claude bridge registration: shell out to `claude mcp add-json reverie_bridge ... --scope user` with `timeout: 600000`.
+- Onboarding consent for Claude bridge registration: merge a `reverie_bridge` entry into `~/.claude.json`'s `mcpServers` directly (`write_claude_mcp_entry`) with `timeout: 600000`.
 - Hook integration via `hook_server.rs` `UserPromptSubmit` handler (same translator pattern, Claude payload).
 - Channels: optional. If the user has enabled channels and the bridge declares `claude/channel`, deliver messages via push. Behind a feature flag for v1.
 
