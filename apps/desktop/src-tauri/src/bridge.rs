@@ -102,6 +102,21 @@ pub(crate) fn start_bridge(
         )
     })?;
 
+    // The socket lives in a shared temp dir, so do not rely on the process
+    // umask to keep other local users out: restrict it to the owner explicitly.
+    // Connecting to an AF_UNIX socket needs write access to the node, so 0600
+    // means only this user can open the bridge even before the secret check.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!(
+                    "restricting permissions on bridge socket at {}",
+                    socket_path.display()
+                )
+            })?;
+    }
+
     let service: Arc<ConnectionService> = Arc::new(ConnectionService::new(repository));
     if let Some(observer) = observer {
         service.set_observer(observer);
@@ -147,32 +162,13 @@ pub(crate) fn start_bridge(
     Ok((service, BridgeInfo { socket_path }))
 }
 
-/// Mint a short, random secret for per-session bridge authentication. Format
-/// is 32 hex characters (128 bits) which is plenty for a local-only,
-/// short-lived secret. Avoids pulling in `rand` by sourcing entropy from the
-/// system clock and pid; collisions are not security-meaningful because the
-/// secret only authenticates to a peer that already knows the session id.
+/// Mint a random secret for per-session bridge authentication. Format is 32
+/// hex characters from a v4 UUID, whose bytes come from the OS CSPRNG (the same
+/// source the hook-token path uses). This is the only credential gating the
+/// bridge, so it must be unpredictable: a clock+pid seed could be guessed by a
+/// local process that observes when a session launched.
 pub(crate) fn mint_session_secret() -> String {
-    let mut bytes = [0u8; 16];
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u128)
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let seed = nanos ^ (pid << 64);
-    // Splitmix64 on the seed to spread bits, two rounds to fill 16 bytes.
-    let mut state = seed as u64 ^ (seed >> 64) as u64;
-    for chunk in bytes.chunks_mut(8) {
-        state = state.wrapping_add(0x9E3779B97F4A7C15);
-        let mut z = state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-        z ^= z >> 31;
-        for (slot, byte) in chunk.iter_mut().zip(z.to_le_bytes()) {
-            *slot = byte;
-        }
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    uuid::Uuid::new_v4().simple().to_string()
 }
 
 #[cfg(test)]
