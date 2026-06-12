@@ -8,15 +8,18 @@ Reverie is a **hybrid Rust + TypeScript monorepo** building a single macOS deskt
 
 ```
 reverie/
-├── Cargo.toml                    # Rust workspace (members: packages/reverie-core)
+├── Cargo.toml                    # Rust workspace (members: apps/reverie-bridge, packages/reverie-core, packages/reverie-persistence)
 ├── package.json                  # Frontend/npm workspace root + all dev scripts
 ├── packages/
-│   └── reverie-core/             # Pure Rust domain/runtime crate (no Tauri, no UI)
-│       └── src/{domain,agents,pty,terminal}.rs
+│   ├── reverie-core/             # Pure Rust domain/runtime crate (no Tauri, no UI)
+│   │   └── src/{domain,agents,pty,terminal,repository,...}.rs
+│   └── reverie-persistence/      # SQLite-backed WorkspaceRepository (the only SQLite engine)
+│       └── src/lib.rs
 ├── apps/
+│   ├── reverie-bridge/           # MCP bridge sidecar binaries (inter-agent connections + CLI hooks)
 │   └── desktop/
 │       ├── src-tauri/            # Tauri v2 desktop app (Rust)
-│       │   └── src/{main,app_shell,terminal_backend,terminal_runtime}.rs
+│       │   └── src/{main,commands,state,...}.rs + src/terminal/{runtime,ghostty,wire,...}.rs
 │       └── web/                  # Vite + React frontend (the WebView UI)
 ├── spikes/                       # Isolated proofs (e.g. ghostty-vt-proof)
 └── docs/                         # This documentation
@@ -28,10 +31,12 @@ reverie/
 | --- | --- | --- |
 | Edition / toolchain | Rust **edition 2024**, `rust-version = 1.93` | Set in the workspace `Cargo.toml` |
 | Desktop shell | **Tauri v2** (`tauri`, `tauri-build`) | Owns the WebView, commands, and events |
-| Domain/runtime crate | `reverie-core` | Pure logic: domain model, agent adapters, PTY, terminal frame model. No Tauri dependency. |
+| Domain/runtime crate | `reverie-core` | Pure logic: domain model, agent adapters, PTY, terminal frame model, activity ingestion, inter-agent connections, the `WorkspaceRepository` trait. No Tauri dependency. |
+| Persistence crate | `reverie-persistence` | SQLite implementation of `WorkspaceRepository`. Owns the only SQLite engine in the workspace; flattens `rusqlite`/serde errors into the core `PersistenceError`. |
+| Bridge sidecar | `apps/reverie-bridge` | Standalone helper binaries (`reverie-bridge`, `reverie-bridge-preturn-hook`, `reverie-codex-hook`) that back inter-agent connections and CLI hooks. |
 | Terminal emulation | **`libghostty-vt` 0.1.1** | Ghostty VT core (parsing, state, scrollback, reflow). Pre-1.0; **requires Zig `0.15.x` on `PATH`** to build. |
 | PTY / process | **`portable-pty` 0.9** | Cross-platform process spawn + PTY for macOS/Windows/Linux |
-| Local persistence | **`rusqlite` 0.32** (`bundled`) + JSON document store | Current state is a versioned JSON shell store in the Tauri app-data dir, migrating toward SQLite |
+| Local persistence | **`rusqlite` 0.32** (`bundled`) | SQLite is the live store: the `reverie-persistence` crate implements `WorkspaceRepository` with one long-lived connection behind a `Mutex`, incremental by-id writes, and ordered migrations keyed on `PRAGMA user_version` (WAL, foreign keys on). It lives in the Tauri app-data dir. |
 | Serialization | `serde`, `serde_json` | Domain records, native-session refs, Tauri boundary |
 | Errors | `anyhow`, `thiserror` | App-level vs. library-level error handling |
 | IDs | `uuid` (v4) | Reverie-owned session/record IDs |
@@ -42,6 +47,7 @@ reverie/
 | Concern | Choice | Notes |
 | --- | --- | --- |
 | Framework | **React 19** (`react`, `react-dom`) | Owns the product shell; does **not** render terminal cells |
+| State management | **Zustand 5** (`zustand`) | App state is split across focused stores in `apps/desktop/web/store/` (navigation, ui, palette, activity, shell, terminal, connectionPanel, overlay); components subscribe to slices via selectors |
 | Build tool | **Vite 7** (`@vitejs/plugin-react`) | Root `apps/desktop/web/`, dev server on `127.0.0.1:1420`, builds to `dist/` |
 | Language | **TypeScript 5.9** | `strict`, `moduleResolution: Bundler`, `noEmit` (Vite transpiles) |
 | Styling | **Panda CSS** (`@pandacss/dev`) | Tokens, recipes, codegen to `apps/desktop/web/styled-system/` (gitignored) |
@@ -53,11 +59,11 @@ reverie/
 ### Fonts & theming
 
 - UI font **Inter**, monospace **JetBrains Mono** (see [`../design-vision.md`](../design-vision.md)).
-- Warm-neutral monochrome token set with `data-theme` light/dark switching, currently defined inline in `App.tsx`. `panda.config.ts` holds a stale blue token set that should be reconciled.
+- Warm-neutral monochrome token set with `data-theme` light/dark switching, defined in `apps/desktop/web/themes/` (`tokens.ts`, `typography.ts`, `appShell.ts`, `surfaces.ts`, `terminalTheme.ts`). `panda.config.ts` is intentionally kept token-free and theme-neutral; tokens are not declared there.
 
 ## Browser-testable harness
 
-Because Tauri desktop WebDriver can't drive macOS WKWebView, the React shell has a **browser fixture runtime** (`apps/desktop/web/appRuntime.ts`) that replaces Tauri IPC with deterministic fixtures. Run `npm run dev:harness` → `http://127.0.0.1:1420`. Smoke coverage runs through `harness-smoke.mjs` / `harnessSmoke.ts` against headless Chrome (`CHROME_PATH` overrides the binary). This is the fast loop for UI screenshots/interaction tests; Rust/Tauri tests remain the source of truth for persistence, commands, CLI detection, and native session launch.
+Because Tauri desktop WebDriver can't drive macOS WKWebView, the React shell has a **browser fixture runtime** (runtime selection in `apps/desktop/web/services/runtime.ts`, fixtures in `apps/desktop/web/services/fixtures.ts`) that replaces Tauri IPC with deterministic fixtures. Run `npm run dev:harness` → `http://127.0.0.1:1420`. Smoke coverage runs through `harness-smoke.mjs` / `harnessSmoke.ts` against headless Chrome (`CHROME_PATH` overrides the binary). This is the fast loop for UI screenshots/interaction tests; Rust/Tauri tests remain the source of truth for persistence, commands, CLI detection, and native session launch.
 
 ## Key build constraints
 
@@ -69,7 +75,7 @@ Because Tauri desktop WebDriver can't drive macOS WKWebView, the React shell has
 
 ```bash
 npm run dev               # start the desktop app (Panda watch + Vite + Tauri/cargo)
-npm run dev:harness       # browser-only React harness with fixture services
+npm run dev:harness       # browser-only React UI loop (alias of dev:web); load fixtures via the harness query param
 npm run build             # production desktop build (web assets + release binary)
 npm run build:web         # Panda codegen + tsc --noEmit + vite build
 npm run check             # frontend typecheck/build + Rust tests/checks

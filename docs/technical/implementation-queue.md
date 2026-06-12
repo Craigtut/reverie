@@ -54,11 +54,11 @@ The yardstick for "faithful to the design" is [`terminal/performance-and-accepta
 
 ## Immediate implementation order
 
-> **Dated caveat (2026-06-01): everything from here down predates the terminal v0 rebuild.** The sections below (PTY runtime, Ghostty frame extraction, session lifecycle, persistence, the initial Tauri command/event surface, the React/Panda scaffold, adapter hardening, and the per-CLI lifecycle state) describe the build status *before* `refactor/terminal-overhaul`. They are kept because the non-terminal work (lifecycle, persistence, commands, adapters, activity ingestion) is still broadly valid and was not the target of the rebuild. But the rebuild touched the terminal runtime, the frame model, the wire transport, and the frontend renderer/cache directly, so any terminal-adjacent claim here may be stale. **Re-verify against the code and against [`terminal/`](terminal/README.md) before relying on these.** Where a claim here contradicts the terminal section above or `terminal/`, the terminal section wins.
+> **Dated caveat (2026-06-01, partially reconciled 2026-06-12): everything from here down predates the terminal v0 rebuild.** The sections below (PTY runtime, Ghostty frame extraction, session lifecycle, persistence, the initial Tauri command/event surface, the React/Panda scaffold, adapter hardening, and the per-CLI lifecycle state) describe the build status *before* `refactor/terminal-overhaul`. They are kept because the non-terminal work (lifecycle, persistence, commands, adapters, activity ingestion) is still broadly valid and was not the target of the rebuild. The terminal-runtime/backend file paths and the persistence section have since been corrected (the terminal runtime is now `terminal/runtime.rs`, the Ghostty backend `terminal/ghostty.rs`, and persistence is the SQLite `reverie-persistence` crate). But the rebuild touched the frame model, the wire transport, and the frontend renderer/cache directly, so other terminal-adjacent claims here may still be stale. **Re-verify against the code and against [`terminal/`](terminal/README.md) before relying on these.** Where a claim here contradicts the terminal section above or `terminal/`, the terminal section wins.
 
 ### 1. Promote PTY runtime from proof code into core/app services
 
-Status: core PTY scaffold exists in `packages/reverie-core/src/pty.rs`, the live Tauri stream proof now uses `PtyProcess`, and `apps/desktop/src-tauri/src/terminal_runtime.rs` owns the app-level terminal session runtime.
+Status: core PTY scaffold exists in `packages/reverie-core/src/pty.rs`, the live Tauri stream proof now uses `PtyProcess`, and `apps/desktop/src-tauri/src/terminal/runtime.rs` owns the app-level terminal session runtime.
 
 Current shape:
 
@@ -78,7 +78,7 @@ Next steps:
 
 ### 2. Split Ghostty frame extraction into a reusable backend
 
-Status: started in `apps/desktop/src-tauri/src/terminal_backend.rs`.
+Status: lives in `apps/desktop/src-tauri/src/terminal/ghostty.rs`.
 
 The Ghostty frame extraction logic is now isolated behind `GhosttyTerminalState`, which consumes VT byte streams and emits Reverie `TerminalFrame` values without knowing about Tauri commands/events or product session semantics. The proof harness now calls this backend instead of owning Ghostty render extraction directly.
 
@@ -106,21 +106,18 @@ This service should coordinate domain records, agent adapters, PTY runtime, and 
 
 ### 4. Add local persistence
 
-Status: first persistence-backed shell slice exists.
+Status: SQLite persistence has landed.
 
 Current shape:
 
-- `apps/desktop/src-tauri/src/app_shell.rs` now owns `AppShellStore`, a local Tauri app-data JSON document at `workspace-shell.v1.json`.
-- `workspace_shell` loads from that store instead of returning only seeded in-memory data.
-- `create_focus` and `create_session` persist local shell changes and return updated snapshots.
-- The seeded snapshot is now first-run bootstrap data, not the ongoing source of truth.
-- Tests cover store seeding, focus round-tripping, and rejecting sessions for unknown focuses.
+- `packages/reverie-persistence/src/lib.rs` is a SQLite-backed `WorkspaceRepository` (implementing the repository trait from `reverie-core`): one long-lived connection behind a `Mutex`, incremental by-id writes, WAL, and foreign keys on.
+- Schema upgrades run through ordered migrations keyed on `PRAGMA user_version` (append a new entry per change; never edit a shipped one).
+- This replaces the earlier Tauri app-data JSON document (`workspace-shell.v1.json`); the seeded snapshot is first-run bootstrap data, not the ongoing source of truth.
+- Backend errors (`rusqlite`, serde) are flattened into the core `PersistenceError` so callers never depend on SQLite.
 
 Next steps:
 
-- Move from JSON-document persistence to SQLite or a repository layer once the domain API stabilizes.
 - Persist runtime-driven session status changes and native session refs.
-- Add migrations or schema-version upgrade handling before broadening stored fields.
 - Keep this local-first only; do not add cloud/account/sync seams.
 
 ### 5. Wire initial Tauri commands/events
