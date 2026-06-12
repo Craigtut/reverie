@@ -98,7 +98,6 @@ pub(crate) struct CreateSessionRequest {
     focus_id: FocusId,
     title: String,
     agent_kind: AgentKind,
-    cwd: PathBuf,
     dangerous_mode_override: Option<bool>,
 }
 
@@ -460,22 +459,40 @@ pub(crate) fn create_session(
     // there instead of whatever cwd the frontend sent. Sessions in a
     // project-backed focus keep using the project's folder.
     let snapshot = service.snapshot().map_err(|err| err.to_string())?;
-    let project_less = snapshot
+    let project_id = snapshot
         .focuses
         .iter()
         .find(|focus| focus.id == request.focus_id)
-        .map(|focus| focus.project_id.is_none())
+        .map(|focus| focus.project_id)
         .ok_or_else(|| format!("unknown focus {}", request.focus_id))?;
-    let cwd = if project_less {
-        let dir = provision_general_workspace(&app)?;
-        // Pre-accept the CLI's folder-trust prompt for this app-created scratch
-        // workspace, so a brand-new General session never opens on "do you trust
-        // this folder?". Scoped to General sessions: a real project folder is the
-        // user's own, and they answer that prompt themselves on first run.
-        crate::agent_trust::trust_workspace(request.agent_kind, &dir);
-        dir
-    } else {
-        request.cwd
+    let cwd = match project_id {
+        // A General (project-less) session is not tied to a folder, so Reverie
+        // provisions a fresh, isolated scratch workspace for it and launches the
+        // CLI there instead of whatever cwd the frontend sent.
+        None => {
+            let dir = provision_general_workspace(&app)?;
+            // Pre-accept the CLI's folder-trust prompt for this app-created scratch
+            // workspace, so a brand-new General session never opens on "do you trust
+            // this folder?". Scoped to General sessions: a real project folder is the
+            // user's own, and they answer that prompt themselves on first run.
+            crate::agent_trust::trust_workspace(request.agent_kind, &dir);
+            dir
+        }
+        // A project-backed session always launches in its project's own folder.
+        // Derive that from the stored project record rather than trusting the cwd
+        // the frontend sent, so a compromised WebView cannot point an agent at an
+        // arbitrary directory on disk.
+        Some(project_id) => snapshot
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| project.path.clone())
+            .ok_or_else(|| {
+                format!(
+                    "focus {} references unknown project {project_id}",
+                    request.focus_id
+                )
+            })?,
     };
     service
         .create_session(
@@ -954,6 +971,16 @@ pub(crate) fn start_session(
     if let Some(session_id) = session_id {
         runtime.terminate_for_session(session_id);
     }
+    // The caller-supplied `spawn_spec` path runs an arbitrary program, args,
+    // cwd, and env. It exists only for the dev bench/proof harness, so it is
+    // compiled out of release builds: a production WebView must not be able to
+    // turn `start_session` into arbitrary command execution. Release launches
+    // always derive the command from `build_agent_launch` below.
+    #[cfg(not(debug_assertions))]
+    if request.spawn_spec.is_some() {
+        return Err("start_session does not accept a caller-supplied spawnSpec".to_owned());
+    }
+
     // `agent_kind` + `folder_name` give the OSC-title worker what it needs to
     // apply this CLI's title rule and suppress folder-name defaults. The
     // caller-supplied-spec path (bench/proof) has no session, so both stay
