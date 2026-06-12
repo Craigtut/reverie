@@ -1,6 +1,6 @@
 # Core experience
 
-This folder is the design for Reverie's core interaction loop: how a person dispatches work to many agents, stays oriented across them, and has a fast back-and-forth with any one of them. It sits downstream of [`product-vision.md`](../../product-vision.md) and assumes the Workspace → Project → Focus → Session model.
+This folder is the design for Reverie's core interaction loop: how a person dispatches work to many agents, stays oriented across them, and has a fast back-and-forth with any one of them. It sits downstream of [`product-vision.md`](../../product-vision.md) and assumes the Workspace → Project → Topic → Session model.
 
 It is a set of feature designs, not a spec. Each feature has its own doc. This README is the anchor: the thesis they share, the two principles that resolve the hard problems, what the platform already gives us, and the order to build in.
 
@@ -44,7 +44,7 @@ The CLIs are not symmetric, and Reverie will keep adding more. So features that 
 ## The features
 
 - **[home-attention-router.md](home-attention-router.md)** — the home reshaped from a session grid into a state-tiered attention surface: big-with-actions at the top, idle collapsed away, fresh gone entirely.
-- **[approval-cards.md](approval-cards.md)** — native approve/deny cards over the third-party TUIs, built as a capability-tiered abstraction. All three current CLIs can answer approvals while keeping their TUI.
+- **[approval-cards.md](approval-cards.md)** — native approve/deny cards over the third-party TUIs, built as a capability-tiered abstraction. The intended design has all three current CLIs answering approvals from the card while keeping their TUI; today only "signpost and jump" is built (the terminal shows a permission banner and the user answers in the TUI), with the inline answer round-trip still to be wired.
 - **[completions-and-reentry.md](completions-and-reentry.md)** — the shared completion surface (CLI-reuse, no new auth) and the re-entry header that kills the reorientation tax on return.
 - **[dispatch.md](dispatch.md)** — a global shortcut, anywhere on the machine, that turns a spoken request into a routed, dispatched agent session.
 - **[voice-input.md](voice-input.md)** — the on-device speech-to-text primitive (Parakeet V3) and the floating voice button that fills a TUI's own input field.
@@ -72,7 +72,7 @@ The gaps are narrower than they look: the **UI surfaces**, the **decision round-
 
 1. **Home reshape.** State-tiered hierarchy, collapse idle, build on the in-flight finished-state work. Pure frontend, immediate relief.
 2. **Completion surface → re-entry header.** The primitive dispatch also needs; lowest-risk way to prove the no-new-auth LLM path.
-3. **Approval cards.** Wire the existing approval data plus the decision round-trip; verify the dead hook code. All three CLIs at the "answer from card" tier.
+3. **Approval cards.** Wire the existing approval data plus the decision round-trip; verify the dead hook code. The goal is to bring all three CLIs up to the "answer from card" tier; until that round-trip lands they stay at "signpost and jump."
 4. **Dispatch.** Global shortcut + STT + classification routed into the existing launch machinery.
 5. **Voice input + notifications.** The floating button and the three-tier system notifications/badge.
 

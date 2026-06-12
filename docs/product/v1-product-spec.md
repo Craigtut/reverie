@@ -37,17 +37,19 @@ The central promise: **come back later and pick up exactly where your agent work
 ```text
 Workspace
 ├── General workspace
-│   └── Focus
+│   └── Topic
 │       └── Session tabs
 └── Projects
     └── Project
-        └── Focus
+        └── Topic
             └── Session tabs
 ```
 
+> Note: the UI calls this entity a **Topic**. The internal data model still calls it a **Focus** (`focusId`, `ShellFocus`); both names refer to the same concept.
+
 ### Workspace
 
-The user's local Reverie home. Stores app settings, detected CLIs, project list, general workspace foci, sessions, restore metadata, and terminal/session preferences.
+The user's local Reverie home. Stores app settings, detected CLIs, project list, general workspace topics, sessions, restore metadata, and terminal/session preferences.
 
 Local path (macOS):
 
@@ -65,9 +67,9 @@ Rules:
 
 - Must not require git.
 - Can later expose git/developer features only when relevant.
-- Has many foci.
+- Has many topics.
 
-### Focus
+### Topic
 
 A user-defined masthead for a cluster of related sessions.
 
@@ -81,11 +83,11 @@ Examples:
 - Research synthesis
 - Bug triage
 
-`Focus` is preferred over `Task` because it is less ticket-like and supports broader work.
+`Topic` is preferred over `Task` because it is less ticket-like and supports broader work. (The internal data model still calls this entity `Focus`/`focusId`.)
 
 ### Session
 
-A resumable agent CLI tab inside a focus.
+A resumable agent CLI tab inside a topic.
 
 A session has:
 
@@ -119,8 +121,8 @@ Projects are introduced as useful context, not as a gate.
 
 ### Start a general workspace session
 
-1. User chooses `New Focus` in the general workspace.
-2. User names the focus.
+1. User chooses `New Topic` in the general workspace.
+2. User names the topic.
 3. User creates a session tab.
 4. Reverie asks which installed CLI to use.
 5. Reverie launches the CLI in a fresh, temporary scratch workspace created for that session.
@@ -131,24 +133,24 @@ Projects are introduced as useful context, not as a gate.
 1. User chooses `Add Project`.
 2. User selects any folder.
 3. Reverie creates a project record without requiring git.
-4. User creates foci and sessions inside that project.
+4. User creates topics and sessions inside that project.
 
 ### Resume work
 
 1. User opens Reverie.
-2. App shows recent foci/sessions across general workspace and projects.
-3. User selects a focus.
+2. App shows recent topics/sessions across general workspace and projects.
+3. User selects a topic.
 4. Previous session tabs are visible with restore state.
 5. User clicks a session tab.
 6. Reverie launches the correct CLI resume command using stored native session metadata.
 
-### Create another agent tab in same focus
+### Create another agent tab in same topic
 
-1. User is inside a focus.
+1. User is inside a topic.
 2. User clicks `New Session`.
 3. User selects an available CLI.
 4. Reverie launches a new CLI session in the same context.
-5. Multiple sessions can coexist as tabs under the same focus.
+5. Multiple sessions can coexist as tabs under the same topic.
 
 ## V1 supported CLIs
 
@@ -207,8 +209,8 @@ Needs dedicated adapter research for:
 - Local app database/config under Reverie-owned storage.
 - General workspace support.
 - Project support with arbitrary folders and no git requirement.
-- Focus creation/editing/deletion.
-- Session creation under a focus.
+- Topic creation/editing/deletion.
+- Session creation under a topic.
 - CLI detection for Claude Code, Codex CLI, Cortex Code.
 - CLI adapter model for launching new sessions and restoring sessions.
 - Per-session terminal process lifecycle.
@@ -219,7 +221,7 @@ Needs dedicated adapter research for:
 
 ### Should have
 
-- Recent sessions/foci view on launch.
+- Recent sessions/topics view on launch.
 - Clear unavailable-CLI setup messages.
 - Restore failure states with understandable recovery options.
 - App-level settings for default workspace path, default dangerous mode, and CLI paths.
@@ -248,12 +250,12 @@ Needs dedicated adapter research for:
 ## Open product decisions
 
 1. Exact visual layout: sidebar-first, command-center-first, or hybrid.
-2. Whether `Focus` is final product language or should be softened further in UI copy.
-3. How much terminal chrome to expose around each session tab.
-4. Whether a session can move between foci/projects in v1.
+2. How much terminal chrome to expose around each session tab.
+3. Whether a session can move between topics/projects in v1.
 
 Resolved:
 
+- Product language: the UI shipped **Topic** as the user-facing name for this entity. (The internal data model still uses `Focus`/`focusId`.) This settles the earlier open question of whether `Focus` was final product language; `Topic` is.
 - Closing a session tab **archives** it: a soft delete that stops the process and
-  is restorable from the focus's history. Archive / restore / delete is one
-  curation axis shared by projects, focuses, and sessions; see [Curation lifecycle](../technical/technical-architecture.md#curation-lifecycle-archive--restore--delete).
+  is restorable from the topic's history. Archive / restore / delete is one
+  curation axis shared by projects, topics, and sessions; see [Curation lifecycle](../technical/technical-architecture.md#curation-lifecycle-archive--restore--delete).

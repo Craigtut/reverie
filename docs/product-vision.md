@@ -41,13 +41,15 @@ Reverie organizes agent work into a small, deliberately generic hierarchy:
 ```
 Workspace
 └── Project            (a folder on your computer; git optional, never required)
-    └── Focus          (a logical grouping / area of work)
+    └── Topic          (a logical grouping / area of work)
         └── Session     (a live agent CLI session, stored as resumable metadata)
 ```
 
-- **Workspace** — the top of the hierarchy. It exists in the model but is intentionally underexpressed in the UI today; users mostly live in projects and focuses.
+> Note: the UI calls this entity a **Topic**. The internal data model still calls it a **Focus** (`focusId`, `ShellFocus`), so a reader cross-referencing these docs against the code is connecting the same concept under two names.
+
+- **Workspace** — the top of the hierarchy. It exists in the model but is intentionally underexpressed in the UI today; users mostly live in projects and topics.
 - **Project** — essentially just a folder on your computer. There is also a **General** lane for work that isn't tied to a specific folder: each General session runs in its own fresh, temporary scratch workspace that Reverie creates and cleans up. **Projects never require git.**
-- **Focus** — a set of things you want to work on: a logical grouping or area. Examples: *security updates*, *branding*, *product design*, *UX design*, *login*, *sign-up*. It's a masthead for related sessions, intentionally looser than a "task" or "ticket."
+- **Topic** — a set of things you want to work on: a logical grouping or area. Examples: *security updates*, *branding*, *product design*, *UX design*, *login*, *sign-up*. It's a masthead for related sessions, intentionally looser than a "task" or "ticket."
 - **Session** — an actual CLI session with a supported agentic harness. Each session gives you a terminal running that harness, and the session is stored as metadata attached to its tab so you can leave and resume it later with full context.
 
 ## Supported agent harnesses (v1)
@@ -62,7 +64,7 @@ Users install the CLIs themselves; Reverie detects what's available and enables 
 
 ## Why "run many agents in parallel" is the point
 
-The unit of value is parallelism plus continuity. A user might have a security audit running under one focus, branding exploration under another, and a writing session in a general workspace — all as live or resumable tabs. Reverie keeps every one of those sessions stored, organized, and ready to continue, so the cost of stepping away from agent work approaches zero.
+The unit of value is parallelism plus continuity. A user might have a security audit running under one topic, branding exploration under another, and a writing session in a general workspace — all as live or resumable tabs. Reverie keeps every one of those sessions stored, organized, and ready to continue, so the cost of stepping away from agent work approaches zero.
 
 ## Product principles
 
@@ -84,4 +86,4 @@ The unit of value is parallelism plus continuity. A user might have a security a
 
 ## How this evolves
 
-This vision will keep developing. The shape that's settled: a persona-plural, local-first, folder-based agentic workspace with a Workspace → Project → Focus → Session model and a genuinely good terminal. The parts still moving are UI language (e.g. how much "Workspace" and "Focus" surface), which harnesses we add next, and which developer affordances graduate from opt-in to mainstream.
+This vision will keep developing. The shape that's settled: a persona-plural, local-first, folder-based agentic workspace with a Workspace → Project → Topic → Session model and a genuinely good terminal. The parts still moving are UI language (e.g. how much "Workspace" surfaces), which harnesses we add next, and which developer affordances graduate from opt-in to mainstream.

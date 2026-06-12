@@ -31,7 +31,7 @@ ApprovalCapability (per adapter)
 
 ### Tiers
 
-1. **Answer from the card (full).** The request is intercepted, surfaced as a card with the exact command/patch and a reason, and Approve/Deny routes a decision back that short-circuits the TUI prompt. Claude, Codex, Cortex today.
+1. **Answer from the card (full).** The request is intercepted, surfaced as a card with the exact command/patch and a reason, and Approve/Deny routes a decision back that short-circuits the TUI prompt. This is the target tier for Claude, Codex, and Cortex (all three have a verified answer channel); the round-trip is not yet wired, so it is not live today. See "The decision round-trip" below.
 2. **Signpost and jump (detect-only).** We cannot answer externally, but we can detect "blocked on approval" and raise a card that says what is pending and focuses/scrolls the terminal to the prompt; the user answers in the TUI. The fallback for a CLI with detection but no answer channel, or when a hook is not installed.
 3. **None.** No card; the session simply shows as blocked in the tier order and the user opens the terminal. The floor for any new CLI before integration work.
 
