@@ -153,6 +153,7 @@ fn apply_update(
             key,
             state,
             fidelity,
+            session_boundary,
         } => {
             let native_id = match key {
                 SessionKey::Native(native_id) => native_id.clone(),
@@ -164,7 +165,12 @@ fn apply_update(
             };
             match key {
                 SessionKey::Reverie(reverie_id) => {
-                    match service.record_session_activity_by_id(*reverie_id, &native_id, merged) {
+                    match service.record_session_activity_by_id_at_boundary(
+                        *reverie_id,
+                        &native_id,
+                        merged,
+                        *session_boundary,
+                    ) {
                         Ok(captured) => captured,
                         Err(error) => {
                             eprintln!(
@@ -187,11 +193,13 @@ fn apply_update(
         ActivityUpdate::State {
             key: SessionKey::Reverie(reverie_id),
             state,
+            session_boundary,
             ..
-        } => match service.record_session_activity_by_id(
+        } => match service.record_session_activity_by_id_at_boundary(
             *reverie_id,
             &state.session_id,
             state.clone(),
+            *session_boundary,
         ) {
             Ok(captured) => captured,
             Err(error) => {
@@ -316,11 +324,22 @@ mod tests {
         sequence: u64,
         status: ActivityStatus,
     ) -> ActivityUpdate {
+        reverie_state_boundary(session_id, native, sequence, status, false)
+    }
+
+    fn reverie_state_boundary(
+        session_id: SessionId,
+        native: &str,
+        sequence: u64,
+        status: ActivityStatus,
+        session_boundary: bool,
+    ) -> ActivityUpdate {
         ActivityUpdate::State {
             source: ActivitySourceKind::ClaudeCode,
             key: SessionKey::Reverie(session_id),
             fidelity: Fidelity::Definitive,
             state: state(native, sequence, status),
+            session_boundary,
         }
     }
 
@@ -366,6 +385,83 @@ mod tests {
     }
 
     #[test]
+    fn session_start_boundary_repoints_native_id_after_in_tui_resume() {
+        // Reproduces the `/resume` bug: a session launched with native id A
+        // switches conversations in the TUI to an externally-started id B. The
+        // SessionStart boundary for B must re-point identity (so the dashboard
+        // stays bound and a later Reverie resume targets B), even though B's
+        // fresh sequence is far below A's high-water mark.
+        let (service, session_id) = service_with_session();
+
+        // Launch + work under native id A; A advances to a high sequence.
+        apply_update(
+            &service,
+            None,
+            &reverie_state(session_id, "native-A", 1, ActivityStatus::Working),
+        );
+        apply_update(
+            &service,
+            None,
+            &reverie_state(session_id, "native-A", 12, ActivityStatus::Working),
+        );
+
+        // `/resume` into B: a SessionStart boundary carrying the new id at seq 1.
+        assert!(
+            apply_update(
+                &service,
+                None,
+                &reverie_state_boundary(
+                    session_id,
+                    "native-B",
+                    1,
+                    ActivityStatus::Working,
+                    true,
+                ),
+            ),
+            "a boundary with a new native id re-points and reports a capture"
+        );
+
+        let bound_native = |service: &WorkspaceService| {
+            service
+                .snapshot()
+                .unwrap()
+                .sessions
+                .into_iter()
+                .find(|s| s.id == session_id)
+                .unwrap()
+                .native_session_ref
+                .and_then(|reference| reference.session_id)
+        };
+        assert_eq!(bound_native(&service).as_deref(), Some("native-B"));
+
+        // A late, non-boundary edge from the abandoned A stream must be ignored:
+        // it neither overwrites state nor drags identity back to A.
+        assert!(!apply_update(
+            &service,
+            None,
+            &reverie_state(session_id, "native-A", 13, ActivityStatus::AwaitingInput),
+        ));
+        assert_eq!(bound_native(&service).as_deref(), Some("native-B"));
+
+        // Subsequent B events flow normally under the re-pointed id.
+        apply_update(
+            &service,
+            None,
+            &reverie_state(session_id, "native-B", 2, ActivityStatus::AwaitingInput),
+        );
+        let session = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == session_id)
+            .unwrap();
+        let activity = session.latest_activity.unwrap();
+        assert_eq!(activity.session_id, "native-B");
+        assert_eq!(activity.status, ActivityStatus::AwaitingInput);
+    }
+
+    #[test]
     fn native_keyed_binds_to_the_session_with_that_ref() {
         let (service, session_id) = service_with_session();
         let reconciler = ActivityReconciler::new();
@@ -381,6 +477,7 @@ mod tests {
             key: SessionKey::Native("native-2".to_owned()),
             fidelity: Fidelity::Inferred,
             state: state("native-2", 2, ActivityStatus::AwaitingPermission),
+            session_boundary: false,
         };
         assert!(!apply_update(&service, Some(&reconciler), &native_update));
 

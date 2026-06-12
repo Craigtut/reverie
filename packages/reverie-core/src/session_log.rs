@@ -396,6 +396,9 @@ fn fold_new_bytes(
             key: SessionKey::Native(state.session_id.clone()),
             fidelity: tail.fold.fidelity(),
             state,
+            // A file-watch source binds by native id and can never re-point a
+            // session's identity; only a token-bound boundary edge does.
+            session_boundary: false,
         });
     }
 }

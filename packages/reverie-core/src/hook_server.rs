@@ -413,13 +413,27 @@ fn hook_state_update(
     source: HookSource,
     reverie_session_id: SessionId,
     state: ActivityState,
+    session_boundary: bool,
 ) -> ActivityUpdate {
     ActivityUpdate::State {
         source: source.activity_source_kind(),
         key: SessionKey::Reverie(reverie_session_id),
         fidelity: Fidelity::Definitive,
         state,
+        session_boundary,
     }
+}
+
+/// Drop a native session's sequence counter once its session has ended, so the
+/// per-process `sequences` map does not grow without bound across a long-running
+/// app that opens and closes many sessions. A later event for the same id (rare
+/// after `SessionEnd`) simply restarts the counter, which the launch-time
+/// sequence reset already tolerates.
+fn forget_sequence(sequences: &Mutex<HashMap<String, u64>>, session_id: &str) {
+    sequences
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(session_id);
 }
 
 /// Built-in Claude tools that block the turn on a user response rather than
@@ -472,10 +486,12 @@ fn translate_claude(
         );
         let status = claude_notification_status(envelope.notification_type.as_deref())?;
         let state = build_simple_state(&session_id, timestamp, sequence, cwd, status);
+        // A Notification is never a session-start boundary.
         return Some(hook_state_update(
             HookSource::ClaudeCode,
             reverie_session_id,
             state,
+            false,
         ));
     }
 
@@ -562,10 +578,20 @@ fn translate_claude(
         ),
     };
 
+    // SessionStart is the boundary at which a resumed/cleared conversation can
+    // arrive under a new native id; the correlator uses it to re-point identity.
+    let session_boundary = envelope.hook_event_name == "SessionStart";
+
+    // A finished session's counter can be reclaimed, bounding the sequences map.
+    if envelope.hook_event_name == "SessionEnd" {
+        forget_sequence(sequences, &session_id);
+    }
+
     Some(hook_state_update(
         HookSource::ClaudeCode,
         reverie_session_id,
         state,
+        session_boundary,
     ))
 }
 
@@ -638,10 +664,15 @@ fn translate_codex(
         ),
     };
 
+    // Same boundary contract as Claude: SessionStart is where a (re)started Codex
+    // conversation can present a new native id for the correlator to re-point.
+    let session_boundary = envelope.hook_event_name == "SessionStart";
+
     Some(hook_state_update(
         HookSource::CodexCli,
         reverie_session_id,
         state,
+        session_boundary,
     ))
 }
 
@@ -942,6 +973,7 @@ mod tests {
                 key,
                 fidelity,
                 state,
+                ..
             } => {
                 assert_eq!(source, ActivitySourceKind::ClaudeCode);
                 assert_eq!(key, SessionKey::Reverie(test_reverie_session_id()));
@@ -1167,6 +1199,36 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(seqs, vec![1, 2]);
+    }
+
+    #[test]
+    fn session_start_is_flagged_as_a_boundary_other_events_are_not() {
+        // The correlator re-points a session's native id only on a boundary edge,
+        // so SessionStart must carry the flag and ordinary turn events must not.
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let _ = post_hook(
+            handle.port(),
+            &claude_path(),
+            r#"{"hook_event_name":"SessionStart","session_id":"s","cwd":"/repo"}"#,
+        );
+        match wait_for_update(&handle) {
+            ActivityUpdate::State {
+                session_boundary, ..
+            } => assert!(session_boundary, "SessionStart is a boundary"),
+            other => panic!("expected State, got {other:?}"),
+        }
+
+        let _ = post_hook(
+            handle.port(),
+            &claude_path(),
+            r#"{"hook_event_name":"Stop","session_id":"s","cwd":"/repo"}"#,
+        );
+        match wait_for_update(&handle) {
+            ActivityUpdate::State {
+                session_boundary, ..
+            } => assert!(!session_boundary, "Stop is not a boundary"),
+            other => panic!("expected State, got {other:?}"),
+        }
     }
 
     #[test]

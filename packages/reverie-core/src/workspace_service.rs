@@ -794,15 +794,73 @@ impl WorkspaceService {
         native_session_id: &str,
         activity: ActivityState,
     ) -> Result<bool> {
+        // Not a session-(re)start boundary: identity is captured on first sight
+        // and never re-pointed. This is the path for ordinary turn/tool events.
+        self.record_session_activity_by_id_at_boundary(
+            reverie_session_id,
+            native_session_id,
+            activity,
+            false,
+        )
+    }
+
+    /// Boundary-aware variant of [`Self::record_session_activity_by_id`].
+    ///
+    /// `session_boundary` is true when the update is a session (re)start edge
+    /// (Claude / Codex `SessionStart`). A CLI changes the active native session id
+    /// inside one running process when the user switches conversations from the
+    /// TUI (`/resume` an externally-started session, or `/clear`), and that switch
+    /// surfaces as a boundary edge carrying the *new* native id under the same
+    /// token. Because the token authenticates the owning Reverie session directly,
+    /// such an edge is not a guess like a folder scan: it is the live process
+    /// telling us, authenticated, which conversation it now holds. So at a boundary
+    /// we **re-point** the session's `native_session_ref` to the new id, which is
+    /// what keeps the dashboard bound and a later Reverie resume targeting the
+    /// conversation the user actually worked in.
+    ///
+    /// Returns `true` when this call captured (first sight) or re-pointed the
+    /// native id, so the caller refetches the record and rebinds the activity feed.
+    pub fn record_session_activity_by_id_at_boundary(
+        &self,
+        reverie_session_id: SessionId,
+        native_session_id: &str,
+        activity: ActivityState,
+        session_boundary: bool,
+    ) -> Result<bool> {
         let Some(mut session) = self.repo.get_session(reverie_session_id)? else {
             return Ok(false);
         };
-        if let Some(existing) = &session.latest_activity {
-            if existing.sequence > activity.sequence {
-                return Ok(false);
+
+        let stored_native = session
+            .native_session_ref
+            .as_ref()
+            .and_then(|reference| reference.session_id.as_deref());
+        let native_changed = matches!(stored_native, Some(stored) if stored != native_session_id);
+        // Follow the live process onto a new conversation only at a start boundary.
+        let repoint = native_changed && session_boundary;
+
+        // A differing native id outside a boundary is a stale edge from a
+        // conversation this session has already moved off (e.g. a late event from
+        // the pre-`/resume` stream). Ignore it so it can neither overwrite the
+        // current state nor mis-bind under the wrong id.
+        if native_changed && !repoint {
+            return Ok(false);
+        }
+
+        // The out-of-order guard compares sequences within ONE native stream. A
+        // re-point begins a fresh stream with its own counter (the hook server
+        // numbers sequences per native id), so the previous stream's high-water
+        // sequence must not drop the new stream's opening events. Skip the guard
+        // exactly when re-pointing.
+        if !repoint {
+            if let Some(existing) = &session.latest_activity {
+                if existing.sequence > activity.sequence {
+                    return Ok(false);
+                }
             }
         }
-        let captured_native_session = session.native_session_ref.is_none();
+
+        let captured_native_session = session.native_session_ref.is_none() || repoint;
         if captured_native_session {
             let native_session_ref = NativeSessionRef {
                 kind: session.agent_kind,
@@ -814,6 +872,15 @@ impl WorkspaceService {
                 .repo
                 .claim_native_session(reverie_session_id, native_session_ref)?
             {
+                // Another Reverie session already owns this native id (e.g. the
+                // same external conversation is open in another tab). Don't steal
+                // it; leave this session as it was rather than corrupt the pairing.
+                if repoint {
+                    eprintln!(
+                        "[reverie] session {reverie_session_id} tried to re-point to native id \
+                         {native_session_id}, but another session already owns it; leaving as-is"
+                    );
+                }
                 return Ok(false);
             }
             session = match self.repo.get_session(reverie_session_id)? {
@@ -1994,6 +2061,71 @@ mod tests {
             session.native_session_ref.and_then(|r| r.session_id),
             Some("claude-native".to_owned())
         );
+    }
+
+    #[test]
+    fn boundary_repoints_native_id_but_same_id_still_respects_the_sequence_guard() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(
+                focus,
+                "Claude".to_owned(),
+                AgentKind::ClaudeCode,
+                "/tmp".into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+
+        let state = |native: &str, seq: u64, status: &str| {
+            crate::activity::parse_state(&format!(
+                r#"{{"version":1,"sessionId":"{native}","status":"{status}","updatedAt":"t","sequence":{seq},"cwd":"/tmp"}}"#
+            ))
+            .unwrap()
+        };
+        let bound = |service: &WorkspaceService| {
+            service.snapshot().unwrap().sessions[0]
+                .native_session_ref
+                .clone()
+                .and_then(|r| r.session_id)
+        };
+
+        // Capture A, then climb to a high sequence.
+        assert!(
+            service
+                .record_session_activity_by_id(id, "A", state("A", 1, "working"))
+                .unwrap()
+        );
+        service
+            .record_session_activity_by_id(id, "A", state("A", 12, "working"))
+            .unwrap();
+
+        // A boundary carrying the SAME id is not a re-point and still obeys the
+        // out-of-order guard: a stale low sequence is dropped.
+        assert!(
+            !service
+                .record_session_activity_by_id_at_boundary(id, "A", state("A", 2, "working"), true)
+                .unwrap()
+        );
+        assert_eq!(bound(&service).as_deref(), Some("A"));
+
+        // A boundary carrying a NEW id re-points despite the low sequence.
+        assert!(
+            service
+                .record_session_activity_by_id_at_boundary(id, "B", state("B", 1, "working"), true)
+                .unwrap()
+        );
+        assert_eq!(bound(&service).as_deref(), Some("B"));
+
+        // A non-boundary edge for the now-stale A id is ignored, not re-pointed.
+        assert!(
+            !service
+                .record_session_activity_by_id(id, "A", state("A", 99, "awaiting_input"))
+                .unwrap()
+        );
+        assert_eq!(bound(&service).as_deref(), Some("B"));
     }
 
     #[test]

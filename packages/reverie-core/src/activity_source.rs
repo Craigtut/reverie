@@ -78,6 +78,19 @@ pub enum ActivityUpdate {
         key: SessionKey,
         fidelity: Fidelity,
         state: ActivityState,
+        /// Whether this update is a session (re)start boundary: the edge a CLI
+        /// emits when it (re)opens a conversation (Claude / Codex `SessionStart`).
+        /// It is the one moment a [`SessionKey::Reverie`] (token-bound) source can
+        /// legitimately carry a *different* native id than the one Reverie already
+        /// captured, because the user switched conversations inside the live
+        /// process (`/resume`, `/clear`). The correlator re-points the session's
+        /// native ref to follow it. Every non-boundary update, and every
+        /// file-watch ([`SessionKey::Native`]) source, leaves this `false`: those
+        /// can never re-point identity, only confirm or advance it. Keeping the
+        /// signal here (not on [`ActivityState`]) means it is a property of the
+        /// transport event, not durable state, and stays CLI-agnostic: a new CLI
+        /// only has to set it on its own start edge.
+        session_boundary: bool,
     },
     Removed {
         source: ActivitySourceKind,
