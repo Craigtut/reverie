@@ -252,6 +252,21 @@ pub struct ConnectionService {
     observer: Mutex<Option<ConnectionObserver>>,
 }
 
+/// Compare two byte strings without short-circuiting on the first mismatch, so
+/// the time taken does not leak how many leading bytes of a presented bridge
+/// secret were correct. Length is allowed to short-circuit: the secret length
+/// is fixed, so it carries no useful signal.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 impl ConnectionService {
     pub fn new(repo: Arc<dyn ConnectionRepository>) -> Self {
         Self {
@@ -314,7 +329,7 @@ impl ConnectionService {
         let session = guard
             .get(&session_id)
             .ok_or_else(|| anyhow!("session {session_id} is not registered with the bridge"))?;
-        if session.secret != secret {
+        if !constant_time_eq(session.secret.as_bytes(), secret.as_bytes()) {
             bail!("session {session_id} presented an invalid bridge secret");
         }
         Ok(session.address.clone())
