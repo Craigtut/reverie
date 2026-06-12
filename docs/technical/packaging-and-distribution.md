@@ -125,9 +125,11 @@ the dylib are ad-hoc signed.
 The inter-agent connection bridge hands each agent CLI (Claude Code, Codex,
 Cortex) an absolute path to a helper binary (`reverie-bridge`) and lets the CLI
 spawn it as a stdio MCP server. A second helper, `reverie-bridge-preturn-hook`,
-backs the pre-turn lifecycle hook. Both must exist on disk at the path written
-into the CLI's config, or the agent reports `MCP client failed to start: No
-such file or directory`.
+backs the pre-turn lifecycle hook. A third, `reverie-codex-hook`, is the Codex
+command hook: Codex runs it on each lifecycle event, and it forwards the hook
+JSON from stdin into the desktop app's localhost hook server at `/hooks/codex`.
+All three must exist on disk at the path written into the CLI's config, or the
+agent reports `MCP client failed to start: No such file or directory`.
 
 The load-bearing invariant is **the helper lives next to the desktop binary**.
 `resolve_bridge_binaries` (in `connection_commands.rs`) writes
@@ -146,9 +148,9 @@ reverie-bridge`, no Zig needed) and copies each binary to:
 
 - `apps/desktop/src-tauri/binaries/<name>-<target-triple>` (gitignored) — the
   Tauri `externalBin` staging location. `tauri.conf.json > bundle > externalBin`
-  lists `binaries/reverie-bridge` and `binaries/reverie-bridge-preturn-hook`; the
-  bundler copies them into `Contents/MacOS/` (triple suffix stripped) and signs
-  them next to the main binary.
+  lists `binaries/reverie-bridge`, `binaries/reverie-bridge-preturn-hook`, and
+  `binaries/reverie-codex-hook`; the bundler copies them into `Contents/MacOS/`
+  (triple suffix stripped) and signs them next to the main binary.
 - `apps/desktop/src-tauri/target/<profile>/<name>` — next to the dev/run desktop
   binary, so `current_exe().parent()` resolves in `npm run dev` / `run:release`.
 
