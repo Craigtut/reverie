@@ -8,8 +8,14 @@ is normalized, and how to add the Nth CLI.
 
 The normalized model is [`ActivityState`](../../packages/reverie-core/src/activity.rs)
 (status, sequence, cwd, active tools, awaiting-permission, last error, final exit).
-`awaiting_permission` is a first-class UI state, so every adapter must be able to
-produce it rather than degrade it.
+The status taxonomy is `working`, `awaiting_input`, `awaiting_permission`,
+`awaiting_response`, `done`, `error`. Two of those are first-class blocking UI
+states every adapter must be able to produce rather than degrade:
+`awaiting_permission` (blocked on a tool-permission decision, suppressed under
+auto-approve) and `awaiting_response` (blocked mid-turn waiting for the user to
+answer a question or approve a plan: Claude's AskUserQuestion / ExitPlanMode
+pickers or an MCP elicitation dialog, and unlike `awaiting_permission` it is not
+suppressed by auto-approve, so a "yolo" session can still sit on a question).
 
 ## The spine
 
@@ -23,7 +29,7 @@ varies per CLI; everything downstream is shared and never per-CLI.
  session_log  (FILE)      ─┼─► ActivityUpdate ─► correlate() ─► WorkspaceService.persist
    ├─ Codex  (append-fold)│      { source,        - resolve SessionKey -> Reverie session
    └─ Cortex (snapshot)   │        key,            - capture native id on first sight
- [future: poll / in-band] ┘        fidelity,       - (deferred) merge by sequence + fidelity
+ [future: poll / in-band] ┘        fidelity,       - reconcile dual-source by turn + fidelity
                                     state }         - emit session_activity_changed
                                                     - emit session_record_changed on capture
 ```
@@ -72,13 +78,16 @@ exactly why one engine serves both.
 | CLI    | Transport  | Derivation | Binding   | Fidelity     | Engine |
 | ------ | ---------- | ---------- | --------- | ------------ | ------ |
 | Claude | push       | (event)    | token     | Definitive   | `hook_server` |
-| Codex  | file-watch | fold       | native-id | Inferred\*   | `session_log` (`CodexLogSource`, Append) |
+| Codex  | file-watch + push | fold | native-id | Inferred\* (+ Definitive hooks) | `session_log` (`CodexLogSource`, Append) + `hook_server` |
 | Cortex | file-watch | snapshot   | native-id | Definitive   | `session_log` (`CortexStateSource`, Snapshot) |
 
-\* Codex's rollout records are not first-class lifecycle transitions:
-`awaiting_permission` is folded heuristically from `with_escalated_permissions`,
-so the whole source is `Inferred` until the definitive `PermissionRequest` command
-hook lands as a second source for it (see Deferred, below).
+\* Codex is the one dual-source CLI. Its rollout records are not first-class
+lifecycle transitions (`awaiting_permission` is folded heuristically from
+`with_escalated_permissions`, so the watcher is `Inferred`), so Reverie layers a
+second source on the same session: per-session Codex lifecycle hooks injected via
+`-c` overrides ([`codex_hooks.rs`](../../packages/reverie-core/src/codex_hooks.rs))
+that POST `Definitive` edges to the hook server. The two sources are merged
+turn-by-turn by the reconciler before persistence (see The correlator, below).
 
 ## The engines
 
@@ -144,12 +153,17 @@ single consumer of `ActivityUpdate`. It:
   the payload is camelCase to match the web layer's `nativeSessionId`).
 - emits `session_record_changed` on first native-id capture, so the dashboard
   refetches the snapshot and can bind the (native-id-keyed) live activity stream.
-- is the home for the **multi-source fidelity merge** (deferred): when one session
-  gains a second source at a different fidelity, this is where a definitive update
-  must not be clobbered by a stale, lower-fidelity one. Today every session has
-  exactly one source and the persistence layer already drops out-of-order updates
-  by sequence, so no extra merge state exists yet; the `fidelity` carried on each
-  update is the hook for that rule.
+- runs the **multi-source reconciliation** for the one dual-source CLI. Codex's
+  updates (lifecycle hooks + rollout watcher) pass through a live
+  [`ActivityReconciler`](../../packages/reverie-core/src/activity_reconciler.rs)
+  before persistence: it is the single writer for that session, merging the two
+  sources turn-by-turn so the cross-source sequence fight is resolved and the
+  rollout's `turn_aborted` can backstop the `Stop` hook on Esc/error. A
+  `Definitive` hook edge wins over the `Inferred` log-tail. The single-source CLIs
+  (Claude hooks, Cortex snapshots) take the direct path with no reconciler, since
+  they have no second source; `record_session_activity*` still drops out-of-order
+  updates by sequence (for Codex, a monotonic dedup on the reconciler's own
+  sequence). The `fidelity` carried on each update drives the merge precedence.
 
 ## How to add a new CLI
 
@@ -179,14 +193,19 @@ single consumer of `ActivityUpdate`. It:
 
 That is the whole surface. Nothing in the spine changes.
 
+## Implemented: Codex dual-source reconciliation
+
+Codex's definitive lifecycle signal is built. Per-session Codex hooks are injected
+as `-c` SessionFlags overrides (the highest-precedence layer, additive to the
+user's own config, with a pre-seeded `trusted_hash` so they fire Trusted with no
+bypass flag), POSTing `Definitive` edges to the hook server alongside the rollout
+watcher. The reconciler in the correlator merges the two sources turn-by-turn, so
+a `Definitive` approval signal wins over the `Inferred` log-tail. See
+[`codex_hooks.rs`](../../packages/reverie-core/src/codex_hooks.rs) and
+[`activity_reconciler.rs`](../../packages/reverie-core/src/activity_reconciler.rs).
+
 ## Deferred (designed for, not built)
 
-- **Codex definitive `awaiting_permission`.** A trusted `PermissionRequest`
-  command hook POSTing to the hook server, layered over the rollout watcher as a
-  second source for the same session. This is what the correlator's fidelity merge
-  is for (a `Definitive` approval signal must win over the `Inferred` log-tail).
-  It needs live experimentation against the installed Codex (which config location
-  actually fires hooks, whether the trust hash persists), not more design.
 - **Poll and in-band transports.** Their only constraints are already satisfied:
   `ActivityState` tolerates low fidelity, and the correlator merges by fidelity.
   In-band would reuse the existing Ghostty/PTY stream and OSC parsing

@@ -8,12 +8,12 @@
 
 The product promise is "come back later and pick up exactly where your agent work left off." Search is the **index into that map**. Today the map has no content index, so the central recall job is unserved:
 
-> I was setting up Claude Code hooks with some agent a few days ago. I don't remember which session it was or which focus it lived under. Let me search "hooks" and have Reverie surface the session, the agent, and where it lives, then let me resume it.
+> I was setting up Claude Code hooks with some agent a few days ago. I don't remember which session it was or which topic it lived under. Let me search "hooks" and have Reverie surface the session, the agent, and where it lives, then let me resume it.
 
 Three things make this **recall**, not in-session find:
 
 1. The unit of the answer is a **session** (an agent + a place + a time), not a line of text.
-2. The query is **content** ("hooks"), but the payload the user wants is **identity and location** ("that was Codex, in the *dev-tooling* focus, three days ago").
+2. The query is **content** ("hooks"), but the payload the user wants is **identity and location** ("that was Codex, in the *dev-tooling* topic, three days ago").
 3. The end action is **resume**, not "highlight match 3 of 12".
 
 Nothing serves this today. In-session Find (Cmd-F) is single-session and renderer-based. The command palette (`apps/desktop/web/domain/palette.ts`) matches only titles, breadcrumb, cwd, and agent kind, so "hooks" finds nothing unless a title happens to contain it.
@@ -50,7 +50,7 @@ A new durable, append-only table (its own SQLite migration; the migration array 
 
 ```
 conversation_turn {
-  reverie_session_id   // ties to focus -> project -> agent_kind: the whole map
+  reverie_session_id   // ties to topic -> project -> agent_kind: the whole map
   native_session_id
   agent_kind
   ordinal              // position within the conversation
@@ -114,7 +114,7 @@ Posture in one line: optimistic about native files for quality, pessimistic abou
 ```
 search_workspace(query, facets) -> Vec<SessionHit>
 SessionHit {
-  reverie_session_id, agent_kind, project/focus breadcrumb,
+  reverie_session_id, agent_kind, project/topic breadcrumb,
   state, last_active, match_count, provenance (managed | external),
   snippets: [{ role, text_with_highlights, ordinal }]
 }
@@ -142,7 +142,7 @@ We need to tell users a session "isn't currently inside Reverie but you've been 
 
 - **Badge: "External".** Recommended. Reads instantly, states the one thing that matters (it is outside Reverie's management), and stays accurate (everything is still local; "external" means external to Reverie, not remote).
 - **Microcopy on the row:** "Discovered in {project} · not yet in Reverie."
-- **Action verb: "Add to Reverie".** Plain and persona-plural. Under the hood this links the discovered session into a focus by attaching a `NativeSessionRef`; the internal concept is "adopt/link", but the user-facing verb stays "Add to Reverie".
+- **Action verb: "Add to Reverie".** Plain and persona-plural. Under the hood this links the discovered session into a topic by attaching a `NativeSessionRef`; the internal concept is "adopt/link", but the user-facing verb stays "Add to Reverie".
 - **After adoption:** the badge clears; it is just a session.
 
 Warmer alternative if "External" reads too cold: **"Discovered"** as the badge (it explains *why* the row appeared). Recommendation stands on "External" for clarity, with "Discovered" as the fallback if user testing says otherwise.
@@ -151,7 +151,7 @@ External sessions index at the fidelity their source allows: Claude/Codex extern
 
 ## 6. UX: one unified command palette (Cmd-K)
 
-Decision: **merge recall into the existing command palette** rather than adding a separate search surface. Cmd-K becomes the single place to search across commands, projects, focuses, sessions, **session content**, and **discovered sessions**.
+Decision: **merge recall into the existing command palette** rather than adding a separate search surface. Cmd-K becomes the single place to search across commands, projects, topics, sessions, **session content**, and **discovered sessions**.
 
 In-session **Find (Cmd-F) stays exactly as it is**: visual, scoped to the current session's scrollback. The split is clean: Cmd-F = find inside this session; Cmd-K = search across everything.
 
@@ -160,8 +160,8 @@ In-session **Find (Cmd-F) stays exactly as it is**: visual, scoped to the curren
 Typing in Cmd-K produces results in calm, labeled sections:
 
 1. **Actions** (when the query matches a command) — synchronous, today's behavior.
-2. **Jump to** (projects, focuses, sessions by title / path / agent) — synchronous, in-memory, today's behavior, renders instantly.
-3. **In conversations** — the new content matches from the FTS index. Async, debounced (~120 to 150 ms), streamed in below the instant results with a subtle pending affordance. Each row: agent glyph, session title, breadcrumb (Project › Focus), relative time, and a one-line snippet with the match highlighted and a role label ("you:" / agent name). A "5 mentions" rollup when a session matches many times.
+2. **Jump to** (projects, topics, sessions by title / path / agent) — synchronous, in-memory, today's behavior, renders instantly.
+3. **In conversations** — the new content matches from the FTS index. Async, debounced (~120 to 150 ms), streamed in below the instant results with a subtle pending affordance. Each row: agent glyph, session title, breadcrumb (Project › Topic), relative time, and a one-line snippet with the match highlighted and a role label ("you:" / agent name). A "5 mentions" rollup when a session matches many times.
 4. **Discovered** — external sessions in your projects, each with the **External** badge and an **Add to Reverie** affordance.
 
 Empty or short query keeps today's behavior (recent sessions + commands). Content results populate as the query grows. Async results must never block typing and must cancel stale queries.
@@ -186,7 +186,7 @@ Ranking inputs for v1: lexical relevance (`bm25()`), recency (last-active), a sm
 
 ## 8. Build sequence and dependencies
 
-**Phase A: palette metadata search (cheap, ships the surface).** Extend the palette to cover focus + project + session titles, cwd, and agent (mostly present in `palette.ts`). Establishes the unified-palette shape. Does not yet serve the content-recall job.
+**Phase A: palette metadata search (cheap, ships the surface).** Extend the palette to cover topic + project + session titles, cwd, and agent (mostly present in `palette.ts`). Establishes the unified-palette shape. Does not yet serve the content-recall job.
 
 **Phase B: the conversation index (the real solution).**
 - B1: finish native-session capture for Claude + Codex (already roadmapped in [`../technical/implementation-queue.md`](../technical/implementation-queue.md); this gives that work a second, higher-value payoff).

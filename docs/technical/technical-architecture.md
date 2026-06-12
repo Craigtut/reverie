@@ -40,15 +40,19 @@ Process/PTY runtime Terminal renderer backend
 
 ### Workspace
 
-Represents Reverie's local home.
+Represents Reverie's local home. (General sessions get per-session scratch dirs under `general-sessions/` in the app data dir; that path is a runtime concern, not a stored field.)
 
 Fields:
 
 - id
-- app data path (General sessions get per-session scratch dirs under `general-sessions/` here)
-- default dangerous mode preference
-- created_at
-- updated_at
+- name
+- general_label
+- default_dangerous_mode (the single workspace-wide auto-approve default)
+- disabled_agent_kinds (CLIs the user switched off in settings)
+- theme (persisted light/dark appearance)
+- default_agent_kind (seeds the new-session composer's agent picker)
+- terminal_font_size
+- ui_view_state (opaque, frontend-owned: last selected focus/session, active surface, sidebar accordion)
 
 ### Project
 
@@ -59,10 +63,8 @@ Fields:
 - id
 - name
 - path
-- created_at
-- updated_at
-- last_opened_at
 - archived (curation bit; see [Curation lifecycle](#curation-lifecycle-archive--restore--delete))
+- sort_order (position in the left-nav project list, for drag-to-reorder)
 
 Constraints:
 
@@ -71,7 +73,7 @@ Constraints:
 
 ### Focus
 
-Masthead/topic under either a project or the general workspace.
+The "Focus" entity, surfaced in the UI as a **Topic** (the user-facing noun). The data model and code still use `Focus`/`focusId`/`ShellFocus`; "Topic" is the label the shell renders. A masthead under either a project or the general workspace.
 
 Fields:
 
@@ -80,9 +82,8 @@ Fields:
 - title
 - description nullable
 - sort_order
-- created_at
-- updated_at
 - archived (curation bit; see [Curation lifecycle](#curation-lifecycle-archive--restore--delete))
+- default_dangerous_mode nullable (topic-wide auto-approve default; falls through to the workspace default when unset)
 
 A null `project_id` means the focus belongs to the general workspace.
 
@@ -103,26 +104,25 @@ Fields:
 - status: `not_started`, `running`, `exited`, `restorable`, `restore_failed`
 - last_exit_code nullable
 - archived (curation bit; see [Curation lifecycle](#curation-lifecycle-archive--restore--delete))
-- created_at
-- updated_at
-- last_started_at nullable
-- last_restored_at nullable
+- latest_activity nullable (denormalized cache of the last activity-state snapshot, so the dashboard paints immediately on app start)
+- sort_order (position within its focus, for drag-to-reorder)
 
 ### NativeSessionRef
 
-Serialized metadata controlled by each adapter.
+Serialized metadata controlled by each adapter. The struct fields are `kind`, `session_id` (nullable), `metadata_path` (nullable), and `adapter_payload` (free-form `serde_json::Value` for adapter-specific data). It serializes camelCase, so the wire keys are `kind`, `sessionId`, `metadataPath`, `adapterPayload` (snake_case aliases are accepted on read).
 
 Common shape:
 
 ```json
 {
-  "kind": "cortex",
-  "session_id": "uuid",
-  "metadata_path": "~/.cortex/sessions/{sessionId}/meta.json"
+  "kind": "cortexCode",
+  "sessionId": "uuid",
+  "metadataPath": "~/.cortex/sessions/{sessionId}/meta.json",
+  "adapterPayload": {}
 }
 ```
 
-Adapter-specific data should be stored as JSON so Reverie can support different restore mechanisms without schema churn.
+`adapter_payload` lets Reverie support different restore mechanisms without schema churn.
 
 ### Curation lifecycle (archive / restore / delete)
 
@@ -163,28 +163,27 @@ projects have no Restore button; Settings lists them with a permanent purge only
 
 ## Persistence
 
-Current first pass:
+Persistence is **SQLite**, and it is live (not a future pass). The storage seam is the `WorkspaceRepository` trait in `packages/reverie-core/src/repository.rs`; the SQLite implementation lives in the dedicated `packages/reverie-persistence` crate, which owns the only SQLite engine in the workspace.
 
-- `apps/desktop/src-tauri/src/app_shell.rs` stores the workspace shell snapshot as a versioned JSON document under the Tauri app data directory.
-- `workspace_shell`, `create_focus`, and `create_session` now read/write that local store.
-- The seeded workspace/project/focus/session snapshot is used only to bootstrap a first-run store.
+- One long-lived `rusqlite::Connection` behind a `Mutex`, with WAL mode and `foreign_keys = ON`.
+- **Incremental, by-id writes** (`upsert_project`, `upsert_focus`, `upsert_session`, ...). There is deliberately no bulk `save_snapshot`; rewriting the whole graph on every mutation was the previous design's central flaw. Callers mutate one entity at a time and `load_snapshot` reads the full `WorkspaceSnapshot` when they need it.
+- Backend errors (`rusqlite`, serde) are flattened into the core `PersistenceError` so the trait and the service above it never depend on the concrete engine.
+- `ensure_seeded` inserts the workspace row only if none exists, so first-run seeding is idempotent.
+- Stored under the Tauri app data directory. General (project-less) sessions get a fresh per-session scratch workspace under `general-sessions/` there, created on session start and removed on delete.
+- `InMemoryWorkspaceRepository` (in `reverie-core`) backs the service's unit tests and any headless/harness use, mirroring the frontend's fixture-runtime pattern.
 
-Recommended next pass:
+Migrations are an ordered list keyed on `PRAGMA user_version`: entry `i` migrates `user_version` from `i` to `i + 1`, and a shipped entry is never edited (append a new one for each change). Current tables include `workspace`, `projects`, `focuses`, `sessions`, `connections`, `connection_messages`, and `session_transcript_chunk`.
 
-- Move durable domain records into SQLite once the service API stabilizes.
-- Keep JSON/TOML config for user preferences if simpler than database migrations.
-- Store under the Tauri app data directory. General (project-less) sessions get a fresh per-session scratch workspace under `general-sessions/` there, created on session start and removed on delete.
-
-Future SQLite table sketch:
+Current schema (abbreviated; the migration list in `reverie-persistence/src/lib.rs` is authoritative):
 
 ```sql
-workspace_settings(key text primary key, value json not null);
-projects(id text primary key, name text not null, path text not null, created_at text not null, updated_at text not null, last_opened_at text, archived_at text);
-foci(id text primary key, project_id text, title text not null, description text, sort_order integer not null, created_at text not null, updated_at text not null, archived_at text);
-sessions(id text primary key, focus_id text not null, title text not null, agent_kind text not null, cwd text not null, native_session_ref json, dangerous_mode_override boolean, status text not null, last_exit_code integer, created_at text not null, updated_at text not null, last_started_at text, last_restored_at text);
+workspace(id text primary key, name text not null, general_label text not null, default_dangerous_mode integer not null, disabled_agent_kinds text not null default '[]', theme text, default_agent_kind text, ...);
+projects(id text primary key, name text not null, path text not null, archived integer not null);
+focuses(id text primary key, project_id text references projects(id) on delete set null, title text not null, description text, sort_order integer not null, archived integer not null);
+sessions(id text primary key, focus_id text not null references focuses(id) on delete cascade, title text not null, agent_kind text not null, cwd text not null, native_session_ref_json text, launch_mode text not null, dangerous_mode_override integer, status text not null, last_exit_code integer, tab_visible integer not null default 1, latest_activity_json text, archived integer not null default 0);
 ```
 
-Migration discipline matters from the beginning because session persistence is Reverie's core promise.
+Note the table is `focuses` (not `foci`), and curation is a boolean `archived` column (not an `archived_at` timestamp). The connection tables (`connections`, `connection_messages`) back inter-agent connections; see [`inter-agent-connections.md`](inter-agent-connections.md). Migration discipline matters from the beginning because session persistence is Reverie's core promise.
 
 ## Agent adapter boundary
 
@@ -196,17 +195,31 @@ Rust trait sketch:
 pub trait AgentAdapter: Send + Sync {
     fn kind(&self) -> AgentKind;
     fn display_name(&self) -> &'static str;
-    fn detect(&self) -> AdapterDetection;
-    fn build_new_command(&self, ctx: LaunchContext) -> anyhow::Result<CommandSpec>;
+    // Detection is defaulted on top of the executable candidate list.
+    fn executable_candidates(&self) -> &'static [&'static str];
+    fn detect(&self) -> AdapterDetection { /* default: find_executable(candidates) */ }
+
+    fn build_new_command(&self, ctx: &LaunchContext) -> anyhow::Result<CommandSpec>;
     fn build_resume_command(
         &self,
-        ctx: LaunchContext,
+        ctx: &LaunchContext,
         native: &NativeSessionRef,
     ) -> anyhow::Result<CommandSpec>;
-    fn dangerous_mode_arg(&self) -> Option<&'static str>;
-    fn capture_native_session_ref(&self, ctx: CaptureContext) -> anyhow::Result<Option<NativeSessionRef>>;
+
+    fn dangerous_mode_arg(&self) -> Option<&'static str> { None }
+
+    // Whether the adapter accepts a Reverie-minted session id at spawn
+    // (Claude's `--session-id`) instead of capturing it from disk afterward.
+    fn mints_new_session_id(&self) -> bool { false }
+
+    // Discover the native session this CLI created for `ctx.cwd`, if any.
+    // Cortex via `meta.json`, Claude via its transcript scanner, Codex via the
+    // rollout reader. The caller only persists the returned ref.
+    fn discover_native_session(&self, ctx: &DiscoveryContext) -> anyhow::Result<Option<NativeSessionRef>> { Ok(None) }
 }
 ```
+
+(There is no `capture_native_session_ref`/`CaptureContext`; capture is `discover_native_session(&DiscoveryContext)`. `build_new_command`/`build_resume_command` take `&LaunchContext` by reference.)
 
 ### CommandSpec
 
@@ -223,14 +236,19 @@ pub struct CommandSpec {
 
 ```rust
 pub struct LaunchContext {
-    pub session_id: ReverieSessionId,
+    pub session_id: SessionId,
     pub cwd: PathBuf,
     pub dangerous_mode: bool,
     pub model: Option<String>,
+    pub executable_path: Option<PathBuf>,
+    // Set only for new launches of adapters that mint their own session id.
+    pub new_session_id: Option<String>,
 }
 ```
 
 ## Initial adapters
+
+The built-in adapters are registered in priority order **Claude Code, then Codex CLI, then Cortex** (`built_in_adapters()` in `agents.rs`), and `Workspace::default_agent_kind` is `ClaudeCode`. (The "Cortex adapter first" framing below and in the implementation sequence is historical: Cortex was the first capture path proven, but Claude is now the default and first in priority.)
 
 ### Cortex Code adapter
 
@@ -378,37 +396,17 @@ The fallback must not leak into product/domain architecture.
 
 ## Tauri command/event surface
 
-Initial command candidates:
+The actual registered handlers live in `apps/desktop/src-tauri/src/main.rs` (the `generate_handler!` list), split between `commands` and `connection_commands`. There is no per-entity `list_*` command: the whole graph is read once via `workspace_shell`, and onboarding state is derived from `workspace_shell` + `list_agent_clis` rather than a dedicated command. Key commands, grouped:
 
-- `get_onboarding_state`
-- `set_onboarding_preferences`
-- `detect_agent_clis`
-- `list_projects`
-- `add_project` (reconnects an archived project when its folder is re-added)
-- `archive_project`
-- `delete_project` (permanent purge of an archived project + its subtree)
-- `list_foci`
-- `create_focus`
-- `update_focus`
-- `archive_focus`
-- `restore_focus`
-- `delete_focus`
-- `list_sessions`
-- `create_session`
-- `start_session`
-- `resume_session`
-- `write_terminal_input`
-- `resize_terminal`
-- `terminate_session`
+- Workspace / graph: `workspace_shell`, `app_status`, `set_workspace_default_dangerous_mode`, `set_workspace_theme`, `set_workspace_default_agent_kind`, `set_workspace_nav_state`, `set_terminal_font_size`.
+- CLIs: `list_agent_clis`, `set_agent_cli_enabled` (detection is folded into `list_agent_clis`, not a `detect_agent_clis`).
+- Projects: `create_project`, `create_project_from_folder` (re-add reconnects an archived project), `choose_project_folder`, `resolve_project_folder`, `archive_project`, `delete_project`, `reorder_projects`.
+- Focuses (Topics in the UI): `create_focus`, `archive_focus`, `restore_focus`, `delete_focus`, `reorder_focuses`.
+- Sessions: `create_session`, `start_session` (resume is folded in via the session's launch mode / native ref, there is no separate `resume_session`), `set_session_archived`, `remove_session`, `set_session_dangerous_mode`, `mark_session_viewed`, `move_session`, `reorder_sessions`, `capture_cortex_session`, `terminate_session`.
+- Terminal: `list_terminal_sessions`, `write_terminal_input`, `resize_terminal`, `read_terminal_rows`, `set_terminal_frontend_active`, `set_terminal_theme`, plus `hook_server_port`, `record_render_metrics`, `record_terminal_diagnostics`.
+- Connections (`connection_commands::*`): `bridge_installation_status`, `install_/uninstall_{cortex,codex,claude}_bridge_command`, `list_pending_connection_requests`, `accept_/deny_connection_request`, `list_session_connections`, `user_open_connection`, `close_connection_command`, `connection_transcript`, `connection_policy`, `set_connection_policy`, and the focus-policy/pair-block helpers. See [`inter-agent-connections.md`](inter-agent-connections.md).
 
-Initial event candidates:
-
-- `cli_detection_changed`
-- `session_status_changed`
-- `terminal_output`
-- `terminal_snapshot_changed`
-- `terminal_exit`
-- `restore_failed`
+Events: terminal lifecycle uses `terminal_stream_started`, `terminal_frame` (binary, via a Tauri Channel), `terminal_exit`, `terminal_failed`, and `terminal_title_changed`; activity/connection state is forwarded to the frontend (see `connection_commands::forward_connection_event`). The early `terminal_output` / `terminal_snapshot_changed` / `session_status_changed` / `restore_failed` names predate the terminal v0 rebuild and are not the shipped events.
 
 ## Error handling expectations
 

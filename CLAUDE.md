@@ -10,7 +10,7 @@ Start here, then drill down. `docs/README.md` is the full index.
 
 | When you are working on… | Read |
 | --- | --- |
-| Why Reverie exists, personas, the Workspace → Project → Focus → Session model | [`docs/product-vision.md`](docs/product-vision.md) |
+| Why Reverie exists, personas, the Workspace → Project → Topic → Session model (the data model still calls a Topic a "Focus") | [`docs/product-vision.md`](docs/product-vision.md) |
 | Anything visual: color, theming, layout, motion, the dot field | [`docs/design-vision.md`](docs/design-vision.md) |
 | v1 scope, user flows, requirements, non-goals | [`docs/product/v1-product-spec.md`](docs/product/v1-product-spec.md) |
 | Languages, frameworks, build constraints | [`docs/technical/tech-stack.md`](docs/technical/tech-stack.md) |
@@ -26,9 +26,11 @@ Hybrid Rust + TypeScript monorepo building one macOS desktop app (Apple Silicon)
 
 ```
 reverie/
-├── Cargo.toml                    # Rust workspace (member: packages/reverie-core)
+├── Cargo.toml                    # Rust workspace (reverie-bridge, reverie-core, reverie-persistence)
 ├── package.json                  # npm root + all dev scripts
 ├── packages/reverie-core/        # Pure Rust domain/runtime crate (no Tauri, no UI)
+├── packages/reverie-persistence/ # SQLite-backed WorkspaceRepository crate
+├── apps/reverie-bridge/          # MCP bridge sidecar binaries (reverie-bridge + hook forwarders)
 ├── apps/desktop/
 │   ├── src-tauri/                # Tauri v2 desktop app (Rust)
 │   └── web/                      # Vite + React frontend (WebView UI)
@@ -42,7 +44,7 @@ reverie/
 
 ```bash
 npm run dev               # run the desktop app on the DEV channel (separate data dir + "dev" badged icon)
-npm run dev:harness       # browser-only React harness with fixture services (fast UI loop)
+npm run dev:harness       # browser-only React UI loop (Vite + Panda); load harness fixtures via the harness query param
 npm run dev:reset         # wipe the dev channel's data (only ever the com.animus.reverie.dev folder)
 npm run check             # frontend typecheck/build + Rust tests/checks
 npm run build             # PRODUCTION desktop build (base identity; install/test prod locally)

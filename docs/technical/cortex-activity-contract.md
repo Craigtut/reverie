@@ -4,7 +4,7 @@
 
 ## Goal
 
-Let Reverie surface, non-hackily, the live activity state of every running Cortex Code session: `working`, `awaiting_input`, `awaiting_permission`, `done`, `error`. State must be readable late (Reverie can start *after* a Cortex session is already running) and reactive (state changes are observable in near real-time via filesystem events).
+Let Reverie surface, non-hackily, the live activity state of every running Cortex Code session: `working`, `awaiting_input`, `awaiting_permission`, `awaiting_response`, `done`, `error`. State must be readable late (Reverie can start *after* a Cortex session is already running) and reactive (state changes are observable in near real-time via filesystem events).
 
 Reverie does not need conversation content, model output, token usage, or costs. Cortex's existing `meta.json` / `history.json` already cover that. This surface is exclusively about *what is the agent doing right now*.
 
@@ -75,7 +75,7 @@ Authoritative snapshot of the session's live activity state. Written atomically 
 | --- | --- | --- | --- |
 | `version` | `1` | yes | Schema version; bump on any breaking change. |
 | `sessionId` | string | yes | Same id as the parent directory. |
-| `status` | enum | yes | `working` \| `awaiting_input` \| `awaiting_permission` \| `done` \| `error`. |
+| `status` | enum | yes | `working` \| `awaiting_input` \| `awaiting_permission` \| `awaiting_response` \| `done` \| `error`. (`awaiting_response` is the wire name for the `AwaitingResponse` variant in `activity.rs`, serialized via `#[serde(rename_all = "snake_case")]`.) |
 | `updatedAt` | RFC 3339 timestamp | yes | Wall-clock time of this transition. |
 | `sequence` | integer | yes | Monotonically increases across every event. Reverie uses this to detect missed events. |
 | `cwd` | string | yes | Mirrors `meta.json.cwd`; included for fast filtering without reading meta. |
@@ -125,6 +125,7 @@ Reverie may read `state.json` at any time and is guaranteed never to see a torn 
 | `working` | An agent turn or tool call is currently active. |
 | `awaiting_input` | Idle; the previous turn completed and Cortex is ready for the next user prompt. The session process is still alive. |
 | `awaiting_permission` | Blocked on a user decision for a tool/command. `awaitingPermission` is non-null. |
+| `awaiting_response` | Blocked mid-turn waiting for the user to answer a question or approve a plan (e.g. an MCP elicitation dialog, or Claude's AskUserQuestion / ExitPlanMode equivalents). The turn is still live and cannot proceed until the user responds, so it reads as attention. Unlike `awaiting_permission` it is not suppressed by auto-approve. |
 | `done` | Cortex process or session exited normally. `finalExit` is non-null. |
 | `error` | Unrecoverable or session-visible error. `lastError.recoverable` should be `false` for a session that's effectively dead; otherwise prefer keeping `status` at its previous value and just updating `lastError`. |
 
@@ -138,9 +139,9 @@ Transitions to watch:
 - any → `done`: process exited.
 - any → `error` (recoverable): session continues; `lastError` populated.
 
-## `events.jsonl` — event stream
+## `events.jsonl` — event stream (forward-looking; not yet consumed)
 
-Append-only newline-delimited JSON. Each line is one event. Used by Reverie to render activity history (per-card "what just happened" lines, timelines, debugging). The current state is always available in `state.json`; events are the richer signal for surfaces that want history.
+Append-only newline-delimited JSON. Each line is one event. This is the richer history signal for surfaces that want a timeline (per-card "what just happened" lines, timelines, debugging), but it is a forward-looking, optional surface that **Reverie does not consume today**. The current state is always available in `state.json`, and `state.json` is the only file the live watcher reads (see [`cortex_state.rs`](../../packages/reverie-core/src/cortex_state.rs)). The schema below is the agreed shape so a producer can start writing it; the typed reader exists in [`activity.rs`](../../packages/reverie-core/src/activity.rs) (`ActivityEvent`, `parse_event`, `parse_events`) and is exercised by tests, but no runtime code tails the file. When a consumer is built it will follow the schema and inode-tailing/rotation rules described here.
 
 ### Write atomicity
 
@@ -182,22 +183,21 @@ When `events.jsonl` exceeds **5 MB**, Cortex must:
 2. Keep at most **5 rolled files** (`events.1.jsonl` … `events.5.jsonl`); older files are deleted.
 3. Open a new `events.jsonl` for the next event.
 
-Reverie tails `events.jsonl` by inode; when the inode changes it picks up the new file. The rolled files exist purely for offline replay/debugging; Reverie may ignore them.
+A future `events.jsonl` consumer would tail the file by inode; when the inode changes it would pick up the new file. The rolled files exist purely for offline replay/debugging; a consumer may ignore them. (No code tails this file today; `state.json` is the only surface read.)
 
 ## Late-start discovery
 
-Reverie may launch after a Cortex session is already running. On startup it:
+Reverie may launch after a Cortex session is already running. Reverie does not enumerate or watch the whole `~/.cortex/sessions/*/` tree. The session-log engine ([`cortex_state.rs`](../../packages/reverie-core/src/cortex_state.rs)) watches only the active `state.json` files the launch path explicitly registers, so cost scales with active sessions rather than with the whole sessions directory. At boot Reverie registers the watch file for each session it already owns (via the native ref captured in its own store), and registers a session's file shortly after launching it. For each such session it:
 
-1. Enumerates `~/.cortex/sessions/*/`.
-2. For each directory, reads `meta.json` (already does this) and, if present, `activity/state.json`.
-3. Treats `state.json` as authoritative current state. If the file is absent the session predates the activity surface; Reverie falls back to its current adapter behavior (treats as `done` if exited, `restorable` if a native ref exists, etc.).
-4. Watches `activity/state.json` for changes via filesystem events.
+1. Reads `meta.json` (already does this) and, if present, the sibling `activity/state.json`.
+2. Treats `state.json` as authoritative current state. If the file is absent the session predates the activity surface; Reverie falls back to its current adapter behavior (treats as `done` if exited, `restorable` if a native ref exists, etc.).
+3. Watches that one `activity/state.json` for changes via filesystem events.
 
-Reverie should also handle the case where `activity/` is created mid-session (Cortex started before the activity surface was wired, then the surface was added on the next launch).
+The producer should still create `activity/` and write `state.json` even when a session was started before the surface existed, so the next time Reverie registers the file the snapshot is present.
 
 ## Reverie's responsibilities
 
-- Watch `~/.cortex/sessions/*/activity/state.json` via FSEvents (macOS) / inotify (Linux) / ReadDirectoryChangesW (Windows). The `notify` crate handles all three.
+- Watch the registered active sessions' `activity/state.json` files (not the whole `~/.cortex/sessions/*/` tree) via FSEvents (macOS) / inotify (Linux) / ReadDirectoryChangesW (Windows). The `notify` crate handles all three.
 - Parse atomically. If a read returns invalid JSON, ignore and wait for the next change event (this should be impossible given the temp-file-rename protocol, but be defensive).
 - Tolerate missing fields by treating older `version` files as best-effort.
 - Surface state changes to the UI within ~200 ms of the file write.

@@ -4,7 +4,7 @@ Documentation for Reverie, a local-first agentic workspace. Start with the visio
 
 ## High-level vision
 
-- [`product-vision.md`](product-vision.md) — what Reverie is and why: the agentic-workspace thesis, personas, and the Workspace → Project → Focus → Session model.
+- [`product-vision.md`](product-vision.md) — what Reverie is and why: the agentic-workspace thesis, personas, and the Workspace → Project → Topic → Session model.
 - [`design-vision.md`](design-vision.md) — the visual/interaction language: warm-neutral monochrome, light + dark, the ambient dot field, rim-lit panels.
 
 ## Product
