@@ -290,7 +290,13 @@ Releases are cut by pushing a version tag, which triggers
 5. The release workflow builds the macOS (Apple Silicon, `aarch64-apple-darwin`)
    app, signs/notarizes it if the Apple secrets are present, and creates a draft
    GitHub Release with the artifacts. When the updater signing secrets are set it
-   also uploads the signed `Reverie.app.tar.gz` and `latest.json`. Review the
+   also uploads the signed `Reverie.app.tar.gz` and `latest.json`. The release
+   body is filled from CHANGELOG.md automatically: a workflow step runs
+   `scripts/changelog-extract.mjs <tag>` to pull the matching `## [X.Y.Z]`
+   section and passes it to `tauri-action`'s `releaseBody`, so the changelog is
+   the single source of truth and nothing is hand-copied. A tag with no matching
+   changelog section fails the release early (before the long build), which is
+   the forcing function to keep step 2 honest. Review the
    draft, then publish: because the updater endpoint resolves `latest`,
    **publishing the release is what makes the update live to installed apps**, so
    nothing auto-updates until you do.

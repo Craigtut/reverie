@@ -32,6 +32,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # Pull the release notes for this tag from CHANGELOG.md (the single source
+      # of truth) and hand them to tauri-action as the GitHub Release body. Runs
+      # before the long build so a missing changelog entry fails the release fast.
+      - name: Extract release notes from CHANGELOG
+        id: changelog
+        run: |
+          {
+            echo 'notes<<__CHANGELOG_EOF__'
+            node scripts/changelog-extract.mjs "${GITHUB_REF_NAME}"
+            echo '__CHANGELOG_EOF__'
+          } >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
@@ -70,6 +81,7 @@ jobs:
           args: --target aarch64-apple-darwin
           tagName: ${{ github.ref_name }}
           releaseName: Reverie ${{ github.ref_name }}
+          releaseBody: ${{ steps.changelog.outputs.notes }}
           releaseDraft: true
           prerelease: false
 
