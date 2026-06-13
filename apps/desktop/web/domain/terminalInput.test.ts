@@ -6,6 +6,7 @@ import type { TerminalSurface } from '../terminalScrollback';
 import type { TerminalModes } from '../terminalTypes';
 import {
   terminalInputForKey,
+  terminalInputForKeyUp,
   terminalWheelDeltaPixels,
   terminalWheelDeltaRows,
 } from './terminalInput';
@@ -160,6 +161,47 @@ describe('terminalInputForKey', () => {
 
   it('returns null for an unknown multi-character key', () => {
     expect(terminalInputForKey(keyEvent({ key: 'CapsLock' }))).toBeNull();
+  });
+
+  describe('kitty keyboard protocol delegation', () => {
+    const kitty: TerminalModes = { kittyKeyboardFlags: 0b1 }; // disambiguate
+
+    it('keeps legacy encoding when no kitty flags are active', () => {
+      // Shift+Enter falls back to LF (the non-kitty newline convention), plain
+      // Enter stays CR, and ctrl combos keep their C0 codes.
+      expect(terminalInputForKey(keyEvent({ key: 'Enter' }))).toBe('\r');
+      expect(terminalInputForKey(keyEvent({ key: 'Enter', shiftKey: true }))).toBe('\n');
+      expect(terminalInputForKey(keyEvent({ key: 'c', ctrlKey: true }))).toBe('\x03');
+    });
+
+    it('routes through the kitty encoder once flags are set', () => {
+      expect(terminalInputForKey(keyEvent({ key: 'Enter', shiftKey: true }), kitty)).toBe(
+        '\x1b[13;2u',
+      );
+      // Ctrl+C becomes CSI u; the app that enabled the protocol decodes it.
+      expect(terminalInputForKey(keyEvent({ key: 'c', ctrlKey: true }), kitty)).toBe('\x1b[99;5u');
+      // Plain typing still passes through as text.
+      expect(terminalInputForKey(keyEvent({ key: 'a' }), kitty)).toBe('a');
+    });
+
+    it('still swallows Cmd combos in kitty mode (app shortcuts win)', () => {
+      expect(terminalInputForKey(keyEvent({ key: 'c', metaKey: true }), kitty)).toBeNull();
+      expect(terminalInputForKey(keyEvent({ key: 'Backspace', metaKey: true }), kitty)).toBe(
+        '\x15',
+      );
+    });
+  });
+});
+
+describe('terminalInputForKeyUp', () => {
+  it('sends nothing without the report-events flag', () => {
+    expect(terminalInputForKeyUp(keyEvent({ key: 'a' }))).toBeNull();
+    expect(terminalInputForKeyUp(keyEvent({ key: 'a' }), { kittyKeyboardFlags: 0b1 })).toBeNull();
+  });
+
+  it('encodes a release when report-events is active', () => {
+    const modes: TerminalModes = { kittyKeyboardFlags: 0b11 }; // disambiguate + events
+    expect(terminalInputForKeyUp(keyEvent({ key: 'ArrowUp' }), modes)).toBe('\x1b[1;1:3A');
   });
 });
 

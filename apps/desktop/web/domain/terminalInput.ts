@@ -1,5 +1,6 @@
 import type { TerminalSurface } from '../terminalScrollback';
 import type { TerminalModes } from '../terminalTypes';
+import { encodeKittyKey } from './kittyKeyboard';
 
 // Pure translation of browser keyboard/wheel events into terminal bytes and
 // scroll deltas. No DOM mutation, no React state; the event objects are read
@@ -7,10 +8,15 @@ import type { TerminalModes } from '../terminalTypes';
 
 export interface TerminalKeyInput {
   key: string;
+  code?: string;
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey?: boolean;
+  repeat?: boolean;
+  // Narrowed to the lock keys the kitty encoder reads so a React KeyboardEvent's
+  // stricter `(key: ModifierKey) => boolean` signature stays assignable here.
+  getModifierState?: (key: 'CapsLock' | 'NumLock') => boolean;
   nativeEvent?: {
     isComposing?: boolean;
   };
@@ -21,7 +27,9 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
 
   // Cmd is reserved for app shortcuts (copy, palette, tab switching), so it is
   // swallowed by default. The exceptions are the macOS line-editing combos,
-  // which terminals translate into the equivalent readline control codes.
+  // which terminals translate into the equivalent readline control codes. This
+  // stays ahead of the kitty path: Cmd is an app/system modifier on macOS, not
+  // a terminal one, in both legacy and kitty modes.
   if (event.metaKey) {
     switch (event.key) {
       case 'Backspace':
@@ -33,6 +41,15 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
       default:
         return null;
     }
+  }
+
+  // When the app has enabled the kitty keyboard protocol, every key (modifiers,
+  // event types, alternates, text) is encoded per that protocol instead of the
+  // legacy sequences below. This is what lets CLIs distinguish Shift+Enter,
+  // Ctrl+Enter, a bare Escape keypress, etc.
+  const kittyFlags = modes?.kittyKeyboardFlags ?? 0;
+  if (kittyFlags !== 0) {
+    return encodeKittyKey(event, kittyFlags, event.repeat ? 'repeat' : 'press');
   }
 
   if (event.ctrlKey) {
@@ -67,7 +84,13 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
 
   switch (event.key) {
     case 'Enter':
-      return '\r';
+      // Without the kitty protocol a terminal can't otherwise distinguish
+      // Shift+Enter from Enter (both are CR). The convention CLIs expect, and
+      // what `claude`'s own terminal-setup configures, is Shift+Enter -> LF so
+      // the input box inserts a newline instead of submitting. Plain Enter stays
+      // CR (submit). Apps that enable the kitty protocol never reach this branch
+      // and get the precise `CSI 13;2 u` encoding instead.
+      return event.shiftKey ? '\n' : '\r';
     case 'Backspace':
       return '\x7f';
     case 'Tab':
@@ -104,6 +127,17 @@ export function terminalInputForKey(event: TerminalKeyInput, modes?: TerminalMod
       }
       return event.key.length === 1 ? event.key : null;
   }
+}
+
+// Key-up only matters under the kitty protocol's "report event types" flag,
+// which asks for release events. In every other mode (including legacy) a key
+// release sends nothing, so this returns null and the caller does nothing.
+export function terminalInputForKeyUp(event: TerminalKeyInput, modes?: TerminalModes) {
+  const kittyFlags = modes?.kittyKeyboardFlags ?? 0;
+  if ((kittyFlags & 0b10) === 0) return null; // report_events bit
+  if (event.nativeEvent?.isComposing || event.key === 'Process') return null;
+  if (event.metaKey) return null;
+  return encodeKittyKey(event, kittyFlags, 'release');
 }
 
 function controlCodeForKey(key: string): string | null {

@@ -20,6 +20,7 @@ type TerminalSurfaceHandle = Pick<
   | 'handleTerminalScroll'
   | 'focusTerminalCanvas'
   | 'handleTerminalKeyDown'
+  | 'handleTerminalKeyUp'
   | 'handleTerminalCompositionStart'
   | 'handleTerminalCompositionEnd'
   | 'handleTerminalTextInput'
@@ -145,6 +146,7 @@ export function TerminalSurface({
               aria-label="Terminal runtime surface"
               tabIndex={-1}
               onKeyDown={terminal.handleTerminalKeyDown}
+              onKeyUp={terminal.handleTerminalKeyUp}
               onPaste={terminal.handleTerminalPaste}
               onMouseDown={terminal.focusTerminalCanvas}
             />
@@ -160,6 +162,7 @@ export function TerminalSurface({
               rows={1}
               tabIndex={0}
               onKeyDown={terminal.handleTerminalKeyDown}
+              onKeyUp={terminal.handleTerminalKeyUp}
               onCompositionStart={terminal.handleTerminalCompositionStart}
               onCompositionEnd={terminal.handleTerminalCompositionEnd}
               onInput={terminal.handleTerminalTextInput}

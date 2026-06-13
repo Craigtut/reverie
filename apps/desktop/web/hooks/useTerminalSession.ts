@@ -28,6 +28,7 @@ import {
   errorMessage,
   shortId,
   terminalInputForKey,
+  terminalInputForKeyUp,
   terminalWheelDeltaPixels,
   terminalWheelDeltaRows,
 } from '../domain';
@@ -1427,6 +1428,16 @@ export function useTerminalSession(params: {
     void sendTerminalInput(input);
   }
 
+  // Release events are only emitted when the app turned on the kitty protocol's
+  // "report event types" flag; otherwise this is a no-op for every keystroke.
+  function handleTerminalKeyUp(event: KeyboardEvent<HTMLCanvasElement | HTMLTextAreaElement>) {
+    if (terminalTextComposingRef.current || event.nativeEvent.isComposing) return;
+    const input = terminalInputForKeyUp(event, controller.getLastFrameModes());
+    if (!input || !inputReady()) return;
+    event.preventDefault();
+    void sendTerminalInput(input);
+  }
+
   function clearTerminalTextInput(event: { currentTarget: HTMLTextAreaElement }) {
     event.currentTarget.value = '';
   }
@@ -1761,6 +1772,7 @@ export function useTerminalSession(params: {
     attachViewport,
     terminalScrollSpacerRef,
     handleTerminalKeyDown,
+    handleTerminalKeyUp,
     handleTerminalCompositionStart,
     handleTerminalCompositionEnd,
     handleTerminalTextInput,

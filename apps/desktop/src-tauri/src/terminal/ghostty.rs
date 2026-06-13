@@ -647,6 +647,88 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_terminal_state_tracks_kitty_keyboard_flags() {
+        // The frontend key encoder switches to the kitty keyboard protocol only
+        // when the frame reports non-zero flags. This proves libghostty parses
+        // the enable/disable stack sequences and surfaces the active flags, so a
+        // CLI that turns the protocol on (Codex via crossterm sends exactly
+        // `CSI > flags u`) gets kitty-encoded keys instead of legacy bytes.
+        let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
+        assert_eq!(
+            terminal.frame().unwrap().modes.kitty_keyboard_flags,
+            0,
+            "no protocol is active before any app enables it"
+        );
+
+        // Push "disambiguate escape codes" + "report alternate keys" (bits 1|4).
+        terminal.write(b"\x1b[>5u");
+        assert_eq!(terminal.frame().unwrap().modes.kitty_keyboard_flags, 5);
+
+        // Popping the stack entry restores the inactive state.
+        terminal.write(b"\x1b[<1u");
+        assert_eq!(terminal.frame().unwrap().modes.kitty_keyboard_flags, 0);
+    }
+
+    #[test]
+    fn ghostty_terminal_state_answers_the_kitty_support_query() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        // A CLI probes kitty support by sending `CSI ? u` and enables the
+        // protocol only if the terminal replies `CSI ? flags u`. crossterm's
+        // `supports_keyboard_enhancement` (used by Codex) does exactly this, so
+        // this reply is what makes Shift+Enter reach our kitty encoder at all.
+        let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
+        let responses = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let sink = responses.clone();
+        terminal
+            .on_pty_write(move |data| sink.borrow_mut().extend_from_slice(data))
+            .unwrap();
+
+        terminal.write(b"\x1b[?u");
+        let reply = responses.borrow().clone();
+        assert_eq!(
+            reply, b"\x1b[?0u",
+            "kitty support query must be answered (got {reply:?})"
+        );
+    }
+
+    #[test]
+    fn ghostty_terminal_state_answers_kitty_query_before_primary_da() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        // crossterm (used by Codex and Cortex) detects kitty support by writing
+        // the kitty query `CSI ? u` immediately followed by a Primary DA `CSI c`,
+        // then reading replies until the DA answer arrives: if it sees the kitty
+        // reply first it concludes support and enables the protocol. So both
+        // replies must be emitted AND the kitty one must come first. (Confirmed
+        // against the real CLIs: each sends `CSI ? u` then pushes `CSI > 7 u`.)
+        let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
+        let responses = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let sink = responses.clone();
+        terminal
+            .on_pty_write(move |data| sink.borrow_mut().extend_from_slice(data))
+            .unwrap();
+
+        terminal.write(b"\x1b[?u\x1b[c");
+        let reply = responses.borrow().clone();
+
+        let kitty_at = reply
+            .windows(2)
+            .position(|w| w == b"?0")
+            .expect("kitty support reply (CSI ? 0 u) must be present");
+        let da_at = reply
+            .windows(2)
+            .position(|w| w == b"?6")
+            .expect("primary DA reply (CSI ? 62..c) must be present");
+        assert!(
+            kitty_at < da_at,
+            "kitty reply must precede the DA reply or crossterm gives up: {reply:?}"
+        );
+    }
+
+    #[test]
     fn ghostty_terminal_state_preserves_wide_cell_widths() {
         let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
         terminal.write("A界B\r\n".as_bytes());
