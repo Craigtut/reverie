@@ -7,12 +7,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-13
+
 ### Added
 - In-app auto-updates via the Tauri v2 updater: silent background download, a
   toast and a persistent "Relaunch to update" affordance, a manual check plus
   auto-check/auto-download toggles in Settings, install-on-quit, and a relaunch
   that routes through the in-flight-work confirmation so live agent sessions are
   never torn down without consent. Production channel only.
+
+### Fixed
+- Reconcile the terminal grid on window focus, visibility change, and resize so a
+  returning or resized window no longer shows a stale or misaligned grid.
+- Stop trusting the webview for a session's launch program and working directory;
+  the backend now resolves them, closing a session-launch trust gap.
+- Re-point a session's native id on a CLI session-start boundary so resume and
+  activity tracking follow the correct underlying session.
 
 ## [0.1.0] - 2026-06-07
 
@@ -41,5 +51,6 @@ Targets macOS (Apple Silicon).
 - Pre-commit linting/formatting (Biome, rustfmt) and Conventional Commit
   validation (commitlint) via Husky.
 
-[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Craigtut/reverie/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Craigtut/reverie/releases/tag/v0.1.0
