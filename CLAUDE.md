@@ -90,6 +90,7 @@ Releases are cut by pushing a `vX.Y.Z` tag, which triggers `.github/workflows/re
 - Update `CHANGELOG.md`: move `Unreleased` items into a new `## [X.Y.Z]` section, summarizing the commits since the previous tag (`git log <prev-tag>..HEAD`), grouped by Conventional Commit type. Commit as `docs(release): changelog for vX.Y.Z`.
 - Bump the version with `npm run version:set -- <x.y.z | patch | minor | major>`, which updates `package.json`, `apps/desktop/src-tauri/tauri.conf.json`, and every crate `Cargo.toml` in lockstep (then run `npm run check` to refresh `Cargo.lock`).
 - macOS signing/notarization needs these repo secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Without them the build is unsigned.
+- Auto-updates need the Tauri minisign keypair (separate from Apple signing): the public key in `tauri.conf.json` (`plugins.updater.pubkey`) and the `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repo secrets. Publishing a release (not just drafting it) is what makes an update live, since the updater endpoint resolves `latest`. See [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md).
 
 Bundling is enabled and the Ghostty dylib ships inside the app with a baked rpath (no runtime `DYLD_LIBRARY_PATH`). `npm run bundle` produces the `.app` and `.dmg` locally; the release workflow builds them in CI. Signed, notarized releases additionally need the Apple secrets above. See the packaging doc for how it works.
 

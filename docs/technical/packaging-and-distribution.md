@@ -289,11 +289,101 @@ Releases are cut by pushing a version tag, which triggers
 
 5. The release workflow builds the macOS (Apple Silicon, `aarch64-apple-darwin`)
    app, signs/notarizes it if the Apple secrets are present, and creates a draft
-   GitHub Release with the artifacts. Review the draft, then publish.
+   GitHub Release with the artifacts. When the updater signing secrets are set it
+   also uploads the signed `Reverie.app.tar.gz` and `latest.json`. Review the
+   draft, then publish: because the updater endpoint resolves `latest`,
+   **publishing the release is what makes the update live to installed apps**, so
+   nothing auto-updates until you do.
 
 The macOS target is Apple Silicon only. A universal or Intel build would be a
 later addition and would require building the Ghostty native library for both
 architectures and lipo-ing the dylib.
+
+## Auto-updates
+
+Reverie updates itself through the Tauri v2 updater plugin
+(`tauri-plugin-updater` + `tauri-plugin-process`), wired so an update never
+interrupts running agent sessions. Read this before touching anything in the
+updater path.
+
+### How it works
+
+- **Two independent signatures.** Every release carries the Apple notarization
+  (Gatekeeper trust, the six `APPLE_*` secrets) *and* a Tauri minisign signature
+  (update-channel trust). The minisign keypair is generated once with
+  `tauri signer generate` and is **separate from, and unrelated to, the Apple
+  code-signing identity**. The public half is compiled into the app
+  (`tauri.conf.json` → `plugins.updater.pubkey`); the private half signs the
+  updater artifact in CI.
+- **Artifacts.** `bundle.createUpdaterArtifacts: true` makes the bundler emit a
+  `Reverie.app.tar.gz` plus a `.sig` alongside the `.app`/`.dmg`. The updater
+  downloads the *tarball*, not the DMG. The `.app` inside it is already notarized
+  and stapled, so Gatekeeper is satisfied on relaunch.
+- **Manifest.** `tauri-action` generates `latest.json` (the version + tarball URL
+  + signature) and uploads it to the GitHub Release. The app checks
+  `plugins.updater.endpoints[0]`, which points at
+  `releases/latest/download/latest.json`. Because it resolves `latest`, only a
+  **published** (non-draft) release becomes live to installed apps.
+- **Channel gating.** Updates run on the production channel only. The dev channel
+  (`com.animus.reverie.dev`) is a bare `cargo run` binary with no installable
+  bundle; the frontend reads `updater_status` (which returns `enabled: false`
+  when `is_dev_channel`) and never reaches out. The browser harness is disabled
+  the same way (no Tauri runtime).
+
+### The UX, and why it never auto-relaunches
+
+Reverie runs many long-lived agent sessions in parallel, so an unprompted
+relaunch would be the single most destructive action in the app. The design
+keeps updates ambient and lets the user own the relaunch moment:
+
+- A delayed first check after boot, then every six hours, plus a manual **Check
+  for updates** button in Settings → General (auto-check / auto-download
+  toggles live there too; both default on, persisted to `localStorage`).
+- A new version downloads silently in the background. When it is staged, a quiet
+  informational toast appears and a persistent **Relaunch to update** affordance
+  shows just above the Settings item in the rail (`UpdateNavRow`).
+- **Relaunch is user-initiated and safety-gated.** It routes through the exact
+  in-flight-work gate the quit flow uses (`collectBusySessions`): if an agent is
+  mid-work the user gets the same confirmation as on quit. On confirm the
+  frontend installs the bundle, calls `prepare_update_relaunch` (graceful session
+  teardown + shutdown flag, the `confirm_quit` teardown minus the exit so the
+  restart is not re-deferred), then `relaunch()`.
+- **Install-on-quit.** If an update is staged, a normal quit also applies it
+  (`useAppQuit` installs before `confirm_quit`), so the next launch is already
+  updated with no explicit relaunch.
+
+Code map: `services/updateApi.ts` (the guarded plugin calls + live `Update`
+handle), `hooks/useAutoUpdate.ts` (check/download orchestration + the
+`relaunchToUpdate` action), `store/updateStore.ts` (serializable status),
+`components/nav/UpdateNavRow.tsx` and
+`components/settings/SoftwareUpdateSection.tsx` (UI). Backend: the
+`updater_status` and `prepare_update_relaunch` commands in `commands.rs` and the
+two plugin registrations in `main.rs`.
+
+### One-time setup (key custody)
+
+Done once, by whoever owns the release key:
+
+1. Generate the Reverie-specific keypair (this is **app-specific**, never shared
+   with another app):
+
+   ```bash
+   npx tauri signer generate -w ~/.tauri/reverie-updater.key
+   ```
+
+   Choose a password when prompted and store it in the password manager next to
+   the key. Keep the private key file out of the repo.
+2. Paste the printed **public** key into `tauri.conf.json` →
+   `plugins.updater.pubkey` (replacing `REPLACE_WITH_TAURI_SIGNER_PUBLIC_KEY`).
+3. Add two repo secrets under Settings → Secrets and variables → Actions:
+   - `TAURI_SIGNING_PRIVATE_KEY`: the contents of `~/.tauri/reverie-updater.key`.
+   - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password from step 1.
+4. Confirm `plugins.updater.endpoints[0]` points at the real release repo slug.
+
+Losing the private key means installed apps will reject every future update
+(their embedded public key no longer matches), so it needs the same custody care
+as the Apple certificate. Rotating it requires shipping a build with the new
+public key *before* the old installs can accept anything signed by the new key.
 
 ## Status checklist
 
@@ -304,4 +394,7 @@ architectures and lipo-ing the dylib.
 - [x] `DYLD_LIBRARY_PATH` removed from `npm run` scripts.
 - [x] macOS `.app` + `.dmg` produced locally via `npm run bundle`.
 - [ ] Apple signing/notarization secrets added in repo settings (for signed, notarized releases).
+- [x] Updater wired: `tauri-plugin-updater` + `tauri-plugin-process`, `createUpdaterArtifacts`, capabilities, UI, install-on-quit.
+- [ ] Updater minisign keypair generated; `pubkey` pasted into `tauri.conf.json`; `TAURI_SIGNING_PRIVATE_KEY` + `_PASSWORD` secrets added.
+- [ ] `plugins.updater.endpoints[0]` confirmed to point at the real release repo slug.
 - [ ] (Later, optional) upstream `libghostty-vt-sys` static-link option evaluated.
