@@ -4,21 +4,18 @@ import { css } from '../../styled-system/css';
 import { openExternalUrl } from '../../services/openApi';
 import { Typography } from '../primitives/Typography';
 
-// The project's public home and license, surfaced once in the About footer so
-// the GitHub button and the license line both point at the canonical sources.
+// The project's public home, surfaced once in the About footer so the GitHub
+// button points at the canonical source.
 const GITHUB_URL = 'https://github.com/Craigtut/reverie';
-const LICENSE_URL = 'https://github.com/Craigtut/reverie/blob/main/LICENSE';
 
 // A quiet "about this software" footer pinned to the bottom of Settings: the
-// running version, copyright, license, and a link out to the source. The
-// version is the build-time package.json value (kept in sync across manifests
-// by set-version.mjs), so it renders identically in the harness, dev, and
-// production builds without depending on the updater being armed.
+// running version and a link out to the source. The version is the build-time
+// package.json value (kept in sync across manifests by set-version.mjs), so it
+// renders identically in the harness, dev, and production builds without
+// depending on the updater being armed.
 export function AboutSection() {
-  const year = new Date().getFullYear();
-
   return (
-    <footer className={aboutFooterClass} aria-label="About Reverie">
+    <footer className={aboutFooterClass}>
       <div className={aboutTextClass}>
         <Typography
           as="span"
@@ -27,17 +24,6 @@ export function AboutSection() {
           style={{ letterSpacing: '-0.005em' }}
         >
           Reverie {__APP_VERSION__}
-        </Typography>
-        <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.6 }}>
-          © {year} Craig Tuttle. Released under the{' '}
-          <button
-            type="button"
-            className={aboutLinkClass}
-            onClick={() => void openExternalUrl(LICENSE_URL)}
-          >
-            MIT License
-          </button>
-          .
         </Typography>
       </div>
       <button
@@ -68,20 +54,6 @@ const aboutTextClass = css({
   display: 'grid',
   gap: '3px',
   minWidth: 0,
-});
-
-const aboutLinkClass = css({
-  appearance: 'none',
-  border: 'none',
-  background: 'none',
-  padding: 0,
-  font: 'inherit',
-  color: 'var(--text-2)',
-  textDecoration: 'underline',
-  textUnderlineOffset: '2px',
-  cursor: 'pointer',
-  transition: 'color 140ms ease',
-  _hover: { color: 'var(--text)' },
 });
 
 const githubButtonClass = css({
