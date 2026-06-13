@@ -7,6 +7,7 @@ export { useAutoUpdate, runUpdateCheck, relaunchToUpdate } from './useAutoUpdate
 export { useCommandPalette } from './useCommandPalette';
 export { useSessionTabShortcuts } from './useSessionTabShortcuts';
 export { useSessionActivity } from './useSessionActivity';
+export { useGitStatus } from './useGitStatus';
 export { useSessionViewed } from './useSessionViewed';
 export { useSessionTitle } from './useSessionTitle';
 export { useAgentClis } from './useAgentClis';

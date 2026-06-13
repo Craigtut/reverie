@@ -198,6 +198,37 @@ export interface ShellProject {
   sortOrder?: number;
 }
 
+// Read-only git context for a project folder, computed by the backend (gix) and
+// pushed over the `git_status_changed` event. A project's entry is `null` when
+// its folder is not a git repository, so the UI can drop the repo strip and nav
+// counts cleanly. Mirrors `reverie_core::git_status::RepoStatus`.
+export interface RepoStatus {
+  branch: string | null;
+  detached: boolean;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  dirty: DirtyStat;
+  lastCommit: CommitSummary | null;
+}
+
+export interface DirtyStat {
+  filesChanged: number;
+  insertions: number;
+  deletions: number;
+}
+
+export interface CommitSummary {
+  subject: string;
+  timeSeconds: number;
+}
+
+// The payload the backend emits per project on `git_status_changed`.
+export interface GitStatusEventPayload {
+  projectId: string;
+  status: RepoStatus | null;
+}
+
 export interface ShellFocus {
   id: string;
   projectId?: string | null;

@@ -13,9 +13,11 @@ import type {
   ShellSession,
   WorkspaceShellSnapshot,
 } from '../../domain';
+import { useGitStatusStore } from '../../store';
 import { Typography } from '../primitives/Typography';
 import { DashboardCountPills } from './DashboardCountPills';
 import { DashboardStateRails } from './DashboardStateRails';
+import { RepoStrip } from './RepoStrip';
 
 // One project's overview, a zoom level below Home: every active session across
 // the project's topics, intermingled (no per-topic dividers) and grouped into
@@ -67,6 +69,11 @@ export function ProjectDashboardSurface({
   );
   const [showArchived, setShowArchived] = useState(false);
 
+  // Git context for this project folder, pushed by the backend poll loop. Null
+  // when the folder is not a repository (then the repo strip simply doesn't
+  // render, and the page reads exactly as it did before git awareness).
+  const repoStatus = useGitStatusStore(s => s.repoStatus[project.id]);
+
   const groups = groupSessionsByState(sessions, sessionTerminalBindings, cortexActivity);
 
   return (
@@ -98,6 +105,8 @@ export function ProjectDashboardSurface({
           </div>
           <DashboardCountPills groups={groups} />
         </header>
+
+        {repoStatus ? <RepoStrip status={repoStatus} projectId={project.id} /> : null}
 
         {sessions.length > 0 ? (
           <DashboardStateRails

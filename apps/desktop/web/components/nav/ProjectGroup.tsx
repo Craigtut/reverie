@@ -39,6 +39,8 @@ export function ProjectGroup({
   attention = 0,
   finished = 0,
   tone = 'recent',
+  gitInsertions = 0,
+  gitDeletions = 0,
   expanded,
   active = false,
   onToggle,
@@ -55,6 +57,11 @@ export function ProjectGroup({
   attention?: number;
   finished?: number;
   tone?: DashboardStatus;
+  // Uncommitted line counts when the project folder is a git repo. Shown as
+  // quiet monochrome facts (not status color) so they never compete with the
+  // folder status light or the attention/ready badges. Zero hides them.
+  gitInsertions?: number;
+  gitDeletions?: number;
   expanded: boolean;
   active?: boolean;
   onToggle: () => void;
@@ -112,6 +119,20 @@ export function ProjectGroup({
           </Typography>
         </button>
         <div className={rowTrailingClass}>
+          {gitInsertions > 0 || gitDeletions > 0 ? (
+            <span
+              className={gitDirtyClass}
+              data-row-meta={onRemove ? 'true' : undefined}
+              title={`${gitInsertions} added, ${gitDeletions} removed (uncommitted)`}
+            >
+              <Typography as="span" variant="caption" tone="inherit">
+                +{gitInsertions}
+              </Typography>
+              <Typography as="span" variant="caption" tone="inherit">
+                −{gitDeletions}
+              </Typography>
+            </span>
+          ) : null}
           {attention > 0 ? (
             <Typography
               as="span"
@@ -192,6 +213,19 @@ const folderToneClass = css({
   flexShrink: 0,
   '& svg': { transition: 'color 180ms ease' },
   '&[data-tone] svg': { color: 'var(--folder-tone)' },
+});
+
+// The uncommitted +/- pair in the nav: deliberately monochrome and faint so it
+// reads as a quiet fact, never competing with the folder status light or the
+// warn/ready badges. Tabular numerals keep the digits from jittering as counts
+// change while an agent edits. Color for +/- is reserved for the project page.
+const gitDirtyClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '4px',
+  flexShrink: 0,
+  color: 'var(--text-3)',
+  fontVariantNumeric: 'tabular-nums',
 });
 
 const projectGroupClass = css({

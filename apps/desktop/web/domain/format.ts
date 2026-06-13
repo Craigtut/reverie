@@ -34,3 +34,20 @@ export function average(values: number[]) {
 export function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
+
+// A compact "x ago" label from a Unix timestamp in seconds, for the project
+// page's last-commit line. Coarse on purpose (no live ticking): the git context
+// refreshes every few seconds, so minute/hour/day granularity is plenty.
+export function relativeTimeFromSeconds(timeSeconds: number): string {
+  const deltaSeconds = Math.max(0, Math.floor(Date.now() / 1000 - timeSeconds));
+  if (deltaSeconds < 45) return 'just now';
+  const minutes = Math.round(deltaSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.round(months / 12)}y ago`;
+}

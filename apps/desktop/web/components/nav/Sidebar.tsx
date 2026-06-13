@@ -21,7 +21,7 @@ import type {
   SurfaceMode,
   WorkspaceShellSnapshot,
 } from '../../domain';
-import { useNavigationStore } from '../../store';
+import { useGitStatusStore, useNavigationStore } from '../../store';
 import { useSidebarFolderDrop, SIDEBAR_PROJECT_DROP_ZONE } from '../../hooks';
 import { ReverieMark, TrafficLights } from '../chrome';
 import { Typography } from '../primitives/Typography';
@@ -100,6 +100,7 @@ export function Sidebar({
   const navScrollRef = useRef<HTMLElement | null>(null);
   const selectedSessionId = useNavigationStore(s => s.selectedSessionId);
   const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
+  const repoStatus = useGitStatusStore(s => s.repoStatus);
   const collapsedProjectIds = useNavigationStore(s => s.collapsedProjectIds);
   const expandedFocusIds = useNavigationStore(s => s.expandedFocusIds);
   const generalCollapsed = useNavigationStore(s => s.generalCollapsed);
@@ -325,6 +326,7 @@ export function Sidebar({
                   viewedSessionId,
                 );
                 const expanded = !collapsedProjectIds.has(project.id);
+                const gitDirty = repoStatus[project.id]?.dirty;
                 return (
                   <SortableRow
                     key={project.id}
@@ -342,6 +344,8 @@ export function Sidebar({
                       attention={projectRollup.attention}
                       finished={projectRollup.finished}
                       tone={projectRollup.tone}
+                      gitInsertions={gitDirty?.insertions ?? 0}
+                      gitDeletions={gitDirty?.deletions ?? 0}
                       expanded={expanded}
                       active={
                         surfaceMode === 'project-dashboard' && selectedProjectId === project.id

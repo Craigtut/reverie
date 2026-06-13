@@ -5,6 +5,7 @@ export { useNavigationStore } from './navigationStore';
 export { useUiStore } from './uiStore';
 export { usePaletteStore } from './paletteStore';
 export { useActivityStore } from './activityStore';
+export { useGitStatusStore } from './gitStatusStore';
 export { useShellStore } from './shellStore';
 export { useTerminalStore } from './terminalStore';
 export { useConnectionPanelStore } from './connectionPanelStore';
