@@ -17,6 +17,7 @@ portable-pty = "0.9"
 libc = "0.2"
 notify = "8"
 notify-debouncer-full = "0.6"
+gix = "0.84"
 tempfile = "3"
 tiny_http = "0.12"
 rusqlite = { version = "0.32", features = ["bundled"] }

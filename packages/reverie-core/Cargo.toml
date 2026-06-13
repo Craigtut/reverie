@@ -15,6 +15,7 @@ portable-pty.workspace = true
 libc.workspace = true
 notify.workspace = true
 notify-debouncer-full.workspace = true
+gix.workspace = true
 tiny_http.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

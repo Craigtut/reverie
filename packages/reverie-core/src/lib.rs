@@ -18,6 +18,7 @@ pub mod connection_repository;
 pub mod connection_service;
 pub mod cortex_state;
 pub mod domain;
+pub mod git_status;
 pub mod hook_config;
 pub mod hook_server;
 pub mod pty;
@@ -61,6 +62,7 @@ pub use domain::{
     AgentKind, Focus, NativeSessionRef, Project, Session, SessionStateTimeline, SessionStatus,
     Workspace, WorkspaceSnapshot,
 };
+pub use git_status::{CommitSummary, DirtyStat, RepoStatus, compute_repo_status};
 pub use hook_config::{WrittenHookConfig, hook_url, write_claude_settings};
 pub use hook_server::{HookServerControl, HookServerHandle, HookSource, start_hook_server};
 pub use repository::{
