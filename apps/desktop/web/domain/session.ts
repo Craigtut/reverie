@@ -142,9 +142,19 @@ export function nativeSessionSummary(session: ShellSession | null) {
   return `${agentLabel(native.kind)} ${shortId(nativeId)}`;
 }
 
+// Whether launching this session continues a prior CLI conversation (via the
+// agent's `--resume` route) rather than starting one fresh. True only once the
+// session has captured a native session id from an earlier run. A brand-new
+// session is a fresh start even though it will capture a ref moments after it
+// boots, so callers that show launch copy should snapshot this at the instant
+// launch begins, not read it live (the ref lands mid-launch and would flip it).
+export function isResumeLaunch(session: ShellSession): boolean {
+  return session.launchMode === 'resume' || Boolean(session.nativeSessionRef);
+}
+
 export function launchButtonLabel(session: ShellSession) {
   if (session.status === 'restore_failed') return 'Retry resume';
-  if (session.launchMode === 'resume' || session.nativeSessionRef) return 'Resume';
+  if (isResumeLaunch(session)) return 'Resume';
   return 'Run';
 }
 

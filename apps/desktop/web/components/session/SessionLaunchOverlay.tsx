@@ -1,7 +1,8 @@
 import { Play } from '@phosphor-icons/react';
+import { useRef } from 'react';
 
 import { css } from '../../styled-system/css';
-import { agentLabel, agentTabLabel, launchButtonLabel } from '../../domain';
+import { agentLabel, agentTabLabel, isResumeLaunch, launchButtonLabel } from '../../domain';
 import type { ShellSession } from '../../domain';
 import { ResumeBloom } from '../chrome';
 import { Typography } from '../primitives/Typography';
@@ -22,11 +23,24 @@ export function SessionLaunchOverlay({
   disabled: boolean;
   onLaunch: () => void;
 }) {
+  // Freeze whether this launch is a resume at the instant launching begins.
+  // Claude captures its native session id via hooks within the launch window, so
+  // a fresh session gains a nativeSessionRef mid-launch; reading it live would
+  // flip "Starting" to "Resuming" on the user. Snapshot the pre-launch session
+  // on the rising edge and hold it until launching ends.
+  const wasLaunching = useRef(false);
+  const resumeAtLaunchStart = useRef(false);
+  if (launching && !wasLaunching.current) {
+    resumeAtLaunchStart.current = session ? isResumeLaunch(session) : false;
+  } else if (!launching) {
+    resumeAtLaunchStart.current = false;
+  }
+  wasLaunching.current = launching;
+
   if (!session) return null;
 
   if (launching) {
-    const actionLabel =
-      session.launchMode === 'resume' || session.nativeSessionRef ? 'Resuming' : 'Launching';
+    const actionLabel = resumeAtLaunchStart.current ? 'Resuming' : 'Starting';
     const title = session.title?.trim() || agentTabLabel(session);
 
     return (
