@@ -21,6 +21,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // get their top-level "version" key set; Cargo files get the [package] version.
 const TARGETS = [
   { path: 'package.json', kind: 'json' },
+  { path: 'package-lock.json', kind: 'npm-lock' },
   { path: 'apps/desktop/src-tauri/tauri.conf.json', kind: 'json' },
   { path: 'apps/desktop/src-tauri/Cargo.toml', kind: 'cargo' },
   { path: 'packages/reverie-core/Cargo.toml', kind: 'cargo' },
@@ -62,6 +63,21 @@ function setJsonVersion(content, version) {
   const re = /^(\s*"version"\s*:\s*)"[^"]*"/m;
   if (!re.test(content)) throw new Error('no top-level "version" key found');
   return content.replace(re, `$1"${version}"`);
+}
+
+// package-lock.json pins the root version twice: the top-level "version" and
+// the root package entry packages[""].version. It also carries a "version" for
+// every dependency, so the first-match/global string edits used elsewhere are
+// unsafe here. Parse, set just those two fields, and reserialize with npm's
+// formatting (2-space indent + trailing newline) so the diff stays to the two
+// lines and the lockfile stays in sync with package.json (or `npm ci` fails).
+function setNpmLockVersion(content, version) {
+  const lock = JSON.parse(content);
+  lock.version = version;
+  if (lock.packages && lock.packages['']) {
+    lock.packages[''].version = version;
+  }
+  return `${JSON.stringify(lock, null, 2)}\n`;
 }
 
 // Replace only the version inside the [package] section, never a dependency's
@@ -107,7 +123,11 @@ for (const { path, kind } of TARGETS) {
   const full = join(repoRoot, path);
   const before = readFileSync(full, 'utf8');
   const after =
-    kind === 'json' ? setJsonVersion(before, version) : setCargoVersion(before, version);
+    kind === 'json'
+      ? setJsonVersion(before, version)
+      : kind === 'npm-lock'
+        ? setNpmLockVersion(before, version)
+        : setCargoVersion(before, version);
   writeFileSync(full, after);
   console.log(`  ${path}`);
 }
