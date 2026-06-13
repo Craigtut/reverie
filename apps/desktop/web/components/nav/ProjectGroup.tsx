@@ -1,5 +1,5 @@
 import type { CSSProperties, MouseEvent, ReactNode } from 'react';
-import { CaretRight } from '@phosphor-icons/react';
+import { CaretRight, GitBranch } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import type { DashboardStatus } from '../../domain';
@@ -77,7 +77,7 @@ export function ProjectGroup({
   const opens = Boolean(onOpen);
   return (
     <div className={projectGroupClass}>
-      <div className={rowShellClass} data-active={active ? 'true' : 'false'}>
+      <div className={rowShellClass} data-active={active ? 'true' : 'false'} data-row-shell="true">
         {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
         <button
           className={rowCaretButtonClass}
@@ -119,20 +119,6 @@ export function ProjectGroup({
           </Typography>
         </button>
         <div className={rowTrailingClass}>
-          {gitInsertions > 0 || gitDeletions > 0 ? (
-            <span
-              className={gitDirtyClass}
-              data-row-meta={onRemove ? 'true' : undefined}
-              title={`${gitInsertions} added, ${gitDeletions} removed (uncommitted)`}
-            >
-              <Typography as="span" variant="caption" tone="inherit">
-                +{gitInsertions}
-              </Typography>
-              <Typography as="span" variant="caption" tone="inherit">
-                −{gitDeletions}
-              </Typography>
-            </span>
-          ) : null}
           {attention > 0 ? (
             <Typography
               as="span"
@@ -156,6 +142,29 @@ export function ProjectGroup({
             >
               {finished}
             </Typography>
+          ) : null}
+          {gitInsertions > 0 || gitDeletions > 0 ? (
+            // Resting: a warn-tinted branch glyph that just says "uncommitted
+            // work here," pulling a little attention. On row hover the glyph
+            // collapses and the color-coded line counts expand in beside the
+            // remove button, progressively disclosing the detail once the user
+            // has shown intent by reaching for the row.
+            <span
+              className={gitDirtyClass}
+              title={`${gitInsertions} added, ${gitDeletions} removed (uncommitted)`}
+            >
+              <span className={gitDirtyRestClass} data-git-rest aria-hidden="true">
+                <GitBranch size={12} weight="bold" />
+              </span>
+              <span className={gitDirtyExpandClass} data-git-expand>
+                <Typography as="span" variant="caption" tone="inherit" className={gitInsertClass}>
+                  +{gitInsertions}
+                </Typography>
+                <Typography as="span" variant="caption" tone="inherit" className={gitDeleteClass}>
+                  −{gitDeletions}
+                </Typography>
+              </span>
+            </span>
           ) : null}
           <span className={rowTrailingCapClass}>
             {count ? (
@@ -215,18 +224,51 @@ const folderToneClass = css({
   '&[data-tone] svg': { color: 'var(--folder-tone)' },
 });
 
-// The uncommitted +/- pair in the nav: deliberately monochrome and faint so it
-// reads as a quiet fact, never competing with the folder status light or the
-// warn/ready badges. Tabular numerals keep the digits from jittering as counts
-// change while an agent edits. Color for +/- is reserved for the project page.
+// The uncommitted-changes indicator in the nav. At rest it is just a small
+// warn-tinted branch glyph: enough to pull a little attention to "there is
+// uncommitted work here" without spelling out numbers. On row hover the glyph
+// collapses and the color-coded +/- line counts expand in (green added, red
+// removed), so the detail appears only once the user reaches for the row. Both
+// transitions are driven off the row's `data-row-shell` hover/focus so the
+// indicator stays in step with the count-to-remove crossfade beside it.
 const gitDirtyClass = css({
   display: 'inline-flex',
   alignItems: 'center',
-  gap: '4px',
   flexShrink: 0,
-  color: 'var(--text-3)',
-  fontVariantNumeric: 'tabular-nums',
+  overflow: 'hidden',
 });
+
+const gitDirtyRestClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  overflow: 'hidden',
+  maxWidth: '16px',
+  opacity: 1,
+  transition: 'opacity 130ms ease, max-width 160ms ease',
+  '& svg': { color: 'var(--warn)' },
+  '[data-row-shell]:hover &': { opacity: 0, maxWidth: 0 },
+  '[data-row-shell]:has(:focus-visible) &': { opacity: 0, maxWidth: 0 },
+});
+
+const gitDirtyExpandClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '5px',
+  overflow: 'hidden',
+  maxWidth: 0,
+  opacity: 0,
+  whiteSpace: 'nowrap',
+  fontVariantNumeric: 'tabular-nums',
+  transition: 'opacity 130ms ease 40ms, max-width 200ms cubic-bezier(0.22, 1, 0.36, 1)',
+  '[data-row-shell]:hover &': { opacity: 1, maxWidth: '72px' },
+  '[data-row-shell]:has(:focus-visible) &': { opacity: 1, maxWidth: '72px' },
+});
+
+// On the row the user is actively engaging, the numbers earn status color: green
+// for additions, red for deletions. (The resting glyph stays warn so it reads as
+// one calm "attention" beacon, not a rainbow.)
+const gitInsertClass = css({ color: 'var(--good)' });
+const gitDeleteClass = css({ color: 'var(--bad)' });
 
 const projectGroupClass = css({
   display: 'grid',
