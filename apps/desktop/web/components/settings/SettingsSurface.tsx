@@ -11,6 +11,7 @@ import { MAX_TERMINAL_FONT_SIZE, MIN_TERMINAL_FONT_SIZE } from '../../terminal/t
 import { SegmentedTabs, type SegmentedTabItem } from '../primitives/SegmentedTabs';
 import { Switch } from '../primitives/Switch';
 import { Typography } from '../primitives/Typography';
+import { AboutSection } from './AboutSection';
 import { AgentsSection } from './AgentsSection';
 import { ArchivedProjectsSection } from './ArchivedProjectsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
@@ -342,6 +343,8 @@ export function SettingsSurface({
             <ArchivedProjectsSection onDeleteProject={onDeleteProject} />
           </div>
         )}
+
+        <AboutSection />
       </div>
     </div>
   );
