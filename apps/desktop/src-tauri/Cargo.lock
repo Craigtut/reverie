@@ -3259,7 +3259,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -3301,7 +3301,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-persistence"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reverie-core",
  "rusqlite",
