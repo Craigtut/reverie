@@ -30,7 +30,7 @@ use crate::activity_bridge::{drain_file_activity, drain_hook_activity};
 use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
 use crate::terminal::runtime::TerminalSessionRuntime;
 
-const WINDOW_CORNER_RADIUS: f64 = 44.0;
+const WINDOW_CORNER_RADIUS: f64 = 28.0;
 
 #[cfg(target_os = "macos")]
 fn apply_macos_window_corners(window: &tauri::WebviewWindow, radius: f64) {

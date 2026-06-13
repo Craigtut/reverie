@@ -453,6 +453,10 @@ const leftPanelClass = css({
   display: 'flex',
   flexDirection: 'column',
   minHeight: 0,
+  // Override the shared rim-lit default (22px) with a radius that stays
+  // proportional to the 28px window corner: at a 20px inset the panel is a
+  // floating card, not concentric, so 20px reads as a calm, related curve.
+  borderRadius: '20px',
 });
 
 const titlebarClass = css({

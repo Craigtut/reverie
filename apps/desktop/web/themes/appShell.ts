@@ -59,9 +59,9 @@ export const appShellClass = css({
   gridTemplateColumns: '288px minmax(0, 1fr)',
   gridTemplateRows: 'minmax(0, 1fr)',
   gap: '18px',
-  padding: '22px',
+  padding: '20px',
   overflow: 'hidden',
-  borderRadius: '44px',
+  borderRadius: '28px',
   color: 'var(--text)',
   // An opaque base color always sits under the gradient so the shell can never go
   // see-through. The `background` shorthand resets background-color to transparent,
@@ -126,7 +126,7 @@ export const appShellClass = css({
   lgDown: {
     gridTemplateColumns: '260px minmax(0, 1fr)',
     padding: '14px',
-    borderRadius: '36px',
+    borderRadius: '28px',
   },
   mdDown: {
     position: 'relative',
