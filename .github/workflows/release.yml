@@ -58,6 +58,13 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Auto-updater signing: the Tauri minisign key (separate from Apple
+          # signing) that signs the .app.tar.gz the updater downloads. With these
+          # set, tauri-action emits the signed updater artifact and the
+          # latest.json manifest and uploads them to the release. Without them the
+          # build still succeeds but ships no updater artifacts.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop/src-tauri
           args: --target aarch64-apple-darwin
