@@ -157,10 +157,10 @@ export function ProjectGroup({
                 <GitBranch size={12} weight="bold" />
               </span>
               <span className={gitDirtyExpandClass} data-git-expand>
-                <Typography as="span" variant="caption" tone="inherit" className={gitInsertClass}>
+                <Typography as="span" variant="caption" tone="good">
                   +{gitInsertions}
                 </Typography>
-                <Typography as="span" variant="caption" tone="inherit" className={gitDeleteClass}>
+                <Typography as="span" variant="caption" tone="bad">
                   −{gitDeletions}
                 </Typography>
               </span>
@@ -231,44 +231,48 @@ const folderToneClass = css({
 // removed), so the detail appears only once the user reaches for the row. Both
 // transitions are driven off the row's `data-row-shell` hover/focus so the
 // indicator stays in step with the count-to-remove crossfade beside it.
+// The indicator occupies only the glyph's footprint in layout; the numbers are
+// an overlay (see below). It never intercepts pointer events, so a click over it
+// always reaches the row's caret/primary targets behind it.
 const gitDirtyClass = css({
+  position: 'relative',
   display: 'inline-flex',
   alignItems: 'center',
   flexShrink: 0,
-  overflow: 'hidden',
+  pointerEvents: 'none',
 });
 
 const gitDirtyRestClass = css({
   display: 'inline-flex',
   alignItems: 'center',
-  overflow: 'hidden',
-  maxWidth: '16px',
   opacity: 1,
-  transition: 'opacity 130ms ease, max-width 160ms ease',
+  transition: 'opacity 130ms ease',
   '& svg': { color: 'var(--warn)' },
-  '[data-row-shell]:hover &': { opacity: 0, maxWidth: 0 },
-  '[data-row-shell]:has(:focus-visible) &': { opacity: 0, maxWidth: 0 },
+  '[data-row-shell]:hover &': { opacity: 0 },
+  '[data-row-shell]:has(:focus-visible) &': { opacity: 0 },
 });
 
+// The numbers overlay the (faded) sibling meta to the indicator's left instead
+// of growing the trailing slot, so revealing them never reflows the row or
+// shrinks the clickable project name under the cursor. Right-anchored to the
+// glyph so they land just left of the remove button, sliding in as they fade up.
+// Color comes from each number's Typography tone (good/bad), not a className,
+// because Typography sets color as an inline style that a class can't override.
 const gitDirtyExpandClass = css({
+  position: 'absolute',
+  right: 0,
+  top: '50%',
   display: 'inline-flex',
   alignItems: 'center',
   gap: '5px',
-  overflow: 'hidden',
-  maxWidth: 0,
-  opacity: 0,
   whiteSpace: 'nowrap',
   fontVariantNumeric: 'tabular-nums',
-  transition: 'opacity 130ms ease 40ms, max-width 200ms cubic-bezier(0.22, 1, 0.36, 1)',
-  '[data-row-shell]:hover &': { opacity: 1, maxWidth: '72px' },
-  '[data-row-shell]:has(:focus-visible) &': { opacity: 1, maxWidth: '72px' },
+  opacity: 0,
+  transform: 'translate(8px, -50%)',
+  transition: 'opacity 130ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1)',
+  '[data-row-shell]:hover &': { opacity: 1, transform: 'translate(0, -50%)' },
+  '[data-row-shell]:has(:focus-visible) &': { opacity: 1, transform: 'translate(0, -50%)' },
 });
-
-// On the row the user is actively engaging, the numbers earn status color: green
-// for additions, red for deletions. (The resting glyph stays warn so it reads as
-// one calm "attention" beacon, not a rainbow.)
-const gitInsertClass = css({ color: 'var(--good)' });
-const gitDeleteClass = css({ color: 'var(--bad)' });
 
 const projectGroupClass = css({
   display: 'grid',

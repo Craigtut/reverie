@@ -112,10 +112,10 @@ export function RepoStrip({ status, projectId }: { status: RepoStatus; projectId
             <Typography as="span" variant="caption" tone="muted">
               {dirty.filesChanged} changed
             </Typography>
-            <Typography as="span" variant="caption" tone="inherit" className={insertionsClass}>
+            <Typography as="span" variant="caption" tone="good">
               +{dirty.insertions}
             </Typography>
-            <Typography as="span" variant="caption" tone="inherit" className={deletionsClass}>
+            <Typography as="span" variant="caption" tone="bad">
               −{dirty.deletions}
             </Typography>
           </span>
@@ -199,9 +199,6 @@ const dirtyClass = css({
   gap: '8px',
   marginLeft: 'auto',
 });
-
-const insertionsClass = css({ color: 'var(--good)' });
-const deletionsClass = css({ color: 'var(--bad)' });
 
 const lastCommitClass = css({
   margin: 0,
