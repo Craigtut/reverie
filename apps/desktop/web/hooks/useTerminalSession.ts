@@ -814,6 +814,37 @@ export function useTerminalSession(params: {
     requestAnimationFrame(() => applyViewportSizeRef.current(node.clientWidth, node.clientHeight));
   }, []);
 
+  // Reconcile the grid when the app regains focus/visibility or the window
+  // resizes. The viewport's own ResizeObserver only fires when its contentRect
+  // changes, but WKWebView can keep a stale layout width after sleep/wake, a
+  // display or Spaces change, or moving between monitors: the live grid is the
+  // only horizontally centered surface (capped to MAX_CONTENT_WIDTH_PX, centered
+  // via margin:auto), so a too-wide viewport parks it off to one side until
+  // something forces a re-measure. Reading clientWidth on the next frame forces a
+  // reflow (nudging the webview's bounds back in sync) and re-fits the grid to the
+  // true size; CSS then re-centers it. Mirrors the matchMedia DPR listener above.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const reconcileViewport = () => {
+      requestAnimationFrame(() => {
+        const node = surfaceViewportRef.current;
+        if (!node) return;
+        applyViewportSizeRef.current(node.clientWidth, node.clientHeight);
+      });
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') reconcileViewport();
+    };
+    window.addEventListener('focus', reconcileViewport);
+    window.addEventListener('resize', reconcileViewport);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('focus', reconcileViewport);
+      window.removeEventListener('resize', reconcileViewport);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
+
   useEffect(() => {
     return () => {
       if (surfaceResizeSettleTimerRef.current !== 0) {
