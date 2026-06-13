@@ -286,6 +286,11 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
               void setWorkspaceDefaultDangerousMode(next);
               setNewSessionDangerousMode(next);
             }}
+            keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
+            keepDisplayAwake={shell.workspace.keepDisplayAwake ?? false}
+            onSetKeepAwake={(enabled, keepDisplay) =>
+              void setWorkspaceKeepAwake(enabled, keepDisplay)
+            }
             terminalFontSize={shell.workspace.terminalFontSize ?? DEFAULT_TERMINAL_FONT_SIZE}
             onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
             onDeleteProject={project => void deleteProjectRecord(project)}

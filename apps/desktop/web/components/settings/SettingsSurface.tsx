@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { CaretRight, Minus, Moon, Plus, Sun } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
@@ -18,12 +18,7 @@ import { ConnectionPolicySection } from './ConnectionPolicySection';
 import { ShortcutsPanel } from './ShortcutsPanel';
 import { SoftwareUpdateSection } from './SoftwareUpdateSection';
 
-type SettingsTab = 'general' | 'shortcuts';
-
-const SETTINGS_TABS: SegmentedTabItem<SettingsTab>[] = [
-  { id: 'general', label: 'General' },
-  { id: 'shortcuts', label: 'Shortcuts' },
-];
+type SettingsTab = 'general' | 'agents' | 'archived' | 'shortcuts';
 
 // The settings surface: appearance (theme) + default new-session preferences.
 // Theme and the new-session defaults are all persisted workspace settings now:
@@ -36,6 +31,9 @@ export function SettingsSurface({
   onSetDefaultAgentKind,
   defaultDangerousMode,
   onSetDefaultDangerousMode,
+  keepAwakeEnabled,
+  keepDisplayAwake,
+  onSetKeepAwake,
   terminalFontSize,
   onSetTerminalFontSize,
   onDeleteProject,
@@ -53,6 +51,13 @@ export function SettingsSurface({
   // dashboard and topic/session composers use.
   defaultDangerousMode: boolean;
   onSetDefaultDangerousMode: (value: boolean) => void;
+  // The persisted "keep my Mac awake while tasks run" toggles. `keepAwakeEnabled`
+  // is the primary opt-in; `keepDisplayAwake` is the secondary screen-on
+  // sub-toggle (only meaningful when the primary is on). The handler persists
+  // both at once and the backend manages the native assertion.
+  keepAwakeEnabled: boolean;
+  keepDisplayAwake: boolean;
+  onSetKeepAwake: (enabled: boolean, keepDisplay: boolean) => void;
   // The persisted terminal font size (CSS px). The stepper reflects and writes
   // this; the terminal hook re-derives the cell so it live-applies to open
   // terminals.
@@ -75,6 +80,24 @@ export function SettingsSurface({
 
   const [tab, setTab] = useState<SettingsTab>('general');
 
+  // Archived projects get their own tab, but only once there is something to
+  // show: an empty archive would be a dead-end tab. We read the projects here
+  // (the same source ArchivedProjectsSection filters) so the tab appears and
+  // disappears with the archive, and a stale `archived` selection falls back to
+  // General the moment the last archived project is purged.
+  const hasArchivedProjects = useShellStore(s => s.shell.projects.some(p => p.archived));
+  const activeTab: SettingsTab = tab === 'archived' && !hasArchivedProjects ? 'general' : tab;
+
+  const tabs = useMemo<SegmentedTabItem<SettingsTab>[]>(
+    () => [
+      { id: 'general', label: 'General' },
+      { id: 'agents', label: 'Agents' },
+      ...(hasArchivedProjects ? [{ id: 'archived' as const, label: 'Archived' }] : []),
+      { id: 'shortcuts', label: 'Shortcuts' },
+    ],
+    [hasArchivedProjects],
+  );
+
   return (
     <div className={settingsSurfaceClass} data-testid="settings-surface">
       <div className={settingsScrollClass}>
@@ -92,8 +115,8 @@ export function SettingsSurface({
             Settings
           </Typography>
           <SegmentedTabs
-            tabs={SETTINGS_TABS}
-            value={tab}
+            tabs={tabs}
+            value={activeTab}
             onChange={setTab}
             ariaLabel="Settings sections"
             idBase="settings"
@@ -101,15 +124,7 @@ export function SettingsSurface({
           />
         </header>
 
-        {tab === 'shortcuts' ? (
-          <div
-            role="tabpanel"
-            id="settings-panel-shortcuts"
-            aria-labelledby="settings-tab-shortcuts"
-          >
-            <ShortcutsPanel />
-          </div>
-        ) : (
+        {activeTab === 'general' ? (
           <div
             role="tabpanel"
             id="settings-panel-general"
@@ -228,16 +243,101 @@ export function SettingsSurface({
               </ul>
             </section>
 
-            <section className={settingsGroupClass} aria-labelledby="settings-sessions-label">
+            <section className={settingsGroupClass} aria-labelledby="settings-power-label">
               <Typography
                 as="h2"
-                id="settings-sessions-label"
+                id="settings-power-label"
                 variant="tiny"
                 tone="faint"
                 uppercase
                 style={{ letterSpacing: '0.12em' }}
               >
-                Sessions
+                Power
+              </Typography>
+              <ul className={settingsListClass}>
+                <li className={settingsRowClass}>
+                  <div className={settingsRowTextClass}>
+                    <Typography
+                      as="span"
+                      variant="smallBody"
+                      tone="default"
+                      style={{ letterSpacing: '-0.005em' }}
+                    >
+                      Keep tasks running while I'm away
+                    </Typography>
+                    <Typography
+                      as="span"
+                      variant="caption"
+                      tone="faint"
+                      style={{ lineHeight: 1.5 }}
+                    >
+                      Holds your Mac awake while a session is running, so long tasks don't stop when
+                      you step away. Works with the lid open, or shut on an external display while
+                      plugged in. On battery with the lid closed, macOS still sleeps.
+                    </Typography>
+                  </div>
+                  <Switch
+                    checked={keepAwakeEnabled}
+                    onChange={next => onSetKeepAwake(next, keepDisplayAwake)}
+                    ariaLabel="Keep tasks running while I'm away"
+                    testId="settings-keep-awake-toggle"
+                  />
+                </li>
+                {keepAwakeEnabled ? (
+                  <li className={settingsRowClass}>
+                    <div className={settingsRowTextClass}>
+                      <Typography
+                        as="span"
+                        variant="smallBody"
+                        tone="default"
+                        style={{ letterSpacing: '-0.005em' }}
+                      >
+                        Keep the screen on too
+                      </Typography>
+                      <Typography
+                        as="span"
+                        variant="caption"
+                        tone="faint"
+                        style={{ lineHeight: 1.5 }}
+                      >
+                        Also stops the display from sleeping. Uses more power; leave off to let the
+                        screen sleep while tasks keep running.
+                      </Typography>
+                    </div>
+                    <Switch
+                      checked={keepDisplayAwake}
+                      onChange={next => onSetKeepAwake(keepAwakeEnabled, next)}
+                      ariaLabel="Keep the screen on too"
+                      testId="settings-keep-display-awake-toggle"
+                    />
+                  </li>
+                ) : null}
+              </ul>
+            </section>
+
+            <SoftwareUpdateSection />
+            <AboutSection />
+          </div>
+        ) : activeTab === 'agents' ? (
+          <div
+            role="tabpanel"
+            id="settings-panel-agents"
+            aria-labelledby="settings-tab-agents"
+            className={settingsPanelClass}
+          >
+            <section
+              className={settingsGroupClass}
+              aria-labelledby="settings-session-defaults-label"
+            >
+              <Typography
+                as="h2"
+                id="settings-session-defaults-label"
+                variant="tiny"
+                tone="faint"
+                uppercase
+                style={{ letterSpacing: '0.12em' }}
+              >
+                Session defaults
               </Typography>
               <ul className={settingsListClass}>
                 <li className={settingsRowClass}>
@@ -339,12 +439,25 @@ export function SettingsSurface({
             {anyReverieToolsInstalled(detections, bridge.status) ? (
               <ConnectionPolicySection />
             ) : null}
-            <SoftwareUpdateSection />
+          </div>
+        ) : activeTab === 'archived' ? (
+          <div
+            role="tabpanel"
+            id="settings-panel-archived"
+            aria-labelledby="settings-tab-archived"
+            className={settingsPanelClass}
+          >
             <ArchivedProjectsSection onDeleteProject={onDeleteProject} />
           </div>
+        ) : (
+          <div
+            role="tabpanel"
+            id="settings-panel-shortcuts"
+            aria-labelledby="settings-tab-shortcuts"
+          >
+            <ShortcutsPanel />
+          </div>
         )}
-
-        <AboutSection />
       </div>
     </div>
   );
@@ -355,7 +468,17 @@ const settingsSurfaceClass = css({
   zIndex: 2,
   height: '100%',
   minHeight: 0,
-  overflow: 'auto',
+  // Always reserve the scrollbar track so moving between a tall tab (Agents) and
+  // a short one (Archived) never changes the content width and shifts the
+  // centered column sideways. `scrollbar-gutter: stable` is the textbook way to
+  // do this, but WebKit (WKWebView) ignores it once a custom `::-webkit-scrollbar`
+  // width is set, which we do globally in main.css, so it had no effect in the
+  // real app. `overflow-y: scroll` does work there: the classic 11px track is
+  // always present (its background is transparent and the thumb only renders when
+  // there is something to scroll), so every tab reserves the same width and the
+  // scrollbar still appears exactly when it is needed.
+  overflowY: 'scroll',
+  overflowX: 'hidden',
   background: 'transparent',
 });
 
@@ -381,8 +504,8 @@ const settingsTabsClass = css({
   marginTop: '14px',
 });
 
-// Holds the General tab's sections with the same rhythm they had as direct
-// children of the settings column.
+// Holds a tab's sections with the same rhythm they had as direct children of
+// the settings column.
 const settingsPanelClass = css({
   display: 'grid',
   gap: '36px',
