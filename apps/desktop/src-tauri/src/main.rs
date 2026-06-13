@@ -138,6 +138,11 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // Auto-updates (production channel only; the frontend gates the actual
+        // check on `updater_status` so the dev channel never reaches out). The
+        // process plugin backs the post-install relaunch.
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             // Closing the window (red traffic-light button) is a quit for this
             // single-window app. Defer it the first time so the frontend can
@@ -344,6 +349,7 @@ fn main() {
         .manage(ActivityReconciler::new())
         .invoke_handler(tauri::generate_handler![
             commands::app_status,
+            commands::updater_status,
             commands::ghostty_frame_sequence,
             commands::workspace_shell,
             commands::list_agent_clis,
@@ -383,6 +389,7 @@ fn main() {
             commands::set_terminal_theme,
             commands::terminate_session,
             commands::confirm_quit,
+            commands::prepare_update_relaunch,
             commands::record_render_metrics,
             commands::record_terminal_diagnostics,
             commands::open_url,

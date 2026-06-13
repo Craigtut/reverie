@@ -11,6 +11,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "externalBin": [
       "binaries/reverie-bridge",
       "binaries/reverie-bridge-preturn-hook",
@@ -44,6 +45,12 @@
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'none'"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM5RjQ2M0VBNjcwMjIxODYKUldTR0lRSm42bVAweVNxRUZ1RVhDL1YyTHVkcXB1U05VZmQzTm02cFMvT3ZkTmRrdE9GZWNuTTYK",
+      "endpoints": ["https://github.com/Craigtut/reverie/releases/latest/download/latest.json"]
     }
   }
 }

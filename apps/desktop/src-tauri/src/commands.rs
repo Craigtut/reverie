@@ -176,6 +176,25 @@ pub(crate) fn app_status() -> &'static str {
     "reverie-desktop-product-shell"
 }
 
+/// What the frontend needs to drive the auto-updater: the running app version
+/// (shown in Settings and compared against the release manifest) and whether
+/// updates are enabled for this build. Updates run on the production channel
+/// only; the dev channel is a bare `cargo run` binary with no installable
+/// bundle, so it never checks.
+#[derive(serde::Serialize)]
+pub(crate) struct UpdaterStatus {
+    version: String,
+    enabled: bool,
+}
+
+#[tauri::command]
+pub(crate) fn updater_status(app: AppHandle) -> UpdaterStatus {
+    UpdaterStatus {
+        version: app.package_info().version.to_string(),
+        enabled: !is_dev_channel(&app),
+    }
+}
+
 /// Sentinel returned while the backend is still opening + seeding the database.
 /// The frontend treats this as a transient, retryable condition (it re-invokes
 /// with backoff) rather than a real load failure, so a cold-start race never
@@ -1223,6 +1242,26 @@ pub(crate) fn confirm_quit(
         let _ = service.mark_session_finished(session_id, true);
     }
     app.exit(0);
+    Ok(())
+}
+
+/// Prepare for an updater relaunch. The frontend has already installed the new
+/// bundle (via the updater plugin) and cleared the in-flight-work gate; this
+/// stops every live session's process tree and marks shutdown as begun, the same
+/// graceful teardown as `confirm_quit`, but WITHOUT exiting. With shutdown
+/// flagged, the `restart()` the frontend issues next passes straight through the
+/// exit guard instead of being deferred into another quit prompt.
+#[tauri::command]
+pub(crate) fn prepare_update_relaunch(
+    service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
+    shutdown: State<'_, ShutdownState>,
+) -> Result<(), String> {
+    shutdown.begin();
+    let live_sessions = runtime.shutdown_all();
+    for session_id in live_sessions {
+        let _ = service.mark_session_finished(session_id, true);
+    }
     Ok(())
 }
 
