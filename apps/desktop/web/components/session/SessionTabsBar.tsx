@@ -137,7 +137,7 @@ export function SessionTabsBar({
                     tightest compact widths it drops out, leaving just the glyph. */}
                 <span className={tabTrailingClass}>
                   <span className={tabCellWrapClass} data-tab-meta="true" aria-hidden="true">
-                    <StateCell state={cellState} size={12} />
+                    <StateCell state={cellState} size={22} />
                   </span>
                   <span
                     className={tabCloseClass}

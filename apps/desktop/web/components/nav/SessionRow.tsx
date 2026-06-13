@@ -60,7 +60,7 @@ export function SessionRow({
       <div className={rowTrailingClass}>
         <span className={rowTrailingCapClass}>
           <span className={cellWrapClass} data-row-meta="true">
-            <StateCell state={cellState} size={16} />
+            <StateCell state={cellState} size={24} />
           </span>
           <button
             className={rowActionClass}

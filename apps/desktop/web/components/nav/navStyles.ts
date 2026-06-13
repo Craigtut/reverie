@@ -125,8 +125,8 @@ export const rowTrailingClass = css({
   alignItems: 'center',
   justifyContent: 'flex-end',
   gap: '5px',
-  minWidth: '26px',
-  height: '26px',
+  minWidth: '28px',
+  height: '28px',
   marginRight: '2px',
   paddingRight: '2px',
 });
@@ -177,8 +177,8 @@ export const rowTrailingCapClass = css({
   flexShrink: 0,
   display: 'grid',
   placeItems: 'center',
-  width: '26px',
-  height: '26px',
+  width: '28px',
+  height: '28px',
 });
 
 export const rowActionClass = css({
