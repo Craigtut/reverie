@@ -56,13 +56,12 @@ function ToastRow({ toast }: { toast: ToastModel }) {
 
 const stackClass = css({
   position: 'fixed',
-  left: '50%',
+  right: '22px',
   bottom: '22px',
-  transform: 'translateX(-50%)',
   zIndex: 40,
   display: 'flex',
   flexDirection: 'column-reverse',
-  alignItems: 'center',
+  alignItems: 'flex-end',
   gap: '8px',
   pointerEvents: 'none',
 });
