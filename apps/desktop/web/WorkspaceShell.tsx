@@ -4,6 +4,7 @@ import {
   useAgentClis,
   useAppFocus,
   useAppQuit,
+  useAutoUpdate,
   useCommandPalette,
   useCreationForm,
   useNavPersistence,
@@ -60,6 +61,7 @@ export function WorkspaceShell() {
 
   useCommandPalette();
   useAppQuit(writeLog);
+  useAutoUpdate();
   useSessionActivity(writeLog, model.loadWorkspaceShell);
   useSessionViewed();
   useSessionTitle(writeLog);

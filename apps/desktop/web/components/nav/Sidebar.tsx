@@ -28,6 +28,7 @@ import { Typography } from '../primitives/Typography';
 import { OverlayScrollbar } from '../primitives/OverlayScrollbar';
 import { ProjectGroup } from './ProjectGroup';
 import { SidebarDropOverlay } from './SidebarDropOverlay';
+import { UpdateNavRow } from './UpdateNavRow';
 import { FocusRow } from './FocusRow';
 import { SessionRow } from './SessionRow';
 import { rowAddClass, rowAttentionBadgeClass, rowReadyBadgeClass } from './navStyles';
@@ -420,6 +421,7 @@ export function Sidebar({
       </div>
 
       <div className={leftFooterClass}>
+        <UpdateNavRow />
         <button
           type="button"
           className={settingsNavRowClass({ active: surfaceMode === 'settings' })}

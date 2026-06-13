@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react';
 
-import { activeWorkspaceSessions, activityForSession, errorMessage } from '../domain';
+import { activityForSession, errorMessage } from '../domain';
 import type { ShellSession } from '../domain';
 import { listen, type UnlistenFn } from '../services/runtime';
 import { confirmQuit } from '../services/terminalApi';
-import { useActivityStore, useOverlayStore, useShellStore, useTerminalStore } from '../store';
+import { hasPendingUpdate, installPendingUpdate } from '../services/updateApi';
+import { useActivityStore, useOverlayStore, useUpdateStore } from '../store';
+import { collectBusySessions } from './busyGuard';
 
 // Bridges the deferred app-quit (window close button / Cmd-Q) to a humane
 // confirmation. The Rust side prevents the default the first time and emits
@@ -23,28 +25,29 @@ export function useAppQuit(writeLog: (line: string) => void) {
     let unlisten: UnlistenFn | null = null;
 
     const finalizeQuit = () => {
-      void confirmQuit().catch(error => writeLogRef.current(`Quit failed: ${errorMessage(error)}`));
+      void (async () => {
+        // Install-on-quit: if a downloaded update is staged, apply it during the
+        // normal shutdown (best effort) so the next launch is already updated.
+        // The user never has to relaunch explicitly to get the new version.
+        if (useUpdateStore.getState().phase === 'ready' && hasPendingUpdate()) {
+          try {
+            await installPendingUpdate();
+          } catch (error) {
+            writeLogRef.current(`Update install on quit failed: ${errorMessage(error)}`);
+          }
+        }
+        await confirmQuit().catch(error =>
+          writeLogRef.current(`Quit failed: ${errorMessage(error)}`),
+        );
+      })();
     };
 
     void (async () => {
       try {
         const fn = await listen('app_quit_requested', () => {
           if (cancelled) return;
-          const sessions = activeWorkspaceSessions(useShellStore.getState().shell);
-          const bindings = useTerminalStore.getState().sessionTerminalBindings;
           const cortexActivity = useActivityStore.getState().cortexActivity;
-
-          // Only a session with a LIVE terminal can have work in flight worth
-          // warning about; a dormant session has nothing running to stop.
-          const busy = sessions.filter(session => {
-            if (!bindings[session.id]) return false;
-            const status = activityForSession(session, cortexActivity)?.status;
-            return (
-              status === 'working' ||
-              status === 'awaiting_permission' ||
-              status === 'awaiting_response'
-            );
-          });
+          const busy = collectBusySessions();
 
           if (busy.length === 0) {
             finalizeQuit();

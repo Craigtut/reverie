@@ -15,6 +15,7 @@ import { AgentsSection } from './AgentsSection';
 import { ArchivedProjectsSection } from './ArchivedProjectsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
 import { ShortcutsPanel } from './ShortcutsPanel';
+import { SoftwareUpdateSection } from './SoftwareUpdateSection';
 
 type SettingsTab = 'general' | 'shortcuts';
 
@@ -337,6 +338,7 @@ export function SettingsSurface({
             {anyReverieToolsInstalled(detections, bridge.status) ? (
               <ConnectionPolicySection />
             ) : null}
+            <SoftwareUpdateSection />
             <ArchivedProjectsSection onDeleteProject={onDeleteProject} />
           </div>
         )}

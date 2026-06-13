@@ -10,4 +10,6 @@ export { useTerminalStore } from './terminalStore';
 export { useConnectionPanelStore } from './connectionPanelStore';
 export { useOverlayStore } from './overlayStore';
 export type { ConfirmRequest, Toast } from './overlayStore';
+export { useUpdateStore } from './updateStore';
+export type { UpdatePhase } from './updateStore';
 export type { SetStateAction } from './setter';

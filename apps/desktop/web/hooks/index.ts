@@ -3,6 +3,7 @@
 
 export { useAppFocus } from './useAppFocus';
 export { useAppQuit } from './useAppQuit';
+export { useAutoUpdate, runUpdateCheck, relaunchToUpdate } from './useAutoUpdate';
 export { useCommandPalette } from './useCommandPalette';
 export { useSessionTabShortcuts } from './useSessionTabShortcuts';
 export { useSessionActivity } from './useSessionActivity';
