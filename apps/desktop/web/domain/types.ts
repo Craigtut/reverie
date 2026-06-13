@@ -171,6 +171,14 @@ export interface ShellWorkspace {
   // it. Absent/null means "never saved" (seed the default view). See
   // PersistedNavState and useNavPersistence.
   navState?: string | null;
+  // Opt-in "keep my Mac awake while tasks run". When on, the desktop app holds a
+  // macOS power assertion while any session is alive so long-running tasks
+  // survive the user walking away. Off by default; absent (pre-migration) means
+  // off. macOS-only; ignored elsewhere.
+  keepAwakeEnabled?: boolean;
+  // Secondary opt-in that, with keepAwakeEnabled, also keeps the display on
+  // instead of letting it sleep while the system stays awake. Off by default.
+  keepDisplayAwake?: boolean;
 }
 
 // The navigation we persist so a reload or relaunch reopens the last view

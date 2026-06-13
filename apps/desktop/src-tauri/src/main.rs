@@ -11,6 +11,7 @@ mod commands;
 #[cfg(unix)]
 mod connection_commands;
 mod correlator;
+mod keep_awake;
 mod path_env;
 mod state;
 mod terminal;
@@ -24,13 +25,48 @@ use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_se
 use reverie_core::session_log::start_session_log_watcher;
 use reverie_core::{CodexLogSource, CompositeLogSource, CortexStateSource};
 use reverie_persistence::SqliteWorkspaceRepository;
-use tauri::{Emitter, Manager, Url};
+use tauri::{Emitter, Listener, Manager, Url};
 
 use crate::activity_bridge::{drain_file_activity, drain_hook_activity};
+use crate::keep_awake::KeepAwakeManager;
 use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
-use crate::terminal::runtime::TerminalSessionRuntime;
+use crate::terminal::runtime::{TerminalRuntimeStatus, TerminalSessionRuntime};
 
 const WINDOW_CORNER_RADIUS: f64 = 28.0;
+
+/// Bring the macOS keep-awake assertion in line with the current setting and
+/// live-session count. Cheap and idempotent: call it whenever a session starts
+/// or ends, and when the toggle changes. A session is "alive" while its process
+/// is `Starting` or `Running`; we deliberately do not look at the finer
+/// working/idle micro-state, because a long task often sits quietly between
+/// turns and must not let the Mac sleep in that gap.
+pub(crate) fn reconcile_keep_awake(app: &tauri::AppHandle) {
+    let (Some(service), Some(runtime), Some(manager)) = (
+        app.try_state::<WorkspaceService>(),
+        app.try_state::<TerminalSessionRuntime>(),
+        app.try_state::<KeepAwakeManager>(),
+    ) else {
+        // Called before state is managed (very early boot). Nothing to do yet;
+        // the next lifecycle event reconciles once everything is up.
+        return;
+    };
+    let Ok(snapshot) = service.snapshot() else {
+        return;
+    };
+    let has_live_session = runtime.list_sessions().is_ok_and(|records| {
+        records.iter().any(|record| {
+            matches!(
+                record.status,
+                TerminalRuntimeStatus::Starting | TerminalRuntimeStatus::Running
+            )
+        })
+    });
+    manager.reconcile(
+        snapshot.workspace.keep_awake_enabled,
+        snapshot.workspace.keep_display_awake,
+        has_live_session,
+    );
+}
 
 #[cfg(target_os = "macos")]
 fn apply_macos_window_corners(window: &tauri::WebviewWindow, radius: f64) {
@@ -339,11 +375,28 @@ fn main() {
                 app.state::<WorkspaceService>().inner().clone(),
             );
 
+            // Keep-awake: hold a macOS power assertion while agent tasks run, so
+            // a user who walked away comes back to still-running sessions. Driven
+            // off session-lifecycle events (start and exit both emit
+            // `session_status_changed`; failures emit `terminal_failed`) plus the
+            // settings toggle. Reconcile recomputes from the live session set, so
+            // it is self-correcting regardless of which event fired. Listening
+            // here keeps power management out of the terminal runtime.
+            for event in ["session_status_changed", "terminal_failed"] {
+                let handle = app.handle().clone();
+                app.listen_any(event, move |_| reconcile_keep_awake(&handle));
+            }
+            // Boot reconcile: a session resumed at startup, or the toggle left on
+            // from a prior run, should take effect without waiting for the next
+            // lifecycle event.
+            reconcile_keep_awake(app.handle());
+
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
         .manage(WorkspaceBoot::default())
         .manage(ShutdownState::default())
+        .manage(KeepAwakeManager::default())
         // Shared cross-source merge for Codex (hooks + rollout), read by the
         // correlator on every Codex activity update.
         .manage(ActivityReconciler::new())
@@ -366,6 +419,7 @@ fn main() {
             commands::mark_session_viewed,
             commands::set_workspace_default_dangerous_mode,
             commands::set_workspace_theme,
+            commands::set_workspace_keep_awake,
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,
             commands::set_workspace_nav_state,
@@ -454,6 +508,7 @@ fn main() {
             // ran (e.g. a wedged or closed webview).
             tauri::RunEvent::Exit => {
                 app_handle.state::<TerminalSessionRuntime>().kill_all_now();
+                app_handle.state::<KeepAwakeManager>().release_all();
             }
             _ => {}
         });

@@ -1,5 +1,12 @@
 import { motion } from 'motion/react';
-import { GearSix, Plus, ShieldWarning, Sparkle, TerminalWindow } from '@phosphor-icons/react';
+import {
+  Coffee,
+  GearSix,
+  Plus,
+  ShieldWarning,
+  Sparkle,
+  TerminalWindow,
+} from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import { DotMatrixWord } from '../brand';
@@ -15,12 +22,18 @@ export function EmptyState({
   openSettings,
   workspaceDefaultDangerousMode,
   onSetWorkspaceDefaultDangerousMode,
+  keepAwakeEnabled,
+  onSetKeepAwakeEnabled,
 }: {
   createProject: () => void;
   createGeneralSession: () => void;
   openSettings: () => void;
   workspaceDefaultDangerousMode: boolean;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
+  // Keep-awake primary opt-in (the screen-on sub-toggle lives in Settings only).
+  // On keeps the Mac awake while sessions run so a walk-away task survives.
+  keepAwakeEnabled: boolean;
+  onSetKeepAwakeEnabled: (next: boolean) => void;
 }) {
   return (
     <div className={emptyStateClass} data-testid="onboarding-panel">
@@ -112,6 +125,45 @@ export function EmptyState({
               <ShieldWarning size={11} />{' '}
               <Typography as="span" variant="caption" tone="inherit">
                 Auto-approve
+              </Typography>
+            </button>
+          </div>
+        </div>
+
+        <div className={safetyCardClass} data-testid="onboarding-keep-awake-step">
+          <div className={safetyCopyClass}>
+            <Typography as="strong" variant="smallBodyAlt" tone="default">
+              <Coffee size={12} weight="fill" /> Keep tasks running when I'm away
+            </Typography>
+            <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.55 }}>
+              Holds your Mac awake while a session is running, so long tasks don't stop when you
+              step away. Closing the lid on battery still sleeps.
+            </Typography>
+          </div>
+          <div className={safetyToggleClass} role="radiogroup" aria-label="Keep tasks running">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={!keepAwakeEnabled}
+              data-active={!keepAwakeEnabled}
+              data-testid="onboarding-keep-awake-off"
+              onClick={() => onSetKeepAwakeEnabled(false)}
+            >
+              <Typography as="span" variant="caption" tone="inherit">
+                Off
+              </Typography>
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={keepAwakeEnabled}
+              data-active={keepAwakeEnabled}
+              data-testid="onboarding-keep-awake-on"
+              onClick={() => onSetKeepAwakeEnabled(true)}
+            >
+              <Coffee size={11} />{' '}
+              <Typography as="span" variant="caption" tone="inherit">
+                Keep awake
               </Typography>
             </button>
           </div>

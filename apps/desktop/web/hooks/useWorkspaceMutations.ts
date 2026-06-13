@@ -88,6 +88,32 @@ export function useWorkspaceMutations({
     }
   }
 
+  // Persist the "keep my Mac awake while tasks run" toggles. The backend reads
+  // these back and manages the native macOS power assertion (held only while a
+  // session is alive), so the frontend just records intent. `keepDisplay` is the
+  // secondary screen-on sub-toggle and is meaningless unless `enabled` is on.
+  async function setWorkspaceKeepAwake(enabled: boolean, keepDisplay: boolean) {
+    if (
+      shell.workspace.keepAwakeEnabled === enabled &&
+      shell.workspace.keepDisplayAwake === keepDisplay
+    ) {
+      return;
+    }
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_workspace_keep_awake', {
+        request: { keepAwakeEnabled: enabled, keepDisplayAwake: keepDisplay },
+      });
+      setShell(snapshot);
+      appendLog(
+        enabled
+          ? `Keep awake on${keepDisplay ? ' (screen stays on)' : ''} while tasks run.`
+          : 'Keep awake off.',
+      );
+    } catch (error) {
+      appendLog(`Update keep awake failed: ${errorMessage(error)}`);
+    }
+  }
+
   // Persist the default agent kind seeded into the new-session composer. Only a
   // starting value for future new-session forms; it does not touch any existing
   // session. The caller also seeds the live composer state.
@@ -512,6 +538,7 @@ export function useWorkspaceMutations({
   return {
     setWorkspaceDefaultDangerousMode,
     setWorkspaceTheme,
+    setWorkspaceKeepAwake,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     toggleSelectedSessionYolo,

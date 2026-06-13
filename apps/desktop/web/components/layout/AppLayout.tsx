@@ -126,6 +126,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const {
     setWorkspaceDefaultDangerousMode,
     setWorkspaceTheme,
+    setWorkspaceKeepAwake,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     toggleSelectedSessionYolo,
@@ -255,6 +256,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             onCreateGeneralSession={startGeneralSession}
             onOpenSettings={() => setSurfaceMode('settings')}
             onSetWorkspaceDefaultDangerousMode={next => void setWorkspaceDefaultDangerousMode(next)}
+            keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
+            onSetKeepAwakeEnabled={next =>
+              void setWorkspaceKeepAwake(next, shell.workspace.keepDisplayAwake ?? false)
+            }
           />
         ) : effectiveSurfaceMode === 'project-dashboard' && selectedProject ? (
           <ProjectDashboardSurface
@@ -399,6 +404,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                 workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
                 onSetWorkspaceDefaultDangerousMode={next =>
                   void setWorkspaceDefaultDangerousMode(next)
+                }
+                keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
+                onSetKeepAwakeEnabled={next =>
+                  void setWorkspaceKeepAwake(next, shell.workspace.keepDisplayAwake ?? false)
                 }
               />
             )}

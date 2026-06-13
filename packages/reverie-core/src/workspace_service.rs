@@ -81,6 +81,8 @@ impl WorkspaceService {
             default_agent_kind: AgentKind::ClaudeCode,
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             nav_state: None,
+            keep_awake_enabled: false,
+            keep_display_awake: false,
         };
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
@@ -282,6 +284,22 @@ impl WorkspaceService {
     pub fn set_workspace_theme(&self, theme: ThemeMode) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.theme = theme;
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Persist the "keep my Mac awake while tasks run" toggles. `enabled` is the
+    /// primary opt-in (hold a system-sleep assertion while sessions are alive);
+    /// `keep_display` additionally keeps the display on. The desktop app reads
+    /// these back and manages the native assertion; the domain only records intent.
+    pub fn set_workspace_keep_awake(
+        &self,
+        enabled: bool,
+        keep_display: bool,
+    ) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.keep_awake_enabled = enabled;
+        workspace.keep_display_awake = keep_display;
         self.repo.save_workspace(&workspace)?;
         Ok(self.repo.load_snapshot()?)
     }

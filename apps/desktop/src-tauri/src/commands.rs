@@ -146,6 +146,13 @@ pub(crate) struct SetWorkspaceThemeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetWorkspaceKeepAwakeRequest {
+    keep_awake_enabled: bool,
+    keep_display_awake: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceDefaultAgentKindRequest {
     default_agent_kind: AgentKind,
 }
@@ -766,6 +773,21 @@ pub(crate) fn set_workspace_theme(
     service
         .set_workspace_theme(request.theme)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_workspace_keep_awake(
+    app: tauri::AppHandle,
+    service: State<'_, WorkspaceService>,
+    request: SetWorkspaceKeepAwakeRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    let snapshot = service
+        .set_workspace_keep_awake(request.keep_awake_enabled, request.keep_display_awake)
+        .map_err(|err| err.to_string())?;
+    // Apply right away so the toggle takes effect without waiting for the next
+    // session lifecycle event.
+    crate::reconcile_keep_awake(&app);
+    Ok(snapshot)
 }
 
 #[tauri::command]

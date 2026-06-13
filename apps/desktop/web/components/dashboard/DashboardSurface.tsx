@@ -29,6 +29,8 @@ export function DashboardSurface({
   onCreateGeneralSession,
   onOpenSettings,
   onSetWorkspaceDefaultDangerousMode,
+  keepAwakeEnabled,
+  onSetKeepAwakeEnabled,
 }: {
   shell: WorkspaceShellSnapshot;
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
@@ -39,6 +41,8 @@ export function DashboardSurface({
   onCreateGeneralSession: () => void;
   onOpenSettings: () => void;
   onSetWorkspaceDefaultDangerousMode: (next: boolean) => void;
+  keepAwakeEnabled: boolean;
+  onSetKeepAwakeEnabled: (next: boolean) => void;
 }) {
   // Home shows every *effectively* active session: not archived, and not inside
   // an archived topic or project (see activeWorkspaceSessions). Filtering on the
@@ -55,6 +59,8 @@ export function DashboardSurface({
         openSettings={onOpenSettings}
         workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
         onSetWorkspaceDefaultDangerousMode={onSetWorkspaceDefaultDangerousMode}
+        keepAwakeEnabled={keepAwakeEnabled}
+        onSetKeepAwakeEnabled={onSetKeepAwakeEnabled}
       />
     );
   }

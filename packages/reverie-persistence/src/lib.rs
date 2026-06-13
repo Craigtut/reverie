@@ -198,6 +198,13 @@ const MIGRATIONS: &[&str] = &[
     // visibility computed by ancestry (a session is hidden when its focus or
     // project is archived), so the column is dead weight. Drop it.
     "ALTER TABLE sessions DROP COLUMN tab_visible;",
+    // v16 -> v17: opt-in macOS keep-awake. `keep_awake_enabled` holds a
+    // system-sleep power assertion while agent sessions are alive so long-running
+    // tasks survive the user walking away; `keep_display_awake` additionally keeps
+    // the display on. Both default to 0 (off) so existing workspaces upgrade with
+    // the feature disabled, matching the explicit-opt-in guardrail.
+    "ALTER TABLE workspace ADD COLUMN keep_awake_enabled INTEGER NOT NULL DEFAULT 0;
+     ALTER TABLE workspace ADD COLUMN keep_display_awake INTEGER NOT NULL DEFAULT 0;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -319,8 +326,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 "INSERT INTO workspace
                     (id, name, general_label, default_dangerous_mode,
                      disabled_agent_kinds,
-                     theme, default_agent_kind, nav_state, terminal_font_size)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     theme, default_agent_kind, nav_state, terminal_font_size,
+                     keep_awake_enabled, keep_display_awake)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -331,6 +339,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     agent_kind_to_db(seed.default_agent_kind)?,
                     seed.nav_state,
                     i64::from(seed.terminal_font_size),
+                    bool_to_int(seed.keep_awake_enabled),
+                    bool_to_int(seed.keep_display_awake),
                 ],
             )
             .map_err(backend)?;
@@ -344,8 +354,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
             "INSERT INTO workspace
                 (id, name, general_label, default_dangerous_mode,
                  disabled_agent_kinds,
-                 theme, default_agent_kind, nav_state, terminal_font_size)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 theme, default_agent_kind, nav_state, terminal_font_size,
+                 keep_awake_enabled, keep_display_awake)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -354,7 +365,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 theme = excluded.theme,
                 default_agent_kind = excluded.default_agent_kind,
                 nav_state = excluded.nav_state,
-                terminal_font_size = excluded.terminal_font_size",
+                terminal_font_size = excluded.terminal_font_size,
+                keep_awake_enabled = excluded.keep_awake_enabled,
+                keep_display_awake = excluded.keep_display_awake",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -365,6 +378,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 agent_kind_to_db(workspace.default_agent_kind)?,
                 workspace.nav_state,
                 i64::from(workspace.terminal_font_size),
+                bool_to_int(workspace.keep_awake_enabled),
+                bool_to_int(workspace.keep_display_awake),
             ],
         )
         .map_err(backend)?;
@@ -876,7 +891,8 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
     conn.query_row(
         "SELECT id, name, general_label, default_dangerous_mode,
                 disabled_agent_kinds,
-                theme, default_agent_kind, nav_state, terminal_font_size
+                theme, default_agent_kind, nav_state, terminal_font_size,
+                keep_awake_enabled, keep_display_awake
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -890,6 +906,8 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 default_agent_kind: agent_kind_from_db(&row.get::<_, String>(6)?)?,
                 nav_state: row.get::<_, Option<String>>(7)?,
                 terminal_font_size: terminal_font_size_from_db(row.get::<_, i64>(8)?),
+                keep_awake_enabled: int_to_bool(row.get::<_, i64>(9)?),
+                keep_display_awake: int_to_bool(row.get::<_, i64>(10)?),
             })
         },
     )
@@ -1447,6 +1465,32 @@ mod tests {
             repo.load_snapshot().unwrap().workspace.terminal_font_size,
             24
         );
+    }
+
+    #[test]
+    fn save_workspace_round_trips_keep_awake() {
+        let repo = seeded();
+        // A fresh workspace has keep-awake off (explicit opt-in).
+        let workspace = repo.load_snapshot().unwrap().workspace;
+        assert!(!workspace.keep_awake_enabled);
+        assert!(!workspace.keep_display_awake);
+
+        // The primary toggle persists on its own, with the display sub-toggle
+        // staying off (system stays awake, screen is free to sleep).
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.keep_awake_enabled = true;
+        repo.save_workspace(&workspace).unwrap();
+        let loaded = repo.load_snapshot().unwrap().workspace;
+        assert!(loaded.keep_awake_enabled);
+        assert!(!loaded.keep_display_awake);
+
+        // Both toggles round-trip together.
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.keep_display_awake = true;
+        repo.save_workspace(&workspace).unwrap();
+        let loaded = repo.load_snapshot().unwrap().workspace;
+        assert!(loaded.keep_awake_enabled);
+        assert!(loaded.keep_display_awake);
     }
 
     #[test]

@@ -50,6 +50,20 @@ pub struct Workspace {
     /// (a fresh workspace), which the renderer treats as "seed a default view".
     #[serde(default)]
     pub nav_state: Option<String>,
+    /// Opt-in "keep my Mac awake while tasks run" toggle. When on, the desktop
+    /// app holds a macOS power assertion (PreventUserIdleSystemSleep) while at
+    /// least one agent session is alive, so long-running tasks survive idle and
+    /// the user can walk away. Off by default (explicit opt-in). The domain only
+    /// stores the intent; the desktop app owns the native assertion. Has no
+    /// effect off macOS.
+    #[serde(default)]
+    pub keep_awake_enabled: bool,
+    /// Secondary opt-in that, together with `keep_awake_enabled`, also keeps the
+    /// display on (PreventUserIdleDisplaySleep) while tasks run. Off by default,
+    /// so the screen is free to sleep while the system stays awake. Meaningless
+    /// unless `keep_awake_enabled` is also set.
+    #[serde(default)]
+    pub keep_display_awake: bool,
 }
 
 impl Workspace {
@@ -64,6 +78,8 @@ impl Workspace {
             default_agent_kind: default_agent_kind(),
             terminal_font_size: default_terminal_font_size(),
             nav_state: None,
+            keep_awake_enabled: false,
+            keep_display_awake: false,
         }
     }
 }
