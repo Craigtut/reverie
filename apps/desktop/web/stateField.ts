@@ -202,11 +202,20 @@ void main(){
   field(aGrid, s, b);
   // No-ops (returns 0, leaves s/b) when uTransition == 0.
   float t = transitionOverlay(aGrid, uTransProgress, s, b);
+  // Round the square lattice into a soft disc. The dots sit on a 5x5 grid, so at
+  // full strength the constellation reads as a hard square; attenuate each dot by
+  // its distance from the lattice center so the four corners drop away and the
+  // edge midpoints dim a touch, leaving a rounded cluster. Applied once here,
+  // after the per-state field and any transition overlay, so every state and
+  // moment rounds the same way (corner rl ~1.41, edge-mid rl 1.0, center 0).
+  float env = smoothstep(1.5, 0.82, length(aGrid));
+  s *= env;
+  b *= env;
   vBright = b;
   vTrans = t;
   vUv = aQuad;
   float spread = 0.66;            // how far the lattice fills the tile
-  float dotRadius = 0.188 * s;    // half-size of a dot in tile space
+  float dotRadius = 0.2 * s;      // half-size of a dot in tile space
   vec2 center = aGrid * spread;
   vec2 pos = center + aQuad * dotRadius;
   gl_Position = vec4(pos, 0.0, 1.0);
@@ -222,7 +231,14 @@ uniform vec3 uColorFrom;
 out vec4 outColor;
 void main(){
   float d = length(vUv);
-  float a = smoothstep(1.0, 0.34, d) * vBright;  // crisp dot with a soft halo
+  // A crisp dot with only a faint halo. The old single wide smoothstep put ~2/3
+  // of the dot radius into soft falloff, which read as blur once the cells grew;
+  // keep a mostly-solid disc with a thin shoulder, plus a faint low-weight glow so
+  // the rim still softens rather than hard-cutting. The 256px tile is downscaled
+  // per cell on stamp, which adds the final gentle anti-aliasing.
+  float disc = smoothstep(0.82, 0.56, d);
+  float glow = smoothstep(1.0, 0.5, d) * 0.13;
+  float a = clamp(disc + glow, 0.0, 1.0) * vBright;
   // During a transition the overlay reads in the FROM color (e.g. green work
   // energy) and dissolves toward the target color as the moment settles.
   vec3 col = mix(uColor, uColorFrom, clamp(vTrans, 0.0, 1.0));
@@ -417,9 +433,13 @@ function draw2dFallback(cell: Cell) {
       const gy = (row / (n - 1)) * 2 - 1;
       const r = Math.hypot(gx, gy);
       const core = Math.max(0, 1 - r / 1.1);
+      // Same circular envelope as the GL path: corners recede so the grid reads
+      // round, not square (smoothstep(1.5, 0.82, r)).
+      const et = Math.min(1, Math.max(0, (r - 1.5) / (0.82 - 1.5)));
+      const env = et * et * (3 - 2 * et);
       const lit = cell.state === 'fresh' || cell.state === 'finished' ? 0.35 : 0.7;
-      const size = (0.28 + 0.4 * core) * gap * 0.7;
-      const alpha = 0.2 + lit * core;
+      const size = (0.28 + 0.4 * core) * gap * 0.7 * env;
+      const alpha = (0.2 + lit * core) * env;
       ctx.beginPath();
       ctx.fillStyle = `rgba(${rgb}, ${alpha.toFixed(3)})`;
       ctx.arc(gap * (col + 0.5), gap * (row + 0.5), size, 0, Math.PI * 2);
