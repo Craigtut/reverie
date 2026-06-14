@@ -410,13 +410,7 @@ mod tests {
             apply_update(
                 &service,
                 None,
-                &reverie_state_boundary(
-                    session_id,
-                    "native-B",
-                    1,
-                    ActivityStatus::Working,
-                    true,
-                ),
+                &reverie_state_boundary(session_id, "native-B", 1, ActivityStatus::Working, true,),
             ),
             "a boundary with a new native id re-points and reports a capture"
         );
