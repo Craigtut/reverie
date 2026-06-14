@@ -165,6 +165,12 @@ pub(crate) struct SetTerminalFontSizeRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetSidebarWidthRequest {
+    sidebar_width: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceNavStateRequest {
     /// Opaque, frontend-owned JSON describing the last view (selection, surface,
     /// sidebar accordion). `None` clears it. The backend stores it verbatim.
@@ -807,6 +813,16 @@ pub(crate) fn set_terminal_font_size(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .set_terminal_font_size(request.terminal_font_size)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_sidebar_width(
+    service: State<'_, WorkspaceService>,
+    request: SetSidebarWidthRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_sidebar_width(request.sidebar_width)
         .map_err(|err| err.to_string())
 }
 

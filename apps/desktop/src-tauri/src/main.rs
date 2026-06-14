@@ -437,6 +437,7 @@ fn main() {
             commands::set_workspace_keep_awake,
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,
+            commands::set_sidebar_width,
             commands::set_workspace_nav_state,
             commands::hook_server_port,
             commands::archive_focus,
