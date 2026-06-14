@@ -114,6 +114,12 @@ export function useShellNavigation({ model, terminal }: ShellNavigationOptions) 
     if (selectedTerminalBinding || isLaunchingSelectedSession) return;
     if (selectedSession.status === 'restore_failed') return;
     if (autoLaunchedSessionIdRef.current === selectedSession.id) return;
+    // Record the selection as auto-launched before starting it. Without this the
+    // once-guard above never trips, so a resume that exits (a stale CLI --resume,
+    // or a process that ends) clears the binding + launching flags, re-fires this
+    // effect, and relaunches in a loop, flickering the bloom against the idle
+    // Run/Resume card. Marking it here rests on that idle card as the manual retry.
+    autoLaunchedSessionIdRef.current = selectedSession.id;
     terminal.autostartSession(selectedSession);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mirrors the original effect deps.
   }, [
