@@ -1820,7 +1820,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reverie-bridge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "reverie-core",
@@ -1833,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "gix",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-persistence"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "reverie-core",
  "rusqlite",
