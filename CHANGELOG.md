@@ -7,6 +7,33 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-14
+
+### Added
+- Git awareness for projects that are repositories: the dashboard and the left nav
+  show live repo status, a dirty-repo glyph in the nav expands on hover to reveal
+  added and removed line counts, and a background poll keeps it current. Backed by a
+  new gix-based repo status reader in the core, with pull and push available from the
+  terminal. Reverie never requires git; this only lights up when a project folder
+  happens to be a repository.
+- An About section in Settings showing the app version, license, and a link to the
+  project on GitHub.
+- Support for the kitty keyboard protocol, so Shift+Enter inserts a newline in an
+  agent prompt instead of submitting it.
+- Keep the Mac awake while agent sessions are running, so long jobs are not
+  interrupted by system sleep.
+
+### Changed
+- Reorganized Settings into General, Agents, and Archived tabs.
+- Sharper session state cells (larger, crisper dots in the sidebar rows and tabs,
+  rounded lattice corners), a velocity-driven animated segmented tab selector, and
+  window and panel corner rounding tuned closer to native.
+- Disabled the native WebView context menu in production builds.
+
+### Fixed
+- Toast notifications now anchor to the bottom-right corner.
+- Fresh sessions show "Starting" rather than "Resuming" in the launch overlay.
+
 ## [0.2.0] - 2026-06-13
 
 ### Added
@@ -51,6 +78,7 @@ Targets macOS (Apple Silicon).
 - Pre-commit linting/formatting (Biome, rustfmt) and Conventional Commit
   validation (commitlint) via Husky.
 
-[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Craigtut/reverie/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Craigtut/reverie/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Craigtut/reverie/releases/tag/v0.1.0
