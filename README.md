@@ -62,7 +62,7 @@ Every session is stored as you go. Close the app, come back tomorrow, and pick u
 
 ## Get Reverie
 
-Reverie is a native macOS app for **Apple Silicon** (M1 and later).
+Reverie is a native macOS app for **Apple Silicon** (M1 and later). It is built with [Tauri](https://tauri.app/) and rides on the system WebView instead of bundling a browser engine, so the whole app is a native download under 25 MB.
 
 ### [⬇︎ Download the latest release](https://github.com/Craigtut/reverie/releases/latest)
 
