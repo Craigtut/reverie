@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
-use reverie_core::{RepoStatus, SessionStatus, WorkspaceService, WorkspaceSnapshot, compute_repo_status};
+use reverie_core::{
+    RepoStatus, SessionStatus, WorkspaceService, WorkspaceSnapshot, compute_repo_status,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// How often the watched set is recomputed while the app is focused. Git context
