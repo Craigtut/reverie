@@ -231,20 +231,24 @@ const folderToneClass = css({
 // removed), so the detail appears only once the user reaches for the row. Both
 // transitions are driven off the row's `data-row-shell` hover/focus so the
 // indicator stays in step with the count-to-remove crossfade beside it.
-// The indicator occupies only the glyph's footprint in layout; the numbers are
-// an overlay (see below). It never intercepts pointer events, so a click over it
-// always reaches the row's caret/primary targets behind it.
+// The indicator occupies only the glyph's footprint at rest. On hover/focus the
+// counts take real layout space, so the project title yields with ellipsis
+// instead of being painted over. It never intercepts pointer events, so a click
+// over it always reaches the row's caret/primary targets behind it.
 const gitDirtyClass = css({
   position: 'relative',
-  display: 'inline-flex',
+  display: 'inline-grid',
   alignItems: 'center',
+  justifyItems: 'end',
   flexShrink: 0,
   pointerEvents: 'none',
 });
 
 const gitDirtyRestClass = css({
+  gridArea: '1 / 1',
   display: 'inline-flex',
   alignItems: 'center',
+  justifySelf: 'end',
   opacity: 1,
   transition: 'opacity 130ms ease',
   '& svg': { color: 'var(--warn)' },
@@ -252,26 +256,31 @@ const gitDirtyRestClass = css({
   '[data-row-shell]:has(:focus-visible) &': { opacity: 0 },
 });
 
-// The numbers overlay the (faded) sibling meta to the indicator's left instead
-// of growing the trailing slot, so revealing them never reflows the row or
-// shrinks the clickable project name under the cursor. Right-anchored to the
-// glyph so they land just left of the remove button, sliding in as they fade up.
+// The numbers share the glyph's right edge, but expand from zero width into the
+// row's normal flex layout. That gives the dirty counts priority over a long
+// project title while keeping the resting row compact.
 // Color comes from each number's Typography tone (good/bad), not a className,
 // because Typography sets color as an inline style that a class can't override.
 const gitDirtyExpandClass = css({
-  position: 'absolute',
-  right: 0,
-  top: '50%',
+  gridArea: '1 / 1',
+  justifySelf: 'end',
   display: 'inline-flex',
   alignItems: 'center',
   gap: '5px',
+  width: 'max-content',
+  maxWidth: '0px',
+  overflow: 'hidden',
   whiteSpace: 'nowrap',
   fontVariantNumeric: 'tabular-nums',
   opacity: 0,
-  transform: 'translate(8px, -50%)',
+  transform: 'translateX(8px)',
   transition: 'opacity 130ms ease, transform 200ms cubic-bezier(0.22, 1, 0.36, 1)',
-  '[data-row-shell]:hover &': { opacity: 1, transform: 'translate(0, -50%)' },
-  '[data-row-shell]:has(:focus-visible) &': { opacity: 1, transform: 'translate(0, -50%)' },
+  '[data-row-shell]:hover &': { maxWidth: 'none', opacity: 1, transform: 'translateX(0)' },
+  '[data-row-shell]:has(:focus-visible) &': {
+    maxWidth: 'none',
+    opacity: 1,
+    transform: 'translateX(0)',
+  },
 });
 
 const projectGroupClass = css({
