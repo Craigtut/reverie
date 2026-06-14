@@ -123,9 +123,13 @@ export function fallbackAgentCliDetections(): AgentCliDetection[] {
 }
 
 export function agentTabLabel(session: ShellSession) {
-  // Tab identity is the user's session title; the agent kind travels in the
-  // AgentGlyph next to the label so parallel sessions of the same CLI are
+  // The display name everywhere a session is shown (sidebar, tabs, dashboard
+  // cards, launch overlay). Precedence: the user's pinned custom name, then the
+  // automatic OSC-derived title, then a per-CLI fallback. The agent kind travels
+  // in the AgentGlyph next to the label so parallel sessions of the same CLI are
   // distinguishable at a glance.
+  const custom = session.customTitle?.trim();
+  if (custom) return custom;
   const title = session.title.trim();
   if (title.length > 0) return title;
   const kind = session.agentKind;
@@ -133,6 +137,12 @@ export function agentTabLabel(session: ShellSession) {
   if (kind === 'codex_cli') return 'Codex';
   if (kind === 'cortex_code') return 'Cortex';
   return 'Session';
+}
+
+// Whether this session currently shows a user-pinned name (vs. its automatic
+// OSC-derived title). Drives the "Use automatic name" context-menu item.
+export function hasCustomTitle(session: ShellSession): boolean {
+  return Boolean(session.customTitle?.trim());
 }
 
 export function nativeSessionSummary(session: ShellSession | null) {

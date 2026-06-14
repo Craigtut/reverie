@@ -275,6 +275,85 @@ export function useWorkspaceMutations({
     }
   }
 
+  // Rename a session: pin a user-chosen display name. An empty/blank name clears
+  // the pin so the session falls back to its automatic OSC-derived title. The
+  // live OSC title keeps tracking underneath either way. No-ops when unchanged.
+  async function renameSession(session: ShellSession, title: string) {
+    const next = title.trim();
+    if (next === (session.customTitle ?? '').trim()) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('rename_session', {
+        request: { sessionId: session.id, title: next },
+      });
+      setShell(snapshot);
+    } catch (error) {
+      appendLog(`Rename session failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Drop a session's pinned name and return to its automatic title (which has
+  // kept updating from the CLI all along). No-op if there is no pin to clear.
+  async function resetSessionTitleToAuto(session: ShellSession) {
+    if (!session.customTitle) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('rename_session', {
+        request: { sessionId: session.id, title: '' },
+      });
+      setShell(snapshot);
+    } catch (error) {
+      appendLog(`Reset session name failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Rename a topic. A topic must keep a name, so a blank rename is ignored.
+  async function renameFocus(focus: ShellFocus, title: string) {
+    const next = title.trim();
+    if (!next || next === focus.title.trim()) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('rename_focus', {
+        request: { focusId: focus.id, title: next },
+      });
+      setShell(snapshot);
+    } catch (error) {
+      appendLog(`Rename topic failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Rename a project's display label only; the folder on disk is left untouched.
+  async function renameProject(project: ShellProject, name: string) {
+    const next = name.trim();
+    if (!next || next === project.name.trim()) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('rename_project', {
+        request: { projectId: project.id, name: next },
+      });
+      setShell(snapshot);
+    } catch (error) {
+      appendLog(`Rename project failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Reveal a session's working directory or a project's folder in Finder.
+  async function revealPath(path: string) {
+    if (!path) return;
+    try {
+      await invoke('reveal_path', { path });
+    } catch (error) {
+      appendLog(`Reveal in Finder failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Copy a folder path to the clipboard, confirming with a quiet toast.
+  async function copyPath(path: string) {
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      useOverlayStore.getState().pushToast({ message: 'Copied folder path' });
+    } catch (error) {
+      appendLog(`Copy path failed: ${errorMessage(error)}`);
+    }
+  }
+
   async function setSessionArchived(session: ShellSession, archived: boolean) {
     const snapshot = await invoke<WorkspaceShellSnapshot>('set_session_archived', {
       request: { shellSessionId: session.id, archived },
@@ -560,6 +639,12 @@ export function useWorkspaceMutations({
     setWorkspaceSidebarWidth,
     toggleSelectedSessionYolo,
     addProjectsFromDroppedFolders,
+    renameSession,
+    resetSessionTitleToAuto,
+    renameFocus,
+    renameProject,
+    revealPath,
+    copyPath,
     archiveSession,
     restoreSessionTab,
     removeSessionRecord,

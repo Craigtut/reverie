@@ -5,6 +5,7 @@ import { css } from '../../styled-system/css';
 import type { DashboardStatus, SessionRollup, ShellFocus } from '../../domain';
 import { CloseGlyph } from '../glyphs';
 import { Typography } from '../primitives/Typography';
+import { InlineRename } from './InlineRename';
 import {
   caretIconClass,
   rowAccentClass,
@@ -31,23 +32,38 @@ export function FocusRow({
   rollup,
   active,
   expanded,
+  renaming,
   onToggle,
   onOpen,
   onRemoveFocus,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onContextMenu,
   children,
 }: {
   focus: ShellFocus;
   rollup: SessionRollup;
   active: boolean;
   expanded: boolean;
+  renaming: boolean;
   onToggle: () => void;
   onOpen: () => void;
   onRemoveFocus: (event: MouseEvent<HTMLElement>) => void;
+  onStartRename: () => void;
+  onCommitRename: (value: string) => void;
+  onCancelRename: () => void;
+  onContextMenu: (event: MouseEvent<HTMLElement>) => void;
   children: ReactNode;
 }) {
   return (
     <div className={focusGroupClass}>
-      <div className={rowShellClass} data-active={active ? 'true' : 'false'}>
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: right-click opens the nav context menu; the row's real targets are its inner buttons */}
+      <div
+        className={rowShellClass}
+        data-active={active ? 'true' : 'false'}
+        onContextMenu={onContextMenu}
+      >
         {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
         <button
           className={rowCaretButtonClass}
@@ -62,22 +78,39 @@ export function FocusRow({
             <CaretRight size={10} weight="bold" />
           </span>
         </button>
-        <button
-          className={rowPrimaryClass}
-          type="button"
-          onClick={onOpen}
-          data-testid="nav-focus-open"
-          data-focus-title={focus.title}
-        >
-          <span
-            className={focusDotBaseClass}
-            style={focusDotStyle(rollup.tone)}
-            aria-hidden="true"
-          />
-          <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
-            {focus.title}
-          </Typography>
-        </button>
+        {renaming ? (
+          <div className={rowPrimaryClass}>
+            <span
+              className={focusDotBaseClass}
+              style={focusDotStyle(rollup.tone)}
+              aria-hidden="true"
+            />
+            <InlineRename
+              initialValue={focus.title}
+              ariaLabel={`Rename topic ${focus.title}`}
+              onCommit={onCommitRename}
+              onCancel={onCancelRename}
+            />
+          </div>
+        ) : (
+          <button
+            className={rowPrimaryClass}
+            type="button"
+            onClick={onOpen}
+            onDoubleClick={onStartRename}
+            data-testid="nav-focus-open"
+            data-focus-title={focus.title}
+          >
+            <span
+              className={focusDotBaseClass}
+              style={focusDotStyle(rollup.tone)}
+              aria-hidden="true"
+            />
+            <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
+              {focus.title}
+            </Typography>
+          </button>
+        )}
         <div className={rowTrailingClass}>
           {rollup.attention > 0 ? (
             <Typography

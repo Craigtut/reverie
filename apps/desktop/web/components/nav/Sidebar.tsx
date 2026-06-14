@@ -1,4 +1,4 @@
-import { useRef, type MouseEvent } from 'react';
+import { useRef, useState, type MouseEvent } from 'react';
 import { Folder, FolderOpen, GearSix, House, MagnifyingGlass, Plus } from '@phosphor-icons/react';
 import { css, cx } from '../../styled-system/css';
 import { rimLitPanelClass } from '../../themes/surfaces';
@@ -8,6 +8,7 @@ import {
   activeWorkspaceSessions,
   activityForSession,
   cellStateFor,
+  hasCustomTitle,
   primaryGeneralFocus,
   rollupSessionStates,
 } from '../../domain';
@@ -31,6 +32,7 @@ import { SidebarDropOverlay } from './SidebarDropOverlay';
 import { UpdateNavRow } from './UpdateNavRow';
 import { FocusRow } from './FocusRow';
 import { SessionRow } from './SessionRow';
+import { NavContextMenu, type NavMenuItem, type NavMenuModel } from './NavContextMenu';
 import { rowAddClass, rowAttentionBadgeClass, rowReadyBadgeClass } from './navStyles';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { NavDndProvider } from './NavDndProvider';
@@ -66,6 +68,18 @@ export interface SidebarProps {
   onOpenSettings: () => void;
   // A folder (or several) dropped onto the rail: each becomes a new project.
   onAddProjectsFromFolders: (paths: string[]) => void;
+  // Rename + context-menu actions. Rename commits the inline editor's value
+  // (empty clears a session's custom name back to automatic). Reveal/copy act on
+  // a folder path; delete is the permanent (confirmed) removal at each level.
+  onRenameSession: (session: ShellSession, title: string) => void;
+  onUseAutomaticSessionTitle: (session: ShellSession) => void;
+  onRenameFocus: (focus: ShellFocus, title: string) => void;
+  onRenameProject: (project: ShellProject, name: string) => void;
+  onRevealPath: (path: string) => void;
+  onCopyPath: (path: string) => void;
+  onDeleteSession: (session: ShellSession) => void;
+  onDeleteFocus: (focus: ShellFocus) => void;
+  onDeleteProject: (project: ShellProject) => void;
 }
 
 // The left navigation rail: workspace search, the Home row, the General group
@@ -92,6 +106,15 @@ export function Sidebar({
   onOpenCreation,
   onOpenSettings,
   onAddProjectsFromFolders,
+  onRenameSession,
+  onUseAutomaticSessionTitle,
+  onRenameFocus,
+  onRenameProject,
+  onRevealPath,
+  onCopyPath,
+  onDeleteSession,
+  onDeleteFocus,
+  onDeleteProject,
 }: SidebarProps) {
   // The whole rail is a folder drop zone (marked on the <aside> below). A folder
   // dropped anywhere on it adds a project; the visual is confined to the panel.
@@ -111,6 +134,108 @@ export function Sidebar({
   // looking at it). Only the terminal surface counts as viewing; on other
   // surfaces nothing is being viewed, so a finished result still shows.
   const viewedSessionId = surfaceMode === 'terminal' ? selectedSessionId : null;
+
+  // Inline rename + right-click menu state. The id of the row being edited (a
+  // session, topic, or project id) and the menu model both live here because the
+  // rows and the menu all render inside this rail. A rename commit clears the id
+  // and forwards the value; the editor's blur path commits too, so clicking away
+  // saves rather than discards.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [menu, setMenu] = useState<NavMenuModel | null>(null);
+
+  function openMenu(event: MouseEvent<HTMLElement>, items: NavMenuItem[]) {
+    event.preventDefault();
+    setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  // Session menu: rename, optionally reset to the automatic name (only when a
+  // custom name is pinned), folder actions (sessions always have a cwd), then the
+  // reversible Close and the permanent Delete, fenced off below a divider.
+  function sessionMenuItems(session: ShellSession): NavMenuItem[] {
+    const items: NavMenuItem[] = [
+      { id: 'rename', label: 'Rename', onSelect: () => setRenamingId(session.id) },
+    ];
+    if (hasCustomTitle(session)) {
+      items.push({
+        id: 'auto-name',
+        label: 'Use automatic name',
+        onSelect: () => onUseAutomaticSessionTitle(session),
+      });
+    }
+    if (session.cwd) {
+      items.push({
+        id: 'reveal',
+        label: 'Reveal folder in Finder',
+        dividerBefore: true,
+        onSelect: () => onRevealPath(session.cwd),
+      });
+      items.push({
+        id: 'copy-path',
+        label: 'Copy folder path',
+        onSelect: () => onCopyPath(session.cwd),
+      });
+    }
+    items.push({
+      id: 'close',
+      label: 'Close session',
+      dividerBefore: true,
+      onSelect: () => onCloseSession(session),
+    });
+    items.push({
+      id: 'delete',
+      label: 'Delete session',
+      danger: true,
+      onSelect: () => onDeleteSession(session),
+    });
+    return items;
+  }
+
+  // Topic menu: rename, then remove (archive) and the permanent delete. Topics
+  // have no folder on disk, so there are no reveal/copy actions.
+  function focusMenuItems(focus: ShellFocus): NavMenuItem[] {
+    return [
+      { id: 'rename', label: 'Rename', onSelect: () => setRenamingId(focus.id) },
+      {
+        id: 'remove',
+        label: 'Remove topic',
+        dividerBefore: true,
+        onSelect: () => onArchiveFocus(focus),
+      },
+      {
+        id: 'delete',
+        label: 'Delete topic',
+        danger: true,
+        onSelect: () => onDeleteFocus(focus),
+      },
+    ];
+  }
+
+  // Project menu: rename (label only, never the folder), folder actions, then
+  // remove (archive) and the permanent delete.
+  function projectMenuItems(project: ShellProject): NavMenuItem[] {
+    return [
+      { id: 'rename', label: 'Rename', onSelect: () => setRenamingId(project.id) },
+      {
+        id: 'reveal',
+        label: 'Reveal folder in Finder',
+        dividerBefore: true,
+        onSelect: () => onRevealPath(project.path),
+      },
+      { id: 'copy-path', label: 'Copy folder path', onSelect: () => onCopyPath(project.path) },
+      {
+        id: 'remove',
+        label: 'Remove project',
+        dividerBefore: true,
+        onSelect: () => onArchiveProject(project),
+      },
+      {
+        id: 'delete',
+        label: 'Delete project',
+        danger: true,
+        onSelect: () => onDeleteProject(project),
+      },
+    ];
+  }
 
   // One topic's (or General's) sessions, each a sortable row, wrapped in the
   // topic's drop zone, with the "New session" button inside so an empty topic
@@ -142,11 +267,19 @@ export function Sidebar({
                 session={session}
                 active={surfaceMode === 'terminal' && selectedSessionId === session.id}
                 cellState={cellState}
+                renaming={renamingId === session.id}
                 onOpen={() => onOpenSession(session)}
                 onClose={(event: MouseEvent<HTMLElement>) => {
                   event.stopPropagation();
                   onCloseSession(session);
                 }}
+                onStartRename={() => setRenamingId(session.id)}
+                onCommitRename={value => {
+                  setRenamingId(null);
+                  onRenameSession(session, value);
+                }}
+                onCancelRename={() => setRenamingId(null)}
+                onContextMenu={event => openMenu(event, sessionMenuItems(session))}
               />
             </SortableRow>
           );
@@ -350,12 +483,20 @@ export function Sidebar({
                       active={
                         surfaceMode === 'project-dashboard' && selectedProjectId === project.id
                       }
+                      renaming={renamingId === project.id}
                       onToggle={() => toggleProjectCollapsed(project.id)}
                       onOpen={() => onOpenProject(project.id)}
                       onRemove={(event: MouseEvent<HTMLElement>) => {
                         event.stopPropagation();
                         onArchiveProject(project);
                       }}
+                      onStartRename={() => setRenamingId(project.id)}
+                      onCommitRename={value => {
+                        setRenamingId(null);
+                        onRenameProject(project, value);
+                      }}
+                      onCancelRename={() => setRenamingId(null)}
+                      onContextMenu={event => openMenu(event, projectMenuItems(project))}
                       removeTitle={`Remove project ${project.name}`}
                     >
                       <SortableContext
@@ -389,12 +530,20 @@ export function Sidebar({
                                   surfaceMode !== 'project-dashboard'
                                 }
                                 expanded={expandedFocusIds.has(focus.id)}
+                                renaming={renamingId === focus.id}
                                 onToggle={() => toggleFocusExpanded(focus.id)}
                                 onOpen={() => onOpenFocus(project.id, focus.id)}
                                 onRemoveFocus={(event: MouseEvent<HTMLElement>) => {
                                   event.stopPropagation();
                                   onArchiveFocus(focus);
                                 }}
+                                onStartRename={() => setRenamingId(focus.id)}
+                                onCommitRename={value => {
+                                  setRenamingId(null);
+                                  onRenameFocus(focus, value);
+                                }}
+                                onCancelRename={() => setRenamingId(null)}
+                                onContextMenu={event => openMenu(event, focusMenuItems(focus))}
                               >
                                 {renderSessionList(focus.id, project.id, focusSessions)}
                               </FocusRow>
@@ -444,6 +593,10 @@ export function Sidebar({
           gravity-well under the cursor and splashes on release. pointer-events
           none, so the native drop still lands on the <aside> zone beneath it. */}
       <SidebarDropOverlay model={folderDrop} />
+
+      {/* The right-click menu for nav rows (rename, folder actions, remove,
+          delete). Position-fixed and rendered last so it floats above the rail. */}
+      <NavContextMenu model={menu} onClose={() => setMenu(null)} />
     </aside>
   );
 }

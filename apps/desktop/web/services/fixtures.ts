@@ -67,6 +67,17 @@ export async function invokeBrowserFixture<T>(
       return updateFixtureSessionArchived(args) as T;
     case 'mark_session_viewed':
       return markFixtureSessionViewed(args) as T;
+    case 'rename_session':
+      return renameFixtureSession(args) as T;
+    case 'rename_focus':
+      return renameFixtureFocus(args) as T;
+    case 'rename_project':
+      return renameFixtureProject(args) as T;
+    case 'reveal_path':
+      // No system file manager in the browser harness; renaming/copying is what
+      // matters here, so revealing a folder is a no-op. The desktop build routes
+      // this to the opener plugin.
+      return undefined as T;
     case 'remove_session':
       return removeFixtureSession(args) as T;
     case 'archive_focus':
@@ -274,6 +285,38 @@ function markFixtureSessionViewed(args?: Record<string, unknown>) {
   const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
   if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
   session.lastViewedAt = request.viewedAt;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function renameFixtureSession(args?: Record<string, unknown>) {
+  const request = readRequest<{ sessionId: string; title: string }>(args);
+  const session = fixtureShell.sessions.find(item => item.id === request.sessionId);
+  if (!session) throw new Error(`Unknown fixture session: ${request.sessionId}`);
+  // Mirror the backend: a non-empty title pins a custom name; empty clears it so
+  // the automatic OSC-derived title shows again.
+  const trimmed = request.title.trim();
+  session.customTitle = trimmed.length > 0 ? trimmed : null;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function renameFixtureFocus(args?: Record<string, unknown>) {
+  const request = readRequest<{ focusId: string; title: string }>(args);
+  const focus = fixtureShell.focuses.find(item => item.id === request.focusId);
+  if (!focus) throw new Error(`Unknown fixture focus: ${request.focusId}`);
+  const trimmed = request.title.trim();
+  if (trimmed.length > 0) focus.title = trimmed;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function renameFixtureProject(args?: Record<string, unknown>) {
+  const request = readRequest<{ projectId: string; name: string }>(args);
+  const project = fixtureShell.projects.find(item => item.id === request.projectId);
+  if (!project) throw new Error(`Unknown fixture project: ${request.projectId}`);
+  const trimmed = request.name.trim();
+  if (trimmed.length > 0) project.name = trimmed;
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }

@@ -134,6 +134,12 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceSidebarWidth,
     toggleSelectedSessionYolo,
     addProjectsFromDroppedFolders,
+    renameSession,
+    resetSessionTitleToAuto,
+    renameFocus,
+    renameProject,
+    revealPath,
+    copyPath,
     archiveSession,
     restoreSessionTab,
     removeSessionRecord,
@@ -248,6 +254,15 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         onOpenCreation={openCreation}
         onOpenSettings={() => setSurfaceMode('settings')}
         onAddProjectsFromFolders={paths => void addProjectsFromDroppedFolders(paths)}
+        onRenameSession={(session, title) => void renameSession(session, title)}
+        onUseAutomaticSessionTitle={session => void resetSessionTitleToAuto(session)}
+        onRenameFocus={(focus, title) => void renameFocus(focus, title)}
+        onRenameProject={(project, name) => void renameProject(project, name)}
+        onRevealPath={path => void revealPath(path)}
+        onCopyPath={path => void copyPath(path)}
+        onDeleteSession={session => void removeSessionRecord(session)}
+        onDeleteFocus={focus => void deleteFocusRecord(focus)}
+        onDeleteProject={project => void deleteProjectRecord(project)}
       />
 
       <SidebarResizeHandle

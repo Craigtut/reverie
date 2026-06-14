@@ -264,7 +264,13 @@ export interface NativeSessionRef {
 export interface ShellSession {
   id: string;
   focusId: string;
+  // The automatic display title, derived live from the agent CLI's OSC terminal
+  // title. Keeps tracking the CLI even when the user has pinned a custom name.
   title: string;
+  // A user-chosen name that overrides `title` for display (set by renaming the
+  // session). Absent/null means the session shows its automatic title; clearing
+  // it ("Use automatic name") reveals the live one again. See agentTabLabel.
+  customTitle?: string | null;
   agentKind: string;
   cwd: string;
   // Position within its focus (topic), for drag-to-reorder. The backend always

@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { Archive, CaretRight, Plus, Trash, Warning } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { groupSessionsByState, sessionCanRestore } from '../../domain';
+import { agentTabLabel, groupSessionsByState, sessionCanRestore } from '../../domain';
 import type {
   ActivityState,
   SessionStateTimeline,
@@ -186,7 +186,7 @@ export function SessionHistorySurface({
                             truncate
                             className={archivedTitleClass}
                           >
-                            {session.title}
+                            {agentTabLabel(session)}
                           </Typography>
                           {!restorable ? (
                             <span

@@ -3,7 +3,7 @@ import { motion } from 'motion/react';
 import { CircleDashed, MagnifyingGlass } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { buildPaletteEntries, filterPalette } from '../../domain';
+import { agentTabLabel, buildPaletteEntries, filterPalette } from '../../domain';
 import type { ShellSession } from '../../domain';
 import { useActivityStore, usePaletteStore, useShellStore } from '../../store';
 import { AgentGlyph } from '../glyphs';
@@ -130,7 +130,7 @@ export function CommandPalette({
                     <AgentGlyph kind={entry.session.agentKind} />
                     <span className={paletteItemLabelClass}>
                       <Typography as="strong" variant="smallBody" tone="inherit" truncate>
-                        {entry.session.title}
+                        {agentTabLabel(entry.session)}
                       </Typography>
                       <Typography as="small" variant="caption" tone="faint" truncate>
                         {entry.breadcrumb} · {entry.session.cwd}

@@ -5,6 +5,7 @@ import { css } from '../../styled-system/css';
 import type { DashboardStatus } from '../../domain';
 import { CloseGlyph } from '../glyphs';
 import { Typography } from '../primitives/Typography';
+import { InlineRename } from './InlineRename';
 import {
   caretIconClass,
   rowAccentClass,
@@ -43,9 +44,14 @@ export function ProjectGroup({
   gitDeletions = 0,
   expanded,
   active = false,
+  renaming = false,
   onToggle,
   onOpen,
   onRemove,
+  onStartRename,
+  onCommitRename,
+  onCancelRename,
+  onContextMenu,
   removeTitle,
   removeTestId = 'remove-project-button',
   testId,
@@ -64,9 +70,16 @@ export function ProjectGroup({
   gitDeletions?: number;
   expanded: boolean;
   active?: boolean;
+  // Rename support, used by real projects only. The General group passes none of
+  // these, so it has no inline editor and no right-click menu.
+  renaming?: boolean;
   onToggle: () => void;
   onOpen?: () => void;
   onRemove?: (event: MouseEvent<HTMLElement>) => void;
+  onStartRename?: () => void;
+  onCommitRename?: (value: string) => void;
+  onCancelRename?: () => void;
+  onContextMenu?: (event: MouseEvent<HTMLElement>) => void;
   removeTitle?: string;
   removeTestId?: string;
   testId?: string;
@@ -75,9 +88,16 @@ export function ProjectGroup({
   // Openable groups (projects) split the row: the caret toggles, the body opens.
   // The General group has no dashboard, so its body falls back to toggling.
   const opens = Boolean(onOpen);
+  const canRename = renaming && Boolean(onCommitRename && onCancelRename);
   return (
     <div className={projectGroupClass}>
-      <div className={rowShellClass} data-active={active ? 'true' : 'false'} data-row-shell="true">
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: right-click opens the nav context menu; the row's real targets are its inner buttons */}
+      <div
+        className={rowShellClass}
+        data-active={active ? 'true' : 'false'}
+        data-row-shell="true"
+        onContextMenu={onContextMenu}
+      >
         {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
         <button
           className={rowCaretButtonClass}
@@ -95,29 +115,51 @@ export function ProjectGroup({
             <CaretRight size={11} weight="bold" />
           </span>
         </button>
-        <button
-          className={rowPrimaryClass}
-          type="button"
-          onClick={onOpen ?? onToggle}
-          aria-expanded={opens ? undefined : expanded}
-          data-testid={opens ? 'nav-project-open' : testId}
-          data-expanded={expanded ? 'true' : 'false'}
-          data-project-title={opens ? title : undefined}
-        >
-          {icon ? (
-            <span
-              className={folderToneClass}
-              data-tone={toneAttr(tone)}
-              style={folderToneStyle(tone)}
-              aria-hidden="true"
-            >
-              {icon}
-            </span>
-          ) : null}
-          <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
-            {title}
-          </Typography>
-        </button>
+        {canRename ? (
+          <div className={rowPrimaryClass}>
+            {icon ? (
+              <span
+                className={folderToneClass}
+                data-tone={toneAttr(tone)}
+                style={folderToneStyle(tone)}
+                aria-hidden="true"
+              >
+                {icon}
+              </span>
+            ) : null}
+            <InlineRename
+              initialValue={title}
+              ariaLabel={`Rename project ${title}`}
+              onCommit={onCommitRename as (value: string) => void}
+              onCancel={onCancelRename as () => void}
+            />
+          </div>
+        ) : (
+          <button
+            className={rowPrimaryClass}
+            type="button"
+            onClick={onOpen ?? onToggle}
+            onDoubleClick={onStartRename}
+            aria-expanded={opens ? undefined : expanded}
+            data-testid={opens ? 'nav-project-open' : testId}
+            data-expanded={expanded ? 'true' : 'false'}
+            data-project-title={opens ? title : undefined}
+          >
+            {icon ? (
+              <span
+                className={folderToneClass}
+                data-tone={toneAttr(tone)}
+                style={folderToneStyle(tone)}
+                aria-hidden="true"
+              >
+                {icon}
+              </span>
+            ) : null}
+            <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
+              {title}
+            </Typography>
+          </button>
+        )}
         <div className={rowTrailingClass}>
           {attention > 0 ? (
             <Typography
