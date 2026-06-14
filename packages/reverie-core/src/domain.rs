@@ -279,7 +279,18 @@ impl NativeSessionRef {
 pub struct Session {
     pub id: SessionId,
     pub focus_id: FocusId,
+    /// The session's automatic display title, derived live from the OSC terminal
+    /// title its agent CLI emits (see `set_session_title`). This keeps tracking
+    /// the CLI even after the user pins a name, so clearing the custom title
+    /// reveals the current automatic one.
     pub title: String,
+    /// A user-chosen name that overrides the automatic `title` for display. Set by
+    /// renaming the session in the left nav; cleared (back to automatic) when the
+    /// user picks "Use automatic name" or commits an empty rename. `None` means
+    /// the session shows its automatic OSC-derived title. Persisted separately so
+    /// live OSC updates never clobber a name the user explicitly chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
     pub agent_kind: AgentKind,
     pub cwd: PathBuf,
     #[serde(default)]
@@ -411,6 +422,7 @@ impl Session {
             id: Uuid::new_v4(),
             focus_id,
             title: title.into(),
+            custom_title: None,
             agent_kind,
             cwd,
             native_session_ref: None,

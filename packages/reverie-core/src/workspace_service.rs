@@ -416,6 +416,22 @@ impl WorkspaceService {
         Ok(self.repo.load_snapshot()?)
     }
 
+    /// Rename a topic (focus). A topic must always have a name, so an empty or
+    /// whitespace-only title is rejected rather than stored.
+    pub fn rename_focus(&self, focus_id: FocusId, title: String) -> Result<WorkspaceSnapshot> {
+        let title = required_text(title, "topic name")?;
+        let mut focus = self
+            .repo
+            .load_snapshot()?
+            .focuses
+            .into_iter()
+            .find(|focus| focus.id == focus_id)
+            .ok_or_else(|| anyhow!("unknown topic {focus_id}"))?;
+        focus.title = title;
+        self.repo.upsert_focus(&focus)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
     /// Archive a project: set its own `archived` bit. Its topics and sessions are
     /// hidden by ancestry, not by writes, so re-adding the folder (which restores
     /// the project) brings the whole subtree back as it was.
@@ -428,6 +444,27 @@ impl WorkspaceService {
     /// by the Settings purge for an archived project; not reversible.
     pub fn delete_project(&self, project_id: ProjectId) -> Result<WorkspaceSnapshot> {
         self.repo.delete_project_cascade(project_id)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Rename a project's display name. This changes only the label Reverie shows
+    /// in the nav; the folder on disk (`path`) is the source of truth and is left
+    /// untouched. A project must always have a name, so empty input is rejected.
+    pub fn rename_project(
+        &self,
+        project_id: ProjectId,
+        name: String,
+    ) -> Result<WorkspaceSnapshot> {
+        let name = required_text(name, "project name")?;
+        let mut project = self
+            .repo
+            .load_snapshot()?
+            .projects
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| anyhow!("unknown project {project_id}"))?;
+        project.name = name;
+        self.repo.upsert_project(&project)?;
         Ok(self.repo.load_snapshot()?)
     }
 
@@ -587,6 +624,23 @@ impl WorkspaceService {
         let title = required_text(title, "session title")?;
         self.update_session(session_id, |session| {
             session.title = title;
+        })
+    }
+
+    /// Set or clear a user-chosen display name for a session. A non-empty `title`
+    /// pins that name: it overrides the live OSC-derived `title` everywhere the
+    /// session is shown. An empty or whitespace-only `title` clears the override,
+    /// so the session falls back to its automatic title (which has kept tracking
+    /// the CLI underneath). Touches `custom_title` only; the automatic `title` is
+    /// left alone so "use automatic name" reveals the current one.
+    pub fn rename_session(
+        &self,
+        session_id: SessionId,
+        title: String,
+    ) -> Result<WorkspaceSnapshot> {
+        let custom_title = optional_text(title);
+        self.update_session(session_id, |session| {
+            session.custom_title = custom_title;
         })
     }
 
@@ -1757,6 +1811,93 @@ mod tests {
         assert!(service.set_session_title(id, "   ".to_owned()).is_err());
         let after = service.snapshot().unwrap();
         assert_eq!(after.sessions[0].title, "Fixing the parser");
+    }
+
+    #[test]
+    fn rename_session_pins_a_custom_title_and_clears_back_to_automatic() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let snapshot = service
+            .create_session(
+                focus,
+                "Claude Code".to_owned(),
+                AgentKind::ClaudeCode,
+                "/tmp".into(),
+                None,
+            )
+            .unwrap();
+        let id = snapshot.sessions[0].id;
+
+        // A non-empty rename pins a custom title (trimmed) without touching the
+        // automatic one.
+        let renamed = service
+            .rename_session(id, "  Parser rewrite  ".to_owned())
+            .unwrap();
+        assert_eq!(
+            renamed.sessions[0].custom_title.as_deref(),
+            Some("Parser rewrite")
+        );
+        assert_eq!(renamed.sessions[0].title, "Claude Code");
+
+        // A live OSC title keeps updating the automatic title underneath the pin,
+        // so the user's chosen name is never clobbered.
+        let osc = service
+            .set_session_title(id, "running tests".to_owned())
+            .unwrap();
+        assert_eq!(osc.sessions[0].custom_title.as_deref(), Some("Parser rewrite"));
+        assert_eq!(osc.sessions[0].title, "running tests");
+
+        // An empty/whitespace rename clears the pin; the current automatic title
+        // is revealed again.
+        let cleared = service.rename_session(id, "   ".to_owned()).unwrap();
+        assert_eq!(cleared.sessions[0].custom_title, None);
+        assert_eq!(cleared.sessions[0].title, "running tests");
+    }
+
+    #[test]
+    fn rename_focus_and_project_change_only_the_label() {
+        let (_repo, service) = service();
+        let project_id = service
+            .create_project("Reverie".to_owned(), "/repo".into())
+            .unwrap()
+            .projects[0]
+            .id;
+        let focus_id = service
+            .create_focus(Some(project_id), "Terminal".to_owned(), None, None)
+            .unwrap()
+            .focuses
+            .iter()
+            .find(|focus| focus.title == "Terminal")
+            .unwrap()
+            .id;
+
+        let renamed = service
+            .rename_focus(focus_id, "  Terminal pipeline  ".to_owned())
+            .unwrap();
+        assert_eq!(
+            renamed
+                .focuses
+                .iter()
+                .find(|focus| focus.id == focus_id)
+                .unwrap()
+                .title,
+            "Terminal pipeline"
+        );
+        // A topic must keep a name: empty input is rejected.
+        assert!(service.rename_focus(focus_id, "  ".to_owned()).is_err());
+
+        let renamed_project = service
+            .rename_project(project_id, "Reverie App".to_owned())
+            .unwrap();
+        let project = renamed_project
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .unwrap();
+        assert_eq!(project.name, "Reverie App");
+        // The folder on disk is the source of truth and stays untouched.
+        assert_eq!(project.path, std::path::PathBuf::from("/repo"));
+        assert!(service.rename_project(project_id, String::new()).is_err());
     }
 
     #[test]

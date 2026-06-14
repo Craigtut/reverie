@@ -210,6 +210,12 @@ const MIGRATIONS: &[&str] = &[
     // width the user dragged it to. Defaults to 288 (the shell's default column)
     // so existing workspaces upgrade unchanged; the service clamps writes.
     "ALTER TABLE workspace ADD COLUMN sidebar_width INTEGER NOT NULL DEFAULT 288;",
+    // v18 -> v19: user-chosen session display name. `title` keeps tracking the
+    // live OSC-derived automatic title; `custom_title` (nullable) overrides it for
+    // display when the user renames a session, and is cleared back to NULL when
+    // they pick "use automatic name". Stored separately so a live OSC update never
+    // clobbers a name the user explicitly chose. NULL for existing rows (no pin).
+    "ALTER TABLE sessions ADD COLUMN custom_title TEXT;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -221,7 +227,8 @@ const CONNECTION_MESSAGE_COLUMNS: &str =
 
 const SESSION_COLUMNS: &str = "id, focus_id, title, agent_kind, cwd, native_session_ref_json, \
      launch_mode, dangerous_mode_override, status, last_exit_code, \
-     latest_activity_json, archived, sort_order, last_viewed_at, state_timeline_json";
+     latest_activity_json, archived, sort_order, last_viewed_at, state_timeline_json, \
+     custom_title";
 
 pub struct SqliteWorkspaceRepository {
     conn: Mutex<Connection>,
@@ -626,8 +633,8 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
         "INSERT INTO sessions (
             id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
             dangerous_mode_override, status, last_exit_code, latest_activity_json,
-            archived, sort_order, last_viewed_at, state_timeline_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            archived, sort_order, last_viewed_at, state_timeline_json, custom_title
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(id) DO UPDATE SET
             focus_id = excluded.focus_id, title = excluded.title,
             agent_kind = excluded.agent_kind, cwd = excluded.cwd,
@@ -639,7 +646,8 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             archived = excluded.archived,
             sort_order = excluded.sort_order,
             last_viewed_at = excluded.last_viewed_at,
-            state_timeline_json = excluded.state_timeline_json",
+            state_timeline_json = excluded.state_timeline_json,
+            custom_title = excluded.custom_title",
         params![
             session.id.to_string(),
             session.focus_id.to_string(),
@@ -656,6 +664,7 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             session.sort_order,
             session.last_viewed_at,
             state_timeline_json,
+            session.custom_title,
         ],
     )
     .map_err(backend)?;
@@ -989,6 +998,7 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         id: parse_uuid_row(row.get::<_, String>(0)?)?,
         focus_id: parse_uuid_row(row.get::<_, String>(1)?)?,
         title: row.get(2)?,
+        custom_title: row.get::<_, Option<String>>(15)?,
         agent_kind: agent_kind_from_db(&row.get::<_, String>(3)?)?,
         cwd: PathBuf::from(row.get::<_, String>(4)?),
         native_session_ref: native_session_ref_from_db(row.get::<_, Option<String>>(5)?)?,
@@ -1247,6 +1257,7 @@ mod tests {
         );
         session.state_timeline.working_since = Some("2026-06-06T15:10:02.000Z".to_owned());
         session.state_timeline.resting_since = Some("2026-06-06T15:12:40.000Z".to_owned());
+        session.custom_title = Some("Pinned name".to_owned());
         repo.upsert_session(&session).unwrap();
 
         let loaded = repo.get_session(session.id).unwrap().unwrap();
@@ -1267,6 +1278,7 @@ mod tests {
             loaded.state_timeline.resting_since.as_deref(),
             Some("2026-06-06T15:12:40.000Z")
         );
+        assert_eq!(loaded.custom_title.as_deref(), Some("Pinned name"));
 
         let by_native = repo.find_session_by_native_id("native-42").unwrap();
         assert_eq!(by_native.map(|s| s.id), Some(session.id));
