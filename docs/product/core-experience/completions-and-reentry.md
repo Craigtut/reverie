@@ -2,7 +2,7 @@
 
 > Part of the [core experience](README.md). Introduces a shared primitive (the completion surface) and the first feature built on it (the re-entry header).
 
-This doc covers two things: the small-completion capability Reverie needs (it has none today), and the re-entry header that uses it. The same primitive later powers dispatch classification and session titles.
+This doc covers two things: the small-completion capability Reverie needs, and the re-entry header that uses it. The same primitive also powers dispatch classification and session titles.
 
 ## The completion surface (shared primitive)
 
@@ -17,6 +17,13 @@ A small Rust trait with one implementation per CLI, each shelling out to the alr
 | **Claude Code** | `claude --bare -p "..." --output-format json` | `--json-schema` → `structured_output` |
 | **Codex** | `codex exec --json "..."` (use `--sandbox read-only --ask-for-approval never --ephemeral`) | `--output-schema <file>` |
 | **Cortex** | new `cortex complete "..."` subcommand (see below) | pass-through of `pi-ai` structured output |
+
+Current implementation status:
+
+- The shared Rust completion helper exists for Claude, Codex, and Cortex command shapes.
+- Codex session titles use it today as a fallback/generator, keyed off the session's rollout file.
+- Title generation starts shortly after the first Codex user prompt once the rollout contains the prompt text, with the turn-complete signal kept as a fallback.
+- The re-entry header and dispatch classification are still product work.
 
 Policy for which engine runs a given job:
 
@@ -59,8 +66,8 @@ The transcript is already on disk for every CLI and already scanned by the adapt
 
 ## Builds on
 
-- Nothing exists yet; Reverie has zero LLM integration today. This is the greenfield primitive.
 - Transcript discovery already exists in the adapters (`agents.rs` and the per-CLI scanners).
+- The first shipped use is Codex session title generation through the CLI-backed structured-completion helper.
 
 ## Open questions
 
@@ -68,4 +75,4 @@ The transcript is already on disk for every CLI and already scanned by the adapt
 - Transcript windowing strategy (how much history the summary needs to be accurate without being expensive).
 - Where the header is cached and how invalidation keys to transcript growth.
 - The exact `cortex complete` flag shape and whether it streams or returns whole.
-- Whether titles (currently OSC-derived) move to this surface or stay OSC-first with completion as a fallback.
+- Whether Claude and Cortex titles move to this surface or stay OSC-first with completion as a fallback.

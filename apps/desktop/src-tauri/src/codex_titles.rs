@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use reverie_core::{
     CompletionRequest, WorkspaceService,
-    activity::ActivityStatus,
+    activity::{ActivityState, ActivityStatus},
     codex_rollout::{read_codex_rollout_state, read_codex_title_context},
     complete_structured, string_object_schema,
 };
@@ -32,6 +32,11 @@ const MAX_TITLE_CHARS: usize = 64;
 const MAX_TITLE_CONTEXT_MESSAGES: usize = 4;
 const MAX_TITLE_CONTEXT_CHARS: usize = 6_000;
 const GENERATED_REFRESH_MESSAGE_DELTA: u64 = 5;
+const EARLY_TITLE_POLL_DELAYS: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
 const CAPTURE_POLL_DELAYS: &[Duration] = &[
     Duration::from_secs(1),
     Duration::from_secs(3),
@@ -40,7 +45,9 @@ const CAPTURE_POLL_DELAYS: &[Duration] = &[
 ];
 
 static IN_FLIGHT: OnceLock<Mutex<HashSet<SessionId>>> = OnceLock::new();
+static EARLY_POLL_IN_FLIGHT: OnceLock<Mutex<HashSet<SessionId>>> = OnceLock::new();
 static CAPTURE_POLL_IN_FLIGHT: OnceLock<Mutex<HashSet<SessionId>>> = OnceLock::new();
+static ATTEMPTED_MESSAGE_COUNTS: OnceLock<Mutex<HashMap<SessionId, u64>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 struct CodexTitleTarget {
@@ -66,20 +73,43 @@ struct GeneratedTitleChangedEvent {
     title: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleScheduleTiming {
+    Early,
+    Immediate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitleReadiness {
+    Ready {
+        user_message_count: u64,
+        sequence: u64,
+    },
+    PendingNoContext,
+    NotEligible {
+        user_message_count: u64,
+        sequence: u64,
+        already_attempted: bool,
+    },
+}
+
 pub(crate) fn maybe_schedule_codex_title(
     app: &AppHandle,
     native_session_id: &str,
-    status: ActivityStatus,
+    state: &ActivityState,
 ) {
-    if status != ActivityStatus::AwaitingInput {
+    let Some(timing) = title_schedule_timing(state) else {
         return;
-    }
+    };
     let app = app.clone();
     let native_session_id = native_session_id.to_owned();
     let Some(target) = find_target(&app, &native_session_id) else {
         return;
     };
-    schedule_target(app, target);
+    match timing {
+        TitleScheduleTiming::Immediate => schedule_target(app, target),
+        TitleScheduleTiming::Early => schedule_early_poll(app, target.session_id),
+    }
 }
 
 pub(crate) fn maybe_schedule_codex_title_after_capture(app: &AppHandle, session_id: SessionId) {
@@ -145,6 +175,94 @@ fn schedule_target(app: AppHandle, target: CodexTitleTarget) {
     });
 }
 
+fn schedule_early_poll(app: AppHandle, session_id: SessionId) {
+    if !mark_early_poll_in_flight(session_id) {
+        return;
+    }
+    record_title_diagnostic(
+        &app,
+        "early_poll_scheduled",
+        None,
+        json!({ "sessionId": session_id }),
+    );
+
+    thread::spawn(move || {
+        let mut exhausted = true;
+        for delay in EARLY_TITLE_POLL_DELAYS {
+            thread::sleep(*delay);
+            let Some(target) = find_target_by_session(&app, session_id) else {
+                record_title_diagnostic(
+                    &app,
+                    "early_poll_target_missing",
+                    None,
+                    json!({ "sessionId": session_id }),
+                );
+                exhausted = false;
+                break;
+            };
+            match title_readiness(&target) {
+                Ok(TitleReadiness::Ready {
+                    user_message_count,
+                    sequence,
+                }) => {
+                    record_title_diagnostic(
+                        &app,
+                        "early_poll_ready",
+                        Some(&target),
+                        json!({
+                            "userMessageCount": user_message_count,
+                            "sequence": sequence,
+                        }),
+                    );
+                    schedule_target(app.clone(), target);
+                    exhausted = false;
+                    break;
+                }
+                Ok(TitleReadiness::PendingNoContext) => {
+                    record_title_diagnostic(&app, "early_poll_pending", Some(&target), json!({}));
+                }
+                Ok(TitleReadiness::NotEligible {
+                    user_message_count,
+                    sequence,
+                    already_attempted,
+                }) => {
+                    record_title_diagnostic(
+                        &app,
+                        "early_poll_not_eligible",
+                        Some(&target),
+                        json!({
+                            "userMessageCount": user_message_count,
+                            "sequence": sequence,
+                            "alreadyAttempted": already_attempted,
+                        }),
+                    );
+                    exhausted = false;
+                    break;
+                }
+                Err(error) => {
+                    record_title_diagnostic(
+                        &app,
+                        "early_poll_failed",
+                        Some(&target),
+                        json!({ "error": format!("{error:#}") }),
+                    );
+                    exhausted = false;
+                    break;
+                }
+            }
+        }
+        if exhausted {
+            record_title_diagnostic(
+                &app,
+                "early_poll_exhausted",
+                None,
+                json!({ "sessionId": session_id }),
+            );
+        }
+        clear_early_poll_in_flight(session_id);
+    });
+}
+
 fn find_target(app: &AppHandle, native_session_id: &str) -> Option<CodexTitleTarget> {
     let service = app.try_state::<WorkspaceService>()?;
     let snapshot = service.snapshot().ok()?;
@@ -199,6 +317,50 @@ fn rollout_is_at_rest(target: &CodexTitleTarget) -> bool {
         })
 }
 
+fn title_schedule_timing(state: &ActivityState) -> Option<TitleScheduleTiming> {
+    state.turn.as_ref()?;
+    match state.status {
+        ActivityStatus::Working
+        | ActivityStatus::AwaitingPermission
+        | ActivityStatus::AwaitingResponse => Some(TitleScheduleTiming::Early),
+        ActivityStatus::AwaitingInput | ActivityStatus::Done | ActivityStatus::Error => {
+            Some(TitleScheduleTiming::Immediate)
+        }
+    }
+}
+
+fn title_readiness(target: &CodexTitleTarget) -> Result<TitleReadiness> {
+    let Some(context) = read_codex_title_context(
+        &target.rollout_path,
+        MAX_TITLE_CONTEXT_MESSAGES,
+        MAX_TITLE_CONTEXT_CHARS,
+    )?
+    else {
+        return Ok(TitleReadiness::PendingNoContext);
+    };
+    if context.user_messages.is_empty() {
+        return Ok(TitleReadiness::PendingNoContext);
+    }
+    let already_attempted = title_attempted(target.session_id, context.user_message_count);
+    if already_attempted
+        || !should_generate_title(
+            &target.current_title,
+            target.marker.as_ref(),
+            context.user_message_count,
+        )
+    {
+        return Ok(TitleReadiness::NotEligible {
+            user_message_count: context.user_message_count,
+            sequence: context.sequence,
+            already_attempted,
+        });
+    }
+    Ok(TitleReadiness::Ready {
+        user_message_count: context.user_message_count,
+        sequence: context.sequence,
+    })
+}
+
 fn run_title_generation(app: &AppHandle, target: &CodexTitleTarget) -> Result<()> {
     let Some(context) = read_codex_title_context(
         &target.rollout_path,
@@ -224,6 +386,18 @@ fn run_title_generation(app: &AppHandle, target: &CodexTitleTarget) -> Result<()
                 "userMessageCount": context.user_message_count,
                 "sequence": context.sequence,
                 "hasUserMessages": !context.user_messages.is_empty(),
+            }),
+        );
+        return Ok(());
+    }
+    if !mark_title_attempt(target.session_id, context.user_message_count) {
+        record_title_diagnostic(
+            app,
+            "skipped_already_attempted",
+            Some(target),
+            json!({
+                "userMessageCount": context.user_message_count,
+                "sequence": context.sequence,
             }),
         );
         return Ok(());
@@ -458,6 +632,22 @@ fn clear_in_flight(session_id: SessionId) {
     sessions.remove(&session_id);
 }
 
+fn mark_early_poll_in_flight(session_id: SessionId) -> bool {
+    let mut sessions = EARLY_POLL_IN_FLIGHT
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("title early-poll set lock poisoned");
+    sessions.insert(session_id)
+}
+
+fn clear_early_poll_in_flight(session_id: SessionId) {
+    let mut sessions = EARLY_POLL_IN_FLIGHT
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("title early-poll set lock poisoned");
+    sessions.remove(&session_id);
+}
+
 fn mark_capture_poll_in_flight(session_id: SessionId) -> bool {
     let mut sessions = CAPTURE_POLL_IN_FLIGHT
         .get_or_init(|| Mutex::new(HashSet::new()))
@@ -474,9 +664,56 @@ fn clear_capture_poll_in_flight(session_id: SessionId) {
     sessions.remove(&session_id);
 }
 
+fn title_attempted(session_id: SessionId, user_message_count: u64) -> bool {
+    let counts = ATTEMPTED_MESSAGE_COUNTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("title attempt set lock poisoned");
+    counts
+        .get(&session_id)
+        .is_some_and(|last_count| user_message_count <= *last_count)
+}
+
+fn mark_title_attempt(session_id: SessionId, user_message_count: u64) -> bool {
+    let mut counts = ATTEMPTED_MESSAGE_COUNTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("title attempt set lock poisoned");
+    if counts
+        .get(&session_id)
+        .is_some_and(|last_count| user_message_count <= *last_count)
+    {
+        return false;
+    }
+    counts.insert(session_id, user_message_count);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reverie_core::activity::{ActivityTurn, TurnStatus};
+
+    fn state(status: ActivityStatus, has_turn: bool) -> ActivityState {
+        ActivityState {
+            version: 1,
+            session_id: "native".to_owned(),
+            status,
+            updated_at: "t".to_owned(),
+            sequence: 1,
+            cwd: "/tmp".to_owned(),
+            turn: has_turn.then(|| ActivityTurn {
+                id: "turn".to_owned(),
+                status: TurnStatus::Running,
+                started_at: "t".to_owned(),
+                ended_at: None,
+            }),
+            active_tools: Vec::new(),
+            awaiting_permission: None,
+            last_error: None,
+            final_exit: None,
+        }
+    }
 
     #[test]
     fn default_titles_generate_once_user_messages_exist() {
@@ -494,6 +731,33 @@ mod tests {
         assert!(!should_generate_title("Fix Parser", Some(&marker), 6));
         assert!(should_generate_title("Fix Parser", Some(&marker), 7));
         assert!(!should_generate_title("User Renamed", Some(&marker), 8));
+    }
+
+    #[test]
+    fn scheduling_ignores_session_start_and_runs_on_turn_edges() {
+        assert_eq!(
+            title_schedule_timing(&state(ActivityStatus::AwaitingInput, false)),
+            None
+        );
+        assert_eq!(
+            title_schedule_timing(&state(ActivityStatus::Working, true)),
+            Some(TitleScheduleTiming::Early)
+        );
+        assert_eq!(
+            title_schedule_timing(&state(ActivityStatus::AwaitingInput, true)),
+            Some(TitleScheduleTiming::Immediate)
+        );
+    }
+
+    #[test]
+    fn title_attempts_dedupe_by_user_message_count() {
+        let session_id = SessionId::new_v4();
+        assert!(!title_attempted(session_id, 1));
+        assert!(mark_title_attempt(session_id, 1));
+        assert!(title_attempted(session_id, 1));
+        assert!(!mark_title_attempt(session_id, 1));
+        assert!(!mark_title_attempt(session_id, 0));
+        assert!(mark_title_attempt(session_id, 2));
     }
 
     #[test]

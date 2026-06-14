@@ -71,7 +71,6 @@ pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
             source, key, state, ..
         } => {
             let native_session_id = native_id_for(&key, &state);
-            let status = state.status;
             // Read back the timeline the apply just stamped so it rides the live
             // event (the session is bound by now, even on a first-sight capture).
             let state_timeline = service.as_ref().and_then(|service| {
@@ -80,6 +79,9 @@ pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
                     .ok()
                     .flatten()
             });
+            if source == ActivitySourceKind::CodexCli {
+                maybe_schedule_codex_title(app, &native_session_id, &state);
+            }
             emit(
                 app,
                 SessionActivityEvent::Updated {
@@ -89,9 +91,6 @@ pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
                     state_timeline,
                 },
             );
-            if source == ActivitySourceKind::CodexCli {
-                maybe_schedule_codex_title(app, &native_session_id, status);
-            }
             // First sight of this session's native id: the record only now
             // carries the ref the dashboard binds activity against, so prompt a
             // snapshot refetch.
