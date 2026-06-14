@@ -56,6 +56,24 @@ export function lastTurnCompletedAtMs(activity: ActivityState | null): number | 
   return Number.isNaN(ms) ? null : ms;
 }
 
+// The moment a session came to rest, for the unseen-completion check, in epoch ms
+// (or null). For most states this is the activity's own timestamp. The exception
+// is `done`: a Claude session emits `done` (a SessionEnd hook) the instant its
+// process exits, which is exactly what quitting Reverie does to every running
+// agent. That `done` carries a fresh `updatedAt` stamped at the quit moment, so
+// reading it as a turn-completion would resurface every session you already
+// opened as "Ready for you" on the next launch. The genuine turn rest is the
+// persisted `restingSince` marker, which the backend deliberately never restamps
+// on the same-class `awaiting_input` -> `done` transition, so for `done` we trust
+// that instead (falling back to the activity time only when no marker exists, as
+// in hand-built fixtures or pre-timeline records).
+function restedAtMs(activity: ActivityState | null, restingSince?: string | null): number | null {
+  if (activity?.status === 'done') {
+    return parseMs(restingSince) ?? lastTurnCompletedAtMs(activity);
+  }
+  return lastTurnCompletedAtMs(activity);
+}
+
 // Whether a session has a turn-completion the user has not seen yet: it came to
 // rest after `session.lastViewedAt` and is not the session currently on screen.
 // Viewing is the acknowledgement, so the session you are looking at is never
@@ -67,7 +85,7 @@ function hasUnseenCompletion(
   isViewed: boolean,
 ): boolean {
   if (isViewed) return false;
-  const completedMs = lastTurnCompletedAtMs(activity);
+  const completedMs = restedAtMs(activity, session.stateTimeline?.restingSince);
   if (completedMs == null) return false;
   const seenMs = session.lastViewedAt ? Date.parse(session.lastViewedAt) : 0;
   return completedMs > (Number.isNaN(seenMs) ? 0 : seenMs);
@@ -294,9 +312,10 @@ export function enteredCurrentStateAt(
     case 'active':
       return parseMs(tl.workingSince);
     case 'finished':
-      // The off-screen rest moment. The live turn-completion time is present
-      // whenever there is a feed; fall back to the persisted marker otherwise.
-      return lastTurnCompletedAtMs(activity) ?? parseMs(tl.restingSince);
+      // The off-screen rest moment. `restedAtMs` already prefers the persisted
+      // rest marker over a `done` state's exit-stamped timestamp; fall back to the
+      // marker alone when there is no activity feed at all.
+      return restedAtMs(activity, tl.restingSince) ?? parseMs(tl.restingSince);
     case 'idle':
       return maxMs(parseMs(tl.restingSince), parseMs(tl.exitedAt), parseMs(session.lastViewedAt));
     case 'fresh':

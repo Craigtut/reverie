@@ -258,6 +258,33 @@ describe('deriveSessionState', () => {
       });
       expect(deriveSessionState(seenBetween, false, activity)).toBe('finished');
     });
+
+    // A `done` activity is a SessionEnd: it fires the instant the agent process
+    // exits, which is what quitting Reverie does to every running session. Its
+    // updatedAt is the quit moment, so a session you already opened would flood
+    // back into "Ready for you" on the next launch if we trusted it. The genuine
+    // turn rest is restingSince, which a same-class awaiting_input -> done
+    // transition never restamps, so a quit-after-view stays idle.
+    it('keeps a viewed session idle when a SessionEnd `done` bumps updatedAt past the view', () => {
+      const session = makeSession({
+        // Looked at it at 14:00, after its turn rested at 12:00.
+        lastViewedAt: '2026-06-13T14:00:00.000Z',
+        stateTimeline: { restingSince: '2026-06-13T12:00:00.000Z' },
+      });
+      // Quit at 20:00 -> SessionEnd stamps `done` with updatedAt = quit time.
+      const exited = makeActivity({ status: 'done', updatedAt: '2026-06-13T20:00:00.000Z' });
+      expect(deriveSessionState(session, false, exited)).toBe('idle');
+    });
+
+    it('still flags a genuinely unseen turn whose rest came after the last view', () => {
+      const session = makeSession({
+        lastViewedAt: '2026-06-13T12:00:00.000Z',
+        // The agent finished a turn at 14:00, after you last looked at 12:00.
+        stateTimeline: { restingSince: '2026-06-13T14:00:00.000Z' },
+      });
+      const exited = makeActivity({ status: 'done', updatedAt: '2026-06-13T20:00:00.000Z' });
+      expect(deriveSessionState(session, false, exited)).toBe('finished');
+    });
   });
 
   describe('without activity (record fallback)', () => {
