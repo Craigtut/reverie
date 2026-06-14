@@ -26,6 +26,31 @@ use crate::domain::{
 use crate::repository::WorkspaceRepository;
 use crate::terminal::TerminalSpawnSpec;
 
+/// Whether `incoming` is an out-of-order (stale) activity update relative to the
+/// `existing` one and must be dropped to keep the dashboard from rolling
+/// backwards.
+///
+/// Ordering is by wall-clock `updated_at` first. A CLI process can restart
+/// mid-session (a crash-resume, a post-error continuation, an external
+/// `/resume`) while Reverie keeps running, and on restart its per-run `sequence`
+/// counter resets to 1. A sequence-only guard would then drop every post-restart
+/// event as "older" and strand a genuinely working session showing its
+/// pre-restart state. Real wall-clock time only moves forward across that
+/// restart, so the timestamp distinguishes a restarted stream (newer time, lower
+/// sequence: kept) from a true straggler (older time: dropped). `sequence` is
+/// the tiebreaker within one run, where it is authoritative and the timestamps
+/// match or are unparseable (e.g. a source that does not stamp one, or a
+/// hand-built fixture). Equal sequence is kept, matching the prior guard.
+fn activity_is_out_of_order(existing: &ActivityState, incoming: &ActivityState) -> bool {
+    match (
+        crate::time::iso8601_to_epoch_millis(&existing.updated_at),
+        crate::time::iso8601_to_epoch_millis(&incoming.updated_at),
+    ) {
+        (Some(prev), Some(next)) if prev != next => next < prev,
+        _ => incoming.sequence < existing.sequence,
+    }
+}
+
 /// Stable id for the single local workspace, so it is identical across restarts
 /// regardless of which backend seeded it.
 const SEED_WORKSPACE_ID: &str = "0f70f21f-55c0-4e2a-923e-73360342db80";
@@ -450,11 +475,7 @@ impl WorkspaceService {
     /// Rename a project's display name. This changes only the label Reverie shows
     /// in the nav; the folder on disk (`path`) is the source of truth and is left
     /// untouched. A project must always have a name, so empty input is rejected.
-    pub fn rename_project(
-        &self,
-        project_id: ProjectId,
-        name: String,
-    ) -> Result<WorkspaceSnapshot> {
+    pub fn rename_project(&self, project_id: ProjectId, name: String) -> Result<WorkspaceSnapshot> {
         let name = required_text(name, "project name")?;
         let mut project = self
             .repo
@@ -837,7 +858,7 @@ impl WorkspaceService {
             return Ok(false);
         };
         if let Some(existing) = &session.latest_activity {
-            if existing.sequence > activity.sequence {
+            if activity_is_out_of_order(existing, &activity) {
                 return Ok(false);
             }
         }
@@ -948,7 +969,7 @@ impl WorkspaceService {
         // exactly when re-pointing.
         if !repoint {
             if let Some(existing) = &session.latest_activity {
-                if existing.sequence > activity.sequence {
+                if activity_is_out_of_order(existing, &activity) {
                     return Ok(false);
                 }
             }
@@ -1844,7 +1865,10 @@ mod tests {
         let osc = service
             .set_session_title(id, "running tests".to_owned())
             .unwrap();
-        assert_eq!(osc.sessions[0].custom_title.as_deref(), Some("Parser rewrite"));
+        assert_eq!(
+            osc.sessions[0].custom_title.as_deref(),
+            Some("Parser rewrite")
+        );
         assert_eq!(osc.sessions[0].title, "running tests");
 
         // An empty/whitespace rename clears the pin; the current automatic title
@@ -2174,6 +2198,80 @@ mod tests {
 
         let session = service.snapshot().unwrap().sessions[0].clone();
         assert_eq!(session.latest_activity.unwrap().sequence, 5);
+    }
+
+    #[test]
+    fn record_activity_accepts_a_process_restart_by_newer_timestamp_over_lower_sequence() {
+        // The Cortex "running session shows idle" bug: a CLI restarts its own
+        // process mid-session (here, after an error) and its per-run sequence
+        // resets to 1 while Reverie keeps running, so `reset_session_activity_
+        // sequence` (only fired on a Reverie-initiated launch) never runs. The
+        // pre-restart high-water sequence must not strand the restarted stream,
+        // which is genuinely newer by wall-clock.
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let id = service
+            .create_session(
+                focus,
+                "Cortex".to_owned(),
+                AgentKind::CortexCode,
+                "/tmp/reverie".into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        service
+            .attach_native_session(
+                id,
+                PathBuf::from("/tmp/reverie"),
+                NativeSessionRef::cortex("native-9", None),
+                AgentKind::CortexCode,
+            )
+            .unwrap();
+
+        let state = |seq: u64, status: &str, updated_at: &str| {
+            crate::activity::parse_state(&format!(
+                r#"{{"version":1,"sessionId":"native-9","status":"{status}","updatedAt":"{updated_at}","sequence":{seq},"cwd":"/tmp/reverie"}}"#
+            ))
+            .unwrap()
+        };
+
+        // Pre-restart stream comes to rest at a high sequence.
+        assert!(
+            service
+                .record_session_activity(
+                    "native-9",
+                    state(115, "awaiting_input", "2026-06-14T18:04:20.000Z"),
+                )
+                .unwrap()
+        );
+        // A genuine straggler from that run (older wall-clock, lower sequence) is
+        // still dropped, so a late read can't roll the dashboard backwards.
+        assert!(
+            !service
+                .record_session_activity(
+                    "native-9",
+                    state(40, "working", "2026-06-14T18:00:00.000Z"),
+                )
+                .unwrap()
+        );
+        // The restarted stream's first working event has a lower sequence (1) but
+        // a newer wall-clock time: it must win, not be dropped as stale.
+        assert!(
+            service
+                .record_session_activity(
+                    "native-9",
+                    state(1, "working", "2026-06-14T18:25:27.631Z"),
+                )
+                .unwrap()
+        );
+        let activity = service.snapshot().unwrap().sessions[0]
+            .clone()
+            .latest_activity
+            .unwrap();
+        assert_eq!(activity.status, ActivityStatus::Working);
+        assert_eq!(activity.sequence, 1);
     }
 
     #[test]

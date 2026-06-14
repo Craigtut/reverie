@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   activityForSession,
+  activitySupersedes,
   cellStateFor,
   classifyForDashboard,
   dashboardToneForState,
@@ -68,6 +69,36 @@ function recoverableError(): ActivityError {
     occurredAt: '2026-05-28T00:00:00.000Z',
   };
 }
+
+describe('activitySupersedes', () => {
+  it('accepts a process restart: newer wall-clock time wins over a lower sequence', () => {
+    // The Cortex "running session shows idle" bug: the CLI restarts mid-session
+    // and its per-run sequence resets to 1, but real time moved forward.
+    const prior = makeActivity({ sequence: 115, updatedAt: '2026-06-14T18:04:20.000Z' });
+    const next = makeActivity({ sequence: 1, updatedAt: '2026-06-14T18:25:27.631Z' });
+    expect(activitySupersedes(next, prior)).toBe(true);
+  });
+
+  it('drops a true straggler: older wall-clock time loses even with a higher sequence', () => {
+    const prior = makeActivity({ sequence: 1, updatedAt: '2026-06-14T18:25:27.631Z' });
+    const next = makeActivity({ sequence: 115, updatedAt: '2026-06-14T18:04:20.000Z' });
+    expect(activitySupersedes(next, prior)).toBe(false);
+  });
+
+  it('falls back to sequence within one run (equal timestamps)', () => {
+    const prior = makeActivity({ sequence: 5, updatedAt: '2026-06-14T18:25:27.631Z' });
+    const higher = makeActivity({ sequence: 6, updatedAt: '2026-06-14T18:25:27.631Z' });
+    const lower = makeActivity({ sequence: 4, updatedAt: '2026-06-14T18:25:27.631Z' });
+    expect(activitySupersedes(higher, prior)).toBe(true);
+    expect(activitySupersedes(lower, prior)).toBe(false);
+  });
+
+  it('falls back to sequence when a timestamp is unparseable', () => {
+    const prior = makeActivity({ sequence: 5, updatedAt: 't' });
+    const next = makeActivity({ sequence: 6, updatedAt: 't' });
+    expect(activitySupersedes(next, prior)).toBe(true);
+  });
+});
 
 describe('activityForSession', () => {
   it('returns null when the session has no nativeSessionRef', () => {

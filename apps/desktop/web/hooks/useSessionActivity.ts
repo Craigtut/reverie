@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 
-import { errorMessage } from '../domain';
+import { activitySupersedes, errorMessage } from '../domain';
 import type { SessionActivityEventPayload } from '../domain';
 import { listen, type UnlistenFn } from '../services/runtime';
 import { useActivityStore, useShellStore } from '../store';
@@ -30,7 +30,7 @@ export function useSessionActivity(writeLog: (line: string) => void, reloadShell
         const cortexId = session.nativeSessionRef?.sessionId;
         if (!cortexId || !session.latestActivity) continue;
         const existing = next[cortexId];
-        if (existing && existing.sequence >= session.latestActivity.sequence) continue;
+        if (existing && !activitySupersedes(session.latestActivity, existing)) continue;
         if (!dirty) {
           next = { ...current };
           dirty = true;
@@ -52,10 +52,12 @@ export function useSessionActivity(writeLog: (line: string) => void, reloadShell
           if (message.kind === 'updated') {
             const { nativeSessionId, state, stateTimeline } = message.payload;
             setCortexActivity(current => {
-              // Drop strictly-older updates by sequence so events that race
-              // across threads can't roll us backwards.
+              // Drop strictly-older updates so events that race across threads
+              // can't roll us backwards, ordering by wall-clock first so a CLI
+              // process restart (which resets its per-run sequence to 1) is still
+              // recognized as newer rather than stranding the session.
               const prior = current[nativeSessionId];
-              if (prior && prior.sequence > state.sequence) return current;
+              if (prior && !activitySupersedes(state, prior)) return current;
               return { ...current, [nativeSessionId]: state };
             });
             // Ride the freshly-stamped timeline so the dashboards reorder a group

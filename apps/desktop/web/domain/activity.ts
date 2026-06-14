@@ -11,6 +11,23 @@ import type {
 // Pure mapping from raw agent activity + session record onto the dashboard's
 // rails, plain-language status text, status-dot color, and glyph state.
 
+// Whether `next` is a newer activity snapshot than `prior` and should replace
+// it. Ordering is by wall-clock `updatedAt` first: a CLI can restart its own
+// process mid-session (a crash-resume or post-error continuation) and reset its
+// per-run `sequence` to 1, so a sequence-only guard would drop every
+// post-restart update and strand the session showing its pre-restart state.
+// Real time only moves forward across the restart, so the timestamp separates a
+// restarted stream (newer time, lower sequence: keep) from a true straggler
+// (older time: drop). `sequence` only breaks ties within one run, where the
+// timestamps match or are unparseable (a missing stamp, or a hand-built
+// fixture). Mirrors the backend's `activity_is_out_of_order`.
+export function activitySupersedes(next: ActivityState, prior: ActivityState): boolean {
+  const a = Date.parse(next.updatedAt);
+  const b = Date.parse(prior.updatedAt);
+  if (Number.isFinite(a) && Number.isFinite(b) && a !== b) return a > b;
+  return next.sequence > prior.sequence;
+}
+
 export function activityForSession(
   session: ShellSession,
   cortexActivity: Record<string, ActivityState>,
