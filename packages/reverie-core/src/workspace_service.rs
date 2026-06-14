@@ -39,6 +39,16 @@ const DEFAULT_TERMINAL_FONT_SIZE: u16 = 14;
 const MIN_TERMINAL_FONT_SIZE: u16 = 9;
 const MAX_TERMINAL_FONT_SIZE: u16 = 24;
 
+/// Default left-panel width (CSS px) for a freshly seeded workspace, matching
+/// the shell's default grid column.
+const DEFAULT_SIDEBAR_WIDTH: u16 = 288;
+
+/// Bounds the persisted left-panel width. The minimum keeps the rail's rows
+/// readable; the maximum is a generous safety cap so a runaway drag can never
+/// store a width that swallows the whole window.
+const MIN_SIDEBAR_WIDTH: u16 = 220;
+const MAX_SIDEBAR_WIDTH: u16 = 560;
+
 #[derive(Clone)]
 pub struct WorkspaceService {
     repo: Arc<dyn WorkspaceRepository>,
@@ -80,6 +90,7 @@ impl WorkspaceService {
             // then Cortex). The frontend re-points it if it is off or missing.
             default_agent_kind: AgentKind::ClaudeCode,
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             nav_state: None,
             keep_awake_enabled: false,
             keep_display_awake: false,
@@ -321,6 +332,17 @@ impl WorkspaceService {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.terminal_font_size =
             font_size.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE);
+        self.repo.save_workspace(&workspace)?;
+        Ok(self.repo.load_snapshot()?)
+    }
+
+    /// Persist the left navigation panel's width (CSS px), clamped to a sane
+    /// range so a runaway drag or hand-edited value can never store a width that
+    /// crushes the rail or swallows the window. The shell reads it back on load
+    /// and seeds the layout grid's first column from it.
+    pub fn set_sidebar_width(&self, width: u16) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.sidebar_width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         self.repo.save_workspace(&workspace)?;
         Ok(self.repo.load_snapshot()?)
     }
@@ -1422,6 +1444,37 @@ mod tests {
                 .workspace
                 .terminal_font_size,
             24
+        );
+    }
+
+    #[test]
+    fn set_sidebar_width_persists_and_clamps() {
+        let (_repo, service) = service();
+        // Fresh workspaces start at the default left-panel width.
+        assert_eq!(service.snapshot().unwrap().workspace.sidebar_width, 288);
+
+        // An in-range width persists and round-trips.
+        let snapshot = service.set_sidebar_width(360).unwrap();
+        assert_eq!(snapshot.workspace.sidebar_width, 360);
+        assert_eq!(service.snapshot().unwrap().workspace.sidebar_width, 360);
+
+        // Out-of-range requests are clamped to the supported range rather than
+        // stored as-is, so a runaway drag can never crush or swallow the rail.
+        assert_eq!(
+            service
+                .set_sidebar_width(40)
+                .unwrap()
+                .workspace
+                .sidebar_width,
+            220
+        );
+        assert_eq!(
+            service
+                .set_sidebar_width(9000)
+                .unwrap()
+                .workspace
+                .sidebar_width,
+            560
         );
     }
 

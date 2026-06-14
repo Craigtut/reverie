@@ -205,6 +205,11 @@ const MIGRATIONS: &[&str] = &[
     // the feature disabled, matching the explicit-opt-in guardrail.
     "ALTER TABLE workspace ADD COLUMN keep_awake_enabled INTEGER NOT NULL DEFAULT 0;
      ALTER TABLE workspace ADD COLUMN keep_display_awake INTEGER NOT NULL DEFAULT 0;",
+    // v17 -> v18: persisted left-panel width (CSS px). The shell drives the
+    // layout grid's first column from this so the navigation rail reopens at the
+    // width the user dragged it to. Defaults to 288 (the shell's default column)
+    // so existing workspaces upgrade unchanged; the service clamps writes.
+    "ALTER TABLE workspace ADD COLUMN sidebar_width INTEGER NOT NULL DEFAULT 288;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -327,8 +332,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     (id, name, general_label, default_dangerous_mode,
                      disabled_agent_kinds,
                      theme, default_agent_kind, nav_state, terminal_font_size,
-                     keep_awake_enabled, keep_display_awake)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                     keep_awake_enabled, keep_display_awake, sidebar_width)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -341,6 +346,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     i64::from(seed.terminal_font_size),
                     bool_to_int(seed.keep_awake_enabled),
                     bool_to_int(seed.keep_display_awake),
+                    i64::from(seed.sidebar_width),
                 ],
             )
             .map_err(backend)?;
@@ -355,8 +361,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 (id, name, general_label, default_dangerous_mode,
                  disabled_agent_kinds,
                  theme, default_agent_kind, nav_state, terminal_font_size,
-                 keep_awake_enabled, keep_display_awake)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 keep_awake_enabled, keep_display_awake, sidebar_width)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -367,7 +373,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 nav_state = excluded.nav_state,
                 terminal_font_size = excluded.terminal_font_size,
                 keep_awake_enabled = excluded.keep_awake_enabled,
-                keep_display_awake = excluded.keep_display_awake",
+                keep_display_awake = excluded.keep_display_awake,
+                sidebar_width = excluded.sidebar_width",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -380,6 +387,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 i64::from(workspace.terminal_font_size),
                 bool_to_int(workspace.keep_awake_enabled),
                 bool_to_int(workspace.keep_display_awake),
+                i64::from(workspace.sidebar_width),
             ],
         )
         .map_err(backend)?;
@@ -892,7 +900,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
         "SELECT id, name, general_label, default_dangerous_mode,
                 disabled_agent_kinds,
                 theme, default_agent_kind, nav_state, terminal_font_size,
-                keep_awake_enabled, keep_display_awake
+                keep_awake_enabled, keep_display_awake, sidebar_width
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -908,6 +916,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 terminal_font_size: terminal_font_size_from_db(row.get::<_, i64>(8)?),
                 keep_awake_enabled: int_to_bool(row.get::<_, i64>(9)?),
                 keep_display_awake: int_to_bool(row.get::<_, i64>(10)?),
+                sidebar_width: sidebar_width_from_db(row.get::<_, i64>(11)?),
             })
         },
     )
@@ -1042,6 +1051,13 @@ fn theme_mode_from_db(value: &str) -> rusqlite::Result<ThemeMode> {
 /// never produce a degenerate cell.
 fn terminal_font_size_from_db(value: i64) -> u16 {
     value.clamp(9, 24) as u16
+}
+
+/// Read the stored left-panel width, clamping any out-of-range or overflowing
+/// value (e.g. a hand-edited row) into the supported range so a bad value can
+/// never crush the rail or swallow the window.
+fn sidebar_width_from_db(value: i64) -> u16 {
+    value.clamp(220, 560) as u16
 }
 
 fn launch_mode_to_db(value: LaunchMode) -> RepoResult<String> {
@@ -1465,6 +1481,27 @@ mod tests {
             repo.load_snapshot().unwrap().workspace.terminal_font_size,
             24
         );
+    }
+
+    #[test]
+    fn save_workspace_round_trips_sidebar_width() {
+        let repo = seeded();
+        // A fresh workspace defaults to the shell's default rail width.
+        assert_eq!(repo.load_snapshot().unwrap().workspace.sidebar_width, 288);
+
+        // A new width persists and round-trips.
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.sidebar_width = 360;
+        repo.save_workspace(&workspace).unwrap();
+        assert_eq!(repo.load_snapshot().unwrap().workspace.sidebar_width, 360);
+
+        // An out-of-range stored value is clamped on load so a bad row can never
+        // crush the rail or swallow the window.
+        repo.conn()
+            .unwrap()
+            .execute("UPDATE workspace SET sidebar_width = 9000", [])
+            .unwrap();
+        assert_eq!(repo.load_snapshot().unwrap().workspace.sidebar_width, 560);
     }
 
     #[test]

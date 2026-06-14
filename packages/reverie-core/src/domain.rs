@@ -42,6 +42,12 @@ pub struct Workspace {
     /// unchanged. The domain stores it verbatim; the renderer validates/clamps.
     #[serde(default = "default_terminal_font_size")]
     pub terminal_font_size: u16,
+    /// Persisted width of the left navigation panel in CSS px. The shell drives
+    /// the layout grid's first column from this, so the rail reopens at the
+    /// width the user dragged it to. Defaults to 288 so existing/serialized rows
+    /// without it upgrade unchanged. The service clamps to a sane range on write.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: u16,
     /// Opaque, frontend-owned UI view state (the last selected focus/session,
     /// active surface, and sidebar accordion), persisted so the workspace
     /// reopens where the user left it instead of resetting to the dashboard on
@@ -77,6 +83,7 @@ impl Workspace {
             theme: ThemeMode::Dark,
             default_agent_kind: default_agent_kind(),
             terminal_font_size: default_terminal_font_size(),
+            sidebar_width: default_sidebar_width(),
             nav_state: None,
             keep_awake_enabled: false,
             keep_display_awake: false,
@@ -98,6 +105,12 @@ fn default_agent_kind() -> AgentKind {
 /// data, matching the renderer's default.
 fn default_terminal_font_size() -> u16 {
     14
+}
+
+/// Default left-panel width (CSS px) when absent from persisted or serialized
+/// data, matching the shell's default grid column.
+fn default_sidebar_width() -> u16 {
+    288
 }
 
 /// Persisted light/dark appearance. Serializes as "light"/"dark" to match the
