@@ -17,8 +17,7 @@ interface GitStatusStoreState {
 
 export const useGitStatusStore = create<GitStatusStoreState>(set => ({
   repoStatus: {},
-  setRepoStatus: action =>
-    set(s => ({ repoStatus: resolveSetStateAction(action, s.repoStatus) })),
+  setRepoStatus: action => set(s => ({ repoStatus: resolveSetStateAction(action, s.repoStatus) })),
 }));
 
 // Preserve repo status across HMR so the dashboard strip and nav counts do not

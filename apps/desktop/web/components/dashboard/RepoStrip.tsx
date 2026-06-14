@@ -190,7 +190,11 @@ const syncButtonClass = css({
   cursor: 'pointer',
   transition: 'border-color 0.15s ease, color 0.15s ease, background 0.15s ease',
   _hover: { borderColor: 'var(--line-strong)', color: 'var(--text)' },
-  _disabled: { opacity: 0.45, cursor: 'default', _hover: { borderColor: 'var(--line)', color: 'var(--text-2)' } },
+  _disabled: {
+    opacity: 0.45,
+    cursor: 'default',
+    _hover: { borderColor: 'var(--line)', color: 'var(--text-2)' },
+  },
 });
 
 const dirtyClass = css({
