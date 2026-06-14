@@ -171,6 +171,29 @@ pub(crate) struct SetSidebarWidthRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct RenameSessionRequest {
+    session_id: SessionId,
+    /// The new display name. Empty/whitespace clears the custom name so the
+    /// session falls back to its automatic OSC-derived title.
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RenameFocusRequest {
+    focus_id: FocusId,
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RenameProjectRequest {
+    project_id: ProjectId,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceNavStateRequest {
     /// Opaque, frontend-owned JSON describing the last view (selection, surface,
     /// sidebar accordion). `None` clears it. The backend stores it verbatim.
@@ -758,6 +781,50 @@ pub(crate) fn mark_session_viewed(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .mark_session_viewed(request.shell_session_id, request.viewed_at)
+        .map_err(|err| err.to_string())
+}
+
+/// Rename a session: set or clear its user-chosen display name. An empty/blank
+/// title clears the override and the session falls back to its automatic title.
+#[tauri::command]
+pub(crate) fn rename_session(
+    service: State<'_, WorkspaceService>,
+    request: RenameSessionRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .rename_session(request.session_id, request.title)
+        .map_err(|err| err.to_string())
+}
+
+/// Rename a topic (focus). A topic must keep a name, so blank input is rejected.
+#[tauri::command]
+pub(crate) fn rename_focus(
+    service: State<'_, WorkspaceService>,
+    request: RenameFocusRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .rename_focus(request.focus_id, request.title)
+        .map_err(|err| err.to_string())
+}
+
+/// Rename a project's display label only; the folder on disk is left untouched.
+#[tauri::command]
+pub(crate) fn rename_project(
+    service: State<'_, WorkspaceService>,
+    request: RenameProjectRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .rename_project(request.project_id, request.name)
+        .map_err(|err| err.to_string())
+}
+
+/// Reveal a file or folder in Finder, selecting it. Backs the nav context menu's
+/// "Reveal folder in Finder" for a session's working directory or a project's
+/// folder. Runs on the trusted side via the opener plugin.
+#[tauri::command]
+pub(crate) fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
+    app.opener()
+        .reveal_item_in_dir(path)
         .map_err(|err| err.to_string())
 }
 
