@@ -35,3 +35,11 @@ export {
   TERMINAL_TAB_DROP_ZONE,
 } from './useTerminalFileDrop';
 export { useSidebarFolderDrop, SIDEBAR_PROJECT_DROP_ZONE } from './useSidebarFolderDrop';
+export {
+  useSidebarResize,
+  clampSidebarWidth,
+  MIN_SIDEBAR_WIDTH,
+  MAX_SIDEBAR_WIDTH,
+  DEFAULT_SIDEBAR_WIDTH,
+} from './useSidebarResize';
+export type { SidebarResize } from './useSidebarResize';

@@ -166,6 +166,10 @@ export interface ShellWorkspace {
   // this (and the configured monospace font) so cell size tracks the setting.
   // Absent (pre-migration / fresh) falls back to the default font size.
   terminalFontSize?: number;
+  // Persisted left navigation panel width (CSS px). The shell seeds the layout
+  // grid's first column from this so the rail reopens at the dragged width.
+  // Absent (pre-migration / fresh) falls back to the default rail width.
+  sidebarWidth?: number;
   // Opaque, frontend-owned UI view state (last selection, surface, sidebar
   // accordion) serialized as JSON, so the workspace reopens where the user left
   // it. Absent/null means "never saved" (seed the default view). See

@@ -142,6 +142,10 @@ export async function invokeBrowserFixture<T>(
       // to the open terminal for visual iteration; persistence across reload is
       // verified in the real app.
       return setFixtureTerminalFontSize(args) as T;
+    case 'set_sidebar_width':
+      // The harness mirrors the real command so dragging the rail live-applies in
+      // the browser loop; persistence across reload is verified in the real app.
+      return setFixtureSidebarWidth(args) as T;
     case 'open_url': {
       // In the browser harness there is no system opener; open a new tab so a
       // human can see the link resolve. The desktop build routes this to the
@@ -478,6 +482,16 @@ function setFixtureTerminalFontSize(args?: Record<string, unknown>) {
   return clone(fixtureShell);
 }
 
+function setFixtureSidebarWidth(args?: Record<string, unknown>) {
+  const request = readRequest<{ sidebarWidth: number }>(args);
+  fixtureShell = {
+    ...fixtureShell,
+    workspace: { ...fixtureShell.workspace, sidebarWidth: request.sidebarWidth },
+  };
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
 function startFixtureSession(args?: Record<string, unknown>) {
   const request = readRequest<{
     sessionId: string;
@@ -774,6 +788,7 @@ function makeFixtureShellSnapshot(): WorkspaceShellSnapshot {
     theme: 'dark',
     defaultAgentKind: 'cortex_code',
     terminalFontSize: 14,
+    sidebarWidth: 288,
   };
 
   const generalFocus = {

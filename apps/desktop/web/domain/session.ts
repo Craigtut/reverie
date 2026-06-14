@@ -14,6 +14,7 @@ export function fallbackShellSnapshot(): WorkspaceShellSnapshot {
       theme: 'dark',
       defaultAgentKind: 'claude_code',
       terminalFontSize: 14,
+      sidebarWidth: 288,
     },
     projects: [],
     focuses: [],

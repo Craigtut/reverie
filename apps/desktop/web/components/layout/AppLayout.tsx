@@ -13,6 +13,7 @@ import {
   TERMINAL_DROP_ZONE,
   TERMINAL_TAB_DROP_ZONE,
   useSessionTabShortcuts,
+  useSidebarResize,
   useTerminalFileDrop,
 } from '../../hooks';
 import {
@@ -42,6 +43,7 @@ import { SettingsSurface } from '../settings';
 import { ConnectionPanel, ConnectionRequestBanner } from '../connections';
 import { ConfirmDialog, ToastStack } from '../overlays';
 import { useConnectionPanelStore } from '../../store';
+import { SidebarResizeHandle } from './SidebarResizeHandle';
 
 const canUseAppServices = true;
 
@@ -129,6 +131,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceKeepAwake,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
+    setWorkspaceSidebarWidth,
     toggleSelectedSessionYolo,
     addProjectsFromDroppedFolders,
     archiveSession,
@@ -160,6 +163,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const dropModel = useTerminalFileDrop({
     insertTextIntoSession: terminal.insertTextIntoSession,
   });
+
+  // Drag-to-resize for the left navigation panel. The hook seeds the shell's grid
+  // var from the persisted width and persists the new width once the drag ends.
+  const sidebarResize = useSidebarResize(setWorkspaceSidebarWidth);
   const tabDropTargetId =
     dropModel.target?.kind === TERMINAL_TAB_DROP_ZONE &&
     (dropModel.phase === 'over' || dropModel.phase === 'confirm')
@@ -197,6 +204,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
 
   return (
     <main
+      ref={sidebarResize.shellRef}
       className={appShellClass}
       data-theme={theme}
       data-terminal-view={terminalView ? 'true' : 'false'}
@@ -240,6 +248,13 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         onOpenCreation={openCreation}
         onOpenSettings={() => setSurfaceMode('settings')}
         onAddProjectsFromFolders={paths => void addProjectsFromDroppedFolders(paths)}
+      />
+
+      <SidebarResizeHandle
+        width={sidebarResize.width}
+        resizing={sidebarResize.resizing}
+        onBeginResize={sidebarResize.beginResize}
+        onNudge={sidebarResize.nudge}
       />
 
       <ConnectionPanelHost />

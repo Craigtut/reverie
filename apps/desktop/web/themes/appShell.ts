@@ -56,10 +56,16 @@ export const appShellClass = css({
   position: 'fixed',
   inset: 0,
   display: 'grid',
-  gridTemplateColumns: '288px minmax(0, 1fr)',
+  // The first column is the resizable left navigation panel. Its width is a CSS
+  // var seeded from the persisted workspace setting (see useSidebarResize); the
+  // 288px fallback is the default before the snapshot loads. The shell padding is
+  // exposed as a var too so the resize handle can anchor on the panel/stage
+  // boundary across breakpoints.
+  '--reverie-shell-pad': '20px',
+  gridTemplateColumns: 'var(--reverie-sidebar-width, 288px) minmax(0, 1fr)',
   gridTemplateRows: 'minmax(0, 1fr)',
   gap: '18px',
-  padding: '20px',
+  padding: 'var(--reverie-shell-pad)',
   overflow: 'hidden',
   borderRadius: '28px',
   color: 'var(--text)',
@@ -124,8 +130,10 @@ export const appShellClass = css({
       '0 30px 60px -22px rgba(60, 40, 20, 0.18), 0 12px 28px -14px rgba(60, 40, 20, 0.18)',
   },
   lgDown: {
-    gridTemplateColumns: '260px minmax(0, 1fr)',
-    padding: '14px',
+    // Honor the persisted/dragged rail width here too; only the fallback and the
+    // shell padding shrink at this breakpoint.
+    '--reverie-shell-pad': '14px',
+    gridTemplateColumns: 'var(--reverie-sidebar-width, 260px) minmax(0, 1fr)',
     borderRadius: '28px',
   },
   mdDown: {

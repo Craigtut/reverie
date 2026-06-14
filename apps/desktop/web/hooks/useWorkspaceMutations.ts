@@ -146,6 +146,22 @@ export function useWorkspaceMutations({
     }
   }
 
+  // Persist the left navigation panel's width after a drag ends. The shell seeds
+  // the layout grid's first column from the snapshot, so the rail reopens at this
+  // width on the next load. The backend clamps to a sane range.
+  async function setWorkspaceSidebarWidth(next: number) {
+    const width = Math.round(next);
+    if (shell.workspace.sidebarWidth === width) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_sidebar_width', {
+        request: { sidebarWidth: width },
+      });
+      setShell(snapshot);
+    } catch (error) {
+      appendLog(`Update sidebar width failed: ${errorMessage(error)}`);
+    }
+  }
+
   async function toggleSelectedSessionYolo() {
     // The CLIs read their auto-approve flag at process start, so changing the
     // setting on a live session means terminate + relaunch with --resume +
@@ -541,6 +557,7 @@ export function useWorkspaceMutations({
     setWorkspaceKeepAwake,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
+    setWorkspaceSidebarWidth,
     toggleSelectedSessionYolo,
     addProjectsFromDroppedFolders,
     archiveSession,
