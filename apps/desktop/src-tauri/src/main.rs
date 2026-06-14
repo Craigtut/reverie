@@ -11,6 +11,7 @@ mod commands;
 #[cfg(unix)]
 mod connection_commands;
 mod correlator;
+mod git_watch;
 mod keep_awake;
 mod path_env;
 mod state;
@@ -28,6 +29,7 @@ use reverie_persistence::SqliteWorkspaceRepository;
 use tauri::{Emitter, Listener, Manager, Url};
 
 use crate::activity_bridge::{drain_file_activity, drain_hook_activity};
+use crate::git_watch::GitWatch;
 use crate::keep_awake::KeepAwakeManager;
 use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
 use crate::terminal::runtime::{TerminalRuntimeStatus, TerminalSessionRuntime};
@@ -189,6 +191,13 @@ fn main() {
                 if !app.state::<ShutdownState>().is_started() {
                     api.prevent_close();
                     let _ = app.emit("app_quit_requested", ());
+                }
+            }
+            // Suspend git status polling while the app is in the background and
+            // resume (with an immediate catch-up) when it returns to focus.
+            if let tauri::WindowEvent::Focused(focused) = event {
+                if let Some(watch) = window.app_handle().try_state::<GitWatch>() {
+                    watch.set_active(*focused);
                 }
             }
         })
@@ -391,12 +400,18 @@ fn main() {
             // lifecycle event.
             reconcile_keep_awake(app.handle());
 
+            // Git status poll loop: keeps each watched project's repo context
+            // (branch, sync state, dirty line counts) fresh and pushes changes
+            // to the WebView. Read-only and calm; see `git_watch`.
+            git_watch::start(app.handle());
+
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
         .manage(WorkspaceBoot::default())
         .manage(ShutdownState::default())
         .manage(KeepAwakeManager::default())
+        .manage(GitWatch::default())
         // Shared cross-source merge for Codex (hooks + rollout), read by the
         // correlator on every Codex activity update.
         .manage(ActivityReconciler::new())
@@ -448,6 +463,10 @@ fn main() {
             commands::record_terminal_diagnostics,
             commands::open_url,
             commands::system_home_dir,
+            git_watch::set_git_watch_projects,
+            git_watch::git_status,
+            git_watch::git_pull,
+            git_watch::git_push,
             #[cfg(unix)]
             connection_commands::bridge_installation_status,
             #[cfg(unix)]
