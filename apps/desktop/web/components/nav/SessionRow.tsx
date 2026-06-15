@@ -1,14 +1,15 @@
 import type { MouseEvent } from 'react';
+import { Archive } from '@phosphor-icons/react';
 
 import { css, cx } from '../../styled-system/css';
 import { agentTabLabel } from '../../domain';
 import type { CellSessionState, ShellSession } from '../../domain';
-import { AgentGlyph, CloseGlyph, StateCell } from '../glyphs';
+import { AgentGlyph, StateCell } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 import { InlineRename } from './InlineRename';
 import {
   rowAccentClass,
-  rowActionClass,
+  rowDangerActionClass,
   rowLabelClass,
   rowPrimaryClass,
   rowShellClass,
@@ -91,14 +92,14 @@ export function SessionRow({
               <StateCell state={cellState} size={24} />
             </span>
             <button
-              className={rowActionClass}
+              className={rowDangerActionClass}
               type="button"
               onClick={onClose}
               title={`Close ${label}`}
               data-testid="nav-session-close-button"
               data-row-action="true"
             >
-              <CloseGlyph size={11} />
+              <Archive size={14} />
             </button>
           </span>
         </div>

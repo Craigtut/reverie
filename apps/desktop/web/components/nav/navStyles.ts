@@ -35,14 +35,6 @@ export const rowShellClass = css({
     color: 'var(--text)',
     '& [data-row-action]': { opacity: 1, pointerEvents: 'auto' },
     '& [data-row-meta]': { opacity: 0 },
-    // As the close X is revealed, its two strokes swing into the cross: the
-    // lead diagonal lands first, the trail follows a beat later (see main.css).
-    '& [data-x-line="lead"]': {
-      animation: 'reverieCloseLead 200ms cubic-bezier(0.34, 1.45, 0.5, 1) backwards',
-    },
-    '& [data-x-line="trail"]': {
-      animation: 'reverieCloseTrail 200ms cubic-bezier(0.34, 1.45, 0.5, 1) 170ms backwards',
-    },
   },
   // Reveal the action for keyboard users too, but only on real keyboard focus
   // (:focus-visible), so a mouse click that leaves the row focused does not pin
@@ -182,8 +174,9 @@ export const rowTrailingCapClass = css({
 });
 
 export const rowActionClass = css({
-  // Fills its trailing cap so the close X lands concentric with the status
-  // indicator it crossfades from, not anchored a few px to its side.
+  // Fills its trailing cap so the revealed action (a plus that adds a child, or
+  // a session's archive control) lands concentric with the status indicator it
+  // crossfades from, not anchored a few px to its side.
   position: 'absolute',
   inset: 0,
   border: 0,
@@ -197,6 +190,30 @@ export const rowActionClass = css({
   pointerEvents: 'none',
   transition: 'opacity 120ms ease, color 120ms ease, background 120ms ease',
   _hover: { color: 'var(--text)', background: 'var(--surface-hi)' },
+});
+
+// The destructive sibling of rowActionClass, used by the session row's archive
+// control. It sits one row below a topic's "add session" plus, so it warms to
+// red on hover to read clearly as the away-from-additive, consequential action
+// (closing a session stops its agent). A full class rather than a composed
+// modifier so its hover color/background reliably win over the base.
+export const rowDangerActionClass = css({
+  position: 'absolute',
+  inset: 0,
+  border: 0,
+  borderRadius: '7px',
+  display: 'grid',
+  placeItems: 'center',
+  color: 'var(--text-3)',
+  background: 'transparent',
+  cursor: 'pointer',
+  opacity: 0,
+  pointerEvents: 'none',
+  transition: 'opacity 120ms ease, color 120ms ease, background 120ms ease',
+  _hover: {
+    color: 'var(--bad)',
+    background: 'color-mix(in srgb, var(--bad) 14%, transparent)',
+  },
 });
 
 // Layout only; size/weight come from the Typography variant the row renders.

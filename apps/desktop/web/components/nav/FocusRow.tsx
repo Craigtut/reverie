@@ -1,9 +1,8 @@
 import type { MouseEvent, ReactNode } from 'react';
-import { CaretRight } from '@phosphor-icons/react';
+import { CaretRight, Plus } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import type { DashboardStatus, SessionRollup, ShellFocus } from '../../domain';
-import { CloseGlyph } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 import { InlineRename } from './InlineRename';
 import {
@@ -25,8 +24,9 @@ import {
 // nested sessions; the row body opens the focus dashboard. The leading dot rolls
 // the worst session state upward (warn = needs you, good = active, ambient =
 // idle); the trailing slot shows the total plus a warn "needs you" badge, both
-// crossfading to the remove action on hover. When the focus is the active
-// surface a short accent lights its left gutter, clear of the caret.
+// crossfading on hover to a plus that adds a session to this topic. When the
+// focus is the active surface a short accent lights its left gutter, clear of
+// the caret.
 export function FocusRow({
   focus,
   rollup,
@@ -35,7 +35,7 @@ export function FocusRow({
   renaming,
   onToggle,
   onOpen,
-  onRemoveFocus,
+  onAddSession,
   onStartRename,
   onCommitRename,
   onCancelRename,
@@ -49,7 +49,7 @@ export function FocusRow({
   renaming: boolean;
   onToggle: () => void;
   onOpen: () => void;
-  onRemoveFocus: (event: MouseEvent<HTMLElement>) => void;
+  onAddSession: (event: MouseEvent<HTMLElement>) => void;
   onStartRename: () => void;
   onCommitRename: (value: string) => void;
   onCancelRename: () => void;
@@ -151,12 +151,12 @@ export function FocusRow({
             <button
               className={rowActionClass}
               type="button"
-              onClick={onRemoveFocus}
-              title={`Remove focus ${focus.title}`}
-              data-testid="remove-focus-button"
+              onClick={onAddSession}
+              title={`New session in ${focus.title}`}
+              data-testid="focus-add-session-button"
               data-row-action="true"
             >
-              <CloseGlyph size={11} />
+              <Plus size={13} weight="bold" />
             </button>
           </span>
         </div>

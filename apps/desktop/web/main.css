@@ -204,56 +204,6 @@ textarea {
   }
 }
 
-/* The close (X) glyph in the left nav and session tabs. When the X is revealed
- * on hover, its two strokes swing into the cross as a quick two-beat: the
- * top-left to bottom-right stroke ("lead") lands first, the other ("trail")
- * follows ~170ms later. A slight overshoot lets each stroke settle. Shell-level
- * motion (transform + opacity only), never inside the terminal paint loop. */
-@keyframes reverieCloseLead {
-  from {
-    opacity: 0;
-    transform: translate(-2.5px, -2px) rotate(-16deg) scale(0.82);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes reverieCloseTrail {
-  from {
-    opacity: 0;
-    transform: translate(2.5px, -2px) rotate(16deg) scale(0.82);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  @keyframes reverieCloseLead {
-    from {
-      opacity: 0;
-      transform: none;
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
-  @keyframes reverieCloseTrail {
-    from {
-      opacity: 0;
-      transform: none;
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   @keyframes reverieSheetIn {
     from {

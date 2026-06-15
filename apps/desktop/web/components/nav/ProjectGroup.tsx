@@ -1,9 +1,8 @@
 import type { CSSProperties, MouseEvent, ReactNode } from 'react';
-import { CaretRight, GitBranch } from '@phosphor-icons/react';
+import { CaretRight, GitBranch, Plus } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import type { DashboardStatus } from '../../domain';
-import { CloseGlyph } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 import { InlineRename } from './InlineRename';
 import {
@@ -26,8 +25,9 @@ import {
 // whether the group is openable: a project (with `onOpen`) opens its dashboard
 // and reveals its topics, mirroring how a topic row opens its own dashboard,
 // while the General group (no `onOpen`) simply toggles since it has no overview
-// of its own. The trailing session count crossfades to the remove action on
-// hover. Children render under a hairline guide rail when expanded. The leading
+// of its own. The trailing session count crossfades to an add (plus) action on
+// hover, which creates a child: a new topic under a project, a new session under
+// General. Children render under a hairline guide rail when expanded. The leading
 // folder icon doubles as a status light: it rolls the worst session state inside
 // the project upward, going green while an agent is working and amber when one
 // needs you, so a collapsed project still signals what is happening beneath it.
@@ -47,13 +47,13 @@ export function ProjectGroup({
   renaming = false,
   onToggle,
   onOpen,
-  onRemove,
+  onAdd,
   onStartRename,
   onCommitRename,
   onCancelRename,
   onContextMenu,
-  removeTitle,
-  removeTestId = 'remove-project-button',
+  addTitle,
+  addTestId = 'add-project-topic-button',
   testId,
   children,
 }: {
@@ -75,13 +75,13 @@ export function ProjectGroup({
   renaming?: boolean;
   onToggle: () => void;
   onOpen?: () => void;
-  onRemove?: (event: MouseEvent<HTMLElement>) => void;
+  onAdd?: (event: MouseEvent<HTMLElement>) => void;
   onStartRename?: () => void;
   onCommitRename?: (value: string) => void;
   onCancelRename?: () => void;
   onContextMenu?: (event: MouseEvent<HTMLElement>) => void;
-  removeTitle?: string;
-  removeTestId?: string;
+  addTitle?: string;
+  addTestId?: string;
   testId?: string;
   children: ReactNode;
 }) {
@@ -167,7 +167,7 @@ export function ProjectGroup({
               variant="caption"
               tone="warn"
               className={rowAttentionBadgeClass}
-              data-row-meta={onRemove ? 'true' : undefined}
+              data-row-meta={onAdd ? 'true' : undefined}
               title={`${attention} need${attention === 1 ? 's' : ''} you`}
             >
               {attention}
@@ -179,7 +179,7 @@ export function ProjectGroup({
               variant="caption"
               tone="muted"
               className={rowReadyBadgeClass}
-              data-row-meta={onRemove ? 'true' : undefined}
+              data-row-meta={onAdd ? 'true' : undefined}
               title={`${finished} ready for you`}
             >
               {finished}
@@ -215,21 +215,21 @@ export function ProjectGroup({
                 variant="caption"
                 tone="ghost"
                 className={rowMetaClass}
-                data-row-meta={onRemove ? 'true' : undefined}
+                data-row-meta={onAdd ? 'true' : undefined}
               >
                 {count}
               </Typography>
             ) : null}
-            {onRemove ? (
+            {onAdd ? (
               <button
                 className={rowActionClass}
                 type="button"
-                onClick={onRemove}
-                title={removeTitle ?? `Remove ${title}`}
-                data-testid={removeTestId}
+                onClick={onAdd}
+                title={addTitle ?? `Add to ${title}`}
+                data-testid={addTestId}
                 data-row-action="true"
               >
-                <CloseGlyph size={11} />
+                <Plus size={13} weight="bold" />
               </button>
             ) : null}
           </span>

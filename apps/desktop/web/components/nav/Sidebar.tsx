@@ -238,8 +238,10 @@ export function Sidebar({
   }
 
   // One topic's (or General's) sessions, each a sortable row, wrapped in the
-  // topic's drop zone, with the "New session" button inside so an empty topic
-  // still has real drop height. `projectId` is null for General.
+  // topic's drop zone. The "add session" affordance lives on the parent row's
+  // hover plus, so the in-list "New session" button shows only when the topic is
+  // empty: it gives an otherwise empty topic both a visible way in and real drop
+  // height. `projectId` is null for General.
   function renderSessionList(focusId: string, projectId: string | null, sessions: ShellSession[]) {
     const sorted = sessions.slice().sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
     return (
@@ -284,20 +286,22 @@ export function Sidebar({
             </SortableRow>
           );
         })}
-        <button
-          className={rowAddClass}
-          type="button"
-          data-testid={
-            projectId === null ? 'create-general-session-button' : 'create-focus-session-button'
-          }
-          disabled={busy || !canUseAppServices}
-          onClick={() => onCreateSession(projectId, focusId)}
-        >
-          <Plus size={projectId === null ? 13 : 12} />
-          <Typography as="span" variant="smallBody" tone="inherit">
-            New session
-          </Typography>
-        </button>
+        {sorted.length === 0 ? (
+          <button
+            className={rowAddClass}
+            type="button"
+            data-testid={
+              projectId === null ? 'create-general-session-button' : 'create-focus-session-button'
+            }
+            disabled={busy || !canUseAppServices}
+            onClick={() => onCreateSession(projectId, focusId)}
+          >
+            <Plus size={projectId === null ? 13 : 12} />
+            <Typography as="span" variant="smallBody" tone="inherit">
+              New session
+            </Typography>
+          </button>
+        ) : null}
       </SessionDropZone>
     );
   }
@@ -414,6 +418,16 @@ export function Sidebar({
               finished={generalRollup.finished}
               expanded={!generalCollapsed}
               onToggle={toggleGeneralCollapsed}
+              onAdd={
+                generalFocus
+                  ? (event: MouseEvent<HTMLElement>) => {
+                      event.stopPropagation();
+                      onCreateSession(null, generalFocus.id);
+                    }
+                  : undefined
+              }
+              addTitle="New session"
+              addTestId="general-add-session-button"
               testId="general-group-toggle"
             >
               {generalFocus ? renderSessionList(generalFocus.id, null, generalSessions) : null}
@@ -486,9 +500,9 @@ export function Sidebar({
                       renaming={renamingId === project.id}
                       onToggle={() => toggleProjectCollapsed(project.id)}
                       onOpen={() => onOpenProject(project.id)}
-                      onRemove={(event: MouseEvent<HTMLElement>) => {
+                      onAdd={(event: MouseEvent<HTMLElement>) => {
                         event.stopPropagation();
-                        onArchiveProject(project);
+                        onOpenCreation('focus', project.id);
                       }}
                       onStartRename={() => setRenamingId(project.id)}
                       onCommitRename={value => {
@@ -497,7 +511,7 @@ export function Sidebar({
                       }}
                       onCancelRename={() => setRenamingId(null)}
                       onContextMenu={event => openMenu(event, projectMenuItems(project))}
-                      removeTitle={`Remove project ${project.name}`}
+                      addTitle={`New topic in ${project.name}`}
                     >
                       <SortableContext
                         items={projectFocuses.map(focus => topicSortId(focus.id))}
@@ -533,10 +547,6 @@ export function Sidebar({
                                 renaming={renamingId === focus.id}
                                 onToggle={() => toggleFocusExpanded(focus.id)}
                                 onOpen={() => onOpenFocus(project.id, focus.id)}
-                                onRemoveFocus={(event: MouseEvent<HTMLElement>) => {
-                                  event.stopPropagation();
-                                  onArchiveFocus(focus);
-                                }}
                                 onStartRename={() => setRenamingId(focus.id)}
                                 onCommitRename={value => {
                                   setRenamingId(null);
@@ -544,6 +554,10 @@ export function Sidebar({
                                 }}
                                 onCancelRename={() => setRenamingId(null)}
                                 onContextMenu={event => openMenu(event, focusMenuItems(focus))}
+                                onAddSession={(event: MouseEvent<HTMLElement>) => {
+                                  event.stopPropagation();
+                                  onCreateSession(project.id, focus.id);
+                                }}
                               >
                                 {renderSessionList(focus.id, project.id, focusSessions)}
                               </FocusRow>
@@ -551,18 +565,24 @@ export function Sidebar({
                           );
                         })}
                       </SortableContext>
-                      <button
-                        className={rowAddClass}
-                        type="button"
-                        data-testid="create-project-focus-button"
-                        disabled={busy || !canUseAppServices}
-                        onClick={() => onOpenCreation('focus', project.id)}
-                      >
-                        <Plus size={13} />
-                        <Typography as="span" variant="smallBody" tone="inherit">
-                          New topic
-                        </Typography>
-                      </button>
+                      {/* The "add topic" affordance lives on the project row's
+                          hover plus; the in-list line shows only when the
+                          project has no topics yet, so an empty project still
+                          has a visible way in. */}
+                      {projectFocuses.length === 0 ? (
+                        <button
+                          className={rowAddClass}
+                          type="button"
+                          data-testid="create-project-focus-button"
+                          disabled={busy || !canUseAppServices}
+                          onClick={() => onOpenCreation('focus', project.id)}
+                        >
+                          <Plus size={13} />
+                          <Typography as="span" variant="smallBody" tone="inherit">
+                            New topic
+                          </Typography>
+                        </button>
+                      ) : null}
                     </ProjectGroup>
                   </SortableRow>
                 );
