@@ -298,30 +298,20 @@ fn main() {
                 Ok(watcher) => {
                     let control = watcher.control.clone();
                     app.manage(control.clone());
-                    // Boot-time registration: re-watch the live-state file of every
-                    // persisted session that already carries a file-transport native
-                    // ref, so a session still running when Reverie starts shows live
-                    // state immediately. This is the old Cortex startup scan, now
-                    // scoped to the sessions Reverie actually owns.
-                    if let Ok(snapshot) = app.state::<WorkspaceService>().snapshot() {
-                        for session in &snapshot.sessions {
-                            if let Some(reference) = &session.native_session_ref {
-                                if let Some(path) =
-                                    crate::terminal::runtime::watch_path_for_ref(reference)
-                                {
-                                    control.register(path);
-                                    if reference.kind == reverie_core::AgentKind::CodexCli
-                                        && session.status == reverie_core::SessionStatus::Running
-                                    {
-                                        crate::codex_titles::maybe_schedule_codex_title_after_capture(
-                                            app.handle(),
-                                            session.id,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // We deliberately do NOT blanket-register persisted sessions'
+                    // state files at boot. On a fresh launch this instance owns no
+                    // live agent process: a graceful quit stopped them all, and the
+                    // orphan reaper above SIGKILLs any process that survived a crash.
+                    // Registering a dead session's file makes the engine immediately
+                    // fold its last on-disk record and emit it (`register_file` reads
+                    // from offset 0), and a crash leaves that record mid-turn, i.e.
+                    // `working`. Because boot reconciliation reset the persisted
+                    // activity's status to rest WITHOUT moving its `updated_at`, that
+                    // re-folded `working` is not "older" than the reset state, so the
+                    // out-of-order guard lets it win and the session falsely lights up
+                    // as actively running again. The launch path registers the watch
+                    // when a session is actually (re)started (`spawn_launch_capture_poll`),
+                    // which is the only moment live state can legitimately flow.
                     let app_handle = app.handle().clone();
                     std::thread::Builder::new()
                         .name("reverie-activity-file-bridge".to_owned())
