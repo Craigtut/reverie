@@ -14,6 +14,7 @@ mod correlator;
 mod git_watch;
 mod keep_awake;
 mod path_env;
+mod shutdown_marker;
 mod state;
 mod terminal;
 
@@ -211,6 +212,31 @@ fn main() {
                     .map_err(|err| anyhow::anyhow!("failed to open Reverie database: {err}"))?,
             );
             let service = WorkspaceService::new(repository.clone());
+            // Did the previous run die without a graceful shutdown (crash, panic,
+            // force-kill, power loss)? If so, any session still marked `running` is
+            // stale: its process is gone (and the orphan reaper below SIGKILLs any
+            // that somehow survived). `ensure_seeded` reconciles those records; we
+            // surface the count first so an unclean exit is observable in the log
+            // instead of resurfacing later as a phantom "still running" session.
+            let unclean_shutdown =
+                crate::shutdown_marker::detect_unclean_shutdown_and_arm(app.handle());
+            if unclean_shutdown {
+                let stale = service
+                    .snapshot()
+                    .map(|snapshot| {
+                        snapshot
+                            .sessions
+                            .iter()
+                            .filter(|session| {
+                                session.status == reverie_core::SessionStatus::Running
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
+                eprintln!(
+                    "[reverie] previous run exited uncleanly; reconciling {stale} session(s) left marked running"
+                );
+            }
             service.ensure_seeded()?;
             crate::terminal::orphans::reap_stale_spawns(app.handle());
             // Reap scratch workspaces left by General sessions that no longer
@@ -533,6 +559,11 @@ fn main() {
             tauri::RunEvent::Exit => {
                 app_handle.state::<TerminalSessionRuntime>().kill_all_now();
                 app_handle.state::<KeepAwakeManager>().release_all();
+                // We reached the runtime's exit event, so this is a graceful stop
+                // (Cmd-Q / window close / app.exit), not a crash. Clear the marker
+                // so the next boot reads a clean shutdown. A crash or SIGKILL never
+                // runs this, leaving the marker for the next boot to detect.
+                crate::shutdown_marker::note_clean_shutdown(&app_handle);
             }
             _ => {}
         });
