@@ -217,15 +217,12 @@ export const rowDangerActionClass = css({
 });
 
 // A leading status icon (the project folder, the Home house) that doubles as its
-// container's ambient liveness mark. At rest it inherits the row's muted icon
-// color. When an agent inside is actively working it tints --good and breathes
-// the slow reverie-live-breathe pulse: a calm sign of life, not an alert. When
-// nothing is live but something needs the user it holds a steady --warn, so a
-// collapsed row still signals a pending ask while the amber count badge beside it
-// carries the actual tally. Liveness deliberately wins the icon over attention:
-// "needs you" is already counted in the trailing badge, while "alive" has no
-// other home, so the green breath is never masked by a concurrent ask. The two
-// data attributes are set mutually exclusively by the row, so their equal-weight
+// container's rollup mark. At rest it inherits the row's muted icon color. When a
+// session inside needs you it holds a steady --warn (a pending ask is the more
+// urgent thing to see, so amber wins the mark over a concurrent worker). Only
+// once nothing needs you does an active session tint the mark --good and breathe
+// the slow reverie-live-breathe pulse: a calm sign of life beneath. The two data
+// attributes are set mutually exclusively by liveIconAttrs, so their equal-weight
 // selectors never collide.
 export const liveStatusIconClass = css({
   display: 'inline-flex',
@@ -237,6 +234,35 @@ export const liveStatusIconClass = css({
     animation: 'reverie-live-breathe 4s ease-in-out infinite',
   },
 });
+
+// What a container's single rollup mark (the project folder, the Home house, the
+// topic dot) shows, given whether anything inside is working and how many need
+// you. Demands win the mark: a session that needs you holds it a steady amber
+// over any concurrent worker, because an unanswered ask is the more urgent thing
+// to see. Only once nothing needs you does an active session breathe the mark
+// green. It is fully reactive: restart the stuck session and, with a worker still
+// running underneath, the mark flips back to the green breath on the next render.
+// (The dashboard's per-state count pills are parallel tallies, not one mark, so
+// this collapse does not apply there: the "working" pill stays green on its own.)
+export type LiveMarkState = 'attention' | 'live' | 'rest';
+
+export function liveMarkState(live: boolean, attention: number): LiveMarkState {
+  if (attention > 0) return 'attention';
+  if (live) return 'live';
+  return 'rest';
+}
+
+// The two mutually exclusive data attributes liveStatusIconClass reads, derived
+// from liveMarkState. 'rest' carries neither, so the icon keeps its calm default.
+export function liveIconAttrs(
+  live: boolean,
+  attention: number,
+): { 'data-live'?: 'true'; 'data-tone'?: 'attention' } {
+  const state = liveMarkState(live, attention);
+  if (state === 'attention') return { 'data-tone': 'attention' };
+  if (state === 'live') return { 'data-live': 'true' };
+  return {};
+}
 
 // Layout only; size/weight come from the Typography variant the row renders.
 // Selection is off so a double-click (which starts a rename) doesn't also

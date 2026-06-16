@@ -45,6 +45,7 @@ import { FocusRow } from './FocusRow';
 import { SessionRow } from './SessionRow';
 import { NavContextMenu, type NavMenuItem, type NavMenuModel } from './NavContextMenu';
 import {
+  liveIconAttrs,
   liveStatusIconClass,
   rowAddClass,
   rowAttentionBadgeClass,
@@ -339,14 +340,15 @@ export function Sidebar({
     cortexActivity,
     viewedSessionId,
   );
-  // The Home row carries the same two-channel rollup as a project, scoped to the
-  // whole workspace. Its trailing badges count only the demanding states: how
-  // many sessions need you (a blocking ask or a hard failure) and how many
-  // finished off-screen and are waiting to be seen, so the count reads as "look
-  // here" rather than a running-process tally. Working is the ambient channel
-  // instead: the House icon breathes a slow green whenever any agent anywhere is
-  // working, a calm sign that something is alive in the background. When nothing
-  // is working, nothing needs you, and nothing is ready, the row is fully at rest.
+  // The Home row carries the same rollup as a project, scoped to the whole
+  // workspace. Its trailing badges count the demanding states: how many sessions
+  // need you (a blocking ask or a hard failure) and how many finished off-screen
+  // and are waiting to be seen, so the count reads as "look here" rather than a
+  // running-process tally. The House icon is the rollup mark: a steady amber while
+  // anything anywhere needs you, and once nothing does, a slow green breath while
+  // an agent is still working, a calm sign that something is alive in the
+  // background. When nothing needs you, nothing is working, and nothing is ready,
+  // the row is fully at rest.
   const workspaceRollup = rollupSessionStates(
     activeWorkspaceSessions(shell),
     sessionTerminalBindings,
@@ -399,7 +401,7 @@ export function Sidebar({
             >
               <span
                 className={liveStatusIconClass}
-                data-live={workspaceRollup.active > 0 ? 'true' : undefined}
+                {...liveIconAttrs(workspaceRollup.active > 0, workspaceRollup.attention)}
                 aria-hidden="true"
               >
                 <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />

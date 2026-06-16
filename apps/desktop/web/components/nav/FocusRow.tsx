@@ -7,6 +7,8 @@ import { Typography } from '../primitives/Typography';
 import { InlineRename } from './InlineRename';
 import {
   caretIconClass,
+  type LiveMarkState,
+  liveMarkState,
   rowAccentClass,
   rowActionClass,
   rowAttentionBadgeClass,
@@ -22,13 +24,13 @@ import {
 
 // A focus in the left nav, rendered as an accordion. The caret toggles its
 // nested sessions; the row body opens the focus dashboard. The leading dot is the
-// topic's ambient liveness mark, matching the project folder and Home house: it
-// breathes a slow green halo while any session inside is working, falls back to a
-// steady amber only when nothing is live but something needs you, and otherwise
-// rests ambient. The trailing slot counts the demands (a warn "needs you" badge,
-// a neutral "ready" badge) plus the total, all crossfading on hover to a plus
-// that adds a session to this topic. When the focus is the active surface a short
-// accent lights its left gutter, clear of the caret.
+// topic's rollup mark, matching the project folder and Home house: a steady amber
+// while a session inside needs you, and once nothing does, a slow breathing green
+// halo while an agent is still working, otherwise ambient. The trailing slot
+// counts the demands (a warn "needs you" badge, a neutral "ready" badge) plus the
+// total, all crossfading on hover to a plus that adds a session to this topic.
+// When the focus is the active surface a short accent lights its left gutter,
+// clear of the caret.
 export function FocusRow({
   focus,
   rollup,
@@ -58,6 +60,10 @@ export function FocusRow({
   onContextMenu: (event: MouseEvent<HTMLElement>) => void;
   children: ReactNode;
 }) {
+  // The leading dot's mark state: a session needing you wins it amber over any
+  // concurrent worker; only once nothing needs you does an active session breathe
+  // it green.
+  const dotState = liveMarkState(rollup.active > 0, rollup.attention);
   return (
     <div className={focusGroupClass}>
       {/* biome-ignore lint/a11y/noStaticElementInteractions: right-click opens the nav context menu; the row's real targets are its inner buttons */}
@@ -84,8 +90,8 @@ export function FocusRow({
           <div className={rowPrimaryClass}>
             <span
               className={focusDotBaseClass}
-              data-live={rollup.active > 0 ? 'true' : undefined}
-              style={focusDotStyle(rollup)}
+              data-live={dotState === 'live' ? 'true' : undefined}
+              style={focusDotStyle(dotState)}
               aria-hidden="true"
             />
             <InlineRename
@@ -106,8 +112,8 @@ export function FocusRow({
           >
             <span
               className={focusDotBaseClass}
-              data-live={rollup.active > 0 ? 'true' : undefined}
-              style={focusDotStyle(rollup)}
+              data-live={dotState === 'live' ? 'true' : undefined}
+              style={focusDotStyle(dotState)}
               aria-hidden="true"
             />
             <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
@@ -181,8 +187,8 @@ const focusGroupClass = css({
 // The rollup dot. Color and resting ring ride an inline style over this static
 // base; when live, the data-live rule swaps the ring for the slow breathing halo
 // (its keyframe's box-shadow overrides the inline one while it plays, then the
-// inline value resumes if work stops). Liveness wins the dot over attention so a
-// working topic still reads as alive even while a session needs you.
+// inline value resumes if work stops). Attention wins the dot over a concurrent
+// worker, matching the project folder and Home house.
 const focusDotBaseClass = css({
   width: '6px',
   height: '6px',
@@ -192,17 +198,17 @@ const focusDotBaseClass = css({
   '&[data-live="true"]': { animation: 'reverie-live-ring 4s ease-in-out infinite' },
 });
 
-function focusDotStyle(rollup: SessionRollup): { background: string; boxShadow: string } {
-  if (rollup.active > 0) {
+function focusDotStyle(state: LiveMarkState): { background: string; boxShadow: string } {
+  if (state === 'attention') {
+    return { background: 'var(--warn)', boxShadow: '0 0 0 3px rgba(229,162,78,0.13)' };
+  }
+  if (state === 'live') {
     // Solid green; the breathing halo comes from the data-live class rule, so
     // this resting ring is just its low point (shown if motion is reduced).
     return {
       background: 'var(--good)',
       boxShadow: '0 0 0 2px color-mix(in srgb, var(--good) 9%, transparent)',
     };
-  }
-  if (rollup.attention > 0) {
-    return { background: 'var(--warn)', boxShadow: '0 0 0 3px rgba(229,162,78,0.13)' };
   }
   return { background: 'var(--dot-ambient)', boxShadow: 'none' };
 }

@@ -6,6 +6,7 @@ import { Typography } from '../primitives/Typography';
 import { InlineRename } from './InlineRename';
 import {
   caretIconClass,
+  liveIconAttrs,
   liveStatusIconClass,
   rowAccentClass,
   rowActionClass,
@@ -28,14 +29,11 @@ import {
 // of its own. The trailing session count crossfades to an add (plus) action on
 // hover, which creates a child: a new topic under a project, a new session under
 // General. Children render under a hairline guide rail when expanded. The leading
-// folder icon doubles as the project's ambient liveness mark: it breathes a slow,
-// soft green while any agent inside is working (a calm sign of life, not an
-// alert), and falls back to a steady amber only when nothing is live but
-// something needs you, so a collapsed project still signals what is happening
-// beneath it. Liveness is its own channel (`live`), independent of the attention
-// count, so the green breath is never masked when a session also needs you. When
-// the project's dashboard is the active surface a short accent lights its left
-// gutter.
+// folder icon doubles as the project's rollup mark: a steady amber while a
+// session inside needs you (the pending ask wins the icon, so a collapsed project
+// still signals it), and once nothing needs you, a slow soft green breath while
+// an agent is still working beneath, a calm sign of life. When the project's
+// dashboard is the active surface a short accent lights its left gutter.
 export function ProjectGroup({
   icon,
   title,
@@ -66,8 +64,8 @@ export function ProjectGroup({
   attention?: number;
   finished?: number;
   // True when any session inside the project is actively working. Drives the
-  // folder's slow green liveness breath, independent of `attention` so the two
-  // never mask each other.
+  // folder's slow green liveness breath, shown once nothing needs you (the
+  // attention count wins the icon while it is non-zero).
   live?: boolean;
   // Uncommitted line counts when the project folder is a git repo. Shown as
   // quiet monochrome facts (not status color) so they never compete with the
@@ -242,20 +240,6 @@ export function ProjectGroup({
       {expanded ? <div className={childrenClass}>{children}</div> : null}
     </div>
   );
-}
-
-// The folder icon's liveness/attention state, as the two mutually exclusive data
-// attributes liveStatusIconClass reads. Liveness wins: a working session breathes
-// the folder green even while another needs you (that ask is already counted in
-// the trailing badge). Only when nothing is live does a pending ask hold the
-// folder a steady amber; otherwise it keeps the calm default color.
-function liveIconAttrs(
-  live: boolean,
-  attention: number,
-): { 'data-live'?: 'true'; 'data-tone'?: 'attention' } {
-  if (live) return { 'data-live': 'true' };
-  if (attention > 0) return { 'data-tone': 'attention' };
-  return {};
 }
 
 // The uncommitted-changes indicator in the nav. At rest it is just a small
