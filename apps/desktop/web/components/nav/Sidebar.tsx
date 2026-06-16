@@ -44,7 +44,12 @@ import { UpdateNavRow } from './UpdateNavRow';
 import { FocusRow } from './FocusRow';
 import { SessionRow } from './SessionRow';
 import { NavContextMenu, type NavMenuItem, type NavMenuModel } from './NavContextMenu';
-import { rowAddClass, rowAttentionBadgeClass, rowReadyBadgeClass } from './navStyles';
+import {
+  liveStatusIconClass,
+  rowAddClass,
+  rowAttentionBadgeClass,
+  rowReadyBadgeClass,
+} from './navStyles';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { NavDndProvider } from './NavDndProvider';
 import { SortableRow } from './SortableRow';
@@ -334,12 +339,14 @@ export function Sidebar({
     cortexActivity,
     viewedSessionId,
   );
-  // The Home row surfaces only the demanding states across the whole workspace:
-  // how many sessions need you (a blocking ask or a hard failure) and how many
-  // finished off-screen and are waiting to be seen. Working and idle are calm by
-  // design and intentionally absent, so the badge reads as "look here" rather
-  // than a running-process tally. When nothing needs you and nothing is ready,
-  // the row carries no badge at all.
+  // The Home row carries the same two-channel rollup as a project, scoped to the
+  // whole workspace. Its trailing badges count only the demanding states: how
+  // many sessions need you (a blocking ask or a hard failure) and how many
+  // finished off-screen and are waiting to be seen, so the count reads as "look
+  // here" rather than a running-process tally. Working is the ambient channel
+  // instead: the House icon breathes a slow green whenever any agent anywhere is
+  // working, a calm sign that something is alive in the background. When nothing
+  // is working, nothing needs you, and nothing is ready, the row is fully at rest.
   const workspaceRollup = rollupSessionStates(
     activeWorkspaceSessions(shell),
     sessionTerminalBindings,
@@ -390,7 +397,13 @@ export function Sidebar({
               data-active={surfaceMode === 'dashboard' ? 'true' : 'false'}
               onClick={onGoToDashboard}
             >
-              <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
+              <span
+                className={liveStatusIconClass}
+                data-live={workspaceRollup.active > 0 ? 'true' : undefined}
+                aria-hidden="true"
+              >
+                <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
+              </span>
               <Typography
                 as="span"
                 variant="smallBody"
@@ -510,7 +523,7 @@ export function Sidebar({
                       count={projectRollup.total}
                       attention={projectRollup.attention}
                       finished={projectRollup.finished}
-                      tone={projectRollup.tone}
+                      live={projectRollup.active > 0}
                       gitInsertions={gitDirty?.insertions ?? 0}
                       gitDeletions={gitDirty?.deletions ?? 0}
                       expanded={expanded}

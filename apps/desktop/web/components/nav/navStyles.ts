@@ -216,6 +216,28 @@ export const rowDangerActionClass = css({
   },
 });
 
+// A leading status icon (the project folder, the Home house) that doubles as its
+// container's ambient liveness mark. At rest it inherits the row's muted icon
+// color. When an agent inside is actively working it tints --good and breathes
+// the slow reverie-live-breathe pulse: a calm sign of life, not an alert. When
+// nothing is live but something needs the user it holds a steady --warn, so a
+// collapsed row still signals a pending ask while the amber count badge beside it
+// carries the actual tally. Liveness deliberately wins the icon over attention:
+// "needs you" is already counted in the trailing badge, while "alive" has no
+// other home, so the green breath is never masked by a concurrent ask. The two
+// data attributes are set mutually exclusively by the row, so their equal-weight
+// selectors never collide.
+export const liveStatusIconClass = css({
+  display: 'inline-flex',
+  flexShrink: 0,
+  '& svg': { transition: 'color 180ms ease' },
+  '&[data-tone="attention"] svg': { color: 'var(--warn)' },
+  '&[data-live="true"] svg': {
+    color: 'var(--good)',
+    animation: 'reverie-live-breathe 4s ease-in-out infinite',
+  },
+});
+
 // Layout only; size/weight come from the Typography variant the row renders.
 // Selection is off so a double-click (which starts a rename) doesn't also
 // highlight the word under the cursor.

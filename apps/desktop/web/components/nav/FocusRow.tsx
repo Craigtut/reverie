@@ -2,7 +2,7 @@ import type { MouseEvent, ReactNode } from 'react';
 import { CaretRight, Plus } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import type { DashboardStatus, SessionRollup, ShellFocus } from '../../domain';
+import type { SessionRollup, ShellFocus } from '../../domain';
 import { Typography } from '../primitives/Typography';
 import { InlineRename } from './InlineRename';
 import {
@@ -21,12 +21,14 @@ import {
 } from './navStyles';
 
 // A focus in the left nav, rendered as an accordion. The caret toggles its
-// nested sessions; the row body opens the focus dashboard. The leading dot rolls
-// the worst session state upward (warn = needs you, good = active, ambient =
-// idle); the trailing slot shows the total plus a warn "needs you" badge, both
-// crossfading on hover to a plus that adds a session to this topic. When the
-// focus is the active surface a short accent lights its left gutter, clear of
-// the caret.
+// nested sessions; the row body opens the focus dashboard. The leading dot is the
+// topic's ambient liveness mark, matching the project folder and Home house: it
+// breathes a slow green halo while any session inside is working, falls back to a
+// steady amber only when nothing is live but something needs you, and otherwise
+// rests ambient. The trailing slot counts the demands (a warn "needs you" badge,
+// a neutral "ready" badge) plus the total, all crossfading on hover to a plus
+// that adds a session to this topic. When the focus is the active surface a short
+// accent lights its left gutter, clear of the caret.
 export function FocusRow({
   focus,
   rollup,
@@ -82,7 +84,8 @@ export function FocusRow({
           <div className={rowPrimaryClass}>
             <span
               className={focusDotBaseClass}
-              style={focusDotStyle(rollup.tone)}
+              data-live={rollup.active > 0 ? 'true' : undefined}
+              style={focusDotStyle(rollup)}
               aria-hidden="true"
             />
             <InlineRename
@@ -103,7 +106,8 @@ export function FocusRow({
           >
             <span
               className={focusDotBaseClass}
-              style={focusDotStyle(rollup.tone)}
+              data-live={rollup.active > 0 ? 'true' : undefined}
+              style={focusDotStyle(rollup)}
               aria-hidden="true"
             />
             <Typography as="span" variant="smallBody" tone="inherit" className={rowLabelClass}>
@@ -174,23 +178,31 @@ const focusGroupClass = css({
   gap: '1px',
 });
 
-// The rollup dot: colored by the worst state in the focus, with a soft ring when
-// something is live or wants the user so it reads as "alive" at a glance. Color
-// and ring are dynamic, so they ride an inline style over a static base class.
+// The rollup dot. Color and resting ring ride an inline style over this static
+// base; when live, the data-live rule swaps the ring for the slow breathing halo
+// (its keyframe's box-shadow overrides the inline one while it plays, then the
+// inline value resumes if work stops). Liveness wins the dot over attention so a
+// working topic still reads as alive even while a session needs you.
 const focusDotBaseClass = css({
   width: '6px',
   height: '6px',
   borderRadius: '50%',
   flexShrink: 0,
   transition: 'background 160ms ease, box-shadow 160ms ease',
+  '&[data-live="true"]': { animation: 'reverie-live-ring 4s ease-in-out infinite' },
 });
 
-function focusDotStyle(tone: DashboardStatus): { background: string; boxShadow: string } {
-  if (tone === 'attention') {
-    return { background: 'var(--warn)', boxShadow: '0 0 0 3px rgba(229,162,78,0.13)' };
+function focusDotStyle(rollup: SessionRollup): { background: string; boxShadow: string } {
+  if (rollup.active > 0) {
+    // Solid green; the breathing halo comes from the data-live class rule, so
+    // this resting ring is just its low point (shown if motion is reduced).
+    return {
+      background: 'var(--good)',
+      boxShadow: '0 0 0 2px color-mix(in srgb, var(--good) 9%, transparent)',
+    };
   }
-  if (tone === 'live') {
-    return { background: 'var(--good)', boxShadow: '0 0 0 3px rgba(111,184,122,0.12)' };
+  if (rollup.attention > 0) {
+    return { background: 'var(--warn)', boxShadow: '0 0 0 3px rgba(229,162,78,0.13)' };
   }
   return { background: 'var(--dot-ambient)', boxShadow: 'none' };
 }

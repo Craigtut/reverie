@@ -157,6 +157,63 @@ textarea {
   animation-play-state: paused;
 }
 
+/* Ambient "an agent is working in here" breath. Deliberately slow (4s) and
+ * faint: a calm sign of life carried by a container's leading status mark, never
+ * a call to action (that stays the steady amber "needs you" count). The same
+ * unhurried green pulse plays at every level of the nav rollup — the topic dot,
+ * the project folder, the Home house — and is echoed on the Home "working"
+ * pill, so one breath means the same thing everywhere: something is alive
+ * beneath this. The icon variant breathes opacity + a soft drop-shadow glow; the
+ * dot variant (below) swells a green halo ring. Both stay GPU-composited. */
+@keyframes reverie-live-breathe {
+  0%,
+  100% {
+    opacity: 0.78;
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--good) 60%, transparent));
+  }
+}
+
+/* The dot variant of the live breath: a soft green halo that swells and settles
+ * around a small status dot (the topic rollup dot, the Home "working" pill). The
+ * dot keeps its solid --good fill; only the ring breathes. */
+@keyframes reverie-live-ring {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--good) 9%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 22%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @keyframes reverie-live-breathe {
+    0%,
+    100% {
+      opacity: 1;
+      filter: none;
+    }
+  }
+  @keyframes reverie-live-ring {
+    0%,
+    100% {
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 15%, transparent);
+    }
+  }
+}
+
+/* Freeze the ambient live breath on a backgrounded window too, matching the
+ * glyph pause above. A data-live mark animates either itself (a dot) or its svg
+ * child (an icon), so pause both. */
+[data-app-focused="false"] [data-live="true"],
+[data-app-focused="false"] [data-live="true"] svg {
+  animation-play-state: paused;
+}
+
 /* Shell-level entrance moments: the confirm sheet, its backdrop, and toasts.
  * Quick and calm (120-160ms), never inside the terminal paint loop. */
 @keyframes reverieFadeIn {

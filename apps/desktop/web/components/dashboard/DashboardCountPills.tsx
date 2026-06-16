@@ -17,7 +17,11 @@ export function DashboardCountPills({ groups }: { groups: GroupedSessions }) {
         data-tone={groups.active.length > 0 ? 'live' : 'idle'}
         data-testid="dashboard-live-count"
       >
-        <i style={{ background: groups.active.length > 0 ? 'var(--good)' : 'var(--text-4)' }} />
+        <i
+          className={liveDotClass}
+          data-live={groups.active.length > 0 ? 'true' : undefined}
+          style={{ background: groups.active.length > 0 ? 'var(--good)' : 'var(--text-4)' }}
+        />
         {groups.active.length} working
       </Typography>
       <Typography
@@ -75,4 +79,12 @@ const dashboardCountsClass = css({
     borderRadius: '50%',
     display: 'inline-block',
   },
+});
+
+// The "working" pill's dot breathes the same slow green halo as the nav's
+// liveness marks while any agent is working, so the surface echoes what the rail
+// is already saying. The other pills' dots stay still: their counts are tallies,
+// not signs of life.
+const liveDotClass = css({
+  '&[data-live="true"]': { animation: 'reverie-live-ring 4s ease-in-out infinite' },
 });
