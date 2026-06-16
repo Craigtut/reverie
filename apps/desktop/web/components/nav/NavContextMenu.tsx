@@ -1,15 +1,18 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
 import { Typography } from '../primitives/Typography';
 
-// One row in a nav right-click menu. `dividerBefore` draws a separator above the
-// item (used to fence destructive actions off from the safe ones); `danger`
-// tints it. The model is flat and pre-resolved: the menu knows nothing about the
-// entity it acts on, only how to render and invoke these items.
+// One row in a nav right-click menu. `icon` is the leading glyph (every item
+// carries one so the column stays aligned); `dividerBefore` draws a separator
+// above the item (used to fence the removal action off from the safe ones);
+// `danger` tints both the icon and label. The model is flat and pre-resolved:
+// the menu knows nothing about the entity it acts on, only how to render and
+// invoke these items.
 export interface NavMenuItem {
   id: string;
   label: string;
+  icon?: ReactNode;
   danger?: boolean;
   dividerBefore?: boolean;
   onSelect: () => void;
@@ -118,6 +121,11 @@ export function NavContextMenu({
             onClick={() => invoke(item)}
             onMouseEnter={() => setActiveIndex(index)}
           >
+            {item.icon ? (
+              <span className={cx(iconClass, item.danger && iconDangerClass)} aria-hidden="true">
+                {item.icon}
+              </span>
+            ) : null}
             <Typography variant="smallBody" tone={item.danger ? 'bad' : 'default'}>
               {item.label}
             </Typography>
@@ -147,6 +155,7 @@ const menuClass = css({
 const itemClass = css({
   display: 'flex',
   alignItems: 'center',
+  gap: '9px',
   width: '100%',
   textAlign: 'left',
   padding: '6px 10px',
@@ -157,6 +166,19 @@ const itemClass = css({
   transition: 'background 120ms ease',
   _hover: { background: 'var(--surface-3)' },
   '&[data-active="true"]': { background: 'var(--surface-3)' },
+});
+
+// The leading glyph. Quiet by default so the label leads; the danger variant
+// turns it red to match the destructive label (the Archive action).
+const iconClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  flexShrink: 0,
+  color: 'var(--text-3)',
+});
+
+const iconDangerClass = css({
+  color: 'var(--bad)',
 });
 
 const dividerWrapClass = css({ display: 'contents' });

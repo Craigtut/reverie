@@ -1,5 +1,16 @@
 import { useRef, useState, type MouseEvent } from 'react';
-import { Folder, FolderOpen, GearSix, House, MagnifyingGlass, Plus } from '@phosphor-icons/react';
+import {
+  Archive,
+  ArrowCounterClockwise,
+  Copy,
+  Folder,
+  FolderOpen,
+  GearSix,
+  House,
+  MagnifyingGlass,
+  PencilSimple,
+  Plus,
+} from '@phosphor-icons/react';
 import { css, cx } from '../../styled-system/css';
 import { rimLitPanelClass } from '../../themes/surfaces';
 import {
@@ -70,16 +81,14 @@ export interface SidebarProps {
   onAddProjectsFromFolders: (paths: string[]) => void;
   // Rename + context-menu actions. Rename commits the inline editor's value
   // (empty clears a session's custom name back to automatic). Reveal/copy act on
-  // a folder path; delete is the permanent (confirmed) removal at each level.
+  // a folder path. The menu's one removal is archive (reversible); it reuses the
+  // same close/archive handlers as the row hover actions.
   onRenameSession: (session: ShellSession, title: string) => void;
   onUseAutomaticSessionTitle: (session: ShellSession) => void;
   onRenameFocus: (focus: ShellFocus, title: string) => void;
   onRenameProject: (project: ShellProject, name: string) => void;
   onRevealPath: (path: string) => void;
   onCopyPath: (path: string) => void;
-  onDeleteSession: (session: ShellSession) => void;
-  onDeleteFocus: (focus: ShellFocus) => void;
-  onDeleteProject: (project: ShellProject) => void;
 }
 
 // The left navigation rail: workspace search, the Home row, the General group
@@ -112,9 +121,6 @@ export function Sidebar({
   onRenameProject,
   onRevealPath,
   onCopyPath,
-  onDeleteSession,
-  onDeleteFocus,
-  onDeleteProject,
 }: SidebarProps) {
   // The whole rail is a folder drop zone (marked on the <aside> below). A folder
   // dropped anywhere on it adds a project; the visual is confined to the panel.
@@ -149,16 +155,24 @@ export function Sidebar({
   }
 
   // Session menu: rename, optionally reset to the automatic name (only when a
-  // custom name is pinned), folder actions (sessions always have a cwd), then the
-  // reversible Close and the permanent Delete, fenced off below a divider.
+  // custom name is pinned), the folder utilities (sessions always have a cwd),
+  // then the single removal action. Archive is reversible everywhere in Reverie,
+  // so it is the one removal the menu offers; permanent deletion lives only in
+  // the deliberate, gated places (Settings, the archived lists), never here.
   function sessionMenuItems(session: ShellSession): NavMenuItem[] {
     const items: NavMenuItem[] = [
-      { id: 'rename', label: 'Rename', onSelect: () => setRenamingId(session.id) },
+      {
+        id: 'rename',
+        label: 'Rename',
+        icon: <PencilSimple size={15} />,
+        onSelect: () => setRenamingId(session.id),
+      },
     ];
     if (hasCustomTitle(session)) {
       items.push({
         id: 'auto-name',
         label: 'Use automatic name',
+        icon: <ArrowCounterClockwise size={15} />,
         onSelect: () => onUseAutomaticSessionTitle(session),
       });
     }
@@ -166,73 +180,79 @@ export function Sidebar({
       items.push({
         id: 'reveal',
         label: 'Reveal folder in Finder',
+        icon: <FolderOpen size={15} />,
         dividerBefore: true,
         onSelect: () => onRevealPath(session.cwd),
       });
       items.push({
         id: 'copy-path',
         label: 'Copy folder path',
+        icon: <Copy size={15} />,
         onSelect: () => onCopyPath(session.cwd),
       });
     }
     items.push({
-      id: 'close',
-      label: 'Close session',
+      id: 'archive',
+      label: 'Archive session',
+      icon: <Archive size={15} />,
+      danger: true,
       dividerBefore: true,
       onSelect: () => onCloseSession(session),
-    });
-    items.push({
-      id: 'delete',
-      label: 'Delete session',
-      danger: true,
-      onSelect: () => onDeleteSession(session),
     });
     return items;
   }
 
-  // Topic menu: rename, then remove (archive) and the permanent delete. Topics
-  // have no folder on disk, so there are no reveal/copy actions.
+  // Topic menu: rename and archive. A topic is a pure Reverie grouping with no
+  // folder on disk, so there is nothing else useful to offer here.
   function focusMenuItems(focus: ShellFocus): NavMenuItem[] {
     return [
-      { id: 'rename', label: 'Rename', onSelect: () => setRenamingId(focus.id) },
       {
-        id: 'remove',
-        label: 'Remove topic',
-        dividerBefore: true,
-        onSelect: () => onArchiveFocus(focus),
+        id: 'rename',
+        label: 'Rename',
+        icon: <PencilSimple size={15} />,
+        onSelect: () => setRenamingId(focus.id),
       },
       {
-        id: 'delete',
-        label: 'Delete topic',
+        id: 'archive',
+        label: 'Archive topic',
+        icon: <Archive size={15} />,
         danger: true,
-        onSelect: () => onDeleteFocus(focus),
+        dividerBefore: true,
+        onSelect: () => onArchiveFocus(focus),
       },
     ];
   }
 
-  // Project menu: rename (label only, never the folder), folder actions, then
-  // remove (archive) and the permanent delete.
+  // Project menu: rename (label only, never the folder), the folder utilities,
+  // then archive. Like the others, no permanent delete here.
   function projectMenuItems(project: ShellProject): NavMenuItem[] {
     return [
-      { id: 'rename', label: 'Rename', onSelect: () => setRenamingId(project.id) },
+      {
+        id: 'rename',
+        label: 'Rename',
+        icon: <PencilSimple size={15} />,
+        onSelect: () => setRenamingId(project.id),
+      },
       {
         id: 'reveal',
         label: 'Reveal folder in Finder',
+        icon: <FolderOpen size={15} />,
         dividerBefore: true,
         onSelect: () => onRevealPath(project.path),
       },
-      { id: 'copy-path', label: 'Copy folder path', onSelect: () => onCopyPath(project.path) },
       {
-        id: 'remove',
-        label: 'Remove project',
-        dividerBefore: true,
-        onSelect: () => onArchiveProject(project),
+        id: 'copy-path',
+        label: 'Copy folder path',
+        icon: <Copy size={15} />,
+        onSelect: () => onCopyPath(project.path),
       },
       {
-        id: 'delete',
-        label: 'Delete project',
+        id: 'archive',
+        label: 'Archive project',
+        icon: <Archive size={15} />,
         danger: true,
-        onSelect: () => onDeleteProject(project),
+        dividerBefore: true,
+        onSelect: () => onArchiveProject(project),
       },
     ];
   }

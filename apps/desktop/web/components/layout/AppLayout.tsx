@@ -260,9 +260,6 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         onRenameProject={(project, name) => void renameProject(project, name)}
         onRevealPath={path => void revealPath(path)}
         onCopyPath={path => void copyPath(path)}
-        onDeleteSession={session => void removeSessionRecord(session)}
-        onDeleteFocus={focus => void deleteFocusRecord(focus)}
-        onDeleteProject={project => void deleteProjectRecord(project)}
       />
 
       <SidebarResizeHandle
