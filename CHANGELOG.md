@@ -7,6 +7,38 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-15
+
+### Added
+- Rename sessions, topics, and projects from the left nav. Double-click a row, or
+  pick Rename from its right-click menu, to edit the name inline. A renamed session
+  keeps its title even as the agent changes its own terminal title.
+- A right-click context menu on nav rows, with Rename and "Reveal folder in Finder"
+  for a session's working directory or a project's folder.
+- Resize the left navigation panel by dragging its edge; the chosen width persists
+  across launches.
+- Archive a session directly from the left nav.
+
+### Changed
+- The nav's new-topic and new-session controls are now a per-row hover "+" instead
+  of standalone lines.
+
+### Fixed
+- Sessions you have already viewed no longer flood back into "Ready for you" after
+  closing and reopening the app.
+- A crashed session no longer shows as still running after you reopen the app.
+  Unclean shutdowns are detected with a runtime-active marker, and the boot watcher
+  no longer re-registers a dead session's last state and resurrects it.
+- A session whose agent CLI restarts itself mid-turn (resetting its own activity
+  counter) no longer gets stuck in a stale state; activity updates are now ordered
+  by wall-clock time.
+- Resumed sessions no longer flicker on launch.
+- The terminal no longer churns through a burst of resizes when a session starts;
+  it now spawns at the measured viewport size and coalesces the startup layout into
+  a single commit.
+- Codex session titles now derive from the first prompt.
+- Long project titles truncate cleanly beside their git line counts.
+
 ## [0.3.0] - 2026-06-14
 
 ### Added
