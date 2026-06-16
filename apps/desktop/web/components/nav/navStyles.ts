@@ -217,12 +217,15 @@ export const rowDangerActionClass = css({
 });
 
 // Layout only; size/weight come from the Typography variant the row renders.
+// Selection is off so a double-click (which starts a rename) doesn't also
+// highlight the word under the cursor.
 export const rowLabelClass = css({
   flex: 1,
   minWidth: 0,
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
+  userSelect: 'none',
 });
 
 // Residual only (tabular figures + the crossfade with the hover action); size

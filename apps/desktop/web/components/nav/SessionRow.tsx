@@ -47,29 +47,44 @@ export function SessionRow({
 }) {
   const label = agentTabLabel(session);
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: right-click opens the nav context menu; the row's real targets are its inner buttons
+    // The whole row is the rename target: double-clicking anywhere on it (a
+    // session has no caret to collide with) starts the inline edit, which is more
+    // forgiving than aiming at the text. Right-click opens the context menu.
+    // biome-ignore lint/a11y/noStaticElementInteractions: double-click renames and right-click opens the menu; the row's real targets are its inner buttons
     <div
       className={cx(rowShellClass, active && sessionShellRevealedClass)}
       data-active={active ? 'true' : 'false'}
       onContextMenu={onContextMenu}
+      onDoubleClick={renaming ? undefined : onStartRename}
     >
       {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
       {renaming ? (
         <div className={cx(rowPrimaryClass, sessionPrimaryClass)}>
           <AgentGlyph kind={session.agentKind} />
-          <InlineRename
-            initialValue={label}
-            ariaLabel={`Rename ${label}`}
-            onCommit={onCommitRename}
-            onCancel={onCancelRename}
-          />
+          {/* The ghost label reserves the row's resting height (one or two lines)
+              so starting a rename never collapses an on-stage, two-line row; the
+              single-line field floats centered over it. */}
+          <span className={renameSlotClass}>
+            <span
+              className={cx(active ? sessionLabelRevealedClass : rowLabelClass, renameGhostClass)}
+              aria-hidden="true"
+            >
+              {label || ' '}
+            </span>
+            <InlineRename
+              initialValue={label}
+              ariaLabel={`Rename ${label}`}
+              onCommit={onCommitRename}
+              onCancel={onCancelRename}
+              fill
+            />
+          </span>
         </div>
       ) : (
         <button
           className={cx(rowPrimaryClass, sessionPrimaryClass)}
           type="button"
           onClick={onOpen}
-          onDoubleClick={onStartRename}
           data-testid="nav-session-row"
           data-session-id={session.id}
           data-session-state={cellState}
@@ -121,6 +136,7 @@ const sessionLabelRevealedClass = css({
   flex: 1,
   minWidth: 0,
   lineClamp: 2,
+  userSelect: 'none',
 });
 
 // The revealed row is taller (two lines); a little vertical padding keeps the
@@ -136,4 +152,21 @@ const cellWrapClass = css({
   display: 'grid',
   placeItems: 'center',
   transition: 'opacity 120ms ease',
+});
+
+// The rename field's slot: a relative box the floating input centers in. It takes
+// its height from the ghost label inside it, so the row keeps its resting height.
+const renameSlotClass = css({
+  position: 'relative',
+  flex: 1,
+  minWidth: 0,
+  display: 'flex',
+  alignItems: 'center',
+});
+
+// The height-reserving stand-in for the label while editing: laid out like the
+// real label (so it wraps to the same one or two lines) but invisible and inert.
+const renameGhostClass = css({
+  visibility: 'hidden',
+  pointerEvents: 'none',
 });
