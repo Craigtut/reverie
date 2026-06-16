@@ -124,6 +124,18 @@ const TERMINAL_BACKEND_RESIZE_FLUSH_MS = 16;
 // storm into one commit. The first measure after the viewport mounts bypasses this
 // so initial paint stays instant.
 const SURFACE_RESIZE_SETTLE_MS = 80;
+// For a short grace after the surface viewport mounts, the app is still settling
+// its own layout (side panels sizing, the workspace snapshot + font loading), so
+// the viewport reports several different sizes spread further apart than
+// SURFACE_RESIZE_SETTLE_MS. Each committed size bumps the backend generation (a
+// SIGWINCH to the CLI plus a fresh seed frame) and remounts the WebGL renderer:
+// the startup resize storm seen in the diagnostics (6+ generations and a renderer
+// mount/dispose flap in the first ~2s). During the grace, use a longer settle so
+// that churn coalesces into one commit; the normal settle resumes afterward so
+// later user-driven resizes stay responsive. The first measure still applies
+// immediately (no default-size flash).
+const SURFACE_STARTUP_SETTLE_MS = 200;
+const SURFACE_STARTUP_GRACE_MS = 1_200;
 const TERMINAL_DIAGNOSTIC_FLUSH_MS = 500;
 const TERMINAL_DIAGNOSTIC_BATCH_LIMIT = 100;
 const TERMINAL_SLOW_PAINT_MS = 24;
@@ -381,6 +393,11 @@ export function useTerminalSession(params: {
   const pendingViewportSizeRef = useRef<{ width: number; height: number } | null>(null);
   const surfaceResizeSettleTimerRef = useRef(0);
   const hasMeasuredSurfaceRef = useRef(false);
+  // performance.now() when the surface viewport last (re)mounted, or 0. Used to
+  // apply the longer SURFACE_STARTUP_SETTLE_MS during the startup grace so the
+  // app's initial layout churn collapses into one surface commit instead of a
+  // generation-bump + renderer-remount storm. See applyViewportSizeRef below.
+  const surfaceMountedAtRef = useRef(0);
   const pendingBackendResizeRef = useRef<{
     terminalId: string;
     cols: number;
@@ -746,6 +763,30 @@ export function useTerminalSession(params: {
     scheduleBackendTerminalResize(terminalId, current.cols, current.rows);
   }
 
+  // Fit the surface to the live viewport synchronously, used right before a spawn
+  // so the PTY starts at the final geometry. Without this the PTY spawns at the
+  // default surface and is resized (SIGWINCH'd) to the real size moments later
+  // once the ResizeObserver delivers, which makes the CLI re-render its first
+  // paint and is the leading edge of the startup resize storm. Best-effort: if the
+  // viewport has not mounted or still reports 0 size, leave the surface as-is and
+  // the settle path corrects it. Marks the surface measured so the observer's first
+  // delivery (the same size) goes through the settle instead of an immediate
+  // re-commit. Returns true when it changed the surface.
+  function fitSurfaceToViewport(): boolean {
+    const viewport = surfaceViewportRef.current;
+    if (!viewport) return false;
+    const width = viewport.clientWidth;
+    const height = viewport.clientHeight;
+    if (!(width > 0) || !(height > 0)) return false;
+    const previous = controller.getSurface();
+    const next = terminalSurfaceForBounds(width, height, previous);
+    if (next.cols === previous.cols && next.rows === previous.rows) return false;
+    controller.setSurface(next);
+    useTerminalStore.getState().setTerminalSurface(next);
+    hasMeasuredSurfaceRef.current = true;
+    return true;
+  }
+
   function flushSettledViewportSize() {
     if (surfaceResizeSettleTimerRef.current !== 0) {
       window.clearTimeout(surfaceResizeSettleTimerRef.current);
@@ -772,10 +813,15 @@ export function useTerminalSession(params: {
     if (surfaceResizeSettleTimerRef.current !== 0) {
       window.clearTimeout(surfaceResizeSettleTimerRef.current);
     }
-    surfaceResizeSettleTimerRef.current = window.setTimeout(
-      flushSettledViewportSize,
-      SURFACE_RESIZE_SETTLE_MS,
-    );
+    // Hold longer while the app is still settling its own startup layout, so the
+    // burst of distinct sizes coalesces into one commit instead of a generation +
+    // renderer-remount per size. Normal responsiveness resumes after the grace.
+    const settleMs =
+      surfaceMountedAtRef.current > 0 &&
+      performance.now() - surfaceMountedAtRef.current < SURFACE_STARTUP_GRACE_MS
+        ? SURFACE_STARTUP_SETTLE_MS
+        : SURFACE_RESIZE_SETTLE_MS;
+    surfaceResizeSettleTimerRef.current = window.setTimeout(flushSettledViewportSize, settleMs);
   };
 
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -797,6 +843,8 @@ export function useTerminalSession(params: {
     // changes while the node stays mounted.
     hasMeasuredSurfaceRef.current = false;
     if (!node) return;
+    // Start the startup-grace clock from when the live node mounts.
+    surfaceMountedAtRef.current = typeof performance === 'undefined' ? 0 : performance.now();
     const onWheel = (event: globalThis.WheelEvent) => terminalWheelHandlerRef.current(event);
     node.addEventListener('wheel', onWheel, { passive: false });
     terminalWheelListenerRef.current = onWheel;
@@ -1226,6 +1274,10 @@ export function useTerminalSession(params: {
     try {
       const listeners = await attachRuntimeSessionListeners(terminalId, session);
       cleanup = listeners.cleanup;
+      // Spawn at the live viewport geometry when it is already measured, so the CLI
+      // renders its first frame at the final size instead of being resized off the
+      // default moments later (avoids the leading edge of the startup resize storm).
+      fitSurfaceToViewport();
       const surface = controller.getSurface();
       const request: StartSessionRequest = {
         sessionId: session.id,
