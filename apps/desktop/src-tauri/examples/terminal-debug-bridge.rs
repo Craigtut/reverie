@@ -21,11 +21,11 @@ use reverie_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[path = "../terminal/ghostty.rs"]
+#[path = "../src/terminal/ghostty.rs"]
 #[allow(dead_code)]
 mod ghostty;
 
-#[path = "../terminal/wire.rs"]
+#[path = "../src/terminal/wire.rs"]
 #[allow(dead_code)]
 mod wire;
 

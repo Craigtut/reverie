@@ -111,14 +111,19 @@ So `beforeBuildCommand` is `npm --prefix ../.. run build:web` (`../..` from
 **4. No DYLD in the scripts.** `dev:desktop`, `dev:tauri`, and `run:release` use
 `cargo run`, which injects the dylib search path for the process it launches, so
 none of them set `DYLD_LIBRARY_PATH`. `npm run bundle` produces the `.app` and
-`.dmg` (it runs `tauri build` from `apps/desktop/src-tauri`).
+`.dmg` through `scripts/tauri-bundle.mjs`. If `TAURI_SIGNING_PRIVATE_KEY` is not
+set locally, that wrapper disables updater artifact creation for the local build
+only, because Tauri requires a private updater key whenever updater artifacts are
+enabled and a public key is configured. `npm run bundle:updater` keeps updater
+artifact creation mandatory and fails if the private key is absent.
 
 **Verified.** `npm run bundle` produced `Reverie.app` (with
-`Contents/Frameworks/libghostty-vt.dylib`) and `Reverie_0.1.0_aarch64.dmg`. The
+`Contents/Frameworks/libghostty-vt.dylib`) and `Reverie_0.4.0_aarch64.dmg`. The
 bundled binary carries the `@executable_path/../Frameworks` rpath, and launching
 it with no `DYLD_*` set produced no `Library not loaded` error (a load-time
-linked dylib aborts at startup if unresolved, so this is conclusive). The app and
-the dylib are ad-hoc signed.
+linked dylib aborts at startup if unresolved, so this is conclusive). A local
+bundle without Apple credentials is ad-hoc signed and is for install smoke tests,
+not distribution.
 
 ## The reverie-bridge helper sidecar
 
@@ -173,6 +178,13 @@ signed binary is in place. `build.rs` does **not** build the helper crate
 (cargo cannot reentrantly build a sibling crate); `stage-bridge.mjs` owns the
 build.
 
+The browser-only terminal debug bridge (`terminal-debug-bridge`) lives under
+Cargo `examples/` and is launched only by `npm run dev:terminal-bridge`. It must
+not be a Cargo bin target in the Tauri package, because Tauri treats package bins
+as app bundle binaries. `scripts/stage-bridge.mjs` still removes stale
+release-profile `terminal-debug-bridge` artifacts before bundling so a local or
+CI cache cannot leak the dev helper into `Contents/MacOS/`.
+
 ## Why not static linking (yet)
 
 It is tempting to link `libghostty-vt.a` and ship a single self-contained
@@ -221,10 +233,12 @@ them, so users still get a single installer). Linux would mirror macOS with an
 - **macOS**: distribution outside the App Store requires a Developer ID
   certificate, signing the app and the bundled dylib, then notarizing. Tauri
   signs `Contents/Frameworks` contents when a signing identity is configured.
-  The release workflow wires these via repository secrets:
+  The release workflow requires these repository secrets and fails before the
+  long build if any are absent:
   `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
-  `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. Without them the build is
-  ad-hoc signed and users hit Gatekeeper warnings.
+  `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`. A local `npm run bundle` can
+  still produce an ad-hoc app/DMG for smoke testing, but it is not a distributable
+  release artifact.
 
 ## Dev vs production channels
 
@@ -287,11 +301,12 @@ Releases are cut by pushing a version tag, which triggers
    git push origin vX.Y.Z
    ```
 
-5. The release workflow builds the macOS (Apple Silicon, `aarch64-apple-darwin`)
-   app, signs/notarizes it if the Apple secrets are present, and creates a draft
-   GitHub Release with the artifacts. When the updater signing secrets are set it
-   also uploads the signed `Reverie.app.tar.gz` and `latest.json`. The release
-   body is filled from CHANGELOG.md automatically: a workflow step runs
+5. The release workflow first verifies that the Apple signing/notarization
+   secrets and the Tauri updater signing secrets are present. It then builds the
+   macOS (Apple Silicon, `aarch64-apple-darwin`) app, signs/notarizes it, uploads
+   the signed updater artifact and `latest.json`, and creates a draft GitHub
+   Release with the artifacts. The release body is filled from CHANGELOG.md
+   automatically: a workflow step runs
    `scripts/changelog-extract.mjs <tag>` to pull the matching `## [X.Y.Z]`
    section and passes it to `tauri-action`'s `releaseBody`, so the changelog is
    the single source of truth and nothing is hand-copied. A tag with no matching
@@ -324,7 +339,10 @@ updater path.
 - **Artifacts.** `bundle.createUpdaterArtifacts: true` makes the bundler emit a
   `Reverie.app.tar.gz` plus a `.sig` alongside the `.app`/`.dmg`. The updater
   downloads the *tarball*, not the DMG. The `.app` inside it is already notarized
-  and stapled, so Gatekeeper is satisfied on relaunch.
+  and stapled, so Gatekeeper is satisfied on relaunch. Because a public updater
+  key is compiled into `tauri.conf.json`, generating updater artifacts requires
+  `TAURI_SIGNING_PRIVATE_KEY`; local `npm run bundle` disables updater artifact
+  generation when that key is absent, while release CI requires it.
 - **Manifest.** `tauri-action` generates `latest.json` (the version + tarball URL
   + signature) and uploads it to the GitHub Release. The app checks
   `plugins.updater.endpoints[0]`, which points at
@@ -385,6 +403,7 @@ Done once, by whoever owns the release key:
    - `TAURI_SIGNING_PRIVATE_KEY`: the contents of `~/.tauri/reverie-updater.key`.
    - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: the password from step 1.
 4. Confirm `plugins.updater.endpoints[0]` points at the real release repo slug.
+   The release workflow enforces these two updater secrets before it builds.
 
 Losing the private key means installed apps will reject every future update
 (their embedded public key no longer matches), so it needs the same custody care
@@ -399,8 +418,10 @@ public key *before* the old installs can accept anything signed by the new key.
 - [x] App launches from a clean environment with no `DYLD_*` set.
 - [x] `DYLD_LIBRARY_PATH` removed from `npm run` scripts.
 - [x] macOS `.app` + `.dmg` produced locally via `npm run bundle`.
-- [ ] Apple signing/notarization secrets added in repo settings (for signed, notarized releases).
+- [x] Release workflow fails fast unless Apple signing/notarization secrets are present.
 - [x] Updater wired: `tauri-plugin-updater` + `tauri-plugin-process`, `createUpdaterArtifacts`, capabilities, UI, install-on-quit.
-- [ ] Updater minisign keypair generated; `pubkey` pasted into `tauri.conf.json`; `TAURI_SIGNING_PRIVATE_KEY` + `_PASSWORD` secrets added.
-- [ ] `plugins.updater.endpoints[0]` confirmed to point at the real release repo slug.
+- [x] Updater minisign public key pasted into `tauri.conf.json`.
+- [x] Release workflow fails fast unless `TAURI_SIGNING_PRIVATE_KEY` + `_PASSWORD` are present.
+- [x] `plugins.updater.endpoints[0]` points at the real release repo slug.
+- [x] `terminal-debug-bridge` is an example, not a production bundle binary.
 - [ ] (Later, optional) upstream `libghostty-vt-sys` static-link option evaluated.

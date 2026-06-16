@@ -19,7 +19,7 @@
 // Mirrors the libghostty-vt.dylib staging done in src-tauri/build.rs.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -68,6 +68,15 @@ const nextToExeDir = join(root, 'apps/desktop/src-tauri/target', profile);
 mkdirSync(binariesDir, { recursive: true });
 mkdirSync(nextToExeDir, { recursive: true });
 
+// Tauri's macOS bundler copies executable files already present next to the
+// desktop binary. A release cache can therefore leak old dev-only binaries into
+// the app even when Cargo no longer builds that target. Keep the release input
+// directory clean before bundling.
+if (profile === 'release') {
+  cleanDevOnlyDesktopBins(join(root, 'apps/desktop/src-tauri/target', 'release'));
+  cleanDevOnlyDesktopBins(join(root, 'apps/desktop/src-tauri/target', triple, 'release'));
+}
+
 for (const name of BINS) {
   const src = join(builtDir, name);
   if (!existsSync(src)) {
@@ -82,4 +91,14 @@ for (const name of BINS) {
   copyFileSync(src, devDest);
   chmodSync(devDest, 0o755);
   console.log(`[stage-bridge] staged ${name} (${triple}, ${profile})`);
+}
+
+function cleanDevOnlyDesktopBins(dir) {
+  for (const file of ['terminal-debug-bridge', 'terminal-debug-bridge.d']) {
+    const path = join(dir, file);
+    if (existsSync(path)) {
+      rmSync(path, { force: true });
+      console.log(`[stage-bridge] removed dev-only desktop artifact ${path}`);
+    }
+  }
 }

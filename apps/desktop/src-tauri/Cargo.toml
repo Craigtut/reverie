@@ -5,6 +5,11 @@ edition = "2024"
 license = "MIT"
 publish = false
 default-run = "reverie-desktop"
+autobins = false
+
+[[bin]]
+name = "reverie-desktop"
+path = "src/main.rs"
 
 [lints.rust]
 # The `objc` 0.2 `msg_send!` macro expands to a `cfg!(feature = "cargo-clippy")`
