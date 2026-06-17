@@ -25,6 +25,16 @@ cc = "1"
 [dependencies]
 anyhow = "1"
 libghostty-vt = { version = "=0.2.0", default-features = false, features = ["link-dynamic"] }
+# Direct dependency purely to make dylib staging in build.rs correct and
+# deterministic. `libghostty-vt-sys` carries `links = "ghostty-vt"`, so depending
+# on it directly guarantees Cargo runs its build script (which produces the
+# dylib) before ours and hands our build script `DEP_GHOSTTY_VT_INCLUDE` to
+# locate it. Without this edge the ordering is a race: on a cold build our
+# staging ran first, found nothing, and shipped a 0-byte placeholder that made
+# the app abort at launch (this is how v0.5.0 shipped broken). The crate itself
+# is used only through the safe `libghostty-vt` wrapper above; features mirror
+# the wrapper so the resolved feature set is unchanged.
+libghostty-vt-sys = { version = "=0.2.0", default-features = false, features = ["link-dynamic"] }
 portable-pty = "0.9"
 reverie-core = { path = "../../../packages/reverie-core" }
 reverie-persistence = { path = "../../../packages/reverie-persistence" }

@@ -44,20 +44,21 @@ fn main() {
     // This is done here, in build.rs, on purpose: `tauri_build::build()` below
     // validates that the configured framework files exist, and that check runs
     // at compile time, before any bundle phase (so a `beforeBundleCommand` would
-    // be too late). By the time this runs, our `libghostty-vt-sys` dependency has
-    // already produced the dylib in the Cargo build output, so we can copy it.
+    // be too late). Ordering is guaranteed because we depend on the
+    // `links = "ghostty-vt"` crate `libghostty-vt-sys` directly: Cargo runs its
+    // build script (which produces the dylib) before ours.
+    //
+    // Never ship a placeholder. v0.5.0 shipped a 0-byte `libghostty-vt.dylib`
+    // because staging silently fell back to writing empty bytes, and dyld then
+    // aborted the app at launch ("Library not loaded: @rpath/libghostty-vt.dylib").
+    // If we cannot stage a real dylib, fail the build loudly instead.
     if target_os == "macos" {
         if let Err(err) = stage_ghostty_dylib() {
-            println!("cargo:warning=failed to stage libghostty-vt.dylib for bundling: {err}");
-            // `tauri_build::build()` validates bundle.macOS.frameworks at COMPILE
-            // time, so the file must exist even for `cargo check`/clippy/test on a
-            // clean checkout where the dylib has not been built yet (otherwise the
-            // build script fails hard). Stage an empty placeholder, the same way the
-            // reverie-bridge externalBin handling does; a real bundling build
-            // rebuilds the dylib and overwrites it with real bytes.
-            if let Err(err) = ensure_ghostty_framework_placeholder() {
-                println!("cargo:warning=failed to stage libghostty-vt.dylib placeholder: {err}");
-            }
+            panic!(
+                "failed to stage libghostty-vt.dylib for bundling: {err}\n\
+                 Refusing to build a desktop bundle without the real Ghostty dylib; \
+                 it would abort at launch with a dyld \"Library not loaded\" error."
+            );
         }
     }
 
@@ -120,11 +121,66 @@ fn ensure_bridge_external_bins() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Copy the freshest built `libghostty-vt.dylib` (resolving its symlink chain to
-/// real bytes) into `<crate>/frameworks/libghostty-vt.dylib`.
+/// Copy the built `libghostty-vt.dylib` (resolving its symlink chain to real
+/// bytes) into `<crate>/frameworks/libghostty-vt.dylib` for bundling, verifying
+/// the result is non-empty. Errors are fatal to the build (see `main`).
 fn stage_ghostty_dylib() -> std::io::Result<()> {
     const LIB_NAME: &str = "libghostty-vt.dylib";
 
+    let source = locate_ghostty_dylib()?;
+    let real = fs::canonicalize(&source)?;
+    let real_len = fs::metadata(&real)?.len();
+    if real_len == 0 {
+        return Err(io_error(&format!(
+            "located libghostty-vt dylib is empty: {}",
+            real.display()
+        )));
+    }
+
+    let dest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("frameworks");
+    fs::create_dir_all(&dest_dir)?;
+    let dest = dest_dir.join(LIB_NAME);
+    fs::copy(&real, &dest)?;
+
+    // Defend against a truncated copy ever reaching the bundler.
+    let dest_len = fs::metadata(&dest)?.len();
+    if dest_len != real_len {
+        return Err(io_error(&format!(
+            "staged dylib is {dest_len} bytes but source is {real_len} bytes: {}",
+            dest.display()
+        )));
+    }
+
+    println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-env-changed=DEP_GHOSTTY_VT_INCLUDE");
+    Ok(())
+}
+
+/// Find the freshest built libghostty-vt dylib. Prefer the exact location from
+/// the `libghostty-vt-sys` `links` metadata; fall back to scanning Cargo's build
+/// output for the dependency's install dir.
+fn locate_ghostty_dylib() -> std::io::Result<PathBuf> {
+    if let Some(path) = ghostty_dylib_from_dep_metadata() {
+        return Ok(path);
+    }
+    ghostty_dylib_from_build_scan()
+}
+
+/// `DEP_GHOSTTY_VT_INCLUDE` is `<sys-out>/ghostty-install/include`; the dylib
+/// lives at the sibling `lib/`. Cargo sets this only for direct dependents of the
+/// `links = "ghostty-vt"` crate, which is why we depend on `libghostty-vt-sys`
+/// directly (see Cargo.toml).
+fn ghostty_dylib_from_dep_metadata() -> Option<PathBuf> {
+    let include = env::var_os("DEP_GHOSTTY_VT_INCLUDE")?;
+    // The value may join multiple include dirs; the install include dir is first.
+    let first = env::split_paths(&include).next()?;
+    let lib_dir = first.parent()?.join("lib");
+    newest_dylib_in(&lib_dir)
+}
+
+/// Fallback: scan Cargo's build output for a `libghostty-vt-sys-*` install dir.
+fn ghostty_dylib_from_build_scan() -> std::io::Result<PathBuf> {
     // OUT_DIR = <target>/<profile>/build/reverie-desktop-<hash>/out
     // build dir = <target>/<profile>/build  (shared with libghostty-vt-sys-*).
     // Deriving it from OUT_DIR keeps this correct under `--target <triple>`,
@@ -145,44 +201,44 @@ fn stage_ghostty_dylib() -> std::io::Result<()> {
         {
             continue;
         }
-        let candidate = entry.path().join("out/ghostty-install/lib").join(LIB_NAME);
-        if let Ok(modified) = fs::metadata(&candidate).and_then(|m| m.modified()) {
-            if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
-                newest = Some((modified, candidate));
+        let lib_dir = entry.path().join("out/ghostty-install/lib");
+        if let Some(candidate) = newest_dylib_in(&lib_dir) {
+            if let Ok(modified) = fs::metadata(&candidate).and_then(|m| m.modified()) {
+                if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
+                    newest = Some((modified, candidate));
+                }
             }
         }
     }
 
-    let source = newest
+    newest
         .map(|(_, path)| path)
-        .ok_or_else(|| io_error("built libghostty-vt.dylib not found in Cargo build output"))?;
-    let real = fs::canonicalize(&source)?;
-
-    let dest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
-        .join("frameworks");
-    fs::create_dir_all(&dest_dir)?;
-    fs::copy(&real, dest_dir.join(LIB_NAME))?;
-
-    println!("cargo:rerun-if-changed={}", source.display());
-    Ok(())
+        .ok_or_else(|| io_error("built libghostty-vt dylib not found in Cargo build output"))
 }
 
-/// Ensure `frameworks/libghostty-vt.dylib` exists so Tauri's compile-time
-/// `frameworks` validation passes even when the real dylib has not been built
-/// yet (e.g. `cargo check`/clippy/test on a clean checkout). A real bundling
-/// build stages the actual dylib and overwrites this placeholder.
-fn ensure_ghostty_framework_placeholder() -> std::io::Result<()> {
-    const LIB_NAME: &str = "libghostty-vt.dylib";
-    let dest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
-        .join("frameworks");
-    fs::create_dir_all(&dest_dir)?;
-    let dest = dest_dir.join(LIB_NAME);
-    // Keep a real (non-empty) dylib if one is already staged.
-    if fs::metadata(&dest).map(|m| m.len() > 0).unwrap_or(false) {
-        return Ok(());
+/// Return the preferred libghostty-vt dylib in `lib_dir`: the unversioned
+/// `libghostty-vt.dylib` symlink if present, else the newest `libghostty-vt*.dylib`.
+/// The basename moved across versions (0.1.x emitted `libghostty-vt.0.1.0.dylib`,
+/// 0.2.0 emits `libghostty-vt.dylib -> libghostty-vt.0.dylib`), so match by prefix.
+fn newest_dylib_in(lib_dir: &Path) -> Option<PathBuf> {
+    let preferred = lib_dir.join("libghostty-vt.dylib");
+    if preferred.exists() {
+        return Some(preferred);
     }
-    fs::write(&dest, b"")?;
-    Ok(())
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(lib_dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("libghostty-vt") && name.ends_with(".dylib") {
+            let path = entry.path();
+            if let Ok(modified) = fs::metadata(&path).and_then(|m| m.modified()) {
+                if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+                    best = Some((modified, path));
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn io_error(message: &str) -> std::io::Error {

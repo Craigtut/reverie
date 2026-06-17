@@ -113,6 +113,32 @@ jobs:
           releaseDraft: true
           prerelease: false
 
+      # Guard against ever shipping a broken bundle again. v0.5.0 shipped a
+      # 0-byte libghostty-vt.dylib (a build-script staging race) and aborted at
+      # launch with a dyld "Library not loaded" error. Fail the release here,
+      # before notarizing/publishing, if the bundled dylib is missing, empty, or
+      # not a Mach-O binary.
+      - name: Verify bundled Ghostty dylib
+        run: |
+          set -euo pipefail
+          APP=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)
+          if [ -z "$APP" ]; then
+            echo "No .app bundle found to verify." >&2
+            exit 1
+          fi
+          DYLIB="$APP/Contents/Frameworks/libghostty-vt.dylib"
+          if [ ! -s "$DYLIB" ]; then
+            echo "Bundled Ghostty dylib is missing or empty: $DYLIB" >&2
+            exit 1
+          fi
+          if ! file "$DYLIB" | grep -q 'Mach-O'; then
+            echo "Bundled Ghostty dylib is not a Mach-O binary:" >&2
+            file "$DYLIB" >&2
+            exit 1
+          fi
+          echo "OK: $DYLIB ($(stat -f%z "$DYLIB") bytes)"
+          file "$DYLIB"
+
       # tauri-action notarizes and staples the .app but leaves the .dmg wrapper
       # signed-but-unnotarized, which makes recent macOS show a one-time "cannot
       # verify" prompt when the user first opens the downloaded DMG. Notarize and

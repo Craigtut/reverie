@@ -4410,6 +4410,7 @@ dependencies = [
  "cc",
  "libc",
  "libghostty-vt",
+ "libghostty-vt-sys",
  "objc",
  "portable-pty",
  "reverie-core",
