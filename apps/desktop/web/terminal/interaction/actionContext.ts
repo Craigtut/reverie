@@ -10,6 +10,9 @@ export interface ActionContextDeps {
   // Send text to the active terminal's input without executing semantics beyond
   // what the bytes carry (used by "Send to input").
   sendInput(text: string): Promise<void>;
+  // Paste an image off the OS clipboard as a temp-file path (native read).
+  // Resolves true when an image was pasted, false when the clipboard held none.
+  pasteClipboardImage(): Promise<boolean>;
   selectAll(): void;
   clearSelection(): void;
   openExternal(href: string): Promise<void>;
@@ -34,6 +37,9 @@ export function buildActionContext(deps: ActionContextDeps): ActionContext {
       if (clipboardWriteAvailable && text) await clipboard?.writeText(text);
     },
     async pasteFromClipboard() {
+      // Image wins when present, matching the Cmd+V paste path; the native read
+      // needs no navigator.clipboard. Fall back to text otherwise.
+      if (await deps.pasteClipboardImage()) return;
       if (!clipboardReadAvailable) return;
       const text = (await clipboard?.readText()) ?? '';
       if (text) await deps.pasteText(text);

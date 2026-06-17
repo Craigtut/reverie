@@ -728,7 +728,19 @@ fn write_pasted_png(app: &AppHandle, bytes: &[u8]) -> Result<String, String> {
     let dir = pasted_images_root(app)?;
     ensure_private_dir(&dir)?;
     let path = dir.join(format!("paste-{}.png", uuid::Uuid::new_v4()));
-    std::fs::write(&path, bytes)
+    // Create owner-only (0600), not the umask default: a pasted image can hold
+    // sensitive content, and the file lives in the user's home, not App Support.
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|err| format!("failed to create pasted image {}: {err}", path.display()))?;
+    file.write_all(bytes)
         .map_err(|err| format!("failed to write pasted image {}: {err}", path.display()))?;
     Ok(path.to_string_lossy().into_owned())
 }
@@ -768,7 +780,14 @@ pub fn sweep_pasted_images(app: &AppHandle) {
     };
     let now = std::time::SystemTime::now();
     for entry in entries.flatten() {
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        // Only reap plain files; never touch a subdirectory that wanders in.
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
             continue;
         };
         let aged_out = now

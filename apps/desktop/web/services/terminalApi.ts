@@ -34,6 +34,20 @@ export function writeTerminalInput(terminalId: string, input: string) {
   return invoke('write_terminal_input', { terminalId, input });
 }
 
+// Read an image off the OS clipboard, persist it as a temp PNG, and return its
+// absolute path (or null when the clipboard holds no usable image). The primary
+// clipboard-image paste path: it catches screenshots/TIFF the WebView clipboard
+// does not reliably expose. The caller inserts the path like a dropped file.
+export function readClipboardImage() {
+  return invoke<string | null>('read_clipboard_image');
+}
+
+// Persist PNG bytes extracted from a DOM paste event (the fallback when the
+// native pasteboard read comes up empty) and return the temp file path.
+export function savePastedImage(bytes: number[]) {
+  return invoke<string>('save_pasted_image', { bytes });
+}
+
 export function resizeTerminal(terminalId: string, cols: number, rows: number) {
   return invoke('resize_terminal', { terminalId, cols, rows });
 }

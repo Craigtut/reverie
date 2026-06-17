@@ -102,7 +102,9 @@ export function registerDefaultInteractions(): void {
     order: 3,
     kinds: ['selection', 'grid', 'empty'],
     label: 'Paste',
-    isEnabled: (_t, ctx) => ctx.canSendInput && ctx.clipboardReadAvailable,
+    // Enabled whenever input can be sent: text paste uses navigator.clipboard,
+    // image paste falls back to a native pasteboard read that does not need it.
+    isEnabled: (_t, ctx) => ctx.canSendInput,
     invoke: (_target, ctx) => ctx.pasteFromClipboard(),
   });
 

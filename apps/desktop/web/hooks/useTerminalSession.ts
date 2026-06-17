@@ -14,10 +14,12 @@ import {
 
 import { listen, type UnlistenFn } from '../services/runtime';
 import {
+  readClipboardImage,
   readTerminalRows,
   recordRenderMetrics,
   recordTerminalDiagnostics,
   resizeTerminal,
+  savePastedImage,
   setTerminalFrontendActive,
   setTerminalTheme,
   startSession,
@@ -26,6 +28,7 @@ import {
 import {
   getUserHome,
   errorMessage,
+  formatDroppedPaths,
   shortId,
   terminalInputForKey,
   terminalInputForKeyUp,
@@ -1557,9 +1560,88 @@ export function useTerminalSession(params: {
     }
   }
 
+  // Pull an image File off a paste event's clipboard data, if any. Must run
+  // synchronously inside the event (clipboardData is only valid during dispatch);
+  // the returned File holds a snapshot that stays readable for the async save.
+  function imageFileFromClipboard(data: DataTransfer | null): File | null {
+    if (!data) return null;
+    for (const file of Array.from(data.files)) {
+      if (file.type.startsWith('image/')) return file;
+    }
+    for (const item of Array.from(data.items)) {
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) return file;
+      }
+    }
+    return null;
+  }
+
+  // Normalize a pasted image File to PNG bytes. A PNG passes through untouched;
+  // anything else (TIFF, JPEG) is re-encoded via an offscreen canvas so the CLI
+  // always receives a .png. Used only for the DOM-event fallback.
+  async function pngBytesFromImageFile(file: File): Promise<number[] | null> {
+    if (file.type === 'image/png') {
+      return Array.from(new Uint8Array(await file.arrayBuffer()));
+    }
+    const bitmap = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      bitmap.close();
+      return null;
+    }
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) return null;
+    return Array.from(new Uint8Array(await blob.arrayBuffer()));
+  }
+
+  // Turn a clipboard image into a temp file and insert its quoted path at the
+  // prompt, exactly like a dropped image (so it routes to the active session,
+  // bracketed-paste aware). Native pasteboard read is primary (sees
+  // screenshots/TIFF); the DOM-event blob (`imageFile`) is the fallback.
+  // Resolves true when an image was pasted, false when there was none to paste.
+  async function pasteClipboardImage(imageFile: File | null): Promise<boolean> {
+    if (!inputReady()) return false;
+    let path: string | null = null;
+    try {
+      path = await readClipboardImage();
+    } catch (error) {
+      writeLog(`Clipboard image read failed: ${errorMessage(error)}`);
+    }
+    if (!path && imageFile) {
+      try {
+        const bytes = await pngBytesFromImageFile(imageFile);
+        if (bytes) path = await savePastedImage(bytes);
+      } catch (error) {
+        writeLog(`Clipboard image fallback failed: ${errorMessage(error)}`);
+      }
+    }
+    if (!path) {
+      // Only a noteworthy failure when we actually saw an image and could not
+      // turn it into a file; a plain text/empty clipboard is silent.
+      if (imageFile) writeLog('Clipboard image could not be pasted.');
+      return false;
+    }
+    await pasteTextToTerminal(formatDroppedPaths([path]));
+    return true;
+  }
+
   function handleTerminalPaste(event: ClipboardEvent<HTMLCanvasElement | HTMLTextAreaElement>) {
     if (!inputReady()) return;
-    const text = event.clipboardData.getData('text');
+    // An image on the clipboard wins: convert it to a temp file and paste the
+    // path. Grab the File synchronously before the event data goes stale.
+    const imageFile = imageFileFromClipboard(event.clipboardData);
+    if (imageFile) {
+      event.preventDefault();
+      void pasteClipboardImage(imageFile);
+      return;
+    }
+    const text = event.clipboardData?.getData('text') ?? '';
     if (!text) return;
     event.preventDefault();
     void pasteTextToTerminal(text);
@@ -1641,6 +1723,7 @@ export function useTerminalSession(params: {
     return {
       pasteText: pasteTextToTerminal,
       sendInput: sendTerminalInput,
+      pasteClipboardImage: () => pasteClipboardImage(null),
       selectAll: () => interaction.selectAll(),
       clearSelection: () => controller.clearSelection(),
       openExternal: href => openExternalUrl(href),

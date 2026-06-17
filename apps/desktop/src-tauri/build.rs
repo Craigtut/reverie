@@ -26,6 +26,15 @@ fn main() {
             .compile("reverie_bookmark");
         println!("cargo:rerun-if-changed=native/reverie_bookmark.m");
         println!("cargo:rustc-link-lib=framework=Foundation");
+
+        // Compile the clipboard-image shim and link AppKit (NSPasteboard,
+        // NSBitmapImageRep, NSImage). Backs clipboard-image paste into terminals.
+        cc::Build::new()
+            .file("native/reverie_clipboard.m")
+            .flag("-fobjc-arc")
+            .compile("reverie_clipboard");
+        println!("cargo:rerun-if-changed=native/reverie_clipboard.m");
+        println!("cargo:rustc-link-lib=framework=AppKit");
     }
 
     // Stage the Ghostty dynamic library to a stable path that
