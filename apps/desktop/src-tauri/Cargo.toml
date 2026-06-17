@@ -24,7 +24,7 @@ cc = "1"
 
 [dependencies]
 anyhow = "1"
-libghostty-vt = "0.1.1"
+libghostty-vt = { version = "=0.2.0", default-features = false, features = ["link-dynamic"] }
 portable-pty = "0.9"
 reverie-core = { path = "../../../packages/reverie-core" }
 reverie-persistence = { path = "../../../packages/reverie-persistence" }

@@ -1,9 +1,8 @@
 use anyhow::Result;
 use std::collections::HashMap;
 
-use libghostty_vt::ffi;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
-use libghostty_vt::screen::CellWide;
+use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::style::{RgbColor, Style, Underline as GhosttyUnderline};
 use libghostty_vt::terminal::{Mode, ScrollViewport};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
@@ -515,8 +514,7 @@ fn extract_frame<'alloc, 'cb>(
             bracketed_paste: terminal.mode(Mode::BRACKETED_PASTE)?,
             sync_output: terminal.mode(Mode::SYNC_OUTPUT)?,
             mouse_tracking: terminal.is_mouse_tracking()?,
-            alternate_screen: terminal.active_screen()?
-                == ffi::GhosttyTerminalScreen_GHOSTTY_TERMINAL_SCREEN_ALTERNATE,
+            alternate_screen: terminal.active_screen()? == Screen::Alternate,
             kitty_keyboard_flags: terminal.kitty_keyboard_flags()?.bits(),
         },
         scrollback: TerminalScrollback {
