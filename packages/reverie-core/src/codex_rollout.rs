@@ -295,6 +295,27 @@ impl CodexRolloutFold {
                 self.active.clear();
                 self.pending_escalation = None;
             }
+            // Long-running Codex goals keep emitting these after the ordinary
+            // prompt/turn records. Treat an active goal as liveness, otherwise a
+            // resumed goal can sit behind the last `task_complete` and read idle.
+            (_, "thread_goal_updated") => match goal_status_from(&record.payload).as_deref() {
+                Some("active") => {
+                    self.status = ActivityStatus::Working;
+                    if let Some(id) = turn_id_from(&record.payload) {
+                        self.current_turn_id = Some(id);
+                    }
+                    self.last_error = None;
+                }
+                Some("complete") | Some("usageLimited") => {
+                    self.status = ActivityStatus::AwaitingInput;
+                    if let Some(id) = turn_id_from(&record.payload) {
+                        self.current_turn_id = Some(id);
+                    }
+                    self.active.clear();
+                    self.pending_escalation = None;
+                }
+                _ => {}
+            },
             (_, "error") => {
                 self.status = ActivityStatus::Error;
                 let message = record
@@ -461,6 +482,37 @@ pub fn discover_latest_codex_rollout_for_cwd(
     Ok(best.map(|(_, reference)| reference))
 }
 
+/// Find the rollout file whose `session_meta` native id equals `native_id`.
+///
+/// Unlike [`discover_latest_codex_rollout_for_cwd`], which picks the newest
+/// cwd-matching file by mtime and so cannot disambiguate several same-CLI
+/// sessions sharing one folder, this keys on the exact native id. Codex embeds
+/// that id in the rollout filename (`rollout-<ts>-<id>.jsonl`), so the scan only
+/// reads `session_meta` for the single name-matching candidate. Used to backfill
+/// the rollout path onto a session that captured its native id before the
+/// launch-time scan bound the file, or where a sibling session in the same folder
+/// won that scan.
+pub fn find_codex_rollout_by_native_id(
+    codex_home: impl AsRef<Path>,
+    native_id: &str,
+) -> Option<PathBuf> {
+    let sessions_dir = codex_home.as_ref().join("sessions");
+    if !sessions_dir.exists() {
+        return None;
+    }
+    // The id is the trailing segment of the filename, so a name match narrows the
+    // scan to one file before we confirm against the `session_meta` record.
+    let suffix = format!("-{native_id}.jsonl");
+    rollout_files(&sessions_dir).into_iter().find(|path| {
+        let name_matches = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(suffix.as_str()));
+        name_matches
+            && read_codex_rollout_meta(path).is_some_and(|meta| meta.session_id == native_id)
+    })
+}
+
 /// Collect `rollout-*.jsonl` files under a `sessions/` tree. Codex partitions by
 /// `YYYY/MM/DD`, so we walk a bounded depth rather than the whole filesystem.
 fn rollout_files(sessions_dir: &Path) -> Vec<PathBuf> {
@@ -501,8 +553,23 @@ fn is_rollout_file(path: &Path) -> bool {
 fn turn_id_from(payload: &Value) -> Option<String> {
     payload
         .get("turn_id")
+        .or_else(|| payload.get("turnId"))
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+fn goal_status_from(payload: &Value) -> Option<String> {
+    payload
+        .get("goal")
+        .and_then(|goal| goal.get("status"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            payload
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
 }
 
 fn active_tool_from_call(
@@ -926,6 +993,51 @@ mod tests {
     }
 
     #[test]
+    fn active_goal_update_keeps_resumed_goal_working_after_turn_complete() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-goal-active.jsonl",
+            &[
+                META,
+                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#,
+                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"a"}}"#,
+                r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"b","threadId":"thread-1","goal":{"status":"active","objective":"private","createdAt":"t0","updatedAt":"t3","tokensUsed":10,"timeUsedSeconds":1}}}"#,
+            ],
+        );
+
+        let state = read_codex_rollout_state(&path).unwrap().expect("state");
+        assert_eq!(state.status, ActivityStatus::Working);
+        assert_eq!(state.turn.as_ref().map(|turn| turn.id.as_str()), Some("b"));
+        assert_eq!(
+            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
+            TurnStatus::Running
+        );
+    }
+
+    #[test]
+    fn terminal_goal_update_returns_to_input_waiting() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-goal-complete.jsonl",
+            &[
+                META,
+                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"a","threadId":"thread-1","goal":{"status":"active","objective":"private","createdAt":"t0","updatedAt":"t1","tokensUsed":10,"timeUsedSeconds":1}}}"#,
+                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"a","threadId":"thread-1","goal":{"status":"complete","objective":"private","createdAt":"t0","updatedAt":"t2","tokensUsed":20,"timeUsedSeconds":2}}}"#,
+            ],
+        );
+
+        let state = read_codex_rollout_state(&path).unwrap().expect("state");
+        assert_eq!(state.status, ActivityStatus::AwaitingInput);
+        assert_eq!(state.turn.as_ref().map(|turn| turn.id.as_str()), Some("a"));
+        assert_eq!(
+            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
+            TurnStatus::Completed
+        );
+    }
+
+    #[test]
     fn incremental_fold_handles_chunks_split_mid_line_and_only_folds_new_records() {
         let mut fold = CodexRolloutFold::new();
         // task_started before any session_meta: processed, but no id to bind yet.
@@ -1012,5 +1124,46 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[test]
+    fn finds_rollout_by_native_id_across_sibling_sessions_in_one_cwd() {
+        let home = TempDir::new().unwrap();
+        let day = home
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("06")
+            .join("16");
+        fs::create_dir_all(&day).unwrap();
+
+        // Two sessions in the SAME cwd: the cwd scan cannot tell them apart, but an
+        // id lookup must return the file whose `session_meta` carries that id.
+        write_rollout(
+            &day,
+            "rollout-2026-06-16T10-00-00-019ec4f2-aaaa.jsonl",
+            &[
+                r#"{"type":"session_meta","payload":{"id":"019ec4f2-aaaa","cwd":"/Users/dev/proj"}}"#,
+            ],
+        );
+        write_rollout(
+            &day,
+            "rollout-2026-06-16T11-00-00-019ed136-bbbb.jsonl",
+            &[
+                r#"{"type":"session_meta","payload":{"id":"019ed136-bbbb","cwd":"/Users/dev/proj"}}"#,
+            ],
+        );
+
+        let found = find_codex_rollout_by_native_id(home.path(), "019ec4f2-aaaa")
+            .expect("rollout for the requested id");
+        assert!(
+            found
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap()
+                .ends_with("019ec4f2-aaaa.jsonl")
+        );
+
+        assert!(find_codex_rollout_by_native_id(home.path(), "missing-id").is_none());
     }
 }

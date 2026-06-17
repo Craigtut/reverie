@@ -18,6 +18,8 @@ use crate::activity::{ActivityState, ActivityStatus, TurnStatus};
 use crate::agents::{
     CortexSessionMetadata, DiscoveryContext, build_spawn_spec, built_in_adapters, require_detected,
 };
+use crate::bookmark::{BookmarkProvider, NoopBookmarkProvider};
+use crate::codex_rollout::find_codex_rollout_by_native_id;
 use crate::domain::{
     AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, Session,
     SessionId, SessionStateTimeline, SessionStatus, ThemeMode, Workspace, WorkspaceId,
@@ -77,6 +79,11 @@ const MAX_SIDEBAR_WIDTH: u16 = 560;
 #[derive(Clone)]
 pub struct WorkspaceService {
     repo: Arc<dyn WorkspaceRepository>,
+    /// Mints and resolves folder-identity bookmarks so a project can follow its
+    /// folder across a rename or move. Defaults to a no-op (auto-reconnect inert,
+    /// manual relocation still works); the desktop app injects the real macOS
+    /// provider via [`WorkspaceService::with_bookmark_provider`].
+    bookmark: Arc<dyn BookmarkProvider>,
 }
 
 /// A session's terminal spawn spec plus the context the runtime needs to derive
@@ -98,7 +105,19 @@ pub struct AgentLaunch {
 
 impl WorkspaceService {
     pub fn new(repo: Arc<dyn WorkspaceRepository>) -> Self {
-        Self { repo }
+        Self {
+            repo,
+            bookmark: Arc::new(NoopBookmarkProvider),
+        }
+    }
+
+    /// Attach the folder-identity bookmark provider used for auto-reconnect.
+    /// Builder-style so `new` stays source-compatible for the secondary
+    /// constructions (the activity correlator, tests) that don't need it.
+    #[must_use]
+    pub fn with_bookmark_provider(mut self, bookmark: Arc<dyn BookmarkProvider>) -> Self {
+        self.bookmark = bookmark;
+        self
     }
 
     /// Seed the workspace row on first run, then reconcile any sessions left in
@@ -123,6 +142,12 @@ impl WorkspaceService {
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
         self.normalize_sessions()?;
+        // Reconnect any project whose folder moved or was renamed while Reverie
+        // was closed, before the first snapshot reaches the UI. Best-effort: a
+        // failure here must not block boot.
+        if let Err(error) = self.reconcile_project_folders() {
+            eprintln!("[reverie] project folder reconcile at boot failed: {error:#}");
+        }
         Ok(())
     }
 
@@ -144,7 +169,9 @@ impl WorkspaceService {
     }
 
     pub fn snapshot(&self) -> Result<WorkspaceSnapshot> {
-        Ok(self.repo.load_snapshot()?)
+        let mut snapshot = self.repo.load_snapshot()?;
+        annotate_folder_missing(&mut snapshot.projects);
+        Ok(snapshot)
     }
 
     pub fn create_project(&self, name: String, path: PathBuf) -> Result<WorkspaceSnapshot> {
@@ -190,7 +217,7 @@ impl WorkspaceService {
         let mut project = Project::new(name, path);
         project.sort_order = next_sort_order;
         self.repo.upsert_project(&project)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     pub fn create_focus(
@@ -229,7 +256,7 @@ impl WorkspaceService {
             default_dangerous_mode,
         };
         self.repo.upsert_focus(&focus)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     pub fn create_session(
@@ -264,7 +291,7 @@ impl WorkspaceService {
         session.dangerous_mode_override = dangerous_mode_override;
         session.sort_order = sort_order;
         self.repo.upsert_session(&session)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Archive or restore a session by flipping its single `archived` bit.
@@ -312,7 +339,7 @@ impl WorkspaceService {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.default_dangerous_mode = default_dangerous_mode;
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Persist the workspace appearance (light/dark). The renderer seeds its
@@ -321,7 +348,7 @@ impl WorkspaceService {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.theme = theme;
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Persist the "keep my Mac awake while tasks run" toggles. `enabled` is the
@@ -337,7 +364,7 @@ impl WorkspaceService {
         workspace.keep_awake_enabled = enabled;
         workspace.keep_display_awake = keep_display;
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Persist the default agent kind seeded into the new-session composer. This
@@ -347,7 +374,7 @@ impl WorkspaceService {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.default_agent_kind = kind;
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Persist the terminal font size (CSS px), clamped to the renderer's
@@ -358,7 +385,7 @@ impl WorkspaceService {
         workspace.terminal_font_size =
             font_size.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE);
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Persist the left navigation panel's width (CSS px), clamped to a sane
@@ -369,7 +396,7 @@ impl WorkspaceService {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.sidebar_width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Persist the opaque, frontend-owned UI view state (last selected
@@ -380,7 +407,7 @@ impl WorkspaceService {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.nav_state = nav_state;
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Switch a single agent CLI on or off for the workspace. Enabling removes
@@ -401,7 +428,7 @@ impl WorkspaceService {
             disabled.push(kind);
         }
         self.repo.save_workspace(&workspace)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// The set of agent kinds the user has switched off. Read by the command
@@ -418,27 +445,27 @@ impl WorkspaceService {
 
     pub fn remove_session(&self, session_id: SessionId) -> Result<WorkspaceSnapshot> {
         self.repo.delete_session(session_id)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Archive a topic: set its own `archived` bit. Its sessions stay untouched
     /// and are hidden by ancestry, so restoring the topic brings them back.
     pub fn archive_focus(&self, focus_id: FocusId) -> Result<WorkspaceSnapshot> {
         self.repo.set_focus_archived(focus_id, true)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Restore an archived topic. Its sessions reappear exactly as they were,
     /// except any session that was individually archived (own bit still set).
     pub fn restore_focus(&self, focus_id: FocusId) -> Result<WorkspaceSnapshot> {
         self.repo.set_focus_archived(focus_id, false)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Permanently delete a topic and its sessions. Not reversible.
     pub fn delete_focus(&self, focus_id: FocusId) -> Result<WorkspaceSnapshot> {
         self.repo.delete_focus_cascade(focus_id)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Rename a topic (focus). A topic must always have a name, so an empty or
@@ -454,7 +481,7 @@ impl WorkspaceService {
             .ok_or_else(|| anyhow!("unknown topic {focus_id}"))?;
         focus.title = title;
         self.repo.upsert_focus(&focus)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Archive a project: set its own `archived` bit. Its topics and sessions are
@@ -462,14 +489,14 @@ impl WorkspaceService {
     /// the project) brings the whole subtree back as it was.
     pub fn archive_project(&self, project_id: ProjectId) -> Result<WorkspaceSnapshot> {
         self.repo.set_project_archived(project_id, true)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Permanently delete a project together with its topics and sessions. Used
     /// by the Settings purge for an archived project; not reversible.
     pub fn delete_project(&self, project_id: ProjectId) -> Result<WorkspaceSnapshot> {
         self.repo.delete_project_cascade(project_id)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Rename a project's display name. This changes only the label Reverie shows
@@ -486,7 +513,7 @@ impl WorkspaceService {
             .ok_or_else(|| anyhow!("unknown project {project_id}"))?;
         project.name = name;
         self.repo.upsert_project(&project)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Reorder focuses to match the given id order, used by drag-and-drop in the
@@ -503,7 +530,7 @@ impl WorkspaceService {
                 self.repo.upsert_focus(&updated)?;
             }
         }
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Reorder top-level projects to match the given id order (drag-and-drop in
@@ -517,7 +544,7 @@ impl WorkspaceService {
                 self.repo.upsert_project(&updated)?;
             }
         }
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Reorder sessions within a focus (topic) to match the given id order.
@@ -530,7 +557,7 @@ impl WorkspaceService {
                 self.repo.upsert_session(&updated)?;
             }
         }
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Move a session to a different focus (topic) and drop it at `target_index`
@@ -586,7 +613,7 @@ impl WorkspaceService {
                 self.repo.upsert_session(&updated)?;
             }
         }
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     pub fn mark_session_running(&self, session_id: SessionId) -> Result<WorkspaceSnapshot> {
@@ -698,7 +725,7 @@ impl WorkspaceService {
         payload.insert("generatedTitle".to_owned(), generated_title_payload);
         native.adapter_payload = Value::Object(payload);
         self.repo.upsert_session(&session)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Explicit Cortex capture (FE-triggered): read the session's `meta.json`,
@@ -741,7 +768,7 @@ impl WorkspaceService {
             native_session_ref,
             AgentKind::CortexCode,
         )?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     /// Attach a native session ref to a session, moving it to resume /
@@ -785,8 +812,12 @@ impl WorkspaceService {
     }
 
     /// Run adapter-driven native-session discovery for a just-launched session
-    /// and attach the result if found. No-op (`Ok(false)`) when the session
-    /// already has a native ref or its adapter has no filesystem discovery.
+    /// and attach the result if found. If a token-bound hook already captured
+    /// the same native id, discovery may still fill in that ref's metadata path
+    /// so file-transport activity can be watched. It never repoints an existing
+    /// ref to a different id from filesystem evidence.
+    /// No-op (`Ok(false)`) when no matching evidence is found or the adapter has
+    /// no filesystem discovery.
     /// `agent_home` is the relevant CLI home (e.g. CORTEX_HOME), resolved by the
     /// caller so core stays out of environment lookups.
     pub fn discover_and_attach_native_session(
@@ -798,9 +829,7 @@ impl WorkspaceService {
         let Some(session) = self.repo.get_session(session_id)? else {
             return Ok(false);
         };
-        if session.native_session_ref.is_some() {
-            return Ok(false);
-        }
+        let existing_native_ref = session.native_session_ref.clone();
         let Some(adapter) = built_in_adapters()
             .into_iter()
             .find(|adapter| adapter.kind() == session.agent_kind)
@@ -833,6 +862,25 @@ impl WorkspaceService {
         let Some(native_session_ref) = adapter.discover_native_session(&context)? else {
             return Ok(false);
         };
+        if let Some(existing) = existing_native_ref {
+            let existing_id = existing.session_id.as_deref();
+            let discovered_id = native_session_ref.session_id.as_deref();
+            // A token-bound hook may have already captured the native id before
+            // the file scanner finds the associated metadata path. In that case
+            // fill in the same native ref's path so file-transport activity can
+            // be watched. Never repoint an existing ref from cwd/mtime discovery.
+            if existing_id.is_some() && existing_id == discovered_id {
+                if existing.metadata_path == native_session_ref.metadata_path
+                    && existing.adapter_payload == native_session_ref.adapter_payload
+                {
+                    return Ok(false);
+                }
+                return Ok(self
+                    .repo
+                    .claim_native_session(session_id, native_session_ref)?);
+            }
+            return Ok(false);
+        }
         // Defense in depth: even past the scanner's exclusion, never attach an id
         // that already resolves to a different session.
         if let Some(discovered_id) = native_session_ref.session_id.as_deref() {
@@ -1174,7 +1222,7 @@ impl WorkspaceService {
             .ok_or_else(|| anyhow!("unknown Reverie session {session_id}"))?;
         update(&mut session);
         self.repo.upsert_session(&session)?;
-        Ok(self.repo.load_snapshot()?)
+        self.snapshot()
     }
 
     fn normalize_sessions(&self) -> Result<()> {
@@ -2668,6 +2716,121 @@ mod tests {
                 .discover_and_attach_native_session(id, Some(0), Some("/nonexistent".into()))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn discover_refreshes_missing_metadata_path_for_existing_codex_ref() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let codex_home = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let rollout_dir = codex_home.path().join("sessions/2026/06/16");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        let rollout_path = rollout_dir.join("rollout-same.jsonl");
+        std::fs::write(
+            &rollout_path,
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"codex-native","cwd":{}}}}}"#,
+                serde_json::to_string(&cwd.path().display().to_string()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let id = service
+            .create_session(
+                focus,
+                "Codex".to_owned(),
+                AgentKind::CodexCli,
+                cwd.path().into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        service
+            .attach_native_session(
+                id,
+                cwd.path().into(),
+                NativeSessionRef::codex("codex-native", None),
+                AgentKind::CodexCli,
+            )
+            .unwrap();
+
+        let refreshed = service
+            .discover_and_attach_native_session(id, Some(0), Some(codex_home.path().into()))
+            .unwrap();
+        assert!(refreshed, "same native id should fill in the rollout path");
+        let native = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == id)
+            .unwrap()
+            .native_session_ref
+            .expect("native ref");
+        assert_eq!(native.session_id.as_deref(), Some("codex-native"));
+        assert_eq!(
+            native.metadata_path.as_deref(),
+            Some(rollout_path.as_path())
+        );
+    }
+
+    #[test]
+    fn discover_does_not_repoint_existing_codex_ref_to_different_id() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let codex_home = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let rollout_dir = codex_home.path().join("sessions/2026/06/16");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        std::fs::write(
+            rollout_dir.join("rollout-other.jsonl"),
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"other-native","cwd":{}}}}}"#,
+                serde_json::to_string(&cwd.path().display().to_string()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let id = service
+            .create_session(
+                focus,
+                "Codex".to_owned(),
+                AgentKind::CodexCli,
+                cwd.path().into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        service
+            .attach_native_session(
+                id,
+                cwd.path().into(),
+                NativeSessionRef::codex("codex-native", None),
+                AgentKind::CodexCli,
+            )
+            .unwrap();
+
+        let refreshed = service
+            .discover_and_attach_native_session(id, Some(0), Some(codex_home.path().into()))
+            .unwrap();
+        assert!(
+            !refreshed,
+            "cwd discovery must not repoint an existing native ref"
+        );
+        let native = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == id)
+            .unwrap()
+            .native_session_ref
+            .expect("native ref");
+        assert_eq!(native.session_id.as_deref(), Some("codex-native"));
+        assert!(native.metadata_path.is_none());
     }
 
     /// Two same-CLI sessions sharing one folder must not adopt the same native

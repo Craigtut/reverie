@@ -1329,10 +1329,13 @@ fn spawn_launch_capture_poll(
                 return;
             };
             // Prefer the collision-proof token-bound hook over the racy cwd scan:
-            // during the grace window only stop if the hook (or, for Claude, the
-            // synchronous `--session-id` capture) has already recorded the ref.
+            // during the grace window only stop once the hook (or, for Claude,
+            // the synchronous `--session-id` capture) has recorded enough data
+            // for this transport. File transports need a watchable metadata path,
+            // not just a native id.
             if has_token_bound_hook(agent_kind) && waited < HOOK_CAPTURE_GRACE {
-                if session_native_ref_present(&service, session_id) {
+                if session_activity_binding_ready(&service, session_id, agent_kind) {
+                    register_active_file_watch(&app, &service, session_id, agent_kind);
                     return;
                 }
                 continue;
@@ -1359,7 +1362,7 @@ fn spawn_launch_capture_poll(
                 // won). Still ensure the live-state watch is attached, then stop.
                 // Otherwise the CLI has not written its file yet -> keep waiting.
                 Ok(false) => {
-                    if session_native_ref_present(&service, session_id) {
+                    if session_activity_binding_ready(&service, session_id, agent_kind) {
                         register_active_file_watch(&app, &service, session_id, agent_kind);
                         if agent_kind == AgentKind::CodexCli {
                             crate::codex_titles::maybe_schedule_codex_title_after_capture(
@@ -1375,20 +1378,30 @@ fn spawn_launch_capture_poll(
     });
 }
 
-/// Whether the session already carries a native ref (so launch-capture polling
-/// should stop). A missing session also stops the poll.
-fn session_native_ref_present(service: &WorkspaceService, session_id: SessionId) -> bool {
-    service
-        .snapshot()
-        .ok()
-        .and_then(|snapshot| {
-            snapshot
-                .sessions
-                .into_iter()
-                .find(|session| session.id == session_id)
-        })
-        .map(|session| session.native_session_ref.is_some())
-        .unwrap_or(true)
+/// Whether launch-capture polling has enough binding data for this transport.
+/// Hook-only CLIs only need the native id; file transports also need the
+/// metadata path that points the session-log watcher at the live state file.
+fn session_activity_binding_ready(
+    service: &WorkspaceService,
+    session_id: SessionId,
+    agent_kind: AgentKind,
+) -> bool {
+    let Some(session) = service.snapshot().ok().and_then(|snapshot| {
+        snapshot
+            .sessions
+            .into_iter()
+            .find(|session| session.id == session_id)
+    }) else {
+        return true;
+    };
+    let Some(reference) = session.native_session_ref else {
+        return false;
+    };
+    if is_file_transport(agent_kind) {
+        watch_path_for_ref(&reference).is_some()
+    } else {
+        true
+    }
 }
 
 /// Resolve the CLI home directory whose on-disk session records the adapter for
