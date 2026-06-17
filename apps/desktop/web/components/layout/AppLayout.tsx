@@ -552,13 +552,18 @@ const terminalDropHostClass = css({
 // subtle (tune via --glow); this replaces the old backdrop radial-gradient.
 const terminalGlowClass = css({
   position: 'fixed',
-  top: 0,
-  left: 0,
-  width: '58vw',
-  height: '66vh',
+  inset: 0,
   zIndex: 1,
   pointerEvents: 'none',
-  background: 'radial-gradient(circle at top left, var(--glow), transparent 70%)',
+  // Span the whole window and give the falloff an EXPLICIT radius so the glow
+  // fades to transparent on its own, well inside the viewport, instead of being
+  // chopped by a box edge. The previous 58vw x 66vh box clipped the still-bright
+  // part of the gradient on tall/portrait windows (the `transparent 70%` stop is
+  // sized to the box's farthest corner, which lands outside the short axis),
+  // leaving a hard line and flat black beyond it. A fixed-px circle is
+  // aspect-ratio independent: same soft corner glow on any window shape. Tune the
+  // radius for reach and --glow for intensity.
+  background: 'radial-gradient(circle 900px at top left, var(--glow), transparent)',
 });
 
 function ConnectionPanelHost() {
