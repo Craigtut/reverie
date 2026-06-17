@@ -16,6 +16,18 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../Frameworks");
     }
 
+    // Compile the Objective-C folder-identity bookmark shim and link Foundation.
+    // Backs project auto-reconnect (following a project folder across a rename or
+    // move). macOS-only, like the rest of the app.
+    if target_os == "macos" {
+        cc::Build::new()
+            .file("native/reverie_bookmark.m")
+            .flag("-fobjc-arc")
+            .compile("reverie_bookmark");
+        println!("cargo:rerun-if-changed=native/reverie_bookmark.m");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+    }
+
     // Stage the Ghostty dynamic library to a stable path that
     // `tauri.conf.json > bundle > macOS.frameworks` references, so the bundler
     // copies it into `Contents/Frameworks/` and signs it.

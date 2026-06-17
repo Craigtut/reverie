@@ -32,6 +32,11 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// The event the WebView listens on for per-project git updates.
 const GIT_STATUS_EVENT: &str = "git_status_changed";
 
+/// The coarse "your snapshot is stale, refetch it" event the WebView already
+/// listens on. We reuse it to push a project's folder-missing / auto-reconnected
+/// state to an open UI the moment the poll loop notices a folder moved.
+const SESSION_RECORD_CHANGED_EVENT: &str = "session_record_changed";
+
 /// Per-project git snapshot pushed to the WebView. `status` is `None` when the
 /// folder is not a git repository, so the UI can drop the repo strip cleanly.
 #[derive(Clone, serde::Serialize)]
@@ -46,6 +51,9 @@ pub struct GitStatusEvent {
 /// UI-declared watched set, and the channel used to wake the loop immediately.
 pub struct GitWatch {
     cache: Mutex<HashMap<String, Option<RepoStatus>>>,
+    /// Last seen per-project folder state (stored path + whether it was missing),
+    /// so we emit a refetch only when a folder actually moves or goes missing.
+    folders: Mutex<HashMap<String, (PathBuf, bool)>>,
     declared: Mutex<HashSet<String>>,
     active: AtomicBool,
     wake: Mutex<Option<Sender<()>>>,
@@ -55,6 +63,7 @@ impl Default for GitWatch {
     fn default() -> Self {
         Self {
             cache: Mutex::new(HashMap::new()),
+            folders: Mutex::new(HashMap::new()),
             declared: Mutex::new(HashSet::new()),
             active: AtomicBool::new(true),
             wake: Mutex::new(None),
@@ -111,9 +120,15 @@ fn poll_once(app: &AppHandle, watch: &GitWatch) {
     let Some(service) = app.try_state::<WorkspaceService>() else {
         return;
     };
+    // Follow any project folder that moved or was renamed while Reverie has been
+    // running: reconcile heals what it can via bookmarks, then we read the fresh
+    // snapshot (which carries each project's up-to-date folder-missing flag).
+    // This is what makes detection continuous rather than boot-only.
+    let _ = service.reconcile_project_folders();
     let Ok(snapshot) = service.snapshot() else {
         return;
     };
+    emit_folder_changes(app, watch, &snapshot);
 
     let paths: HashMap<String, std::path::PathBuf> = snapshot
         .projects
@@ -146,6 +161,36 @@ fn emit_if_changed(
         cache.insert(project_id.clone(), status.clone());
     }
     let _ = app.emit(GIT_STATUS_EVENT, GitStatusEvent { project_id, status });
+}
+
+/// Push a snapshot-refetch to the WebView when any project's folder state changed
+/// since the last tick (its stored path moved, or it crossed into/out of the
+/// missing state). The first population is silent: the UI already has the boot
+/// snapshot, so there is nothing new to tell it yet.
+fn emit_folder_changes(app: &AppHandle, watch: &GitWatch, snapshot: &WorkspaceSnapshot) {
+    let current: HashMap<String, (PathBuf, bool)> = snapshot
+        .projects
+        .iter()
+        .map(|project| {
+            (
+                project.id.to_string(),
+                (project.path.clone(), project.folder_missing),
+            )
+        })
+        .collect();
+    let should_emit = {
+        let mut cache = watch.folders.lock().unwrap();
+        let was_populated = !cache.is_empty();
+        if *cache == current {
+            false
+        } else {
+            *cache = current;
+            was_populated
+        }
+    };
+    if should_emit {
+        let _ = app.emit(SESSION_RECORD_CHANGED_EVENT, ());
+    }
 }
 
 /// The set of projects worth polling: those the UI declared visible, plus any

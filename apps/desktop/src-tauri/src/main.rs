@@ -2,6 +2,8 @@
 
 mod activity_bridge;
 mod agent_trust;
+#[cfg(target_os = "macos")]
+mod bookmark;
 #[cfg(unix)]
 mod bridge;
 #[cfg(unix)]
@@ -212,6 +214,11 @@ fn main() {
                     .map_err(|err| anyhow::anyhow!("failed to open Reverie database: {err}"))?,
             );
             let service = WorkspaceService::new(repository.clone());
+            // Attach the macOS folder-identity bookmark provider so a project can
+            // follow its folder across a rename or move (auto-reconnect).
+            #[cfg(target_os = "macos")]
+            let service =
+                service.with_bookmark_provider(std::sync::Arc::new(bookmark::MacBookmarkProvider));
             // Did the previous run die without a graceful shutdown (crash, panic,
             // force-kill, power loss)? If so, any session still marked `running` is
             // stale: its process is gone (and the orphan reaper below SIGKILLs any
@@ -458,6 +465,7 @@ fn main() {
             commands::resolve_project_folder,
             commands::create_project,
             commands::create_project_from_folder,
+            commands::relocate_project,
             commands::create_focus,
             commands::create_session,
             commands::set_session_archived,

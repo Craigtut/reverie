@@ -957,6 +957,26 @@ pub(crate) fn archive_project(
         .map_err(|err| err.to_string())
 }
 
+/// Repoint a project at a folder the user chose. This is the manual "Locate
+/// folder" repair for a moved or renamed folder that auto-reconnect could not
+/// follow (a cross-volume move, a deleted-then-restored folder, or a project
+/// with no stored bookmark). Rejects a non-directory so a stale or hand-typed
+/// path can't strand the project further. Repoints the project's session cwds so
+/// they reopen in place.
+#[tauri::command]
+pub(crate) fn relocate_project(
+    service: State<'_, WorkspaceService>,
+    project_id: ProjectId,
+    new_path: PathBuf,
+) -> Result<WorkspaceSnapshot, String> {
+    if !new_path.is_dir() {
+        return Err(format!("That path is not a folder: {}", new_path.display()));
+    }
+    service
+        .relocate_project(project_id, new_path)
+        .map_err(|err| err.to_string())
+}
+
 /// Permanently delete a project together with its topics and sessions. Used by
 /// the Settings purge for an archived project. Reaps each session's runtime
 /// first; an archived project's sessions are already stopped, but this stays
