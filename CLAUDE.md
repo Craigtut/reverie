@@ -45,7 +45,7 @@ reverie/
 ```bash
 npm run dev               # run the desktop app on the DEV channel (separate data dir + "dev" badged icon)
 npm run dev:harness       # browser-only React UI loop (Vite + Panda); load harness fixtures via the harness query param
-npm run dev:reset         # wipe the dev channel's data (only ever the com.animus.reverie.dev folder)
+npm run dev:reset         # wipe the dev channel's data (only ever the com.muselab.reverie.dev folder)
 npm run check             # frontend typecheck/build + Rust tests/checks
 npm run build             # PRODUCTION desktop build (base identity; install/test prod locally)
 npm run version:set -- X  # bump version across all 6 manifests in lockstep (x.y.z | patch | minor | major)
@@ -65,7 +65,7 @@ Keep the checks in [`docs/technical/implementation-queue.md`](docs/technical/imp
 
 ### Dev vs production channels
 
-`npm run dev` runs the **dev channel**: a separate bundle identifier (`com.animus.reverie.dev`, productName "Reverie Dev", badged Dock icon, " Dev" window title). Production (`npm run build`, `npm run bundle`) keeps the base `com.animus.reverie`. Because macOS namespaces Application Support by identifier, the dev build's database, scratch workspaces, and diagnostics live in a **separate folder** and never co-mingle with a real install. The agent CLI homes (`~/.claude`, `~/.codex`, `~/.cortex`) are intentionally shared across channels: those sessions belong to the CLIs.
+`npm run dev` runs the **dev channel**: a separate bundle identifier (`com.muselab.reverie.dev`, productName "Reverie Dev", badged Dock icon, " Dev" window title). Production (`npm run build`, `npm run bundle`) keeps the base `com.muselab.reverie`. Because macOS namespaces Application Support by identifier, the dev build's database and diagnostics live in a **separate folder** and never co-mingle with a real install. CLI-readable scratch and hook files use `~/.reverie-dev/` for dev and `~/.reverie/` for production. The agent CLI homes (`~/.claude`, `~/.codex`, `~/.cortex`) are intentionally shared across channels: those sessions belong to the CLIs.
 
 - Mechanism: `scripts/tauri-channel.mjs dev` merges `tauri.dev.conf.json` over `tauri.conf.json` via the `TAURI_CONFIG` env var (the same RFC 7396 merge the Tauri CLI's `--config` uses; `tauri-build` reads it at compile time). It works through our `cargo run` dev path without the Tauri CLI. Production paths pass no overlay, so a local `npm run build` is a real production app.
 - `npm run dev:reset` wipes the dev data folder (only ever the `.dev` path) when a schema or migration needs a clean slate.
@@ -77,7 +77,7 @@ Keep the checks in [`docs/technical/implementation-queue.md`](docs/technical/imp
 The desktop app appends terminal renderer diagnostics (dev channel only) to its app-data dir:
 
 ```bash
-~/Library/Application Support/com.animus.reverie.dev/terminal-diagnostics.jsonl   # npm run dev
+~/Library/Application Support/com.muselab.reverie.dev/terminal-diagnostics.jsonl   # npm run dev
 # A production build writes no diagnostics log.
 ```
 

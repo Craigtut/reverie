@@ -8,6 +8,7 @@ mod bookmark;
 mod bridge;
 #[cfg(unix)]
 mod bridge_installer;
+mod clipboard;
 mod codex_titles;
 mod commands;
 #[cfg(unix)]
@@ -249,6 +250,8 @@ fn main() {
             // Reap scratch workspaces left by General sessions that no longer
             // exist (e.g. if a crash interrupted delete-time cleanup).
             commands::sweep_orphan_general_sessions(app.handle(), &service);
+            // Reap stale clipboard-image temp files from earlier runs.
+            commands::sweep_pasted_images(app.handle());
             // Publish the service only after the database is opened, migrated,
             // and seeded. `WorkspaceBoot` is managed on the builder below, so it
             // is available the instant the webview fires its first
@@ -280,7 +283,7 @@ fn main() {
             }
 
             // Dev channel adornment: the dev build runs from a separate bundle
-            // identifier (com.animus.reverie.dev) so its data never co-mingles
+            // identifier (com.muselab.reverie.dev) so its data never co-mingles
             // with a real install. Make it visibly distinct too, so the two are
             // never confused on screen.
             if commands::is_dev_channel(app.handle()) {
@@ -508,6 +511,8 @@ fn main() {
             commands::record_terminal_diagnostics,
             commands::open_url,
             commands::system_home_dir,
+            commands::read_clipboard_image,
+            commands::save_pasted_image,
             git_watch::set_git_watch_projects,
             git_watch::git_status,
             git_watch::git_pull,

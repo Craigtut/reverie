@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// reset-dev-data.mjs — wipe the dev channel's stored data (the Reverie database,
-// General scratch workspaces, diagnostics) so a botched migration or a stale
-// schema can be cleared in one step.
+// reset-dev-data.mjs: wipe the dev channel's Application Support data (the
+// Reverie database and diagnostics) so a botched migration or a stale schema can
+// be cleared in one step.
 //
 // This targets ONLY the dev bundle's Application Support folder. The `.dev`
 // suffix is hardcoded and the path is asserted to contain it before any delete,
@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 
-const DEV_IDENTIFIER = 'com.animus.reverie.dev';
+const DEV_IDENTIFIER = 'com.muselab.reverie.dev';
 const target = join(homedir(), 'Library', 'Application Support', DEV_IDENTIFIER);
 
 // Safety rail: never proceed unless the resolved path is the dev folder.

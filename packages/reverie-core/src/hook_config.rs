@@ -1,9 +1,9 @@
 //! Per-session hook config writer for Claude Code.
 //!
 //! Each launched Claude session gets a private settings file (under Reverie's
-//! cache root, never the user's `~/.claude`) declaring HTTP lifecycle hooks
-//! that point at Reverie's localhost hook server. The launch path attaches it
-//! with `claude --settings <file>`, which merges additively on top of the
+//! CLI-readable home, never the user's `~/.claude`) declaring HTTP lifecycle
+//! hooks that point at Reverie's localhost hook server. The launch path attaches
+//! it with `claude --settings <file>`, which merges additively on top of the
 //! user's own settings and leaves `~/.claude` (credentials/auth) untouched, so
 //! no credential-home redirect is needed and the CLI never re-prompts to sign
 //! in. We deliberately do NOT set `CLAUDE_CONFIG_DIR`: that would redirect the

@@ -151,12 +151,12 @@ helper inside `Contents/MacOS/`, signed. Both are solved by
 `scripts/stage-bridge.mjs`, which builds the helper crate (`cargo build -p
 reverie-bridge`, no Zig needed) and copies each binary to:
 
-- `apps/desktop/src-tauri/binaries/<name>-<target-triple>` (gitignored) — the
+- `apps/desktop/src-tauri/binaries/<name>-<target-triple>` (gitignored): the
   Tauri `externalBin` staging location. `tauri.conf.json > bundle > externalBin`
   lists `binaries/reverie-bridge`, `binaries/reverie-bridge-preturn-hook`, and
   `binaries/reverie-codex-hook`; the bundler copies them into `Contents/MacOS/`
   (triple suffix stripped) and signs them next to the main binary.
-- `apps/desktop/src-tauri/target/<profile>/<name>` — next to the dev/run desktop
+- `apps/desktop/src-tauri/target/<profile>/<name>`: next to the dev/run desktop
   binary, so `current_exe().parent()` resolves in `npm run dev` / `run:release`.
 
 Staging is wired in two ways. The cargo-direct scripts (`dev:desktop`,
@@ -243,19 +243,21 @@ them, so users still get a single installer). Linux would mirror macOS with an
 ## Dev vs production channels
 
 The app ships from one base config (`tauri.conf.json` = production,
-`com.animus.reverie`). To keep a `npm run dev` build from co-mingling its data,
+`com.muselab.reverie`). To keep a `npm run dev` build from co-mingling its data,
 icon, and Dock identity with a real install, the **dev channel** runs under a
 separate bundle identifier.
 
 - **Identity.** `scripts/tauri-channel.mjs dev` merges
   `apps/desktop/src-tauri/tauri.dev.conf.json` (`identifier`
-  `com.animus.reverie.dev`, `productName` "Reverie Dev", a badged icon set in
+  `com.muselab.reverie.dev`, `productName` "Reverie Dev", a badged icon set in
   `icons-dev/`) over the base config. macOS namespaces Application Support,
-  Caches, and Preferences by identifier, so the dev build's database, General
-  scratch workspaces, and diagnostics land in
-  `~/Library/Application Support/com.animus.reverie.dev/` and never touch the
-  production folder. The agent CLI homes (`~/.claude`, `~/.codex`, `~/.cortex`)
-  are deliberately shared: those sessions belong to the CLIs, not to Reverie.
+  Caches, and Preferences by identifier, so the dev build's database and
+  diagnostics land in `~/Library/Application Support/com.muselab.reverie.dev/`
+  and never touch the production folder. CLI-readable scratch and hook files
+  live under `~/.reverie/` for production and `~/.reverie-dev/` for dev. The
+  agent CLI homes
+  (`~/.claude`, `~/.codex`, `~/.cortex`) are deliberately shared: those sessions
+  belong to the CLIs, not to Reverie.
 
 - **Mechanism.** The overlay is passed through the `TAURI_CONFIG` env var, a
   JSON string that `tauri-build` reads at compile time and merge-patches
@@ -349,7 +351,7 @@ updater path.
   `releases/latest/download/latest.json`. Because it resolves `latest`, only a
   **published** (non-draft) release becomes live to installed apps.
 - **Channel gating.** Updates run on the production channel only. The dev channel
-  (`com.animus.reverie.dev`) is a bare `cargo run` binary with no installable
+  (`com.muselab.reverie.dev`) is a bare `cargo run` binary with no installable
   bundle; the frontend reads `updater_status` (which returns `enabled: false`
   when `is_dev_channel`) and never reaches out. The browser harness is disabled
   the same way (no Tauri runtime).

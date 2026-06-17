@@ -3363,6 +3363,8 @@ mod tests {
         assert_eq!(
             session.native_session_ref.and_then(|r| r.session_id),
             Some("second".to_owned())
+        );
+    }
 
     // --- folder-missing detection, relocation, and bookmark reconnection ---
 
@@ -3501,10 +3503,7 @@ mod tests {
         let (_project_id, session_id) = project_with_session(&service, &folder);
         std::fs::remove_dir_all(&folder).unwrap();
         let err = service.build_agent_launch(session_id, 80, 24).unwrap_err();
-        assert!(
-            err.to_string().contains("folder is missing"),
-            "got: {err}"
-        );
+        assert!(err.to_string().contains("folder is missing"), "got: {err}");
     }
 
     #[test]
@@ -3592,7 +3591,5 @@ mod tests {
         assert!(!changed);
         let snap = service.snapshot().unwrap();
         assert!(project_in(&snap, project_id).folder_missing);
-    }
-        );
     }
 }

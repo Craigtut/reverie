@@ -40,7 +40,7 @@ Process/PTY runtime Terminal renderer backend
 
 ### Workspace
 
-Represents Reverie's local home. (General sessions get per-session scratch dirs under `general-sessions/` in the app data dir; that path is a runtime concern, not a stored field.)
+Represents Reverie's local home. (General sessions get per-session scratch dirs under `~/.reverie/general-sessions/`; dev builds use `~/.reverie-dev/general-sessions/`. That path is a runtime concern, not a stored field.)
 
 Fields:
 
@@ -169,7 +169,7 @@ Persistence is **SQLite**, and it is live (not a future pass). The storage seam 
 - **Incremental, by-id writes** (`upsert_project`, `upsert_focus`, `upsert_session`, ...). There is deliberately no bulk `save_snapshot`; rewriting the whole graph on every mutation was the previous design's central flaw. Callers mutate one entity at a time and `load_snapshot` reads the full `WorkspaceSnapshot` when they need it.
 - Backend errors (`rusqlite`, serde) are flattened into the core `PersistenceError` so the trait and the service above it never depend on the concrete engine.
 - `ensure_seeded` inserts the workspace row only if none exists, so first-run seeding is idempotent.
-- Stored under the Tauri app data directory. General (project-less) sessions get a fresh per-session scratch workspace under `general-sessions/` there, created on session start and removed on delete.
+- Stored under the Tauri app data directory. General (project-less) sessions get a fresh per-session scratch workspace under `~/.reverie/general-sessions/` (or `~/.reverie-dev/general-sessions/` for dev builds), created on session start and removed on delete, so external CLIs do not need to read Reverie's macOS app-data directory.
 - `InMemoryWorkspaceRepository` (in `reverie-core`) backs the service's unit tests and any headless/harness use, mirroring the frontend's fixture-runtime pattern.
 
 Migrations are an ordered list keyed on `PRAGMA user_version`: entry `i` migrates `user_version` from `i` to `i + 1`, and a shipped entry is never edited (append a new one for each change). Current tables include `workspace`, `projects`, `focuses`, `sessions`, `connections`, `connection_messages`, and `session_transcript_chunk`.

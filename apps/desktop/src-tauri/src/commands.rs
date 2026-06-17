@@ -628,22 +628,155 @@ fn reap_session_runtime(app: &AppHandle, runtime: &TerminalSessionRuntime, sessi
     unregister_session_from_bridge(app, session_id);
 }
 
-/// Delete the per-session hook config directory written under the app cache at
-/// launch (`<cache>/sessions/<id>`). Best-effort: a leftover dir is harmless and
-/// is rewritten on the next launch, so any failure only logs. The token itself
-/// is revoked separately; a terminated-but-resumable session deliberately keeps
-/// its token until removal or the next launch replaces it.
+/// Delete the per-session hook config directory written at launch. Best-effort:
+/// a leftover dir is harmless and is rewritten on the next launch, so any
+/// failure only logs. The token itself is revoked separately; a
+/// terminated-but-resumable session deliberately keeps its token until removal
+/// or the next launch replaces it.
 fn cleanup_session_hook_config(app: &AppHandle, session_id: SessionId) {
-    let Ok(base) = app.path().app_cache_dir() else {
+    let Ok(root) = session_hook_root(app) else {
         return;
     };
-    let dir = base.join("sessions").join(session_id.to_string());
+    let dir = root.join(session_id.to_string());
     if dir.exists() {
         if let Err(err) = std::fs::remove_dir_all(&dir) {
             eprintln!(
                 "[reverie-hooks] failed removing session hook dir {}: {err}",
                 dir.display()
             );
+        }
+    }
+}
+
+const REVERIE_HOME_DIR: &str = ".reverie";
+const REVERIE_DEV_HOME_DIR: &str = ".reverie-dev";
+const GENERAL_SESSIONS_DIR: &str = "general-sessions";
+const SESSION_HOOKS_DIR: &str = "session-hooks";
+const PASTED_IMAGES_DIR: &str = "pasted-images";
+
+/// How long a pasted-image temp file lives before the boot sweeper reaps it. A
+/// pasted image is only needed between landing at the prompt and the CLI reading
+/// it on send, so a generous day covers a prompt left sitting open overnight.
+const PASTED_IMAGE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+fn cli_files_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "HOME is not set, so Reverie cannot create CLI files".to_owned())?;
+    Ok(cli_files_root_for(
+        home,
+        is_dev_identifier(&app.config().identifier),
+    ))
+}
+
+fn cli_files_root_for(home: PathBuf, dev_channel: bool) -> PathBuf {
+    home.join(if dev_channel {
+        REVERIE_DEV_HOME_DIR
+    } else {
+        REVERIE_HOME_DIR
+    })
+}
+
+fn is_dev_identifier(identifier: &str) -> bool {
+    identifier.ends_with(".dev")
+}
+
+fn ensure_private_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir)
+            .map_err(|err| format!("failed to stat {}: {err}", dir.display()))?
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(dir, perms)
+            .map_err(|err| format!("failed to chmod 0700 {}: {err}", dir.display()))?;
+    }
+    Ok(())
+}
+
+fn session_hook_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(cli_files_root(app)?.join(SESSION_HOOKS_DIR))
+}
+
+/// Root that holds external CLI-readable files. This deliberately lives outside
+/// macOS Application Support and Caches: Claude/Codex/Cortex are separate
+/// signed tools, and handing them paths inside Reverie's app-data directories
+/// can trigger SystemPolicyAppData prompts.
+fn general_sessions_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(cli_files_root(app)?.join(GENERAL_SESSIONS_DIR))
+}
+
+/// Directory holding temp images pasted from the clipboard. Lives under the
+/// CLI-readable root (outside Application Support) for the same reason General
+/// scratch workspaces do: the agent CLIs are separate signed tools, and handing
+/// them a path inside Reverie's app-data dirs can trigger SystemPolicyAppData
+/// prompts.
+fn pasted_images_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(cli_files_root(app)?.join(PASTED_IMAGES_DIR))
+}
+
+/// Write PNG bytes to a fresh temp file in the pasted-images dir and return its
+/// absolute path. The caller (the React paste handler) inserts that path at the
+/// session's prompt exactly like a dropped file, so the CLI attaches the image.
+fn write_pasted_png(app: &AppHandle, bytes: &[u8]) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("clipboard image was empty".to_owned());
+    }
+    let dir = pasted_images_root(app)?;
+    ensure_private_dir(&dir)?;
+    let path = dir.join(format!("paste-{}.png", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes)
+        .map_err(|err| format!("failed to write pasted image {}: {err}", path.display()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read an image off the OS clipboard, persist it as a temp PNG, and return the
+/// path. Returns `None` when the clipboard holds no usable image (the frontend
+/// then falls back to the DOM paste event's image blob). This is the primary
+/// clipboard-image paste path: it sees screenshots and TIFF data the WebView
+/// clipboard does not reliably expose, and it serves the right-click Paste menu.
+#[tauri::command]
+pub fn read_clipboard_image(app: AppHandle) -> Result<Option<String>, String> {
+    match crate::clipboard::read_clipboard_png() {
+        Some(bytes) => Ok(Some(write_pasted_png(&app, &bytes)?)),
+        None => Ok(None),
+    }
+}
+
+/// Persist image bytes the frontend extracted from a DOM paste event (already
+/// normalized to PNG) as a temp file and return the path. The fallback for the
+/// rare case where the native pasteboard read comes up empty but the WebView
+/// surfaced the image on the paste event.
+#[tauri::command]
+pub fn save_pasted_image(app: AppHandle, bytes: Vec<u8>) -> Result<String, String> {
+    write_pasted_png(&app, &bytes)
+}
+
+/// Reap pasted-image temp files older than [`PASTED_IMAGE_MAX_AGE_SECS`]. Called
+/// at boot so abandoned pastes (a prompt closed before sending) do not pile up.
+/// Best-effort: a directory that does not exist or files that resist deletion
+/// are skipped silently.
+pub fn sweep_pasted_images(app: &AppHandle) {
+    let Ok(dir) = pasted_images_root(app) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        let aged_out = now
+            .duration_since(modified)
+            .map(|age| age.as_secs() > PASTED_IMAGE_MAX_AGE_SECS)
+            .unwrap_or(false);
+        if aged_out {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -659,28 +792,16 @@ If the user wants to keep this work, help them move it into a real project folde
 (a folder on their computer that they choose) rather than leaving it here.
 ";
 
-/// Root that holds the per-session scratch workspaces for General (project-less)
-/// sessions, kept under the app data dir next to the database.
-fn general_sessions_root(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|base| base.join("general-sessions"))
-        .map_err(|err| format!("failed to resolve app data dir: {err}"))
-}
-
 /// Create a fresh, isolated scratch workspace for a General session and return
 /// its path. The folder token is independent of the session id (which does not
 /// exist yet at create time); the session's stored cwd is the only link back. The
 /// directory is seeded with a CLAUDE.md plus a relative AGENTS.md symlink so any
 /// CLI launched here gets the same orientation.
 fn provision_general_workspace(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = general_sessions_root(app)?.join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir).map_err(|err| {
-        format!(
-            "failed to create general workspace {}: {err}",
-            dir.display()
-        )
-    })?;
+    let root = general_sessions_root(app)?;
+    ensure_private_dir(&root)?;
+    let dir = root.join(uuid::Uuid::new_v4().to_string());
+    ensure_private_dir(&dir)?;
     scaffold_general_workspace(&dir).map_err(|err| {
         format!(
             "failed to scaffold general workspace {}: {err}",
@@ -1502,13 +1623,14 @@ fn keep_cli_auth_env_unmodified(
 /// Attach Reverie's per-session Claude Code lifecycle hooks to the spawn.
 ///
 /// Mints a token, registers it with the hook server, writes a private
-/// `settings.json` under the app cache, and appends `--settings <file>` to the
-/// launch via the adapter so Claude POSTs its lifecycle hooks to Reverie's
-/// localhost server. Best-effort: if the hook server is not managed or the
-/// cache dir cannot be resolved, the session still launches and the transcript
-/// scanner remains the capture fallback. We never set `CLAUDE_CONFIG_DIR`, so
-/// `~/.claude` credentials are untouched and `assert_safe_cli_env` keeps passing
-/// (the attach adds a CLI arg, not an env var).
+/// `settings.json` under Reverie's CLI files root, and appends `--settings
+/// <file>` to the launch via the adapter so Claude POSTs its lifecycle hooks to
+/// Reverie's localhost server. Best-effort: if the hook server is not managed
+/// or the hook dir cannot be resolved, the session still launches and the
+/// transcript scanner remains the capture fallback. We never set
+/// `CLAUDE_CONFIG_DIR`, so `~/.claude` credentials are untouched and
+/// `assert_safe_cli_env` keeps passing (the attach adds a CLI arg, not an env
+/// var).
 fn attach_claude_hooks(
     app: &AppHandle,
     shell_session_id: SessionId,
@@ -1522,13 +1644,10 @@ fn attach_claude_hooks(
         _ => return,
     };
 
-    let config_dir = match app.path().app_cache_dir() {
-        Ok(base) => base
-            .join("sessions")
-            .join(shell_session_id.to_string())
-            .join("claude"),
+    let config_dir = match session_hook_root(app) {
+        Ok(base) => base.join(shell_session_id.to_string()).join("claude"),
         Err(err) => {
-            eprintln!("[reverie-hooks] cannot resolve app cache dir: {err}");
+            eprintln!("[reverie-hooks] cannot resolve CLI files dir: {err}");
             return;
         }
     };
@@ -1806,6 +1925,24 @@ fn build_ghostty_frame_sequence() -> Result<GhosttyFrameSequence> {
         output_bytes,
         frames,
     })
+}
+
+#[cfg(test)]
+mod cli_files_path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn production_files_root_is_the_plain_reverie_home() {
+        let root = cli_files_root_for(PathBuf::from("/Users/alex"), false);
+        assert_eq!(root, PathBuf::from("/Users/alex/.reverie"));
+    }
+
+    #[test]
+    fn dev_files_root_is_the_reverie_dev_home() {
+        let root = cli_files_root_for(PathBuf::from("/Users/alex"), true);
+        assert_eq!(root, PathBuf::from("/Users/alex/.reverie-dev"));
+    }
 }
 
 #[cfg(test)]

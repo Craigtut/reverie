@@ -54,10 +54,10 @@ The user's local Reverie home. Stores app settings, detected CLIs, project list,
 Local path (macOS):
 
 ```text
-~/Library/Application Support/com.animus.reverie/
+~/Library/Application Support/com.muselab.reverie/
 ```
 
-General (project-less) sessions each get a fresh, temporary scratch working directory under `general-sessions/` in that same app data directory, created when the session starts and removed when the session is deleted.
+General (project-less) sessions each get a fresh, temporary scratch working directory under `~/.reverie/general-sessions/`, created when the session starts and removed when the session is deleted. Dev builds use `~/.reverie-dev/general-sessions/`. This keeps external agent CLIs out of Reverie's macOS app-data directory.
 
 ### Project
 

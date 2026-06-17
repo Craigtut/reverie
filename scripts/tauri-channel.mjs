@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// tauri-channel.mjs — pick the build/run channel for the desktop app, then exec
+// tauri-channel.mjs: pick the build/run channel for the desktop app, then exec
 // the rest of the command with that channel's config layered in.
 //
 //   node scripts/tauri-channel.mjs <channel> <cmd> [args...]
@@ -9,8 +9,8 @@
 // keep a `npm run dev` build from co-mingling its data, icon, and Dock identity
 // with a real install, the `dev` channel merges tauri.dev.conf.json over the
 // base config. That overlay changes the bundle identifier to
-// `com.animus.reverie.dev`, which is what macOS namespaces Application Support,
-// Caches, and Preferences by — so `app_data_dir()` (the Reverie database) moves
+// `com.muselab.reverie.dev`, which is what macOS namespaces Application Support,
+// Caches, and Preferences by, so `app_data_dir()` (the Reverie database) moves
 // to a separate folder with zero Rust changes.
 //
 // The merge uses TAURI_CONFIG, a JSON string that `tauri-build` reads at compile
