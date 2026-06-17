@@ -37,7 +37,7 @@ import {
 } from '../session';
 import { CommandPalette } from '../palette';
 import { EmptyState } from '../onboarding';
-import { DashboardSurface, ProjectDashboardSurface } from '../dashboard';
+import { DashboardSurface, ProjectDashboardSurface, type SessionCardActions } from '../dashboard';
 import { CreationComposer } from '../creation';
 import { SettingsSurface } from '../settings';
 import { ConnectionPanel, ConnectionRequestBanner } from '../connections';
@@ -164,6 +164,18 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setNewSessionAgentKind(next);
   };
 
+  // The session card right-click actions, shared by every dashboard so a card's
+  // context menu matches the left nav's. Same mutations the sidebar wires up:
+  // rename (empty resets to the automatic name), reset-to-automatic, the folder
+  // utilities, and the reversible archive.
+  const dashboardSessionActions: SessionCardActions = {
+    onRename: (session, title) => void renameSession(session, title),
+    onUseAutomaticName: session => void resetSessionTitleToAuto(session),
+    onRevealPath: path => void revealPath(path),
+    onCopyPath: path => void copyPath(path),
+    onArchive: session => void archiveSession(session),
+  };
+
   // Native file drag-drop: resolves the session under the cursor (terminal body
   // or a session tab) and inserts dropped paths into it. Drives the drop overlay.
   const dropModel = useTerminalFileDrop({
@@ -278,6 +290,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             sessionTerminalBindings={sessionTerminalBindings}
             cortexActivity={cortexActivity}
             sessionTimelines={sessionTimelines}
+            sessionActions={dashboardSessionActions}
             onOpenSession={openSessionFromDashboard}
             onCreateProject={() => openCreation('project')}
             onCreateGeneralSession={startGeneralSession}
@@ -295,6 +308,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             sessionTerminalBindings={sessionTerminalBindings}
             cortexActivity={cortexActivity}
             sessionTimelines={sessionTimelines}
+            sessionActions={dashboardSessionActions}
             onOpenSession={openSessionFromDashboard}
             onRestoreTopic={focus => void restoreFocusRecord(focus)}
             onDeleteTopic={focus => void deleteFocusRecord(focus)}
@@ -331,6 +345,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             sessionTerminalBindings={sessionTerminalBindings}
             cortexActivity={cortexActivity}
             sessionTimelines={sessionTimelines}
+            sessionActions={dashboardSessionActions}
             onOpenSession={openSessionFromDashboard}
             onRestore={session =>
               restoreSessionTab(session).catch(error =>

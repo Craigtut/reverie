@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { MouseEvent, ReactNode } from 'react';
 
 import { css } from '../../styled-system/css';
 import { activityForSession } from '../../domain';
@@ -21,7 +21,11 @@ export function DashboardRail({
   shell,
   bindings,
   cortexActivity,
+  renamingSessionId,
   onOpenSession,
+  onContextMenuSession,
+  onCommitRename,
+  onCancelRename,
 }: {
   title: string;
   icon?: ReactNode;
@@ -30,7 +34,11 @@ export function DashboardRail({
   shell: WorkspaceShellSnapshot;
   bindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
+  renamingSessionId: string | null;
   onOpenSession: (session: ShellSession) => void;
+  onContextMenuSession: (event: MouseEvent<HTMLElement>, session: ShellSession) => void;
+  onCommitRename: (session: ShellSession, value: string) => void;
+  onCancelRename: () => void;
 }) {
   return (
     <section className={dashboardRailClass} data-tone={tone} data-testid={`dashboard-rail-${tone}`}>
@@ -58,7 +66,11 @@ export function DashboardRail({
             isBound={Boolean(bindings[session.id])}
             activity={activityForSession(session, cortexActivity)}
             tone={tone}
+            renaming={renamingSessionId === session.id}
             onOpen={() => onOpenSession(session)}
+            onContextMenu={event => onContextMenuSession(event, session)}
+            onCommitRename={value => onCommitRename(session, value)}
+            onCancelRename={onCancelRename}
           />
         ))}
       </div>

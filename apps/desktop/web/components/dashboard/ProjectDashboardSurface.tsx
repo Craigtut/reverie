@@ -16,7 +16,7 @@ import type {
 import { useGitStatusStore } from '../../store';
 import { Typography } from '../primitives/Typography';
 import { DashboardCountPills } from './DashboardCountPills';
-import { DashboardStateRails } from './DashboardStateRails';
+import { DashboardStateRails, type SessionCardActions } from './DashboardStateRails';
 import { RepoStrip } from './RepoStrip';
 
 // One project's overview, a zoom level below Home: every active session across
@@ -31,6 +31,7 @@ export function ProjectDashboardSurface({
   sessionTerminalBindings,
   cortexActivity,
   sessionTimelines,
+  sessionActions,
   onOpenSession,
   onRestoreTopic,
   onDeleteTopic,
@@ -40,6 +41,7 @@ export function ProjectDashboardSurface({
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
   sessionTimelines: Record<string, SessionStateTimeline>;
+  sessionActions: SessionCardActions;
   onOpenSession: (session: ShellSession) => void;
   onRestoreTopic: (focus: ShellFocus) => void;
   onDeleteTopic: (focus: ShellFocus) => void;
@@ -115,6 +117,7 @@ export function ProjectDashboardSurface({
             bindings={sessionTerminalBindings}
             cortexActivity={cortexActivity}
             sessionTimelines={sessionTimelines}
+            sessionActions={sessionActions}
             onOpenSession={onOpenSession}
           />
         ) : (

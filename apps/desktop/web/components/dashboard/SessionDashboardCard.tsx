@@ -1,3 +1,5 @@
+import type { MouseEvent } from 'react';
+
 import { css } from '../../styled-system/css';
 import { agentTabLabel, cellStateFor, plainLanguageStatus, sessionContext } from '../../domain';
 import type {
@@ -7,6 +9,7 @@ import type {
   WorkspaceShellSnapshot,
 } from '../../domain';
 import { AgentGlyph, StateCell } from '../glyphs';
+import { InlineRename } from '../nav/InlineRename';
 import { ConnectionChip } from '../connections';
 import { Typography } from '../primitives/Typography';
 import { useConnectionPanelStore } from '../../store';
@@ -24,14 +27,22 @@ export function SessionDashboardCard({
   isBound,
   activity,
   tone,
+  renaming,
   onOpen,
+  onContextMenu,
+  onCommitRename,
+  onCancelRename,
 }: {
   session: ShellSession;
   shell: WorkspaceShellSnapshot;
   isBound: boolean;
   activity: ActivityState | null;
   tone: DashboardStatus;
+  renaming: boolean;
   onOpen: () => void;
+  onContextMenu: (event: MouseEvent<HTMLElement>) => void;
+  onCommitRename: (value: string) => void;
+  onCancelRename: () => void;
 }) {
   const { project, topic } = sessionContext(session, shell);
   const permission = activity?.awaitingPermission ?? null;
@@ -53,8 +64,12 @@ export function SessionDashboardCard({
       data-activity-status={activity?.status ?? 'none'}
       data-testid="dashboard-session-card"
       data-session-id={session.id}
-      onClick={onOpen}
+      onClick={renaming ? undefined : onOpen}
+      onContextMenu={onContextMenu}
       onKeyDown={event => {
+        // While the inline editor is open it owns the keyboard (it stops its own
+        // keys from bubbling); the card only opens on Enter/Space at rest.
+        if (renaming) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           onOpen();
@@ -79,14 +94,23 @@ export function SessionDashboardCard({
             </span>
             <ConnectionChip sessionId={session.id} onOpenPanel={openConnectionPanel} />
           </div>
-          <Typography
-            as="div"
-            variant="smallBody"
-            tone="default"
-            className={dashboardCardTitleClass}
-          >
-            {agentTabLabel(session)}
-          </Typography>
+          {renaming ? (
+            <InlineRename
+              initialValue={agentTabLabel(session)}
+              ariaLabel={`Rename ${agentTabLabel(session)}`}
+              onCommit={onCommitRename}
+              onCancel={onCancelRename}
+            />
+          ) : (
+            <Typography
+              as="div"
+              variant="smallBody"
+              tone="default"
+              className={dashboardCardTitleClass}
+            >
+              {agentTabLabel(session)}
+            </Typography>
+          )}
         </div>
         <StateCell state={cellStateFor(session, isBound, activity)} size={32} />
       </div>

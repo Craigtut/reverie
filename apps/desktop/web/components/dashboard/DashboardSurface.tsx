@@ -13,7 +13,7 @@ import type {
 import { EmptyState } from '../onboarding';
 import { Typography } from '../primitives/Typography';
 import { DashboardCountPills } from './DashboardCountPills';
-import { DashboardStateRails } from './DashboardStateRails';
+import { DashboardStateRails, type SessionCardActions } from './DashboardStateRails';
 
 // The default surface (Home): every non-archived session across the workspace,
 // grouped by state. Archived sessions are excluded here and live in each focus's
@@ -24,6 +24,7 @@ export function DashboardSurface({
   sessionTerminalBindings,
   cortexActivity,
   sessionTimelines,
+  sessionActions,
   onOpenSession,
   onCreateProject,
   onCreateGeneralSession,
@@ -36,6 +37,7 @@ export function DashboardSurface({
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
   sessionTimelines: Record<string, SessionStateTimeline>;
+  sessionActions: SessionCardActions;
   onOpenSession: (session: ShellSession) => void;
   onCreateProject: () => void;
   onCreateGeneralSession: () => void;
@@ -130,6 +132,7 @@ export function DashboardSurface({
           bindings={sessionTerminalBindings}
           cortexActivity={cortexActivity}
           sessionTimelines={sessionTimelines}
+          sessionActions={sessionActions}
           onOpenSession={onOpenSession}
         />
       </motion.div>

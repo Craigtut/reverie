@@ -1,7 +1,6 @@
 import { useRef, useState, type MouseEvent } from 'react';
 import {
   Archive,
-  ArrowCounterClockwise,
   Copy,
   Folder,
   FolderOpen,
@@ -19,7 +18,6 @@ import {
   activeWorkspaceSessions,
   activityForSession,
   cellStateFor,
-  hasCustomTitle,
   primaryGeneralFocus,
   rollupSessionStates,
 } from '../../domain';
@@ -44,6 +42,7 @@ import { UpdateNavRow } from './UpdateNavRow';
 import { FocusRow } from './FocusRow';
 import { SessionRow } from './SessionRow';
 import { NavContextMenu, type NavMenuItem, type NavMenuModel } from './NavContextMenu';
+import { buildSessionMenuItems } from './sessionMenu';
 import {
   liveIconAttrs,
   liveStatusIconClass,
@@ -160,52 +159,17 @@ export function Sidebar({
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
 
-  // Session menu: rename, optionally reset to the automatic name (only when a
-  // custom name is pinned), the folder utilities (sessions always have a cwd),
-  // then the single removal action. Archive is reversible everywhere in Reverie,
-  // so it is the one removal the menu offers; permanent deletion lives only in
-  // the deliberate, gated places (Settings, the archived lists), never here.
+  // Session menu: built from the shared builder so a right-click on a session
+  // reads identically here and on every dashboard card. The sidebar binds rename
+  // to its own inline editor; the rest forward straight to the shell handlers.
   function sessionMenuItems(session: ShellSession): NavMenuItem[] {
-    const items: NavMenuItem[] = [
-      {
-        id: 'rename',
-        label: 'Rename',
-        icon: <PencilSimple size={15} />,
-        onSelect: () => setRenamingId(session.id),
-      },
-    ];
-    if (hasCustomTitle(session)) {
-      items.push({
-        id: 'auto-name',
-        label: 'Use automatic name',
-        icon: <ArrowCounterClockwise size={15} />,
-        onSelect: () => onUseAutomaticSessionTitle(session),
-      });
-    }
-    if (session.cwd) {
-      items.push({
-        id: 'reveal',
-        label: 'Reveal folder in Finder',
-        icon: <FolderOpen size={15} />,
-        dividerBefore: true,
-        onSelect: () => onRevealPath(session.cwd),
-      });
-      items.push({
-        id: 'copy-path',
-        label: 'Copy folder path',
-        icon: <Copy size={15} />,
-        onSelect: () => onCopyPath(session.cwd),
-      });
-    }
-    items.push({
-      id: 'archive',
-      label: 'Archive session',
-      icon: <Archive size={15} />,
-      danger: true,
-      dividerBefore: true,
-      onSelect: () => onCloseSession(session),
+    return buildSessionMenuItems(session, {
+      onRename: () => setRenamingId(session.id),
+      onUseAutomaticName: () => onUseAutomaticSessionTitle(session),
+      onRevealPath,
+      onCopyPath,
+      onArchive: () => onCloseSession(session),
     });
-    return items;
   }
 
   // Topic menu: rename and archive. A topic is a pure Reverie grouping with no

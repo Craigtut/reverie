@@ -12,7 +12,7 @@ import type {
   ShellSession,
   WorkspaceShellSnapshot,
 } from '../../domain';
-import { DashboardStateRails } from '../dashboard';
+import { DashboardStateRails, type SessionCardActions } from '../dashboard';
 import { AgentGlyph } from '../glyphs';
 import { primaryComposerButtonClass } from '../primitives/buttons';
 import { Typography } from '../primitives/Typography';
@@ -30,6 +30,7 @@ export function SessionHistorySurface({
   sessionTerminalBindings,
   cortexActivity,
   sessionTimelines,
+  sessionActions,
   onOpenSession,
   onRestore,
   onDelete,
@@ -43,6 +44,7 @@ export function SessionHistorySurface({
   sessionTerminalBindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
   sessionTimelines: Record<string, SessionStateTimeline>;
+  sessionActions: SessionCardActions;
   onOpenSession: (session: ShellSession) => void;
   onRestore: (session: ShellSession) => void;
   onDelete: (session: ShellSession) => void;
@@ -112,6 +114,7 @@ export function SessionHistorySurface({
           bindings={sessionTerminalBindings}
           cortexActivity={cortexActivity}
           sessionTimelines={sessionTimelines}
+          sessionActions={sessionActions}
           onOpenSession={onOpenSession}
         />
 
