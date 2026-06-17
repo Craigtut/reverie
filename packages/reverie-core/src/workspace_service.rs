@@ -895,6 +895,50 @@ impl WorkspaceService {
             .claim_native_session(session_id, native_session_ref)?)
     }
 
+    /// Bind the rollout file path onto a Codex session that captured a native id
+    /// but no metadata path.
+    ///
+    /// The launch-time cwd scan ([`Self::discover_and_attach_native_session`])
+    /// picks the newest cwd-matching rollout, so when several Codex sessions share
+    /// one folder it can hand a launching session a sibling's file (then refuse to
+    /// repoint) or never find this session's at all, leaving an id-only ref.
+    /// Without the path the rollout cannot be activity-watched and no title is ever
+    /// generated. This resolves the file by the exact native id, which is
+    /// collision-proof, and fills it in. Returns whether a path was newly bound.
+    /// No-op unless the session is a Codex session whose ref has a native id but no
+    /// metadata path.
+    pub fn backfill_codex_rollout_path(
+        &self,
+        session_id: SessionId,
+        codex_home: impl AsRef<Path>,
+    ) -> Result<bool> {
+        let Some(session) = self.repo.get_session(session_id)? else {
+            return Ok(false);
+        };
+        if session.agent_kind != AgentKind::CodexCli {
+            return Ok(false);
+        }
+        let Some(existing) = session.native_session_ref else {
+            return Ok(false);
+        };
+        if existing.metadata_path.is_some() {
+            return Ok(false);
+        }
+        let Some(native_id) = existing.session_id.clone() else {
+            return Ok(false);
+        };
+        let Some(rollout_path) = find_codex_rollout_by_native_id(codex_home, &native_id) else {
+            return Ok(false);
+        };
+        let reference = NativeSessionRef {
+            kind: existing.kind,
+            session_id: Some(native_id),
+            metadata_path: Some(rollout_path),
+            adapter_payload: existing.adapter_payload,
+        };
+        Ok(self.repo.claim_native_session(session_id, reference)?)
+    }
+
     /// Persist the latest activity for whichever session owns `native_session_id`.
     /// Drops out-of-order updates by sequence. Returns whether a session matched.
     pub fn record_session_activity(
@@ -2773,6 +2817,78 @@ mod tests {
         assert_eq!(
             native.metadata_path.as_deref(),
             Some(rollout_path.as_path())
+        );
+    }
+
+    #[test]
+    fn backfill_binds_codex_rollout_by_native_id_across_siblings() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let codex_home = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let rollout_dir = codex_home.path().join("sessions/2026/06/16");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        let cwd_json = serde_json::to_string(&cwd.path().display().to_string()).unwrap();
+        // Two sessions in the SAME cwd. The sibling's rollout is the newest, so the
+        // cwd scan would hand this session the wrong file; the id lookup must not.
+        let own_path = rollout_dir.join("rollout-2026-06-16T10-00-00-codex-self.jsonl");
+        std::fs::write(
+            &own_path,
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"codex-self","cwd":{cwd_json}}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            rollout_dir.join("rollout-2026-06-16T11-00-00-codex-sibling.jsonl"),
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"codex-sibling","cwd":{cwd_json}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let id = service
+            .create_session(
+                focus,
+                "Codex".to_owned(),
+                AgentKind::CodexCli,
+                cwd.path().into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        // An id-only ref, the exact state the launch-time cwd scan leaves behind.
+        service
+            .attach_native_session(
+                id,
+                cwd.path().into(),
+                NativeSessionRef::codex("codex-self", None),
+                AgentKind::CodexCli,
+            )
+            .unwrap();
+
+        let bound = service
+            .backfill_codex_rollout_path(id, codex_home.path())
+            .unwrap();
+        assert!(bound, "an id-only Codex ref should bind its rollout by id");
+        let native = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == id)
+            .unwrap()
+            .native_session_ref
+            .expect("native ref");
+        assert_eq!(native.session_id.as_deref(), Some("codex-self"));
+        assert_eq!(native.metadata_path.as_deref(), Some(own_path.as_path()));
+
+        // Idempotent: a ref that already has a path is left alone.
+        assert!(
+            !service
+                .backfill_codex_rollout_path(id, codex_home.path())
+                .unwrap()
         );
     }
 

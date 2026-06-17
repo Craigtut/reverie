@@ -1328,6 +1328,23 @@ fn spawn_launch_capture_poll(
             let Some((service, session_id)) = workspace_service(&app, Some(session_id)) else {
                 return;
             };
+            // Codex can capture its native id (via a hook, or a prior run) before
+            // the cwd scan binds the rollout file. That scan picks the newest
+            // cwd-matching rollout, so a folder with several Codex sessions can hand
+            // this one a sibling's file (then refuse to repoint) or miss it, leaving
+            // an id-only ref that can never be watched or titled. Bind the rollout by
+            // the exact native id instead, which is collision-proof, and schedule the
+            // title once it is bound.
+            if agent_kind == AgentKind::CodexCli
+                && service
+                    .backfill_codex_rollout_path(session_id, &agent_home)
+                    .unwrap_or(false)
+            {
+                let _ = app.emit("session_record_changed", ());
+                register_active_file_watch(&app, &service, session_id, agent_kind);
+                crate::codex_titles::maybe_schedule_codex_title_after_capture(&app, session_id);
+                return;
+            }
             // Prefer the collision-proof token-bound hook over the racy cwd scan:
             // during the grace window only stop once the hook (or, for Claude,
             // the synchronous `--session-id` capture) has recorded enough data
@@ -1376,6 +1393,52 @@ fn spawn_launch_capture_poll(
             }
         }
     });
+}
+
+/// Repair Codex sessions that hold a native id but no rollout path.
+///
+/// The launch-time cwd scan can leave a Codex session with an id-only native ref
+/// (a sibling session in the same folder won the newest-file scan, or the id was
+/// captured before the file was bound). Without the rollout path the session
+/// cannot be activity-watched and never generates a title. This binds the path by
+/// the exact native id for every such persisted session, so the next resume
+/// watches live state and titles immediately. Pure record repair: it does NOT
+/// register any file watch (boot deliberately never tails persisted state files;
+/// the launch path owns that), so it cannot resurrect a dead session as "working".
+pub(crate) fn backfill_codex_rollout_paths(app: &AppHandle) {
+    let Some(codex_home) = codex_home_dir() else {
+        return;
+    };
+    let Some(service) = app.try_state::<WorkspaceService>() else {
+        return;
+    };
+    let Ok(snapshot) = service.snapshot() else {
+        return;
+    };
+    let mut repaired = 0_usize;
+    for session in snapshot.sessions {
+        if session.agent_kind != AgentKind::CodexCli {
+            continue;
+        }
+        let id_only = session
+            .native_session_ref
+            .as_ref()
+            .is_some_and(|reference| {
+                reference.session_id.is_some() && reference.metadata_path.is_none()
+            });
+        if !id_only {
+            continue;
+        }
+        if service
+            .backfill_codex_rollout_path(session.id, &codex_home)
+            .unwrap_or(false)
+        {
+            repaired += 1;
+        }
+    }
+    if repaired > 0 {
+        let _ = app.emit("session_record_changed", ());
+    }
 }
 
 /// Whether launch-capture polling has enough binding data for this transport.

@@ -323,6 +323,22 @@ fn main() {
                 }
             }
 
+            // Repair Codex sessions that captured a native id but never bound their
+            // rollout path (a sibling session in the same folder won the launch-time
+            // cwd scan, or the id was captured first). Without the path they can be
+            // neither activity-watched nor titled. This only fixes the persisted ref
+            // by exact native id; the launch path still owns watch registration, so
+            // it cannot resurrect a dead session as "working". Off-thread (file scan).
+            {
+                let app_handle = app.handle().clone();
+                std::thread::Builder::new()
+                    .name("reverie-codex-rollout-backfill".to_owned())
+                    .spawn(move || {
+                        crate::terminal::runtime::backfill_codex_rollout_paths(&app_handle)
+                    })
+                    .ok();
+            }
+
             // Start the inter-agent connection bridge FIRST so we can hand
             // its ConnectionService into the hook server below as the
             // pre-turn push source. The Unix-socket listener spawned here
