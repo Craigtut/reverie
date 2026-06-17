@@ -309,6 +309,183 @@ describe('createTerminalController', () => {
     expect(viewport.scrollTop).toBe(2470);
   });
 
+  it('restores each session to its own scrolled-back position across switches', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    // Both sessions hold 200 rows, so the scroll extent (200*10 + 10 inset) is the
+    // same throughout and the assertions read straight off viewport.scrollTop.
+    const viewport = { clientHeight: 40, scrollHeight: 2010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    // Session A: scroll back so its top row is buffer row 30.
+    controller.ingestFrame(
+      'session-a',
+      liveFrameAtBottom(196, [row(0, 'a'), row(1, 'a'), row(2, 'a'), row(3, 'a')]),
+      true,
+    );
+    controller.scrollBufferedToRow(30);
+    expect(viewport.scrollTop).toBe(310);
+    expect(controller.isLiveFollow()).toBe(false);
+
+    // Session B becomes current, then scrolls back to its own row 80.
+    controller.ingestFrame(
+      'session-b',
+      liveFrameAtBottom(196, [row(0, 'b'), row(1, 'b'), row(2, 'b'), row(3, 'b')]),
+      true,
+    );
+    controller.scrollBufferedToRow(80);
+    expect(viewport.scrollTop).toBe(810);
+
+    // Back to A: its remembered position, not B's.
+    controller.paintCurrent('session-a');
+    expect(viewport.scrollTop).toBe(310);
+    expect(controller.isLiveFollow()).toBe(false);
+
+    // Back to B: its own remembered position.
+    controller.paintCurrent('session-b');
+    expect(viewport.scrollTop).toBe(810);
+  });
+
+  it('restores scroll on switch even when a streamed frame marks the session active first', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-a',
+      liveFrameAtBottom(196, [row(0, 'a'), row(1, 'a'), row(2, 'a'), row(3, 'a')]),
+      true,
+    );
+    controller.scrollBufferedToRow(30);
+    expect(viewport.scrollTop).toBe(310);
+
+    controller.ingestFrame(
+      'session-b',
+      liveFrameAtBottom(196, [row(0, 'b'), row(1, 'b'), row(2, 'b'), row(3, 'b')]),
+      true,
+    );
+    controller.scrollBufferedToRow(70);
+    controller.paintCurrent('session-b');
+    expect(viewport.scrollTop).toBe(710);
+
+    // Re-select A, but a streamed clean frame for A lands first and marks it the
+    // active session (as happens for a session producing output). The switch must
+    // still be detected and A restored, not treated as a same-session repaint.
+    controller.ingestFrame(
+      'session-a',
+      {
+        ...frame([]),
+        dirty: 'clean',
+        scrollback: { totalRows: 200, viewportOffset: 196, viewportRows: 4, atBottom: false },
+      },
+      true,
+    );
+    controller.paintCurrent('session-a');
+
+    expect(viewport.scrollTop).toBe(310);
+  });
+
+  it('makes a relaunched session forget its prior scroll anchor and re-follow the tail', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    // A is scrolled back: a stable-id anchor and a not-following intent are stored.
+    controller.ingestFrame(
+      'session-a',
+      liveFrameAtBottom(196, [row(0, 'a'), row(1, 'a'), row(2, 'a'), row(3, 'a')]),
+      true,
+    );
+    controller.scrollBufferedToRow(30);
+    expect(viewport.scrollTop).toBe(310);
+    expect(controller.isLiveFollow()).toBe(false);
+
+    // Move to B so returning to A later is a genuine switch.
+    controller.ingestFrame(
+      'session-b',
+      liveFrameAtBottom(196, [row(0, 'b'), row(1, 'b'), row(2, 'b'), row(3, 'b')]),
+      true,
+    );
+
+    // A's process exits and is relaunched: seedEmptyView resets its per-session
+    // scroll memory. The resumed conversation then streams in while B is shown.
+    controller.seedEmptyView('session-a');
+    controller.ingestFrame(
+      'session-a',
+      liveFrameAtBottom(196, [row(0, 'a2'), row(1, 'a2'), row(2, 'a2'), row(3, 'a2')]),
+      false,
+    );
+
+    // Returning to A follows the new tail, not the stale row-30 anchor.
+    controller.paintCurrent('session-a');
+    expect(viewport.scrollTop).toBe(1970);
+    expect(controller.isLiveFollow()).toBe(true);
+  });
+
+  it('returns a session that was at the bottom to the live tail after a detour', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 2010, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    // Session A stays pinned to the tail (never scrolled back).
+    controller.ingestFrame(
+      'session-a',
+      liveFrameAtBottom(196, [row(0, 'a'), row(1, 'a'), row(2, 'a'), row(3, 'a')]),
+      true,
+    );
+    expect(viewport.scrollTop).toBe(1970);
+    expect(controller.isLiveFollow()).toBe(true);
+
+    // Detour through B, scrolled back.
+    controller.ingestFrame(
+      'session-b',
+      liveFrameAtBottom(196, [row(0, 'b'), row(1, 'b'), row(2, 'b'), row(3, 'b')]),
+      true,
+    );
+    controller.scrollBufferedToRow(50);
+    expect(viewport.scrollTop).toBe(510);
+
+    // Returning to A re-pins the tail; it is not left at B's offset.
+    controller.paintCurrent('session-a');
+    expect(viewport.scrollTop).toBe(1970);
+    expect(controller.isLiveFollow()).toBe(true);
+  });
+
   it('coalesces scheduled scroll paints into one animation frame', () => {
     const rafCallbacks: FrameRequestCallback[] = [];
     vi.stubGlobal(

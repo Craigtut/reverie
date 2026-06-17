@@ -262,8 +262,24 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let lastHistoryRowsRequestTraceKey = '';
   let lastFrameScrollbackTraceKey = '';
   let activeSessionId: string | null = null;
+  // The session whose scroll position paintCurrent has already restored for the
+  // current activation. Tracked separately from activeSessionId because a streamed
+  // frame for the newly-selected session reaches ingestFrames (and sets
+  // activeSessionId) before paintCurrent's activation rAF runs; keying the switch
+  // off activeSessionId would then read "same session" and skip the restore.
+  let scrollRestoredSessionId: string | null = null;
   let liveFollow = true;
   const sessionFollowIntents: Record<string, boolean> = {};
+  // Per-session scrolled-back position, remembered across session switches (RAM
+  // only; terminal history never persists across a restart). Keyed by session id,
+  // the value is the STABLE ROW ID of the top visible row (oldestId + position),
+  // not a pixel/position offset: stable ids survive eviction and background output
+  // (the same id model the live-buffer fetch uses, decisions.md D8), so converting
+  // the id back through the current oldestId on return re-anchors to the same
+  // content even though rows shifted while the session was off-screen. A session at
+  // the live tail has no entry here; its anchor is "the tail", encoded by
+  // sessionFollowIntents being true (so scrollToTail re-pins to the newest output).
+  const sessionScrollAnchors: Record<string, number> = {};
   let autoScrolling = false;
   // Interaction overlay state, all in buffer (composite-frame) coordinates so it
   // survives scrolling. The interaction controller drives these; paintWindow
@@ -1381,7 +1397,14 @@ export function createTerminalController(options: TerminalControllerOptions) {
     view: SessionTerminalView,
     forSurface: TerminalSurface = surface,
     buffer: TerminalBufferState | null = null,
-    options: { dirtyAbsoluteRows?: ReadonlySet<number>; forceFullPaint?: boolean } = {},
+    options: {
+      dirtyAbsoluteRows?: ReadonlySet<number>;
+      forceFullPaint?: boolean;
+      // Set on a genuine session switch so a scrolled-back session lands back where
+      // the user left it. Never set on live frame ingestion, which must not yank
+      // the viewport. Only honored when the session is not following the tail.
+      restoreScrollForSession?: string;
+    } = {},
   ) {
     const previousPaintMode = terminalPaintMode(lastComposite, activeBuffer);
     const nextPaintMode = terminalPaintMode(view.compositeFrame, buffer);
@@ -1398,6 +1421,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
     const autoFollow = shouldAutoFollow();
     if (autoFollow) autoScrolling = true;
     updateSpacer(buffer?.totalRows ?? view.compositeFrame.rows.length, forSurface);
+    if (!autoFollow && buffer && options.restoreScrollForSession) {
+      restoreBufferedScrollAnchor(options.restoreScrollForSession, buffer, forSurface);
+    }
     const alignedToTail = alignLiveViewportToTail();
     paintWindow(view.compositeFrame, forSurface, 'frame', options.dirtyAbsoluteRows);
     onComposite?.();
@@ -1583,6 +1609,11 @@ export function createTerminalController(options: TerminalControllerOptions) {
   }
 
   function paintCurrent(selectedSessionId: string | null, forSurface: TerminalSurface = surface) {
+    // A genuine session switch restores that session's remembered scroll position;
+    // a same-session repaint (resize, font change, autostart) must preserve the
+    // user's current scroll, so it does not.
+    const isSessionSwitch = scrollRestoredSessionId !== selectedSessionId;
+    scrollRestoredSessionId = selectedSessionId;
     activeSessionId = selectedSessionId;
     if (selectedSessionId) liveFollow = followIntentForSession(selectedSessionId);
     if (selectedSessionId) {
@@ -1595,6 +1626,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
           terminalFrameUsesAlternateScreen(frame)
             ? null
             : (sessionBuffers[selectedSessionId] ?? null),
+          isSessionSwitch ? { restoreScrollForSession: selectedSessionId } : undefined,
         );
         return;
       }
@@ -1848,7 +1880,67 @@ export function createTerminalController(options: TerminalControllerOptions) {
         sessionViews[activeSessionId] = { ...view, liveFollow: live };
       }
     }
+    captureActiveScrollAnchor();
     onLiveFollow(live);
+  }
+
+  // Remember where the active session is scrolled, so switching away and back
+  // lands on the same content. Driven through setLiveFollow, which fires on every
+  // scroll settle (wheel, scrollbar, native scroll), so the stored anchor always
+  // tracks the user's latest scrolled-back position. We only ever WRITE an anchor
+  // (never delete): a following session's "remembered position" is the live tail,
+  // and the gated restore ignores any stale anchor while following. Not deleting
+  // also avoids a hazard during activation: scrollToTail can re-pin (setLiveFollow
+  // true) while activeSessionId still names the OUTGOING session, which would
+  // otherwise drop that session's fresh anchor. Follow-intent and the anchor are
+  // written together here, so a not-following session always has a fresh anchor.
+  function captureActiveScrollAnchor() {
+    const sessionId = activeSessionId;
+    if (!sessionId || liveFollow) return;
+    const viewport = els.viewport;
+    if (!activeBuffer || !viewport) return;
+    const inset = terminalInsetPx(surface);
+    const topPosition = Math.max(
+      0,
+      Math.floor((viewport.scrollTop - inset.top) / surface.cellHeight),
+    );
+    sessionScrollAnchors[sessionId] = activeBuffer.oldestId + topPosition;
+  }
+
+  // Restore a remembered scrolled-back position when a session becomes current.
+  // Runs after updateSpacer (so the scroll range is this session's) and before the
+  // paint (so there is no flash at the previous session's position). The stable row
+  // id is converted to a buffer position through the current oldestId; rows below
+  // the backend's floor are gone for good (past libghostty's scrollback cap), so we
+  // clamp to the oldest available. Rows that are still in libghostty but not in the
+  // frontend mirror paint as placeholders and the paint-window prefetch pulls them
+  // from the backend. Only the not-following case lands here; a following session
+  // is aligned to the tail by alignLiveViewportToTail instead.
+  function restoreBufferedScrollAnchor(
+    sessionId: string,
+    buffer: TerminalBufferState,
+    forSurface: TerminalSurface,
+  ) {
+    const viewport = els.viewport;
+    if (!viewport) return;
+    const inset = terminalInsetPx(forSurface);
+    const anchorId = sessionScrollAnchors[sessionId];
+    // With a remembered anchor, convert its stable id back to a buffer position
+    // through the current oldestId (rows evicted past the backend's floor clamp to
+    // the oldest available). Without one (a session the backend reported scrolled
+    // back before the user ever touched it), fall back to the buffer's own viewport
+    // offset so we still avoid landing at the previous session's position.
+    const targetPosition =
+      anchorId === undefined
+        ? Math.max(0, buffer.viewportOffset)
+        : Math.max(0, anchorId - buffer.oldestId);
+    const targetTop = targetPosition * forSurface.cellHeight + inset.top;
+    // The spacer was just sized for this session, so its DOM scroll extent is the
+    // authoritative upper bound (it accounts for both insets and any partial
+    // trailing row). Clamping to it lands a stale anchor that now sits below a
+    // shorter tail at the bottom rather than beyond it; no separate row-space clamp.
+    const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+    viewport.scrollTop = Math.max(0, Math.min(maxTop, targetTop));
   }
 
   function resizeAlternateSessionViews(forSurface: TerminalSurface) {
@@ -1977,6 +2069,15 @@ export function createTerminalController(options: TerminalControllerOptions) {
       return active;
     },
     seedEmptyView(sessionId: string) {
+      // A (re)launched session starts fresh at the tail. Drop any remembered scroll
+      // anchor and follow intent from a prior run (and the stale view they would be
+      // inherited from) so a stable id is never restored against the new, unrelated
+      // buffer. This is the per-session reset the relaunch path runs alongside
+      // resetScrollback; a session that exits on its own is never dropped, so its
+      // scroll memory would otherwise survive into the resumed conversation.
+      delete sessionScrollAnchors[sessionId];
+      delete sessionFollowIntents[sessionId];
+      delete sessionViews[sessionId];
       const view = viewWithLiveFollow(emptyTerminalView(surface), sessionId);
       sessionViews[sessionId] = view;
       sessionBuffers[sessionId] = createTerminalBuffer(surface);
@@ -1998,8 +2099,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete latestFrames[sessionId];
       delete sessionBuffers[sessionId];
       delete sessionFollowIntents[sessionId];
+      delete sessionScrollAnchors[sessionId];
       clearSessionResizeReflowPending(sessionId);
       if (activeSessionId === sessionId) activeSessionId = null;
+      if (scrollRestoredSessionId === sessionId) scrollRestoredSessionId = null;
     },
     focusCanvas() {
       if (focusElement(els.input)) return;
