@@ -7,7 +7,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-06-16
+## [0.5.1] - 2026-06-17
 
 ### Added
 - Paste an image from the clipboard straight into a session. Reverie saves it to a
@@ -35,6 +35,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   under the old identifier.
 
 ### Fixed
+- The app no longer fails to launch with "reverie-desktop cannot be opened because of
+  a problem." The 0.5.0 build packaged an empty copy of the terminal-core library, so
+  macOS could not start the app; the build now always bundles the real library and
+  refuses to ship without it.
+- Sessions you have not scrolled stay pinned to the newest output, so the cursor and
+  latest lines remain visible instead of resting above the bottom.
 - Resolved a high-CPU regression: the libghostty-vt terminal core now ships as an
   optimized ReleaseFast build instead of a debug build, which had kept CPU usage high
   and could make sessions feel stuck.
@@ -153,8 +159,8 @@ Targets macOS (Apple Silicon).
 - Pre-commit linting/formatting (Biome, rustfmt) and Conventional Commit
   validation (commitlint) via Husky.
 
-[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.5.0...HEAD
-[0.5.0]: https://github.com/Craigtut/reverie/compare/v0.4.0...v0.5.0
+[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Craigtut/reverie/compare/v0.4.0...v0.5.1
 [0.4.0]: https://github.com/Craigtut/reverie/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Craigtut/reverie/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Craigtut/reverie/compare/v0.1.0...v0.2.0
