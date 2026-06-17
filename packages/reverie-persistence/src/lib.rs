@@ -216,6 +216,13 @@ const MIGRATIONS: &[&str] = &[
     // they pick "use automatic name". Stored separately so a live OSC update never
     // clobbers a name the user explicitly chose. NULL for existing rows (no pin).
     "ALTER TABLE sessions ADD COLUMN custom_title TEXT;",
+    // v19 -> v20: per-project folder-identity bookmark (macOS NSURL bookmark
+    // blob). Lets Reverie follow a project folder the user renames or moves on
+    // disk by resolving the bookmark to the folder's new location instead of
+    // stranding the project at a dead path. NULL for existing rows and any
+    // project minted on a platform without bookmark support; the service
+    // backfills a bookmark for projects whose folder still exists.
+    "ALTER TABLE projects ADD COLUMN bookmark BLOB;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -404,16 +411,18 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
     fn upsert_project(&self, project: &Project) -> RepoResult<()> {
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO projects (id, name, path, archived, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO projects (id, name, path, archived, sort_order, bookmark)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name, path = excluded.path, archived = excluded.archived,
-                sort_order = excluded.sort_order",
+                sort_order = excluded.sort_order, bookmark = excluded.bookmark",
             params![
                 project.id.to_string(),
                 project.name,
                 path_to_db(&project.path),
                 bool_to_int(project.archived),
                 project.sort_order,
+                project.bookmark,
             ],
         )
         .map_err(backend)?;
@@ -940,7 +949,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
 fn load_projects(conn: &Connection) -> RepoResult<Vec<Project>> {
     let mut statement = conn
         .prepare(
-            "SELECT id, name, path, archived, sort_order
+            "SELECT id, name, path, archived, sort_order, bookmark
              FROM projects ORDER BY sort_order, name COLLATE NOCASE",
         )
         .map_err(backend)?;
@@ -952,6 +961,10 @@ fn load_projects(conn: &Connection) -> RepoResult<Vec<Project>> {
                 path: PathBuf::from(row.get::<_, String>(2)?),
                 archived: int_to_bool(row.get::<_, i64>(3)?),
                 sort_order: row.get(4)?,
+                // Recomputed on every snapshot from the live filesystem; the DB
+                // never stores it, so a stale row can't mislead the UI.
+                folder_missing: false,
+                bookmark: row.get::<_, Option<Vec<u8>>>(5)?,
             })
         })
         .map_err(backend)?;

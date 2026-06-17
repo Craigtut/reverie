@@ -135,6 +135,17 @@ pub struct Project {
     /// (which then fall back to name order as a stable tiebreak).
     #[serde(default)]
     pub sort_order: i64,
+    /// Computed at snapshot-build time, never persisted: the project's folder is
+    /// not a directory on disk right now (moved, renamed, deleted, or unmounted)
+    /// and could not be auto-reconnected. The frontend uses it to show a
+    /// missing-folder badge and the manual "Locate folder" repair affordance.
+    #[serde(default)]
+    pub folder_missing: bool,
+    /// macOS bookmark blob (volume UUID + catalog node id), persisted so the OS
+    /// can relocate the folder after a rename or move-within-volume. Kept
+    /// server-side only: `skip` means it never crosses the Tauri boundary.
+    #[serde(skip)]
+    pub bookmark: Option<Vec<u8>>,
 }
 
 impl Project {
@@ -145,6 +156,8 @@ impl Project {
             path,
             archived: false,
             sort_order: 0,
+            folder_missing: false,
+            bookmark: None,
         }
     }
 }

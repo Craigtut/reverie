@@ -8,6 +8,7 @@ pub mod activity;
 pub mod activity_reconciler;
 pub mod activity_source;
 pub mod agents;
+pub mod bookmark;
 pub mod bridge_protocol;
 pub mod bridge_server;
 pub mod codex_hooks;
@@ -36,6 +37,7 @@ pub use activity::{
     parse_events, parse_state,
 };
 pub use activity_source::{ActivitySourceKind, ActivityUpdate, Fidelity, SessionKey};
+pub use bookmark::{BookmarkProvider, NoopBookmarkProvider};
 pub use agents::{
     AdapterDetection, AgentAdapter, CommandSpec, CortexAdapter, CortexSessionDiscovery,
     CortexSessionMetadata, DiscoveryContext, LaunchContext,

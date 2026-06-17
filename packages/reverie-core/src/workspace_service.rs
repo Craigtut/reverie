@@ -211,13 +211,160 @@ impl WorkspaceService {
             let mut project = existing.clone();
             project.archived = false;
             project.sort_order = next_sort_order;
+            // Refresh the folder-identity bookmark to the folder we just
+            // reconnected through; keep the old one if minting isn't available.
+            if let Some(bookmark) = self.bookmark.create(&project.path) {
+                project.bookmark = Some(bookmark);
+            }
             self.repo.upsert_project(&project)?;
-            return Ok(self.repo.load_snapshot()?);
+            return self.snapshot();
         }
+        // Mint a folder-identity bookmark now, while the folder is known-good, so
+        // a later rename or move can be auto-reconnected.
+        let bookmark = self.bookmark.create(&path);
         let mut project = Project::new(name, path);
         project.sort_order = next_sort_order;
+        project.bookmark = bookmark;
         self.repo.upsert_project(&project)?;
         self.snapshot()
+    }
+
+    /// Repoint a project at a new folder location and return the refreshed
+    /// snapshot. Used by the manual "Locate folder" repair and (via
+    /// [`Self::relocate_inner`]) by automatic bookmark reconnection.
+    pub fn relocate_project(
+        &self,
+        project_id: ProjectId,
+        new_path: PathBuf,
+    ) -> Result<WorkspaceSnapshot> {
+        self.relocate_inner(project_id, new_path, true)?;
+        self.snapshot()
+    }
+
+    /// Move a project's stored folder path to `new_path`, repointing the cwds of
+    /// its sessions and (when `mint_bookmark`) refreshing the folder-identity
+    /// bookmark. Returns no snapshot so it can run inside [`Self::snapshot`]-free
+    /// paths (boot and the poll-loop reconcile) without recursion.
+    fn relocate_inner(
+        &self,
+        project_id: ProjectId,
+        new_path: PathBuf,
+        mint_bookmark: bool,
+    ) -> Result<()> {
+        if new_path.as_os_str().is_empty() {
+            bail!("new project path is required");
+        }
+        if !new_path.is_dir() {
+            bail!("new project path is not a folder: {}", new_path.display());
+        }
+        let snapshot = self.repo.load_snapshot()?;
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .with_context(|| format!("unknown project {project_id}"))?;
+        // Refuse to point this project at a folder another active project already
+        // owns; that would make two records resume into one folder.
+        if let Some(clash) = snapshot.projects.iter().find(|other| {
+            other.id != project_id && !other.archived && paths_equivalent(&other.path, &new_path)
+        }) {
+            bail!(
+                "another project already points at that folder: {}",
+                clash.path.display()
+            );
+        }
+        let old_path = project.path.clone();
+        if paths_equivalent(&old_path, &new_path) {
+            return Ok(());
+        }
+        let mut updated = project.clone();
+        updated.path = new_path.clone();
+        if mint_bookmark {
+            if let Some(bookmark) = self.bookmark.create(&new_path) {
+                updated.bookmark = Some(bookmark);
+            }
+        }
+        self.repo.upsert_project(&updated)?;
+
+        // Repoint the cwds of this project's sessions that lived under the old
+        // folder, so they reopen in place after the move. Sessions reach a
+        // project through their focus.
+        let focus_ids: BTreeSet<FocusId> = snapshot
+            .focuses
+            .iter()
+            .filter(|focus| focus.project_id == Some(project_id))
+            .map(|focus| focus.id)
+            .collect();
+        for session in &snapshot.sessions {
+            if !focus_ids.contains(&session.focus_id) {
+                continue;
+            }
+            if let Some(new_cwd) = repoint_under(&session.cwd, &old_path, &new_path) {
+                let mut moved = session.clone();
+                moved.cwd = new_cwd;
+                self.repo.upsert_session(&moved)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reconcile every active project's stored path against the filesystem.
+    /// Backfills a folder-identity bookmark for projects whose folder still
+    /// exists, and auto-reconnects any whose folder moved by resolving its
+    /// bookmark to the new location. Returns whether any project was relocated,
+    /// so a caller can push a refreshed snapshot to the UI. Per-project failures
+    /// are logged and skipped, never propagated.
+    pub fn reconcile_project_folders(&self) -> Result<bool> {
+        let snapshot = self.repo.load_snapshot()?;
+        let mut relocated = false;
+        for project in &snapshot.projects {
+            if project.archived {
+                continue;
+            }
+            if project.path.is_dir() {
+                // Folder is fine: opportunistically mint a bookmark for projects
+                // created before this feature (or on a platform that had none) so
+                // a future move is recoverable.
+                if project.bookmark.is_none() {
+                    if let Some(bookmark) = self.bookmark.create(&project.path) {
+                        let mut updated = project.clone();
+                        updated.bookmark = Some(bookmark);
+                        if let Err(error) = self.repo.upsert_project(&updated) {
+                            eprintln!(
+                                "[reverie] bookmark backfill failed for {}: {error:#}",
+                                project.path.display()
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            // Folder is missing: try to follow it via its bookmark.
+            let Some(blob) = project.bookmark.as_deref() else {
+                continue;
+            };
+            let Some(resolved) = self.bookmark.resolve(blob) else {
+                continue;
+            };
+            if !resolved.is_dir() || paths_equivalent(&resolved, &project.path) {
+                continue;
+            }
+            match self.relocate_inner(project.id, resolved.clone(), true) {
+                Ok(()) => {
+                    relocated = true;
+                    eprintln!(
+                        "[reverie] reconnected project {} to {}",
+                        project.id,
+                        resolved.display()
+                    );
+                }
+                Err(error) => eprintln!(
+                    "[reverie] could not reconnect project {}: {error:#}",
+                    project.id
+                ),
+            }
+        }
+        Ok(relocated)
     }
 
     pub fn create_focus(
@@ -1165,12 +1312,35 @@ impl WorkspaceService {
         cols: u16,
         rows: u16,
     ) -> Result<AgentLaunch> {
-        let snapshot = self.repo.load_snapshot()?;
+        let mut snapshot = self.repo.load_snapshot()?;
+        // If the session's folder is gone (its project moved or was renamed),
+        // try a just-in-time reconcile so an auto-reconnectable move heals before
+        // we spawn, instead of launching a CLI into a missing directory.
+        let folder_gone = snapshot
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .map(|session| !session.cwd.is_dir())
+            .unwrap_or(false);
+        if folder_gone {
+            let _ = self.reconcile_project_folders();
+            snapshot = self.repo.load_snapshot()?;
+        }
         let session = snapshot
             .sessions
             .iter()
             .find(|session| session.id == session_id)
             .with_context(|| format!("unknown Reverie session {session_id}"))?;
+        // Fail loudly rather than spawning into a directory that no longer
+        // exists: a CLI launched at a dead cwd misbehaves while Reverie would
+        // still mark the session running.
+        if !session.cwd.is_dir() {
+            bail!(
+                "This session's folder is missing: {}. Use \u{201c}Locate folder\u{201d} \
+                 on the project to reconnect it.",
+                session.cwd.display()
+            );
+        }
         let adapter = built_in_adapters()
             .into_iter()
             .find(|adapter| adapter.kind() == session.agent_kind)
@@ -1312,6 +1482,25 @@ fn paths_equivalent(a: &Path, b: &Path) -> bool {
         (Ok(canonical_a), Ok(canonical_b)) => canonical_a == canonical_b,
         _ => false,
     }
+}
+
+/// Set each non-archived project's `folder_missing` from the live filesystem.
+/// Read-only: the flag is computed per snapshot and never persisted, so it always
+/// reflects the current truth (and self-clears once a folder is back or healed).
+fn annotate_folder_missing(projects: &mut [Project]) {
+    for project in projects {
+        project.folder_missing = !project.archived && !project.path.is_dir();
+    }
+}
+
+/// If `cwd` is the moved folder (`old`) or lives under it, return the equivalent
+/// path under `new`; otherwise `None` (the session's cwd was elsewhere and should
+/// be left alone).
+fn repoint_under(cwd: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
+    if cwd == old {
+        return Some(new.to_path_buf());
+    }
+    cwd.strip_prefix(old).ok().map(|rest| new.join(rest))
 }
 
 fn seed_workspace_id() -> WorkspaceId {
@@ -3174,6 +3363,236 @@ mod tests {
         assert_eq!(
             session.native_session_ref.and_then(|r| r.session_id),
             Some("second".to_owned())
+
+    // --- folder-missing detection, relocation, and bookmark reconnection ---
+
+    use std::collections::HashMap as TestMap;
+    use std::sync::Mutex as TestMutex;
+
+    /// Test double for the macOS bookmark provider: mints a blob that encodes the
+    /// minted path, and resolves it back through an optional redirect table the
+    /// test controls (to simulate a folder that moved).
+    #[derive(Default)]
+    struct FakeBookmarks {
+        redirects: TestMutex<TestMap<PathBuf, PathBuf>>,
+    }
+
+    impl FakeBookmarks {
+        fn redirect(&self, from: &Path, to: &Path) {
+            self.redirects
+                .lock()
+                .unwrap()
+                .insert(from.to_path_buf(), to.to_path_buf());
+        }
+    }
+
+    impl BookmarkProvider for FakeBookmarks {
+        fn create(&self, path: &Path) -> Option<Vec<u8>> {
+            Some(path.to_string_lossy().into_owned().into_bytes())
+        }
+        fn resolve(&self, blob: &[u8]) -> Option<PathBuf> {
+            let minted = PathBuf::from(String::from_utf8_lossy(blob).into_owned());
+            Some(
+                self.redirects
+                    .lock()
+                    .unwrap()
+                    .get(&minted)
+                    .cloned()
+                    .unwrap_or(minted),
+            )
+        }
+    }
+
+    fn service_with_bookmarks() -> (
+        Arc<InMemoryWorkspaceRepository>,
+        WorkspaceService,
+        Arc<FakeBookmarks>,
+    ) {
+        let repo = Arc::new(InMemoryWorkspaceRepository::new());
+        let fake = Arc::new(FakeBookmarks::default());
+        let service = WorkspaceService::new(repo.clone()).with_bookmark_provider(fake.clone());
+        service.ensure_seeded().unwrap();
+        (repo, service, fake)
+    }
+
+    /// Create a project with a focus and one session whose cwd is the project
+    /// folder. Returns `(project_id, session_id)`.
+    fn project_with_session(service: &WorkspaceService, path: &Path) -> (ProjectId, SessionId) {
+        let snapshot = service
+            .create_project("P".to_owned(), path.to_path_buf())
+            .unwrap();
+        let project_id = snapshot.projects.iter().find(|p| !p.archived).unwrap().id;
+        let focus_snapshot = service
+            .create_focus(Some(project_id), "T".to_owned(), None, None)
+            .unwrap();
+        let focus_id = focus_snapshot
+            .focuses
+            .iter()
+            .find(|f| f.project_id == Some(project_id))
+            .unwrap()
+            .id;
+        let session_snapshot = service
+            .create_session(
+                focus_id,
+                "S".to_owned(),
+                AgentKind::CortexCode,
+                path.to_path_buf(),
+                None,
+            )
+            .unwrap();
+        let session_id = session_snapshot
+            .sessions
+            .iter()
+            .find(|s| s.focus_id == focus_id)
+            .unwrap()
+            .id;
+        (project_id, session_id)
+    }
+
+    fn project_in(snapshot: &WorkspaceSnapshot, id: ProjectId) -> &Project {
+        snapshot.projects.iter().find(|p| p.id == id).unwrap()
+    }
+
+    fn session_cwd_in(snapshot: &WorkspaceSnapshot, id: SessionId) -> PathBuf {
+        snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap()
+            .cwd
+            .clone()
+    }
+
+    #[test]
+    fn snapshot_flags_folder_missing_when_path_is_gone() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let folder = root.path().join("proj");
+        std::fs::create_dir(&folder).unwrap();
+        let (project_id, _session) = project_with_session(&service, &folder);
+
+        let snap = service.snapshot().unwrap();
+        assert!(!project_in(&snap, project_id).folder_missing);
+
+        std::fs::remove_dir_all(&folder).unwrap();
+        let snap = service.snapshot().unwrap();
+        assert!(project_in(&snap, project_id).folder_missing);
+    }
+
+    #[test]
+    fn archived_projects_are_never_flagged_missing() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let folder = root.path().join("proj");
+        std::fs::create_dir(&folder).unwrap();
+        let (project_id, _session) = project_with_session(&service, &folder);
+        service.archive_project(project_id).unwrap();
+        std::fs::remove_dir_all(&folder).unwrap();
+        let snap = service.snapshot().unwrap();
+        assert!(!project_in(&snap, project_id).folder_missing);
+    }
+
+    #[test]
+    fn build_agent_launch_errors_when_folder_missing() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let folder = root.path().join("proj");
+        std::fs::create_dir(&folder).unwrap();
+        let (_project_id, session_id) = project_with_session(&service, &folder);
+        std::fs::remove_dir_all(&folder).unwrap();
+        let err = service.build_agent_launch(session_id, 80, 24).unwrap_err();
+        assert!(
+            err.to_string().contains("folder is missing"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn relocate_project_repoints_path_and_session_cwds() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let (project_id, session_id) = project_with_session(&service, &old);
+
+        let snap = service.relocate_project(project_id, new.clone()).unwrap();
+        assert_eq!(project_in(&snap, project_id).path, new);
+        assert_eq!(session_cwd_in(&snap, session_id), new);
+        assert!(!project_in(&snap, project_id).folder_missing);
+    }
+
+    #[test]
+    fn relocate_rejects_a_folder_owned_by_another_project() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let (project_a, _s) = project_with_session(&service, &a);
+        service.create_project("B".to_owned(), b.clone()).unwrap();
+        assert!(service.relocate_project(project_a, b).is_err());
+    }
+
+    #[test]
+    fn reconcile_backfills_bookmark_for_existing_folder() {
+        let (repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let folder = root.path().join("proj");
+        std::fs::create_dir(&folder).unwrap();
+        // A project whose folder exists but which has no bookmark yet, as if it
+        // were created before this feature shipped.
+        let mut p = Project::new("P", folder.clone());
+        p.bookmark = None;
+        let project_id = p.id;
+        repo.upsert_project(&p).unwrap();
+
+        service.reconcile_project_folders().unwrap();
+        let stored = repo.load_snapshot().unwrap();
+        assert!(project_in(&stored, project_id).bookmark.is_some());
+    }
+
+    #[test]
+    fn reconcile_auto_heals_a_moved_folder() {
+        let (_repo, service, fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let (project_id, session_id) = project_with_session(&service, &old);
+
+        // Simulate a move: the folder is now at `new`, and the bookmark minted at
+        // `old` resolves to `new`.
+        fake.redirect(&old, &new);
+        std::fs::remove_dir_all(&old).unwrap();
+
+        let changed = service.reconcile_project_folders().unwrap();
+        assert!(changed, "a resolvable move should heal");
+        let snap = service.snapshot().unwrap();
+        assert_eq!(project_in(&snap, project_id).path, new);
+        assert_eq!(session_cwd_in(&snap, session_id), new);
+        assert!(!project_in(&snap, project_id).folder_missing);
+    }
+
+    #[test]
+    fn reconcile_flags_missing_when_bookmark_cannot_resolve() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let folder = root.path().join("proj");
+        std::fs::create_dir(&folder).unwrap();
+        let (project_id, _session) = project_with_session(&service, &folder);
+
+        // Move with no redirect: the bookmark resolves back to the now-missing
+        // original path, so it can't heal and the project stays flagged.
+        std::fs::remove_dir_all(&folder).unwrap();
+        let changed = service.reconcile_project_folders().unwrap();
+        assert!(!changed);
+        let snap = service.snapshot().unwrap();
+        assert!(project_in(&snap, project_id).folder_missing);
+    }
         );
     }
 }
