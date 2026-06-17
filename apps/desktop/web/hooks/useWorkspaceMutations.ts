@@ -7,6 +7,7 @@ import {
   shortId,
 } from '../domain';
 import type {
+  ProjectFolderSelection,
   ShellFocus,
   ShellProject,
   ShellSession,
@@ -590,6 +591,30 @@ export function useWorkspaceMutations({
     appendLog(`Removed project from navigation: ${project.name}.`);
   }
 
+  // Manually repair a project whose folder moved or was renamed and that
+  // auto-reconnect could not follow (a cross-volume move, a deleted-then
+  // -restored folder, or a project with no stored bookmark). Opens the native
+  // folder picker, then repoints the project and its session cwds at the chosen
+  // folder so its topics, sessions, and history stay attached.
+  async function locateProjectFolder(project: ShellProject) {
+    const { pushToast } = useOverlayStore.getState();
+    try {
+      const selection = await invoke<ProjectFolderSelection | null>('choose_project_folder');
+      if (!selection) return;
+      const snapshot = await invoke<WorkspaceShellSnapshot>('relocate_project', {
+        projectId: project.id,
+        newPath: selection.path,
+      });
+      setShell(snapshot);
+      pushToast({ message: `Reconnected “${project.name}” to its folder` });
+      appendLog(`Relocated project “${project.name}” to ${selection.path}.`);
+    } catch (error) {
+      const message = errorMessage(error);
+      pushToast({ message });
+      appendLog(`Locate folder failed for “${project.name}”: ${message}`);
+    }
+  }
+
   // Permanently purge an archived project and everything under it. Used by the
   // Settings "Archived projects" list; there is no restore button there because
   // re-adding the folder reconnects, so this is the one destructive action.
@@ -652,6 +677,7 @@ export function useWorkspaceMutations({
     restoreFocusRecord,
     deleteFocusRecord,
     archiveProjectRecord,
+    locateProjectFolder,
     deleteProjectRecord,
   };
 }

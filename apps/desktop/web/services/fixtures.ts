@@ -73,6 +73,8 @@ export async function invokeBrowserFixture<T>(
       return renameFixtureFocus(args) as T;
     case 'rename_project':
       return renameFixtureProject(args) as T;
+    case 'relocate_project':
+      return relocateFixtureProject(args) as T;
     case 'reveal_path':
       // No system file manager in the browser harness; renaming/copying is what
       // matters here, so revealing a folder is a no-op. The desktop build routes
@@ -317,6 +319,17 @@ function renameFixtureProject(args?: Record<string, unknown>) {
   if (!project) throw new Error(`Unknown fixture project: ${request.projectId}`);
   const trimmed = request.name.trim();
   if (trimmed.length > 0) project.name = trimmed;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function relocateFixtureProject(args?: Record<string, unknown>) {
+  const projectId = readDirectArg<string>(args, 'projectId');
+  const newPath = readDirectArg<string>(args, 'newPath');
+  const project = fixtureShell.projects.find(item => item.id === projectId);
+  if (!project) throw new Error(`Unknown fixture project: ${projectId}`);
+  project.path = newPath;
+  project.folderMissing = false;
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }

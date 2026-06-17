@@ -208,6 +208,10 @@ export interface ShellProject {
   // Position in the left-nav project list, for drag-to-reorder. The backend
   // always sends it; absent only in hand-built fixtures/tests (treated as 0).
   sortOrder?: number;
+  // Computed by the backend on every snapshot: the project's folder is not on
+  // disk right now and could not be auto-reconnected, so the UI shows a missing
+  // -folder badge and the "Locate folder" repair. Absent/false means present.
+  folderMissing?: boolean;
 }
 
 // Read-only git context for a project folder, computed by the backend (gix) and
@@ -453,6 +457,24 @@ export interface AgentCliDetection {
   // toggle-off in settings sets this false. A CLI must be both `available`
   // and `enabled` to be offered as a session agent.
   enabled: boolean;
+}
+
+// How to install one supported agent CLI, shown wherever a user is blocked
+// because nothing is installed (the creation composer's agent picker and the
+// Agents settings rows). Reverie does not install these for the user; it points
+// the way. The fast path is a one-line package-manager command they can copy;
+// the thorough path is a docs link with every install method. Either field can
+// be absent for a CLI that lacks a public one-liner or a hosted page yet.
+export interface AgentInstallGuide {
+  kind: AgentKind;
+  displayName: string;
+  // A copy-and-run quick install (a global npm install today). Null when the
+  // CLI has no single canonical one-liner to offer.
+  quickInstall: { manager: string; command: string } | null;
+  // Full installation docs (other install methods, auth, requirements). Empty
+  // when no public page exists yet, in which case the UI omits the link.
+  docsUrl: string;
+  docsLabel: string;
 }
 
 export type PaletteEntry =

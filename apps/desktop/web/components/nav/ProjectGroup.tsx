@@ -1,5 +1,5 @@
 import type { MouseEvent, ReactNode } from 'react';
-import { CaretRight, GitBranch, Plus } from '@phosphor-icons/react';
+import { CaretRight, GitBranch, Plus, WarningCircle } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import { Typography } from '../primitives/Typography';
@@ -43,6 +43,7 @@ export function ProjectGroup({
   live = false,
   gitInsertions = 0,
   gitDeletions = 0,
+  folderMissing = false,
   expanded,
   active = false,
   renaming = false,
@@ -72,6 +73,9 @@ export function ProjectGroup({
   // folder status light or the attention/ready badges. Zero hides them.
   gitInsertions?: number;
   gitDeletions?: number;
+  // The project's folder is not on disk and could not be auto-reconnected. Shows
+  // a warn indicator so even a collapsed project signals it needs locating.
+  folderMissing?: boolean;
   expanded: boolean;
   active?: boolean;
   // Rename support, used by real projects only. The General group passes none of
@@ -163,6 +167,16 @@ export function ProjectGroup({
           </button>
         )}
         <div className={rowTrailingClass}>
+          {folderMissing ? (
+            <span
+              className={folderMissingClass}
+              role="img"
+              title="This folder is missing. Right-click to locate it."
+              aria-label="Folder missing"
+            >
+              <WarningCircle size={13} weight="bold" />
+            </span>
+          ) : null}
           {attention > 0 ? (
             <Typography
               as="span"
@@ -260,6 +274,17 @@ const gitDirtyClass = css({
   justifyItems: 'end',
   flexShrink: 0,
   pointerEvents: 'none',
+});
+
+// The missing-folder mark: a small warn-tinted warning glyph in the trailing
+// slot, present even while the project is collapsed so a moved/renamed folder is
+// visible at a glance. Non-interactive; the action lives in the context menu.
+const folderMissingClass = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  flexShrink: 0,
+  pointerEvents: 'none',
+  '& svg': { color: 'var(--warn)' },
 });
 
 const gitDirtyRestClass = css({

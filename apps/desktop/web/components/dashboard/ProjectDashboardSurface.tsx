@@ -35,6 +35,7 @@ export function ProjectDashboardSurface({
   onOpenSession,
   onRestoreTopic,
   onDeleteTopic,
+  onLocateFolder,
 }: {
   shell: WorkspaceShellSnapshot;
   project: ShellProject;
@@ -45,6 +46,9 @@ export function ProjectDashboardSurface({
   onOpenSession: (session: ShellSession) => void;
   onRestoreTopic: (focus: ShellFocus) => void;
   onDeleteTopic: (focus: ShellFocus) => void;
+  // Repair the project's folder location (manual fallback for a move that
+  // auto-reconnect could not follow). Invoked from the missing-folder banner.
+  onLocateFolder: (project: ShellProject) => void;
 }) {
   // Scope to the project's non-archived topics, matching what the sidebar rolls
   // up onto the project row, so the row's pills and this surface always agree.
@@ -107,6 +111,28 @@ export function ProjectDashboardSurface({
           </div>
           <DashboardCountPills groups={groups} />
         </header>
+
+        {project.folderMissing ? (
+          <div className={missingBannerClass} role="alert" data-testid="project-folder-missing">
+            <div className={missingTextClass}>
+              <Typography as="span" variant="smallBody" tone="warn">
+                This project’s folder can’t be found
+              </Typography>
+              <Typography as="span" variant="caption" tone="faint" className={missingPathClass}>
+                {project.path}
+              </Typography>
+            </div>
+            <button
+              type="button"
+              className={missingActionClass}
+              onClick={() => onLocateFolder(project)}
+            >
+              <Typography as="span" variant="caption" tone="inherit">
+                Locate folder…
+              </Typography>
+            </button>
+          </div>
+        ) : null}
 
         {repoStatus ? <RepoStrip status={repoStatus} projectId={project.id} /> : null}
 
@@ -243,6 +269,44 @@ const projectEmptyClass = css({
   padding: '18px',
   border: '1px dashed var(--line)',
   borderRadius: '18px',
+});
+
+const missingBannerClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '16px',
+  flexWrap: 'wrap',
+  padding: '12px 16px',
+  border: '1px solid color-mix(in srgb, var(--warn) 45%, var(--line))',
+  borderRadius: '14px',
+  background: 'color-mix(in srgb, var(--warn) 8%, var(--surface-1))',
+});
+
+const missingTextClass = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '2px',
+  minWidth: 0,
+});
+
+const missingPathClass = css({
+  fontFamily: 'var(--font-mono, monospace)',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+const missingActionClass = css({
+  flexShrink: 0,
+  background: 'transparent',
+  border: '1px solid color-mix(in srgb, var(--warn) 55%, var(--line))',
+  borderRadius: '999px',
+  padding: '5px 14px',
+  cursor: 'pointer',
+  color: 'var(--warn)',
+  transition: 'border-color 0.15s ease, background 0.15s ease',
+  _hover: { background: 'color-mix(in srgb, var(--warn) 14%, transparent)' },
 });
 
 const archivedSectionClass = css({

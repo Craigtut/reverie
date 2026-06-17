@@ -147,6 +147,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     restoreFocusRecord,
     deleteFocusRecord,
     archiveProjectRecord,
+    locateProjectFolder,
     deleteProjectRecord,
   } = mutations;
 
@@ -272,6 +273,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         onRenameProject={(project, name) => void renameProject(project, name)}
         onRevealPath={path => void revealPath(path)}
         onCopyPath={path => void copyPath(path)}
+        onLocateProjectFolder={project => void locateProjectFolder(project)}
       />
 
       <SidebarResizeHandle
@@ -312,6 +314,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
             onOpenSession={openSessionFromDashboard}
             onRestoreTopic={focus => void restoreFocusRecord(focus)}
             onDeleteTopic={focus => void deleteFocusRecord(focus)}
+            onLocateFolder={project => void locateProjectFolder(project)}
           />
         ) : surfaceMode === 'settings' ? (
           <SettingsSurface

@@ -94,6 +94,9 @@ export interface SidebarProps {
   onRenameProject: (project: ShellProject, name: string) => void;
   onRevealPath: (path: string) => void;
   onCopyPath: (path: string) => void;
+  // Repair a project whose folder is missing: opens the native folder picker to
+  // point it at the folder's new location.
+  onLocateProjectFolder: (project: ShellProject) => void;
 }
 
 // The left navigation rail: workspace search, the Home row, the General group
@@ -126,6 +129,7 @@ export function Sidebar({
   onRenameProject,
   onRevealPath,
   onCopyPath,
+  onLocateProjectFolder,
 }: SidebarProps) {
   // The whole rail is a folder drop zone (marked on the <aside> below). A folder
   // dropped anywhere on it adds a project; the visual is confined to the panel.
@@ -215,6 +219,15 @@ export function Sidebar({
         label: 'Copy folder path',
         icon: <Copy size={15} />,
         onSelect: () => onCopyPath(project.path),
+      },
+      {
+        id: 'locate',
+        // When the folder is missing this is the repair; otherwise it's a manual
+        // way to re-point a project the user moved themselves.
+        label: project.folderMissing ? 'Locate folder…' : 'Move to folder…',
+        icon: <Folder size={15} />,
+        dividerBefore: true,
+        onSelect: () => onLocateProjectFolder(project),
       },
       {
         id: 'archive',
@@ -492,6 +505,7 @@ export function Sidebar({
                       live={projectRollup.active > 0}
                       gitInsertions={gitDirty?.insertions ?? 0}
                       gitDeletions={gitDirty?.deletions ?? 0}
+                      folderMissing={project.folderMissing ?? false}
                       expanded={expanded}
                       active={
                         surfaceMode === 'project-dashboard' && selectedProjectId === project.id
