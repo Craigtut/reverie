@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, CaretRight, Folder, ShieldWarning } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { folderNameFromPath } from '../../domain';
+import { agentInstallGuides, folderNameFromPath } from '../../domain';
 import type {
   AgentCliDetection,
   AgentKind,
@@ -13,6 +13,7 @@ import type {
 import { useFileDrop } from '../../hooks';
 import { DropSurface } from '../dnd';
 import { AgentGlyph } from '../glyphs';
+import { AgentInstallGuideCard } from '../onboarding';
 import { primaryComposerButtonClass, secondaryComposerButtonClass } from '../primitives/buttons';
 import { Typography } from '../primitives/Typography';
 
@@ -467,6 +468,12 @@ function AgentPicker({
 }) {
   const visible = cliDetections.filter(detection => detection.enabled);
   const usableCount = visible.filter(d => d.available).length;
+  // When nothing is pickable, help the user get unstuck. Installing is the real
+  // fix when a CLI is missing; if one is installed but switched off, it just
+  // needs turning on. We surface install guides for the not-installed CLIs and a
+  // separate nudge when the only thing in the way is a disabled toggle.
+  const notInstalledKinds = cliDetections.filter(d => !d.available).map(d => d.kind);
+  const hasInstalledButDisabled = cliDetections.some(d => d.available && !d.enabled);
 
   return (
     <div className={agentPickerClass}>
@@ -532,16 +539,20 @@ function AgentPicker({
           {disabledHint}
         </Typography>
       ) : usableCount === 0 ? (
-        <Typography
-          as="p"
-          variant="caption"
-          tone="faint"
-          className={pickerHintClass}
-          data-testid="cli-empty-help"
-        >
-          No supported agent CLIs are installed yet. Install Cortex, Claude Code, or Codex CLI and
-          turn it on in Settings, then come back.
-        </Typography>
+        <div className={emptyHelpClass} data-testid="cli-empty-help">
+          {notInstalledKinds.length > 0 ? (
+            <AgentInstallGuideCard
+              guides={agentInstallGuides(notInstalledKinds)}
+              title="Install an agent to begin"
+              subtitle="Reverie runs agent CLIs you install yourself. Add one, then it shows up here automatically."
+            />
+          ) : null}
+          {hasInstalledButDisabled ? (
+            <Typography as="p" variant="caption" tone="faint" className={pickerHintClass}>
+              Already installed? Turn an agent on in Settings → Agents.
+            </Typography>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
@@ -773,6 +784,8 @@ function agentTileClass({ available }: { available: boolean }) {
 }
 
 const pickerHintClass = css({ margin: 0, lineHeight: 1.5 });
+
+const emptyHelpClass = css({ display: 'grid', gap: '10px' });
 
 // Session Options disclosure.
 const optionsClass = css({ marginTop: '6px', display: 'grid', gap: '10px' });

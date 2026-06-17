@@ -5,7 +5,8 @@ import type {
   BridgeInstallationStatus,
   BridgeStatusReport,
 } from '../../domain';
-import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
+import { AGENT_INSTALL_GUIDES, AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
+import { CliInstallActions } from '../onboarding';
 import { Switch } from '../primitives/Switch';
 import { Typography } from '../primitives/Typography';
 
@@ -46,8 +47,9 @@ export function AgentsSection({
         Agents
       </Typography>
       <Typography as="p" variant="smallBody" tone="muted" style={{ lineHeight: 1.55 }}>
-        The agent CLIs Reverie found on this machine. Turn one off to hide it everywhere new
-        sessions are created and to keep Reverie out of its config files.
+        The agent CLIs Reverie looks for on this machine. Turn one off to hide it everywhere new
+        sessions are created and to keep Reverie out of its config files. Not detected? Install it
+        below and Reverie picks it up automatically.
       </Typography>
       {error ? (
         <p className={errorClass} role="alert">
@@ -119,7 +121,7 @@ function AgentRow({
       data-available={available ? 'on' : 'off'}
       title={detail}
     >
-      <div className={rowMainClass}>
+      <div className={rowMainClass} data-row-main>
         <Typography
           as="span"
           variant="smallBody"
@@ -157,6 +159,12 @@ function AgentRow({
           <span className={switchPlaceholderClass} aria-hidden />
         )}
       </div>
+
+      {!available ? (
+        <div className={installHintClass} data-testid={`agent-cli-install-${kind}`}>
+          <CliInstallActions guide={AGENT_INSTALL_GUIDES[kind]} />
+        </div>
+      ) : null}
 
       {showReverieTools ? (
         bridgeEntry === null ? (
@@ -236,8 +244,11 @@ const rowClass = css({
   padding: '16px 4px',
   borderTop: '1px solid var(--line-faint)',
   _first: { borderTop: 'none' },
-  '&[data-available="off"]': { opacity: 0.62 },
+  // Dim only the title/status line of a not-detected CLI; its install command
+  // and link below stay full strength so they read as the actionable next step.
+  '&[data-available="off"] [data-row-main]': { opacity: 0.62 },
 });
+const installHintClass = css({ marginTop: '2px' });
 const rowMainClass = css({
   display: 'grid',
   gridTemplateColumns: '1fr auto auto',

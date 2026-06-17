@@ -1,5 +1,12 @@
 import { shortId } from './format';
-import type { AgentCliDetection, ShellFocus, ShellSession, WorkspaceShellSnapshot } from './types';
+import type {
+  AgentCliDetection,
+  AgentInstallGuide,
+  AgentKind,
+  ShellFocus,
+  ShellSession,
+  WorkspaceShellSnapshot,
+} from './types';
 
 // Pure helpers over the session/shell model: breadcrumbs, labels, fallbacks,
 // and project/session filtering.
@@ -120,6 +127,44 @@ export function fallbackAgentCliDetections(): AgentCliDetection[] {
       enabled: true,
     },
   ];
+}
+
+// How to install each supported CLI, surfaced when a user has none enabled and
+// is otherwise stuck. Keyed by AgentKind so callers can look up a single guide
+// or list them all. All three publish global npm packages and have hosted docs:
+// Claude Code and Codex CLI on their vendors' sites, Cortex Code (ours, from
+// Animus Labs) at its package README. Keep these values correct here: this is
+// the one place the install copy lives.
+export const AGENT_INSTALL_GUIDES: Record<AgentKind, AgentInstallGuide> = {
+  claude_code: {
+    kind: 'claude_code',
+    displayName: 'Claude Code',
+    quickInstall: { manager: 'npm', command: 'npm install -g @anthropic-ai/claude-code' },
+    docsUrl: 'https://docs.claude.com/en/docs/claude-code/setup',
+    docsLabel: 'Installation guide',
+  },
+  codex_cli: {
+    kind: 'codex_cli',
+    displayName: 'Codex CLI',
+    quickInstall: { manager: 'npm', command: 'npm install -g @openai/codex' },
+    docsUrl: 'https://developers.openai.com/codex/cli/',
+    docsLabel: 'Installation guide',
+  },
+  cortex_code: {
+    kind: 'cortex_code',
+    displayName: 'Cortex Code',
+    quickInstall: { manager: 'npm', command: 'npm install -g @animus-labs/cortex-code' },
+    docsUrl: 'https://github.com/Craigtut/cortex-mono/tree/main/packages/cortex-code',
+    docsLabel: 'Installation guide',
+  },
+};
+
+// The install guides in the same priority order the picker and settings list
+// CLIs, optionally narrowed to a set of kinds (e.g. only the ones not installed).
+export function agentInstallGuides(only?: AgentKind[]): AgentInstallGuide[] {
+  const order: AgentKind[] = ['claude_code', 'codex_cli', 'cortex_code'];
+  const allow = only ? new Set(only) : null;
+  return order.filter(kind => !allow || allow.has(kind)).map(kind => AGENT_INSTALL_GUIDES[kind]);
 }
 
 export function agentTabLabel(session: ShellSession) {
