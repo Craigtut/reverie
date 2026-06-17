@@ -7,6 +7,49 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-16
+
+### Added
+- Paste an image from the clipboard straight into a session. Reverie saves it to a
+  temporary file and inserts the file path, so you can hand a screenshot to an agent
+  without saving it yourself first.
+- Install guidance for agent CLIs. When a CLI is not detected, the empty session
+  picker and Settings → Agents now offer a copyable install command and a link to
+  that CLI's setup instructions.
+- Reverie now follows a project folder that is renamed, moved, or deleted. It flags a
+  missing folder and lets you relocate it, and on macOS it auto-reconnects a moved
+  folder through a saved security-scoped bookmark.
+- Sessions remember their scroll position and whether they were tailing the latest
+  output as you switch between them, so returning to a session lands where you left off.
+- Dashboard session cards now have the same right-click context menu as the left-nav
+  rows.
+- An ambient green mark breathes up the left-nav rollup while an agent is working, so
+  active work is visible even when its branch is collapsed.
+
+### Changed
+- The nav row's removal options are collapsed into a single Archive action with
+  clearer icons.
+- The macOS bundle identifier is now com.muselab.reverie (com.muselab.reverie.dev on
+  the dev channel). Because macOS stores application data per identifier, an existing
+  install starts from an empty workspace after updating; previous data remains on disk
+  under the old identifier.
+
+### Fixed
+- Resolved a high-CPU regression: the libghostty-vt terminal core now ships as an
+  optimized ReleaseFast build instead of a debug build, which had kept CPU usage high
+  and could make sessions feel stuck.
+- Resumed sessions render reliably. They repaint at their exact width, restore their
+  own frame generation, keep a clean alternate-screen view instead of blanking, and
+  fetch missing history rows correctly.
+- The ambient terminal glow spans the whole window instead of clipping to a hard edge
+  on tall or portrait windows.
+- Codex session titles and live state bind correctly again, by backfilling the
+  session's rollout path from its native id, and the active Codex goal state is
+  mirrored accurately.
+- Agents that redraw their UI in place (Ink) no longer leave stale blank rows behind.
+- A session needing your attention now takes visual priority over the working "breath"
+  on the nav rollup marks.
+
 ## [0.4.0] - 2026-06-15
 
 ### Added
@@ -110,7 +153,9 @@ Targets macOS (Apple Silicon).
 - Pre-commit linting/formatting (Biome, rustfmt) and Conventional Commit
   validation (commitlint) via Husky.
 
-[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Craigtut/reverie/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/Craigtut/reverie/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Craigtut/reverie/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Craigtut/reverie/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Craigtut/reverie/releases/tag/v0.1.0
