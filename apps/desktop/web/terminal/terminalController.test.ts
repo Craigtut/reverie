@@ -283,6 +283,46 @@ describe('createTerminalController', () => {
     expect(controller.hasRenderableContent('session-1')).toBe(true);
   });
 
+  it('buffers inactive primary frames with their own viewport size', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const visibleSurface = { ...surface, rows: 6 };
+    const controller = createTerminalController({
+      surface: visibleSurface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 60, scrollHeight: 60, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-bg',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        cols: surface.cols,
+        scrollback: {
+          totalRows: 4,
+          viewportOffset: 0,
+          viewportRows: 4,
+          atBottom: true,
+        },
+      },
+      false,
+    );
+    controller.paintCurrent('session-bg', visibleSurface);
+
+    expect(controller.getBufferDebug()).toEqual(
+      expect.objectContaining({
+        totalRows: 4,
+        rowMapSize: 4,
+        cachedRanges: [{ start: 0, end: 4 }],
+      }),
+    );
+  });
+
   it('re-pins a cached live-following session when repainting it as current', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
@@ -1961,6 +2001,48 @@ describe('createTerminalController', () => {
     expect(controller.getComposite()?.rows.map(rowText)).toEqual(['stable status', '', '', '']);
   });
 
+  it('preserves an inactive alternate screen when its latest frame is clean', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'stable status'), row(1, 'stable details')]),
+        modes: { alternateScreen: true },
+      },
+      false,
+    );
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'clean',
+        modes: { alternateScreen: true },
+      },
+      false,
+    );
+
+    controller.paintCurrent('session-1');
+
+    expect(controller.getComposite()?.rows.map(rowText)).toEqual([
+      'stable status',
+      'stable details',
+      '',
+      '',
+    ]);
+  });
+
   it('preserves every alternate-screen frame in a coalesced ingestion batch', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
@@ -2809,6 +2891,94 @@ describe('createTerminalController', () => {
       startRow: 0,
       rowCount: 250,
       totalRows: 250,
+      generation: 0,
+    });
+  });
+
+  it('requests history for drifted blank rows that are present but not covered', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 130, scrollTop: 30 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rowsById = new Map<number, TerminalRow>();
+    for (let index = 0; index < 12; index += 1) rowsById.set(index, row(index, ''));
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 12,
+      viewportRows: surface.rows,
+      viewportOffset: 8,
+      rowsById,
+      cachedRanges: [{ start: 8, end: 12 }],
+      atBottom: false,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 8,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 0,
+      rowCount: 12,
+      totalRows: 12,
+      generation: 0,
+    });
+  });
+
+  it('requests history when only blank live viewport rows are known', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rowsById = new Map<number, TerminalRow>();
+    for (let index = 16; index < 20; index += 1) rowsById.set(index, row(index, ''));
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 20,
+      viewportRows: surface.rows,
+      viewportOffset: 16,
+      rowsById,
+      cachedRanges: [],
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 16,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith({
+      startRow: 0,
+      rowCount: 20,
+      totalRows: 20,
       generation: 0,
     });
   });
@@ -3907,6 +4077,96 @@ describe('createTerminalController', () => {
 
     expect(createRenderer).toHaveBeenCalledTimes(7);
     expect(createRenderer.mock.calls[6]?.[1]).toEqual(expect.objectContaining({ cols: 97 }));
+
+    const seventyCols = { ...surface, cols: 70 };
+    controller.setSurface(seventyCols);
+    controller.paintCurrent('session-1', seventyCols);
+
+    expect(createRenderer).toHaveBeenCalledTimes(8);
+    expect(createRenderer.mock.calls[7]?.[1]).toEqual(expect.objectContaining({ cols: 70 }));
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, 'two'), row(3, 'three')]),
+        cols: seventyCols.cols,
+      },
+      true,
+    );
+
+    expect(createRenderer).toHaveBeenCalledTimes(9);
+    expect(createRenderer.mock.calls[8]?.[1]).toEqual(expect.objectContaining({ cols: 70 }));
+  });
+
+  it('restores the backend generation for an idle session when it becomes current', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-a',
+      liveFrameAtBottom(16, [row(0, 'a16'), row(1, 'a17'), row(2, 'a18'), row(3, 'a19')]),
+      true,
+    );
+    controller.setLiveGeneration(3, 'session-a', true);
+    expect(controller.getLiveGeneration()).toBe(3);
+
+    controller.ingestFrame(
+      'session-b',
+      liveFrameAtBottom(16, [row(0, 'b16'), row(1, 'b17'), row(2, 'b18'), row(3, 'b19')]),
+      false,
+    );
+    controller.setLiveGeneration(7, 'session-b', false);
+    expect(controller.getLiveGeneration()).toBe(3);
+
+    controller.paintCurrent('session-b');
+
+    expect(controller.getLiveGeneration()).toBe(7);
+  });
+
+  it('restores the backend generation for the immediate activation path', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-a',
+      liveFrameAtBottom(16, [row(0, 'a16'), row(1, 'a17'), row(2, 'a18'), row(3, 'a19')]),
+      true,
+    );
+    controller.setLiveGeneration(3, 'session-a', true);
+
+    controller.ingestFrame(
+      'session-b',
+      liveFrameAtBottom(16, [row(0, 'b16'), row(1, 'b17'), row(2, 'b18'), row(3, 'b19')]),
+      false,
+    );
+    controller.setLiveGeneration(7, 'session-b', false);
+    expect(controller.getLiveGeneration()).toBe(3);
+
+    controller.setCurrentSession('session-b');
+    const view = controller.ensureSessionView('session-b');
+    if (!view) throw new Error('expected session view');
+    controller.applyView(view);
+
+    expect(controller.getLiveGeneration()).toBe(7);
   });
 
   it('exposes only the painted live-buffer window as the interaction composite', () => {

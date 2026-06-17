@@ -252,11 +252,13 @@ export function mergeHistoryWindowIntoBuffer(
     cachedRanges = [...previous.cachedRanges];
   }
 
+  const cachedRowIds: number[] = [];
   for (const row of frame.rows) {
     const rowId = startRow + row.index;
     rowsById.set(rowId, rowWithId(filterRowToCols(row, surface.cols), rowId));
+    cachedRowIds.push(rowId);
   }
-  cachedRanges = addCachedRange(cachedRanges, startRow, startRow + frame.rows.length);
+  cachedRanges = addCachedRows(cachedRanges, cachedRowIds);
 
   const viewportRows = surface.rows;
   const viewportOffset = Math.max(0, nextTotalRows - viewportRows);
@@ -367,14 +369,11 @@ export function terminalBufferHasRows(
   return terminalBufferCachedRangeForRows(state, startRow, rowCount) !== null;
 }
 
-// Provenance check: are all rows in [startRow, startRow+rowCount) PRESENT in the
-// mirror (fetched), regardless of whether they hold cells? Unlike
-// `terminalBufferHasRows` (which keys off the content-filtered `cachedRanges`, where
-// blank rows read as missing), a fetched blank row counts as present here. The
-// prefetch gates on this so genuine empty output lines (every blank line in a
-// conversation) cannot read as "uncached" and trigger an endless re-fetch loop.
-// Clamped to `totalRows` so a band reaching past the buffer end is not treated as
-// permanently missing.
+// Physical row-map presence check, regardless of trusted coverage. This is useful
+// for diagnostics, but it does NOT mean the rows are safe to render without a
+// fetch: a stale blank row from an earlier live viewport may still be present in
+// the mirror after drifting into scrollback. Fetch decisions must use
+// `terminalBufferHasRows`, which applies the provenance coverage model.
 export function terminalBufferRowsPresent(
   state: TerminalBufferState,
   startRow: number,

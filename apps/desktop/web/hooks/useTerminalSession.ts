@@ -1082,12 +1082,14 @@ export function useTerminalSession(params: {
       // Sync the controller to the backend-adopted generation so history-range
       // requests and the merge gate are stamped with the backend's generation
       // (which starts at 1 and bumps on every resize), not a frontend-only token.
-      // Without this the serve gate never matches and scroll-back past the live
-      // mirror fetches nothing. Only sync for the active terminal: a background
-      // session's frames must not move the visible session's request generation.
-      if (useTerminalStore.getState().activeTerminalId === terminalId) {
-        controller.setLiveGeneration(latestGeneration);
-      }
+      // Store it per session too: an idle background session may be activated
+      // before another frame arrives, and its scroll-back fetches still need the
+      // generation that its last frame carried.
+      controller.setLiveGeneration(
+        latestGeneration,
+        session.id,
+        useTerminalStore.getState().activeTerminalId === terminalId,
+      );
 
       terminalEventDebugRef.current.frameEventsMatched += 1;
       terminalEventDebugRef.current.lastMatchedFrameSeq = framesReceived;
@@ -1217,6 +1219,7 @@ export function useTerminalSession(params: {
     nav.setCreationMode(null);
     nav.setSurfaceMode('terminal');
 
+    controller.setCurrentSession(session.id);
     const view = controller.ensureSessionView(session.id);
     if (!binding) {
       if (view) controller.applyView(view);

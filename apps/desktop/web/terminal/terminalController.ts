@@ -37,7 +37,6 @@ import {
   selectAllTerminalBufferRange,
   terminalBufferCachedRangeForRows,
   terminalBufferHasRows,
-  terminalBufferRowsPresent,
   terminalBufferSelectionText,
   type TerminalBufferState,
 } from './bufferModel';
@@ -296,6 +295,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   // This must be the backend's generation, not a frontend-only token, or the
   // serve gate never matches and every range request comes back empty.
   let liveGeneration = 0;
+  const sessionGenerations: Record<string, number> = {};
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
   const sessionBuffers: Record<string, TerminalBufferState> = {};
@@ -537,7 +537,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   ): TerminalRenderer | null {
     if (
       !renderer ||
-      renderer.cols < forSurface.cols ||
+      renderer.cols !== forSurface.cols ||
       renderer.rows < displayRows ||
       renderer.cellWidth !== forSurface.cellWidth ||
       renderer.cellHeight !== forSurface.cellHeight ||
@@ -938,16 +938,14 @@ export function createTerminalController(options: TerminalControllerOptions) {
       // so one round-trip warms the next stretch of scroll-up instead of stalling
       // per screen. The band reduces to the paint window at the live tail.
       const band = historyPrefetchBand(buffer, startRow, rowCount, !liveFollow);
-      // Fetch only if the band is not already PRESENT by provenance (rows in the
-      // mirror), not merely "uncached" by content. A window can read uncached purely
-      // because it holds blank output lines, which the content-filtered `cachedRanges`
-      // excludes; without this guard those blanks re-request every frame, an infinite
-      // fetch loop that saturates the worker and wedges scrolling. This holds at the
-      // live tail too: blank lines at the bottom of a Cortex/Claude conversation would
-      // otherwise loop a viewport-band fetch every frame (each one a blocking
-      // main-thread round-trip, so the loop eats scroll input). Column changes
-      // wait for the resize-seeded Full frame above, then normal gaps fetch here.
-      const needsFetch = !terminalBufferRowsPresent(buffer, band.startRow, band.rowCount);
+      // Fetch only if the band is not already covered by trusted provenance. Raw
+      // row-map presence is not enough: blank rows from an old live viewport may
+      // still be present in the mirror after drifting into scrollback, but they
+      // are deliberately untrusted until a history band confirms them. Fetched
+      // blank rows are safe because fetched bands add settled coverage, and blank
+      // rows in the current live viewport are safe because coverageRanges unions
+      // the live viewport.
+      const needsFetch = !terminalBufferHasRows(buffer, band.startRow, band.rowCount);
       let requested = false;
       if (needsFetch) {
         const request = {
@@ -1002,7 +1000,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     request: TerminalHistoryRowsRequest,
   ) {
     if (!onMissingLiveRows) return false;
-    if (buffer.rowsById.size === 0 || buffer.cachedRanges.length === 0) return false;
+    if (buffer.rowsById.size === 0) return false;
     return onMissingLiveRows(request) !== false;
   }
 
@@ -1316,6 +1314,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
     return sessionFollowIntents[sessionId] ?? sessionViews[sessionId]?.liveFollow ?? true;
   }
 
+  function setCurrentSession(sessionId: string | null) {
+    activeSessionId = sessionId;
+    liveGeneration = sessionId ? (sessionGenerations[sessionId] ?? 0) : 0;
+    if (sessionId) liveFollow = followIntentForSession(sessionId);
+  }
+
   function viewWithLiveFollow(view: SessionTerminalView, sessionId: string): SessionTerminalView {
     const followIntent =
       view.compositeFrame.modes?.alternateScreen === true
@@ -1569,6 +1573,25 @@ export function createTerminalController(options: TerminalControllerOptions) {
     const frame = latestFrames[sessionId];
     if (terminalFrameUsesAlternateScreen(frame)) {
       const previousView = sessionViews[sessionId];
+      if (
+        frame?.dirty === 'clean' &&
+        previousView?.compositeFrame?.modes?.alternateScreen === true
+      ) {
+        const compositeFrame = frameForSurface(
+          {
+            ...previousView.compositeFrame,
+            dirty: 'full',
+            modes: frame.modes ?? previousView.compositeFrame.modes,
+          },
+          forSurface,
+        );
+        const view = viewWithLiveFollow(
+          { ...previousView, lastFrame: compositeFrame, compositeFrame },
+          sessionId,
+        );
+        sessionViews[sessionId] = view;
+        return view;
+      }
       const alternateFrame = preserveSparseAlternateResizeFrame(
         frame,
         previousView?.compositeFrame,
@@ -1614,8 +1637,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     // user's current scroll, so it does not.
     const isSessionSwitch = scrollRestoredSessionId !== selectedSessionId;
     scrollRestoredSessionId = selectedSessionId;
-    activeSessionId = selectedSessionId;
-    if (selectedSessionId) liveFollow = followIntentForSession(selectedSessionId);
+    setCurrentSession(selectedSessionId);
     if (selectedSessionId) {
       const view = ensureSessionView(selectedSessionId, forSurface);
       if (view) {
@@ -1686,10 +1708,11 @@ export function createTerminalController(options: TerminalControllerOptions) {
     for (const frame of acceptedFrames) {
       latestFrames[sessionId] = frame;
       if (terminalFrameUsesAlternateScreen(frame)) {
+        const alternateSurface = isActive ? surface : surfaceForFrame(frame, surface);
         const alternateFrame = preserveSparseAlternateResizeFrame(
           frame,
           nextAlternateView?.compositeFrame,
-          surface,
+          alternateSurface,
           resizeReflowPendingSessions[sessionId] === true,
         );
         if (alternateFrame !== frame) alternateNeedsFullPaint = true;
@@ -1707,7 +1730,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
         }
         if (alternateFrame.dirty === 'clean') continue;
         nextAlternateView = viewWithLiveFollow(
-          buildSessionTerminalView(nextAlternateView, alternateFrame, surface),
+          buildSessionTerminalView(nextAlternateView, alternateFrame, alternateSurface),
           sessionId,
         );
         sessionViews[sessionId] = nextAlternateView;
@@ -1726,13 +1749,14 @@ export function createTerminalController(options: TerminalControllerOptions) {
           if (row.dirty !== false) primaryDirtyRows.add(viewportOffset + row.index);
         }
       }
+      const frameSurface = isActive ? surface : surfaceForFrame(frame, surface);
       const preserveBlankRows = shouldHoldBlankResizeFrame(
         resizeReflowPendingSessions[sessionId] === true,
         frame,
       );
       const followIntent = followIntentForSession(sessionId);
       const preserveShapeRows = isActive && followIntent === false;
-      nextBuffer = applyViewportFrameToBuffer(nextBuffer, frame, surface, {
+      nextBuffer = applyViewportFrameToBuffer(nextBuffer, frame, frameSurface, {
         preserveBlankRows,
         preserveShapeRows,
         anchorPreservedRowsToViewport: isActive && followIntent === true,
@@ -2081,6 +2105,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete sessionScrollAnchors[sessionId];
       delete sessionFollowIntents[sessionId];
       delete sessionViews[sessionId];
+      delete sessionGenerations[sessionId];
+      if (activeSessionId === sessionId) liveGeneration = 0;
       const view = viewWithLiveFollow(emptyTerminalView(surface), sessionId);
       sessionViews[sessionId] = view;
       sessionBuffers[sessionId] = createTerminalBuffer(surface);
@@ -2091,6 +2117,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     applyView,
     paintFrame,
     paintCurrent,
+    setCurrentSession,
     clear,
     resetScrollback,
     scrollToTail,
@@ -2103,8 +2130,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete sessionBuffers[sessionId];
       delete sessionFollowIntents[sessionId];
       delete sessionScrollAnchors[sessionId];
+      delete sessionGenerations[sessionId];
       clearSessionResizeReflowPending(sessionId);
-      if (activeSessionId === sessionId) activeSessionId = null;
+      if (activeSessionId === sessionId) {
+        activeSessionId = null;
+        liveGeneration = 0;
+      }
       if (scrollRestoredSessionId === sessionId) scrollRestoredSessionId = null;
     },
     focusCanvas() {
@@ -2123,8 +2154,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
     // generation from a Full frame). History-range requests and the merge gate
     // use this value, so they always agree with the backend's generation; never
     // a frontend-only token, or the serve gate would never match.
-    setLiveGeneration(generation: number) {
-      liveGeneration = generation;
+    setLiveGeneration(generation: number, sessionId?: string, active = false) {
+      const targetSessionId = sessionId ?? activeSessionId;
+      if (targetSessionId) sessionGenerations[targetSessionId] = generation;
+      if (!sessionId || active || activeSessionId === sessionId) {
+        liveGeneration = generation;
+      }
     },
     getLiveGeneration() {
       return liveGeneration;
@@ -2390,6 +2425,19 @@ function terminalFrameMatchesSurface(frame: TerminalFrame, surface: TerminalSurf
     return false;
   }
   return true;
+}
+
+function surfaceForFrame(frame: TerminalFrame, fallback: TerminalSurface): TerminalSurface {
+  const cols =
+    Number.isFinite(frame.cols) && (frame.cols as number) > 0
+      ? (frame.cols as number)
+      : fallback.cols;
+  const viewportRows = frame.scrollback?.viewportRows;
+  const rows =
+    Number.isFinite(viewportRows) && (viewportRows as number) > 0
+      ? (viewportRows as number)
+      : fallback.rows;
+  return { ...fallback, cols, rows };
 }
 
 function terminalFrameHasRenderableCells(frame: TerminalFrame) {

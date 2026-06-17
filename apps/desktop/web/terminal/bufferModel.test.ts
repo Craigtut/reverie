@@ -51,13 +51,11 @@ describe('terminal buffer model', () => {
     expect(state.cursor?.position?.row).toBe(7);
   });
 
-  it('counts a present blank row as present by provenance, unlike content coverage', () => {
-    // The prefetch gates fetches on provenance (rows in the mirror), not content
-    // coverage. A genuine blank output line is a real fetched row but is excluded
-    // from the content-filtered cachedRanges; a content-only check would read it as
-    // "missing" and re-request the band every frame (the scroll fetch loop that
-    // saturated the worker on long Cortex/Claude sessions). Provenance counts the
-    // fetched blank as present, so the loop cannot start.
+  it('can report a blank row as physically present while coverage still treats it as a miss', () => {
+    // This helper is a physical row-map check, not the render/fetch gate. A blank
+    // row can be present in the mirror but still not covered by trusted provenance
+    // (for example, a stale live blank that drifted into scrollback). Fetch
+    // decisions use terminalBufferHasRows instead.
     // Blank row 2 sits in scrollback (below the live viewport [3,5)), so the
     // viewport-union in the coverage model does not cover it.
     const state = {
@@ -747,6 +745,24 @@ describe('terminal buffer model', () => {
     expect(terminalBufferHasRows(state, 0, 2)).toBe(true);
     expect(terminalBufferHasRows(state, 0, 8)).toBe(false);
     expect(terminalBufferFullyCached(state)).toBe(false);
+  });
+
+  it('does not mark sparse merged history rows as contiguous coverage', () => {
+    let state = createTerminalBuffer(surface);
+    state = mergeHistoryWindowIntoBuffer(
+      state,
+      frame([row(0, 'head'), row(2, 'tail')]),
+      surface,
+      10,
+      20,
+    );
+
+    expect([...state.rowsById.keys()].sort((left, right) => left - right)).toEqual([10, 12]);
+    expect(state.cachedRanges).toEqual([
+      { start: 10, end: 11 },
+      { start: 12, end: 13 },
+    ]);
+    expect(terminalBufferHasRows(state, 10, 3)).toBe(false);
   });
 
   it('returns the cached range covering a requested row window', () => {
