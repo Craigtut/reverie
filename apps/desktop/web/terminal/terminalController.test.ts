@@ -2600,6 +2600,61 @@ describe('createTerminalController', () => {
     ).toEqual(['ROW 017', 'ROW 018', 'ROW 019', 'ROW 020']);
   });
 
+  it('clears blank rows in mixed Ink redraws during a pending resize guard', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        cols: nextSurface.cols,
+        rows: displayRows,
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([
+          row(0, 'old question'),
+          row(1, 'old choice'),
+          row(2, 'old notes'),
+          row(3, 'old footer'),
+        ]),
+        cols: surface.cols,
+        scrollback: { totalRows: 4, viewportOffset: 0, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    const resized = { ...surface, cols: 100 };
+    controller.setSurface(resized);
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0), row(1, 'new question'), row(2), row(3, 'new footer')]),
+        dirty: 'partial',
+        cols: resized.cols,
+        scrollback: { totalRows: 4, viewportOffset: 0, viewportRows: 4, atBottom: true },
+      },
+      true,
+    );
+
+    expect(
+      (paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame).rows.slice(0, 4).map(rowText),
+    ).toEqual(['', 'new question', '', 'new footer']);
+  });
+
   it('scrolls a live buffered viewport to an absolute row when cached', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 

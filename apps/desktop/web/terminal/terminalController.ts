@@ -1726,7 +1726,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
           if (row.dirty !== false) primaryDirtyRows.add(viewportOffset + row.index);
         }
       }
-      const preserveBlankRows = resizeReflowPendingSessions[sessionId] === true;
+      const preserveBlankRows = shouldHoldBlankResizeFrame(
+        resizeReflowPendingSessions[sessionId] === true,
+        frame,
+      );
       const followIntent = followIntentForSession(sessionId);
       const preserveShapeRows = isActive && followIntent === false;
       nextBuffer = applyViewportFrameToBuffer(nextBuffer, frame, surface, {
@@ -2398,6 +2401,10 @@ function terminalBufferHasRenderableRows(buffer: TerminalBufferState) {
     if (terminalRowHasRenderableCells(row)) return true;
   }
   return false;
+}
+
+function shouldHoldBlankResizeFrame(resizeReflowPending: boolean, frame: TerminalFrame) {
+  return resizeReflowPending && !terminalFrameHasRenderableCells(frame);
 }
 
 function terminalRowHasRenderableCells(row: TerminalRow) {
