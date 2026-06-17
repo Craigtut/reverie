@@ -1421,13 +1421,25 @@ export function createTerminalController(options: TerminalControllerOptions) {
     liveFollow = view.liveFollow;
     recomputeLinks();
     onScrollbackRowCount(view.rowCount);
-    onLiveFollow(view.liveFollow);
-    const autoFollow = shouldAutoFollow();
+    let autoFollow = shouldAutoFollow();
     if (autoFollow) autoScrolling = true;
     updateSpacer(buffer?.totalRows ?? view.compositeFrame.rows.length, forSurface);
     if (!autoFollow && buffer && options.restoreScrollForSession) {
-      restoreBufferedScrollAnchor(options.restoreScrollForSession, buffer, forSurface);
+      const repinnedToTail = restoreBufferedScrollAnchor(
+        options.restoreScrollForSession,
+        buffer,
+        forSurface,
+      );
+      // Re-pinning re-arms follow, so the tail-align and auto-follow settle below
+      // must run as if this were a following session.
+      if (repinnedToTail) {
+        autoFollow = shouldAutoFollow();
+        if (autoFollow) autoScrolling = true;
+      }
     }
+    // Emit follow state once the restore has settled it, so a re-pin does not first
+    // flash the stale not-following value to consumers.
+    onLiveFollow(liveFollow);
     const alignedToTail = alignLiveViewportToTail();
     paintWindow(view.compositeFrame, forSurface, 'frame', options.dirtyAbsoluteRows);
     onComposite?.();
@@ -1936,38 +1948,53 @@ export function createTerminalController(options: TerminalControllerOptions) {
 
   // Restore a remembered scrolled-back position when a session becomes current.
   // Runs after updateSpacer (so the scroll range is this session's) and before the
-  // paint (so there is no flash at the previous session's position). The stable row
-  // id is converted to a buffer position through the current oldestId; rows below
-  // the backend's floor are gone for good (past libghostty's scrollback cap), so we
-  // clamp to the oldest available. Rows that are still in libghostty but not in the
-  // frontend mirror paint as placeholders and the paint-window prefetch pulls them
-  // from the backend. Only the not-following case lands here; a following session
-  // is aligned to the tail by alignLiveViewportToTail instead.
+  // paint (so there is no flash at the previous session's position). Returns true
+  // when it re-pinned to the live tail (and re-armed follow), so the caller resumes
+  // the auto-follow path.
+  //
+  // A session only lands here when its follow intent is false, which happens two
+  // ways, and only one is a real scrolled-back position:
+  //   - The user scrolled it back: a stable-row-id anchor is recorded. Restore it
+  //     and leave the follow intent off, so a deliberate scroll-back stays put even
+  //     if a later resize makes the whole live cache fit the viewport.
+  //   - No anchor: the user never scrolled it; the intent went false from a
+  //     background frame that briefly reported not-at-bottom. The old fallback
+  //     parked the viewport at the buffer's viewport offset, which sits a row or
+  //     more above the true tail whenever the visible height is shorter than the
+  //     buffer's viewport rows. That pushed the live cursor row past the paint
+  //     window's bottom edge, so cursorForWindow hid it and the cursor "vanished"
+  //     for that session. A never-scrolled session belongs at the live tail, so
+  //     re-pin and re-arm follow.
   function restoreBufferedScrollAnchor(
     sessionId: string,
     buffer: TerminalBufferState,
     forSurface: TerminalSurface,
-  ) {
+  ): boolean {
     const viewport = els.viewport;
-    if (!viewport) return;
-    const inset = terminalInsetPx(forSurface);
-    const anchorId = sessionScrollAnchors[sessionId];
-    // With a remembered anchor, convert its stable id back to a buffer position
-    // through the current oldestId (rows evicted past the backend's floor clamp to
-    // the oldest available). Without one (a session the backend reported scrolled
-    // back before the user ever touched it), fall back to the buffer's own viewport
-    // offset so we still avoid landing at the previous session's position.
-    const targetPosition =
-      anchorId === undefined
-        ? Math.max(0, buffer.viewportOffset)
-        : Math.max(0, anchorId - buffer.oldestId);
-    const targetTop = targetPosition * forSurface.cellHeight + inset.top;
+    if (!viewport) return false;
     // The spacer was just sized for this session, so its DOM scroll extent is the
-    // authoritative upper bound (it accounts for both insets and any partial
-    // trailing row). Clamping to it lands a stale anchor that now sits below a
-    // shorter tail at the bottom rather than beyond it; no separate row-space clamp.
+    // authoritative tail position (it accounts for both insets and any partial
+    // trailing row); no separate row-space clamp is needed.
     const maxTop = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-    viewport.scrollTop = Math.max(0, Math.min(maxTop, targetTop));
+    const anchorId = sessionScrollAnchors[sessionId];
+    if (anchorId !== undefined) {
+      // Convert the stable id back to a buffer position through the current oldestId
+      // (rows evicted past the backend's floor clamp to the oldest available), then
+      // clamp to the tail so a stale anchor now past a shorter tail lands at the
+      // bottom rather than beyond it.
+      const inset = terminalInsetPx(forSurface);
+      const targetTop = Math.max(0, anchorId - buffer.oldestId) * forSurface.cellHeight + inset.top;
+      viewport.scrollTop = Math.max(0, Math.min(maxTop, targetTop));
+      return false;
+    }
+    // Re-arm follow so output tracks and the cursor shows again. The caller emits
+    // onLiveFollow once the rest of applyView has settled.
+    viewport.scrollTop = maxTop;
+    liveFollow = true;
+    sessionFollowIntents[sessionId] = true;
+    const view = sessionViews[sessionId];
+    if (view && !view.liveFollow) sessionViews[sessionId] = { ...view, liveFollow: true };
+    return true;
   }
 
   function resizeAlternateSessionViews(forSurface: TerminalSurface) {

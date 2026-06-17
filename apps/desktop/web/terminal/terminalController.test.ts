@@ -526,6 +526,56 @@ describe('createTerminalController', () => {
     expect(controller.isLiveFollow()).toBe(true);
   });
 
+  it('re-pins a not-following session with no scroll anchor to the live tail', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onLiveFollow = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    // The visible height (40px = 4 rows) is shorter than the buffer's viewport rows
+    // (10), so the old fallback's viewport-offset position (1910) sat a row above the
+    // true tail (1970), clipping the live cursor row out of the paint window. The
+    // session is parked above the tail so any re-pin is observable.
+    const viewport = { clientHeight: 40, scrollHeight: 2010, scrollTop: 500 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const rowsById = new Map<number, TerminalRow>();
+    for (let index = 190; index < 200; index += 1) rowsById.set(index, row(index, String(index)));
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 200,
+      viewportRows: 10,
+      viewportOffset: 190,
+      oldestId: 0,
+      rowsById,
+      cachedRanges: [{ start: 190, end: 200 }],
+      atBottom: false,
+    };
+    // A not-following view with no captured scroll anchor: the user never scrolled
+    // it back; its follow intent went false from a background frame that briefly
+    // reported not-at-bottom.
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 190,
+      liveFollow: false,
+    };
+    controller.applyView(view, surface, buffer, { restoreScrollForSession: 'session-x' });
+
+    // The session snaps to the live tail and re-arms follow instead of landing above
+    // it (which hid the cursor), so the live cursor row stays inside the window.
+    expect(viewport.scrollTop).toBe(1970);
+    expect(controller.isLiveFollow()).toBe(true);
+    expect(onLiveFollow).toHaveBeenLastCalledWith(true);
+  });
+
   it('coalesces scheduled scroll paints into one animation frame', () => {
     const rafCallbacks: FrameRequestCallback[] = [];
     vi.stubGlobal(
