@@ -1,7 +1,14 @@
 import type { MouseEvent } from 'react';
+import { BookmarkSimple } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { agentTabLabel, cellStateFor, plainLanguageStatus, sessionContext } from '../../domain';
+import {
+  agentTabLabel,
+  cellStateFor,
+  isFollowingUp,
+  plainLanguageStatus,
+  sessionContext,
+} from '../../domain';
 import type {
   ActivityState,
   DashboardStatus,
@@ -45,6 +52,7 @@ export function SessionDashboardCard({
   onCancelRename: () => void;
 }) {
   const { project, topic } = sessionContext(session, shell);
+  const followingUp = isFollowingUp(session, activity);
   const permission = activity?.awaitingPermission ?? null;
   const liveActivity =
     activity?.status === 'working' || activity?.status === 'awaiting_response'
@@ -112,7 +120,17 @@ export function SessionDashboardCard({
             </Typography>
           )}
         </div>
-        <StateCell state={cellStateFor(session, isBound, activity)} size={32} />
+        <div className={cardTrailingClass}>
+          {followingUp ? (
+            <BookmarkSimple
+              size={14}
+              weight="fill"
+              className={cardFollowUpMarkClass}
+              aria-label="Following up"
+            />
+          ) : null}
+          <StateCell state={cellStateFor(session, isBound, activity)} size={32} />
+        </div>
       </div>
 
       {liveActivity ? (
@@ -173,6 +191,21 @@ const cardTopClass = css({
   display: 'flex',
   alignItems: 'flex-start',
   gap: '10px',
+});
+
+// The trailing cluster: the follow-up bookmark (when flagged) sits just left of
+// the live state cell, top-aligned with it. The bookmark is a quiet monochrome
+// marker, not a status hue, so it never competes with the cell or the rail.
+const cardTrailingClass = css({
+  flexShrink: 0,
+  display: 'flex',
+  alignItems: 'center',
+  gap: '6px',
+});
+
+const cardFollowUpMarkClass = css({
+  flexShrink: 0,
+  color: 'var(--text-3)',
 });
 
 const cardMainClass = css({

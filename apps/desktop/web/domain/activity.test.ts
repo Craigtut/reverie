@@ -10,6 +10,7 @@ import {
   enteredCurrentStateAt,
   glyphStateFor,
   groupSessionsByState,
+  isFollowingUp,
   lastTurnCompletedAtMs,
   plainLanguageStatus,
   rollupSessionStates,
@@ -341,11 +342,87 @@ describe('deriveSessionState', () => {
   });
 });
 
+describe('isFollowingUp (the user-applied follow-up flag)', () => {
+  it('is false when the session has no flag', () => {
+    expect(isFollowingUp(makeSession(), null)).toBe(false);
+    expect(isFollowingUp(makeSession(), makeActivity({ status: 'awaiting_input' }))).toBe(false);
+  });
+
+  it('is true when flagged and the session has not worked since', () => {
+    const flagged = makeSession({ flaggedAt: '2026-06-15T00:00:00.000Z' });
+    expect(isFollowingUp(flagged, null)).toBe(true);
+    expect(isFollowingUp(flagged, makeActivity({ status: 'awaiting_input' }))).toBe(true);
+  });
+
+  it('clears (false) once a reply starts a new turn after the flag (live turn start)', () => {
+    const flagged = makeSession({ flaggedAt: '2026-06-15T00:00:00.000Z' });
+    const replied = makeActivity({
+      status: 'working',
+      turn: { id: 't', status: 'running', startedAt: '2026-06-15T09:00:00.000Z' },
+    });
+    expect(isFollowingUp(flagged, replied)).toBe(false);
+  });
+
+  it('clears (false) once workingSince advances past the flag (snapshot, between refetches)', () => {
+    const flagged = makeSession({
+      flaggedAt: '2026-06-15T00:00:00.000Z',
+      stateTimeline: { workingSince: '2026-06-15T09:00:00.000Z' },
+    });
+    expect(isFollowingUp(flagged, null)).toBe(false);
+  });
+
+  it('stays set when the only working turn predates the flag (flagged during/after that work)', () => {
+    const flagged = makeSession({
+      flaggedAt: '2026-06-15T12:00:00.000Z',
+      stateTimeline: { workingSince: '2026-06-15T09:00:00.000Z' },
+    });
+    expect(isFollowingUp(flagged, makeActivity({ status: 'awaiting_input' }))).toBe(true);
+  });
+});
+
+describe('deriveSessionState (follow-up)', () => {
+  // The flag's whole point: viewing a session does not clear it (unlike finished).
+  it('routes a seen, flagged at-rest session to followup', () => {
+    const session = makeSession({
+      flaggedAt: '2026-06-15T00:00:00.000Z',
+      lastViewedAt: '2026-06-01T00:00:00.000Z', // after the 2026-05-28 feed: completion is seen
+    });
+    expect(deriveSessionState(session, true, makeActivity({ status: 'awaiting_input' }))).toBe(
+      'followup',
+    );
+  });
+
+  it('keeps a flagged session in followup even while it is the one on screen', () => {
+    const session = makeSession({ flaggedAt: '2026-06-15T00:00:00.000Z' });
+    expect(deriveSessionState(session, true, makeActivity({ status: 'done' }), true)).toBe(
+      'followup',
+    );
+  });
+
+  it('lets an unseen completion (Ready for you) win over the flag', () => {
+    // Flagged but the latest turn finished off-screen and is unseen: surface it as
+    // the fresher "finished" until the user looks.
+    const session = makeSession({ flaggedAt: '2026-06-15T00:00:00.000Z' });
+    expect(deriveSessionState(session, false, makeActivity({ status: 'done' }))).toBe('finished');
+  });
+
+  it('lets active work win over the flag (a reply in progress reads truthfully)', () => {
+    const session = makeSession({ flaggedAt: '2026-06-15T00:00:00.000Z' });
+    expect(deriveSessionState(session, true, makeActivity({ status: 'working' }))).toBe('active');
+  });
+
+  it('routes a flagged session with no activity feed to followup', () => {
+    const session = makeSession({ status: 'exited', flaggedAt: '2026-06-15T00:00:00.000Z' });
+    expect(deriveSessionState(session, false, null)).toBe('followup');
+  });
+});
+
 describe('dashboardToneForState', () => {
   it('maps states to card tones', () => {
     expect(dashboardToneForState('attention')).toBe('attention');
     expect(dashboardToneForState('active')).toBe('live');
     expect(dashboardToneForState('finished')).toBe('recent'); // no status hue; distinguished by the cell
+    expect(dashboardToneForState('followup')).toBe('recent'); // a quiet user marker, not a status hue
     expect(dashboardToneForState('idle')).toBe('recent');
     expect(dashboardToneForState('fresh')).toBe('recent');
   });

@@ -1,7 +1,7 @@
 import { useState, type MouseEvent } from 'react';
-import { Warning } from '@phosphor-icons/react';
+import { BookmarkSimple, Warning } from '@phosphor-icons/react';
 
-import { sortGroupByRecency } from '../../domain';
+import { activityForSession, isFollowingUp, sortGroupByRecency } from '../../domain';
 import type {
   ActivityState,
   GroupedSessions,
@@ -18,12 +18,11 @@ import { DASHBOARD_SECTIONS } from './sections';
 // The per-session actions a dashboard card's right-click menu drives. They mirror
 // the left-nav session menu so a session reads the same wherever its card lives:
 // rename (commits the inline editor's value; empty resets to the automatic name),
-// reset to the automatic name, the folder utilities, and the reversible archive.
+// reset to the automatic name, and the reversible archive.
 export interface SessionCardActions {
   onRename: (session: ShellSession, title: string) => void;
   onUseAutomaticName: (session: ShellSession) => void;
-  onRevealPath: (path: string) => void;
-  onCopyPath: (path: string) => void;
+  onToggleFollowUp: (session: ShellSession) => void;
   onArchive: (session: ShellSession) => void;
 }
 
@@ -58,13 +57,17 @@ export function DashboardStateRails({
 
   function openSessionMenu(event: MouseEvent<HTMLElement>, session: ShellSession) {
     event.preventDefault();
-    const items = buildSessionMenuItems(session, {
-      onRename: () => setRenamingSessionId(session.id),
-      onUseAutomaticName: () => sessionActions.onUseAutomaticName(session),
-      onRevealPath: sessionActions.onRevealPath,
-      onCopyPath: sessionActions.onCopyPath,
-      onArchive: () => sessionActions.onArchive(session),
-    });
+    const followingUp = isFollowingUp(session, activityForSession(session, cortexActivity));
+    const items = buildSessionMenuItems(
+      session,
+      { followingUp },
+      {
+        onRename: () => setRenamingSessionId(session.id),
+        onUseAutomaticName: () => sessionActions.onUseAutomaticName(session),
+        onToggleFollowUp: () => sessionActions.onToggleFollowUp(session),
+        onArchive: () => sessionActions.onArchive(session),
+      },
+    );
     setMenu({ x: event.clientX, y: event.clientY, items });
   }
 
@@ -80,7 +83,13 @@ export function DashboardStateRails({
           <DashboardRail
             key={section.key}
             title={section.title}
-            icon={section.attention ? <Warning size={13} weight="fill" /> : undefined}
+            icon={
+              section.attention ? (
+                <Warning size={13} weight="fill" />
+              ) : section.key === 'followup' ? (
+                <BookmarkSimple size={12} weight="fill" />
+              ) : undefined
+            }
             tone={section.tone}
             sessions={sortGroupByRecency(
               groups[section.key],

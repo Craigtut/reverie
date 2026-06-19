@@ -108,6 +108,28 @@ function hasUnseenCompletion(
   return completedMs > (Number.isNaN(seenMs) ? 0 : seenMs);
 }
 
+// The moment this session last started working, in epoch ms, from whichever
+// signal is freshest: the live activity's current/last turn start (a reply kicks
+// off a new turn, so this is effectively "when you last replied") combined with
+// the persisted workingSince marker (the only source between snapshot refetches).
+// Null when the session has never been observed working.
+function workedSinceMs(session: ShellSession, activity: ActivityState | null): number | null {
+  return maxMs(parseMs(activity?.turn?.startedAt), parseMs(session.stateTimeline?.workingSince));
+}
+
+// Whether the user has a live follow-up flag on this session: they marked it to
+// come back to and have not replied since. A reply restarts work, so any working
+// turn that began after the flag was placed supersedes it. This is derived (not a
+// stored clear), mirroring how `finished` compares restingSince vs lastViewedAt.
+// Unlike `finished`, viewing the session never clears it; that is the whole point
+// of the flag, so this deliberately takes no `isViewed`.
+export function isFollowingUp(session: ShellSession, activity: ActivityState | null): boolean {
+  const flaggedMs = parseMs(session.flaggedAt);
+  if (flaggedMs == null) return false;
+  const workedMs = workedSinceMs(session, activity);
+  return workedMs == null || workedMs <= flaggedMs;
+}
+
 // Group a session into one of the user-facing states the dashboard and focus
 // view partition by. Live activity wins; the persisted record status is the
 // fallback. Key distinctions:
@@ -123,11 +145,18 @@ function hasUnseenCompletion(
 //                without a working signal we cannot know it is working, and
 //                showing every live CLI as active misrepresents an agent that is
 //                just waiting for you.
+//   - followup  = the user hand-flagged this session to come back to it. Derived
+//                from the flag (see isFollowingUp), not the agent lifecycle, but
+//                returned as its own bucket. Ranks below `finished` so a genuinely
+//                unseen result still surfaces first, and below `active`/`working`
+//                so an in-progress reply reads truthfully; it clears once the user
+//                replies. Surfaces only for at-rest sessions.
 //   - attention only means a blocking ask (permission) or a hard failure, not
 //                the everyday "waiting for input" rest state.
 //   - fresh    = never launched, so there is no conversation to reopen yet.
 // `isViewed` is true when this session is the one currently on screen (the
-// selected terminal); a viewed session is never `finished`.
+// selected terminal); a viewed session is never `finished` (but can be `followup`,
+// since the flag deliberately survives viewing).
 export function deriveSessionState(
   session: ShellSession,
   isBound: boolean,
@@ -146,9 +175,14 @@ export function deriveSessionState(
     // awaiting_input | done | recoverable error: alive, waiting on you. If the
     // rest happened off-screen and is unseen, surface it as finished.
     if (hasUnseenCompletion(session, activity, isViewed)) return 'finished';
+    // A seen-but-held session the user flagged for follow-up (and hasn't replied
+    // to since). Ranks under `finished` so a fresh unseen result wins.
+    if (isFollowingUp(session, activity)) return 'followup';
     return 'idle';
   }
   if (session.status === 'restore_failed') return 'attention';
+  // A follow-up flag stands even for a session with no live activity feed.
+  if (isFollowingUp(session, null)) return 'followup';
   // fresh = never launched, not currently bound, and no resume handle: there is
   // genuinely no conversation to reopen. A bound not_started session is mid
   // launch, so it is already alive (idle), not fresh.
@@ -180,8 +214,11 @@ export interface SessionRollup {
   // Lets a row say "2 ready"; does not raise the rollup tone (it is invitational,
   // not blocking), so it never reads as the amber attention alarm.
   finished: number;
+  // Sessions the user hand-flagged for follow-up ("Following up"). Like finished,
+  // a personal/invitational count that never raises the rollup tone.
+  followup: number;
   // The highest-priority tone among the sessions: 'attention' wins over 'live'
-  // wins over 'recent' (finished / idle / fresh / empty).
+  // wins over 'recent' (finished / followup / idle / fresh / empty).
   tone: DashboardStatus;
 }
 
@@ -196,6 +233,7 @@ export function rollupSessionStates(
   let attention = 0;
   let active = 0;
   let finished = 0;
+  let followup = 0;
   for (const session of sessions) {
     const isBound = Boolean(bindings[session.id]);
     const activity = activityForSession(session, cortexActivity);
@@ -203,9 +241,10 @@ export function rollupSessionStates(
     if (state === 'attention') attention += 1;
     else if (state === 'active') active += 1;
     else if (state === 'finished') finished += 1;
+    else if (state === 'followup') followup += 1;
   }
   const tone: DashboardStatus = attention > 0 ? 'attention' : active > 0 ? 'live' : 'recent';
-  return { total: sessions.length, attention, active, finished, tone };
+  return { total: sessions.length, attention, active, finished, followup, tone };
 }
 
 // The state the live WebGL StateCell renders. A superset of SessionState that
@@ -219,7 +258,11 @@ export function cellStateFor(
   isViewed = false,
 ): CellSessionState {
   if (activity?.lastError && !activity.lastError.recoverable) return 'error';
-  return deriveSessionState(session, isBound, activity, isViewed);
+  const state = deriveSessionState(session, isBound, activity, isViewed);
+  // The follow-up flag is an orthogonal user marker shown by a separate bookmark,
+  // not the state cell: the cell keeps rendering the underlying agent lifecycle
+  // (a flagged session is at rest, i.e. idle), so the dot never invents a state.
+  return state === 'followup' ? 'idle' : state;
 }
 
 export type GroupedSessions = Record<SessionState, ShellSession[]>;
@@ -239,6 +282,7 @@ export function groupSessionsByState(
     attention: [],
     active: [],
     finished: [],
+    followup: [],
     idle: [],
     fresh: [],
   };
@@ -333,6 +377,9 @@ export function enteredCurrentStateAt(
       // rest marker over a `done` state's exit-stamped timestamp; fall back to the
       // marker alone when there is no activity feed at all.
       return restedAtMs(activity, tl.restingSince) ?? parseMs(tl.restingSince);
+    case 'followup':
+      // When the user flagged it: most-recently-flagged sits at the top of the rail.
+      return parseMs(session.flaggedAt);
     case 'idle':
       return maxMs(parseMs(tl.restingSince), parseMs(tl.exitedAt), parseMs(session.lastViewedAt));
     case 'fresh':

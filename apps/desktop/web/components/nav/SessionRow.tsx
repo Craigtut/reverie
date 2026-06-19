@@ -1,5 +1,5 @@
 import type { MouseEvent } from 'react';
-import { Archive } from '@phosphor-icons/react';
+import { Archive, BookmarkSimple } from '@phosphor-icons/react';
 
 import { css, cx } from '../../styled-system/css';
 import { agentTabLabel } from '../../domain';
@@ -26,6 +26,7 @@ export function SessionRow({
   session,
   active,
   cellState,
+  followUp,
   renaming,
   onOpen,
   onClose,
@@ -37,6 +38,10 @@ export function SessionRow({
   session: ShellSession;
   active: boolean;
   cellState: CellSessionState;
+  // Whether the user has flagged this session for follow-up: shows a quiet
+  // bookmark in the trailing slot so a held session is recognizable while
+  // scanning the flat nav tree (where rows are not grouped into rails).
+  followUp: boolean;
   renaming: boolean;
   onOpen: () => void;
   onClose: (event: MouseEvent<HTMLElement>) => void;
@@ -102,6 +107,14 @@ export function SessionRow({
       )}
       {renaming ? null : (
         <div className={rowTrailingClass}>
+          {followUp ? (
+            <BookmarkSimple
+              size={12}
+              weight="fill"
+              className={followUpMarkClass}
+              aria-label="Following up"
+            />
+          ) : null}
           <span className={rowTrailingCapClass}>
             <span className={cellWrapClass} data-row-meta="true">
               <StateCell state={cellState} size={24} />
@@ -127,6 +140,15 @@ export function SessionRow({
 // under the parent focus label.
 const sessionPrimaryClass = css({
   paddingLeft: '6px',
+});
+
+// The follow-up bookmark in the trailing slot: a quiet monochrome marker that
+// stays put while the state cell / close action crossfade on hover beside it.
+const followUpMarkClass = css({
+  flexShrink: 0,
+  display: 'inline-flex',
+  alignItems: 'center',
+  color: 'var(--text-3)',
 });
 
 // The session on stage reveals its full title in the rail: instead of a single

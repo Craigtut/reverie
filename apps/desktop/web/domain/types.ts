@@ -183,6 +183,10 @@ export interface ShellWorkspace {
   // Secondary opt-in that, with keepAwakeEnabled, also keeps the display on
   // instead of letting it sleep while the system stays awake. Off by default.
   keepDisplayAwake?: boolean;
+  // Opt-in retro CRT post-process over the terminal (convex-glass warp + faint
+  // vignette/aberration, plus a cranked variant for the loading sequences). Off
+  // by default; absent (pre-migration) means off.
+  crtEnabled?: boolean;
 }
 
 // The navigation we persist so a reload or relaunch reopens the last view
@@ -308,6 +312,14 @@ export interface ShellSession {
   // enteredCurrentStateAt / sortGroupByRecency. Backend-owned, rides the snapshot;
   // live updates arrive on the activity event. Absent in hand-built fixtures.
   stateTimeline?: SessionStateTimeline | null;
+  // When the user marked this session for follow-up (ISO 8601, frontend clock),
+  // or absent/null when not flagged. A durable, hand-placed version of the
+  // transient `finished` ("Ready for you") signal: the user has seen the session
+  // but is deliberately keeping it on their plate. Viewing does NOT clear it (the
+  // whole point); the follow-up state is derived by comparing this against the
+  // session's workingSince, so a reply (which starts a new turn) supersedes it.
+  // See isFollowingUp / deriveSessionState.
+  flaggedAt?: string | null;
 }
 
 // Reverie's record of when a session last entered each meaningful state. Mirrors
@@ -499,11 +511,16 @@ export type DashboardStatus = 'attention' | 'live' | 'recent';
 //              NOT looking at it: "Ready for you, come take a look." The unseen
 //              variant of idle, cleared by viewing the session. Reads quieter
 //              than attention (which means blocked, act now); this is invitational.
+//   followup = the user hand-flagged this session to come back to it ("Following
+//              up"). The durable, user-applied counterpart to `finished`: it
+//              survives viewing (unlike `finished`) and clears only when the user
+//              replies (a new working turn) or clears the flag. Orthogonal to the
+//              agent lifecycle, but rendered as its own rail, below `finished`.
 //   idle     = the session is waiting for you and you have already seen the
 //              latest. Whether its process is still alive or has exited is
 //              deliberately not surfaced: opening it re-attaches if live and
 //              resumes if not, so both read the same to a user. `fresh` (never
 //              launched) stays separate because there is no conversation to reopen yet.
-export type SessionState = 'attention' | 'active' | 'finished' | 'idle' | 'fresh';
+export type SessionState = 'attention' | 'active' | 'finished' | 'followup' | 'idle' | 'fresh';
 
 export type GlyphState = 'working' | 'attention' | 'error' | 'idle';

@@ -11,6 +11,7 @@ export const DASHBOARD_SECTIONS: {
 }[] = [
   { key: 'attention', title: 'Needs your attention', tone: 'attention', attention: true },
   { key: 'finished', title: 'Ready for you', tone: 'recent' },
+  { key: 'followup', title: 'Following up', tone: 'recent' },
   { key: 'active', title: 'Working', tone: 'live' },
   { key: 'idle', title: 'Idle', tone: 'recent' },
   { key: 'fresh', title: 'Fresh', tone: 'recent' },

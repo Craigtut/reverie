@@ -18,6 +18,7 @@ import {
   activeWorkspaceSessions,
   activityForSession,
   cellStateFor,
+  isFollowingUp,
   primaryGeneralFocus,
   rollupSessionStates,
 } from '../../domain';
@@ -90,6 +91,8 @@ export interface SidebarProps {
   // same close/archive handlers as the row hover actions.
   onRenameSession: (session: ShellSession, title: string) => void;
   onUseAutomaticSessionTitle: (session: ShellSession) => void;
+  // Toggle a session's follow-up flag from its right-click menu.
+  onToggleSessionFollowUp: (session: ShellSession) => void;
   onRenameFocus: (focus: ShellFocus, title: string) => void;
   onRenameProject: (project: ShellProject, name: string) => void;
   onRevealPath: (path: string) => void;
@@ -125,6 +128,7 @@ export function Sidebar({
   onAddProjectsFromFolders,
   onRenameSession,
   onUseAutomaticSessionTitle,
+  onToggleSessionFollowUp,
   onRenameFocus,
   onRenameProject,
   onRevealPath,
@@ -167,13 +171,17 @@ export function Sidebar({
   // reads identically here and on every dashboard card. The sidebar binds rename
   // to its own inline editor; the rest forward straight to the shell handlers.
   function sessionMenuItems(session: ShellSession): NavMenuItem[] {
-    return buildSessionMenuItems(session, {
-      onRename: () => setRenamingId(session.id),
-      onUseAutomaticName: () => onUseAutomaticSessionTitle(session),
-      onRevealPath,
-      onCopyPath,
-      onArchive: () => onCloseSession(session),
-    });
+    const followingUp = isFollowingUp(session, activityForSession(session, cortexActivity));
+    return buildSessionMenuItems(
+      session,
+      { followingUp },
+      {
+        onRename: () => setRenamingId(session.id),
+        onUseAutomaticName: () => onUseAutomaticSessionTitle(session),
+        onToggleFollowUp: () => onToggleSessionFollowUp(session),
+        onArchive: () => onCloseSession(session),
+      },
+    );
   }
 
   // Topic menu: rename and archive. A topic is a pure Reverie grouping with no
@@ -272,6 +280,7 @@ export function Sidebar({
                 session={session}
                 active={surfaceMode === 'terminal' && selectedSessionId === session.id}
                 cellState={cellState}
+                followUp={isFollowingUp(session, activity)}
                 renaming={renamingId === session.id}
                 onOpen={() => onOpenSession(session)}
                 onClose={(event: MouseEvent<HTMLElement>) => {

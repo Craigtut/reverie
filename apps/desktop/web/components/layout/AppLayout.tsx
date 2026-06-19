@@ -27,6 +27,7 @@ import {
 import { css } from '../../styled-system/css';
 import { DEFAULT_TERMINAL_FONT_SIZE } from '../../terminal/terminalMetrics';
 import { appShellClass } from '../../themes/appShell';
+import { CrtBootSequence } from '../../crtLoading';
 import { DotField } from '../chrome';
 import { Sidebar } from '../nav';
 import {
@@ -66,6 +67,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const appFocused = useUiStore(s => s.appFocused);
   const busy = useUiStore(s => s.busy);
   const writeLog = useUiStore(s => s.appendLog);
+  // While the boot power-on owns the screen, hide the (still-loading) surface
+  // content so the transparent boot canvas shows the ambient field, not a flash
+  // of the empty state / dashboard; the content fades in once the boot clears.
+  const bootSequenceActive = useUiStore(s => s.bootSequenceActive);
   const surfaceMode = useNavigationStore(s => s.surfaceMode);
   const selectedFocusId = useNavigationStore(s => s.selectedFocusId);
   const creationMode = useNavigationStore(s => s.creationMode);
@@ -129,6 +134,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceDefaultDangerousMode,
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
+    setCrtEnabled,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     setWorkspaceSidebarWidth,
@@ -140,6 +146,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     renameProject,
     revealPath,
     copyPath,
+    toggleSessionFollowUp,
     archiveSession,
     restoreSessionTab,
     removeSessionRecord,
@@ -167,13 +174,12 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
 
   // The session card right-click actions, shared by every dashboard so a card's
   // context menu matches the left nav's. Same mutations the sidebar wires up:
-  // rename (empty resets to the automatic name), reset-to-automatic, the folder
-  // utilities, and the reversible archive.
+  // rename (empty resets to the automatic name), reset-to-automatic, and the
+  // reversible archive. Folder utilities live on the project menu, not the session.
   const dashboardSessionActions: SessionCardActions = {
     onRename: (session, title) => void renameSession(session, title),
     onUseAutomaticName: session => void resetSessionTitleToAuto(session),
-    onRevealPath: path => void revealPath(path),
-    onCopyPath: path => void copyPath(path),
+    onToggleFollowUp: session => void toggleSessionFollowUp(session),
     onArchive: session => void archiveSession(session),
   };
 
@@ -244,8 +250,9 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     >
       <div className={windowDragStripClass} data-tauri-drag-region aria-hidden="true" />
       {/* The ambient dot field is a backdrop for the dashboard/empty views; it is
-          hidden while a terminal screen is on stage so the session reads calm. */}
-      {!terminalView ? <DotField variant="ambient" /> : null}
+          hidden while a terminal screen is on stage so the session reads calm.
+          Kept on during the boot so the transparent power-on floats over it. */}
+      {!terminalView || bootSequenceActive ? <DotField variant="ambient" /> : null}
 
       <Sidebar
         shell={shell}
@@ -269,6 +276,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
         onAddProjectsFromFolders={paths => void addProjectsFromDroppedFolders(paths)}
         onRenameSession={(session, title) => void renameSession(session, title)}
         onUseAutomaticSessionTitle={session => void resetSessionTitleToAuto(session)}
+        onToggleSessionFollowUp={session => void toggleSessionFollowUp(session)}
         onRenameFocus={(focus, title) => void renameFocus(focus, title)}
         onRenameProject={(project, name) => void renameProject(project, name)}
         onRevealPath={path => void revealPath(path)}
@@ -284,185 +292,197 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
       />
 
       <ConnectionPanelHost />
-      <section className={canvasStageClass} aria-label="Focus view" data-testid="focus-stage">
+      <section
+        className={canvasStageClass}
+        style={terminalView ? STAGE_BLEED_STYLE : undefined}
+        aria-label="Focus view"
+        data-testid="focus-stage"
+      >
+        <CrtBootSequence />
         <ConnectionRequestBanner />
-        {effectiveSurfaceMode === 'dashboard' ? (
-          <DashboardSurface
-            shell={shell}
-            sessionTerminalBindings={sessionTerminalBindings}
-            cortexActivity={cortexActivity}
-            sessionTimelines={sessionTimelines}
-            sessionActions={dashboardSessionActions}
-            onOpenSession={openSessionFromDashboard}
-            onCreateProject={() => openCreation('project')}
-            onCreateGeneralSession={startGeneralSession}
-            onOpenSettings={() => setSurfaceMode('settings')}
-            onSetWorkspaceDefaultDangerousMode={next => void setWorkspaceDefaultDangerousMode(next)}
-            keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
-            onSetKeepAwakeEnabled={next =>
-              void setWorkspaceKeepAwake(next, shell.workspace.keepDisplayAwake ?? false)
-            }
-          />
-        ) : effectiveSurfaceMode === 'project-dashboard' && selectedProject ? (
-          <ProjectDashboardSurface
-            shell={shell}
-            project={selectedProject}
-            sessionTerminalBindings={sessionTerminalBindings}
-            cortexActivity={cortexActivity}
-            sessionTimelines={sessionTimelines}
-            sessionActions={dashboardSessionActions}
-            onOpenSession={openSessionFromDashboard}
-            onRestoreTopic={focus => void restoreFocusRecord(focus)}
-            onDeleteTopic={focus => void deleteFocusRecord(focus)}
-            onLocateFolder={project => void locateProjectFolder(project)}
-          />
-        ) : surfaceMode === 'settings' ? (
-          <SettingsSurface
-            theme={theme}
-            onSetTheme={onSetTheme}
-            defaultAgentKind={shell.workspace.defaultAgentKind}
-            onSetDefaultAgentKind={onSetDefaultAgentKind}
-            defaultDangerousMode={shell.workspace.defaultDangerousMode}
-            onSetDefaultDangerousMode={next => {
-              // Persist the single workspace auto-approve default and reflect it
-              // in the live composer immediately so an open new-session form
-              // picks it up at once.
-              void setWorkspaceDefaultDangerousMode(next);
-              setNewSessionDangerousMode(next);
-            }}
-            keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
-            keepDisplayAwake={shell.workspace.keepDisplayAwake ?? false}
-            onSetKeepAwake={(enabled, keepDisplay) =>
-              void setWorkspaceKeepAwake(enabled, keepDisplay)
-            }
-            terminalFontSize={shell.workspace.terminalFontSize ?? DEFAULT_TERMINAL_FONT_SIZE}
-            onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
-            onDeleteProject={project => void deleteProjectRecord(project)}
-          />
-        ) : surfaceMode === 'session-history' ? (
-          <SessionHistorySurface
-            focus={selectedFocus}
-            shell={shell}
-            activeSessions={activeFocusSessions}
-            archivedSessions={archivedFocusSessions}
-            sessionTerminalBindings={sessionTerminalBindings}
-            cortexActivity={cortexActivity}
-            sessionTimelines={sessionTimelines}
-            sessionActions={dashboardSessionActions}
-            onOpenSession={openSessionFromDashboard}
-            onRestore={session =>
-              restoreSessionTab(session).catch(error =>
-                writeLog(`Restore failed: ${errorMessage(error)}`),
-              )
-            }
-            onDelete={session =>
-              removeSessionRecord(session).catch(error =>
-                writeLog(`Delete failed: ${errorMessage(error)}`),
-              )
-            }
-            onCreateSession={() =>
-              selectedFocus
-                ? createSessionInFocus(selectedFocus.projectId ?? null, selectedFocus.id)
-                : openCreation('session')
-            }
-            busy={busy}
-          />
-        ) : (
-          <div className={activeSurfaceClass} data-testid="terminal-stage">
-            {!creationMode ? (
-              <SessionTabsBar
-                visibleSessions={visibleSessions}
-                selectedSessionId={selectedSession?.id ?? null}
-                sessionTerminalBindings={sessionTerminalBindings}
-                cortexActivity={cortexActivity}
-                busy={busy}
-                canUseAppServices={canUseAppServices}
-                canCreateSession={Boolean(selectedFocus)}
-                hasSelectedSession={Boolean(selectedSession)}
-                hasTerminalBinding={Boolean(selectedTerminalBinding)}
-                effectiveDangerousMode={effectiveDangerousMode}
-                dangerousToggleLocked={dangerousToggleLocked}
-                dropTargetSessionId={tabDropTargetId}
-                onSelectSession={selectSessionTab}
-                onCloseSession={(event, session) => {
-                  event.stopPropagation();
-                  void archiveSession(session);
-                }}
-                onCreateSession={() => openCreation('session')}
-                onToggleDangerousMode={() => void toggleSelectedSessionYolo()}
-              />
-            ) : null}
-
-            {creationMode ? (
-              <CreationComposer
-                mode={creationMode}
-                selectedProject={selectedProject}
-                selectedFocus={selectedFocus}
-                newProjectName={newProjectName}
-                newProjectPath={newProjectPath}
-                newFocusTitle={newFocusTitle}
-                setNewFocusTitle={setNewFocusTitle}
-                newFocusDangerousMode={newFocusDangerousMode}
-                setNewFocusDangerousMode={setNewFocusDangerousMode}
-                newSessionDangerousMode={newSessionDangerousMode}
-                setNewSessionDangerousMode={setNewSessionDangerousMode}
-                cliDetections={agentCliDetections}
-                busy={busy}
-                projectDropError={projectDropError}
-                onChooseProjectFolder={() => chooseProjectFolder().catch(() => {})}
-                onDropProjectFolder={selectDroppedProjectFolder}
-                onCreateProject={() => createProjectFromComposer().catch(() => {})}
-                onCreateTopicWithAgent={kind => createTopicAndStartSession(kind).catch(() => {})}
-                onCreateSessionWithAgent={kind => createSessionWithAgent(kind).catch(() => {})}
-                onCancel={() => setCreationMode(null)}
-              />
-            ) : null}
-
-            {selectedSession && !creationMode ? (
-              // The drop host marks the terminal body as a file-drop zone and
-              // anchors the drop overlay over it. data-drop-id lets the drop
-              // controller route a release into this session.
-              <div
-                className={terminalDropHostClass}
-                data-drop-zone={TERMINAL_DROP_ZONE}
-                data-drop-id={selectedSession.id}
-              >
-                <TerminalSurface
-                  session={selectedSession}
-                  terminalBinding={selectedTerminalBinding}
-                  terminalContentReady={selectedTerminalContentReady}
-                  runningLabel={runningLabel}
-                  terminalLiveFollow={terminalLiveFollow}
-                  scrollbackRowCount={scrollbackRowCount}
-                  scrollbackMaxRows={scrollbackContract.maxRenderedHistoryRows}
-                  permissionRequest={selectedPermissionRequest}
-                  launching={isLaunchingSelectedSession}
+        <div className={stageContentClass} style={{ opacity: bootSequenceActive ? 0 : 1 }}>
+          {effectiveSurfaceMode === 'dashboard' ? (
+            <DashboardSurface
+              shell={shell}
+              sessionTerminalBindings={sessionTerminalBindings}
+              cortexActivity={cortexActivity}
+              sessionTimelines={sessionTimelines}
+              sessionActions={dashboardSessionActions}
+              onOpenSession={openSessionFromDashboard}
+              onCreateProject={() => openCreation('project')}
+              onCreateGeneralSession={startGeneralSession}
+              onOpenSettings={() => setSurfaceMode('settings')}
+              onSetWorkspaceDefaultDangerousMode={next =>
+                void setWorkspaceDefaultDangerousMode(next)
+              }
+              keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
+              onSetKeepAwakeEnabled={next =>
+                void setWorkspaceKeepAwake(next, shell.workspace.keepDisplayAwake ?? false)
+              }
+            />
+          ) : effectiveSurfaceMode === 'project-dashboard' && selectedProject ? (
+            <ProjectDashboardSurface
+              shell={shell}
+              project={selectedProject}
+              sessionTerminalBindings={sessionTerminalBindings}
+              cortexActivity={cortexActivity}
+              sessionTimelines={sessionTimelines}
+              sessionActions={dashboardSessionActions}
+              onOpenSession={openSessionFromDashboard}
+              onRestoreTopic={focus => void restoreFocusRecord(focus)}
+              onDeleteTopic={focus => void deleteFocusRecord(focus)}
+              onLocateFolder={project => void locateProjectFolder(project)}
+            />
+          ) : surfaceMode === 'settings' ? (
+            <SettingsSurface
+              theme={theme}
+              onSetTheme={onSetTheme}
+              defaultAgentKind={shell.workspace.defaultAgentKind}
+              onSetDefaultAgentKind={onSetDefaultAgentKind}
+              defaultDangerousMode={shell.workspace.defaultDangerousMode}
+              onSetDefaultDangerousMode={next => {
+                // Persist the single workspace auto-approve default and reflect it
+                // in the live composer immediately so an open new-session form
+                // picks it up at once.
+                void setWorkspaceDefaultDangerousMode(next);
+                setNewSessionDangerousMode(next);
+              }}
+              keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
+              keepDisplayAwake={shell.workspace.keepDisplayAwake ?? false}
+              onSetKeepAwake={(enabled, keepDisplay) =>
+                void setWorkspaceKeepAwake(enabled, keepDisplay)
+              }
+              terminalFontSize={shell.workspace.terminalFontSize ?? DEFAULT_TERMINAL_FONT_SIZE}
+              onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
+              crtEnabled={shell.workspace.crtEnabled ?? false}
+              onSetCrtEnabled={next => void setCrtEnabled(next)}
+              onDeleteProject={project => void deleteProjectRecord(project)}
+            />
+          ) : surfaceMode === 'session-history' ? (
+            <SessionHistorySurface
+              focus={selectedFocus}
+              shell={shell}
+              activeSessions={activeFocusSessions}
+              archivedSessions={archivedFocusSessions}
+              sessionTerminalBindings={sessionTerminalBindings}
+              cortexActivity={cortexActivity}
+              sessionTimelines={sessionTimelines}
+              sessionActions={dashboardSessionActions}
+              onOpenSession={openSessionFromDashboard}
+              onRestore={session =>
+                restoreSessionTab(session).catch(error =>
+                  writeLog(`Restore failed: ${errorMessage(error)}`),
+                )
+              }
+              onDelete={session =>
+                removeSessionRecord(session).catch(error =>
+                  writeLog(`Delete failed: ${errorMessage(error)}`),
+                )
+              }
+              onCreateSession={() =>
+                selectedFocus
+                  ? createSessionInFocus(selectedFocus.projectId ?? null, selectedFocus.id)
+                  : openCreation('session')
+              }
+              busy={busy}
+            />
+          ) : (
+            <div className={activeSurfaceClass} data-testid="terminal-stage">
+              {!creationMode ? (
+                <SessionTabsBar
+                  visibleSessions={visibleSessions}
+                  selectedSessionId={selectedSession?.id ?? null}
+                  sessionTerminalBindings={sessionTerminalBindings}
+                  cortexActivity={cortexActivity}
                   busy={busy}
-                  terminal={terminal}
-                  onLaunch={() => {
-                    void terminal.launchSession(selectedSession).catch(error => {
-                      writeLog(`Launch failed: ${errorMessage(error)}`);
-                    });
+                  canUseAppServices={canUseAppServices}
+                  canCreateSession={Boolean(selectedFocus)}
+                  hasSelectedSession={Boolean(selectedSession)}
+                  hasTerminalBinding={Boolean(selectedTerminalBinding)}
+                  effectiveDangerousMode={effectiveDangerousMode}
+                  dangerousToggleLocked={dangerousToggleLocked}
+                  dropTargetSessionId={tabDropTargetId}
+                  onSelectSession={selectSessionTab}
+                  onCloseSession={(event, session) => {
+                    event.stopPropagation();
+                    void archiveSession(session);
                   }}
+                  onCreateSession={() => openCreation('session')}
+                  onToggleDangerousMode={() => void toggleSelectedSessionYolo()}
                 />
-              </div>
-            ) : creationMode ? null : (
-              <EmptyState
-                createProject={() => openCreation('project')}
-                createGeneralSession={startGeneralSession}
-                openSettings={() => setSurfaceMode('settings')}
-                workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
-                onSetWorkspaceDefaultDangerousMode={next =>
-                  void setWorkspaceDefaultDangerousMode(next)
-                }
-                keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
-                onSetKeepAwakeEnabled={next =>
-                  void setWorkspaceKeepAwake(next, shell.workspace.keepDisplayAwake ?? false)
-                }
-              />
-            )}
-          </div>
-        )}
+              ) : null}
+
+              {creationMode ? (
+                <CreationComposer
+                  mode={creationMode}
+                  selectedProject={selectedProject}
+                  selectedFocus={selectedFocus}
+                  newProjectName={newProjectName}
+                  newProjectPath={newProjectPath}
+                  newFocusTitle={newFocusTitle}
+                  setNewFocusTitle={setNewFocusTitle}
+                  newFocusDangerousMode={newFocusDangerousMode}
+                  setNewFocusDangerousMode={setNewFocusDangerousMode}
+                  newSessionDangerousMode={newSessionDangerousMode}
+                  setNewSessionDangerousMode={setNewSessionDangerousMode}
+                  cliDetections={agentCliDetections}
+                  busy={busy}
+                  projectDropError={projectDropError}
+                  onChooseProjectFolder={() => chooseProjectFolder().catch(() => {})}
+                  onDropProjectFolder={selectDroppedProjectFolder}
+                  onCreateProject={() => createProjectFromComposer().catch(() => {})}
+                  onCreateTopicWithAgent={kind => createTopicAndStartSession(kind).catch(() => {})}
+                  onCreateSessionWithAgent={kind => createSessionWithAgent(kind).catch(() => {})}
+                  onCancel={() => setCreationMode(null)}
+                />
+              ) : null}
+
+              {selectedSession && !creationMode ? (
+                // The drop host marks the terminal body as a file-drop zone and
+                // anchors the drop overlay over it. data-drop-id lets the drop
+                // controller route a release into this session.
+                <div
+                  className={terminalDropHostClass}
+                  data-drop-zone={TERMINAL_DROP_ZONE}
+                  data-drop-id={selectedSession.id}
+                >
+                  <TerminalSurface
+                    session={selectedSession}
+                    terminalBinding={selectedTerminalBinding}
+                    terminalContentReady={selectedTerminalContentReady}
+                    runningLabel={runningLabel}
+                    terminalLiveFollow={terminalLiveFollow}
+                    scrollbackRowCount={scrollbackRowCount}
+                    scrollbackMaxRows={scrollbackContract.maxRenderedHistoryRows}
+                    permissionRequest={selectedPermissionRequest}
+                    launching={isLaunchingSelectedSession}
+                    busy={busy}
+                    terminal={terminal}
+                    onLaunch={() => {
+                      void terminal.launchSession(selectedSession).catch(error => {
+                        writeLog(`Launch failed: ${errorMessage(error)}`);
+                      });
+                    }}
+                  />
+                </div>
+              ) : creationMode ? null : (
+                <EmptyState
+                  createProject={() => openCreation('project')}
+                  createGeneralSession={startGeneralSession}
+                  openSettings={() => setSurfaceMode('settings')}
+                  workspaceDefaultDangerousMode={shell.workspace.defaultDangerousMode}
+                  onSetWorkspaceDefaultDangerousMode={next =>
+                    void setWorkspaceDefaultDangerousMode(next)
+                  }
+                  keepAwakeEnabled={shell.workspace.keepAwakeEnabled ?? false}
+                  onSetKeepAwakeEnabled={next =>
+                    void setWorkspaceKeepAwake(next, shell.workspace.keepDisplayAwake ?? false)
+                  }
+                />
+              )}
+            </div>
+          )}
+        </div>
         {/* Frame-level top-left glow. Mounted inside the canvas stage so it
             shares that stacking context (painting above the terminal but below
             the tabs, which are lifted); position:fixed anchors it to the whole
@@ -519,6 +539,26 @@ const canvasStageClass = css({
   position: 'relative',
 });
 
+// Wraps the surface router so it can fade in after the boot power-on (held at
+// opacity 0 during the boot so the still-loading content never flashes through
+// the transparent power-on). Fills the stage so the surfaces lay out unchanged.
+const stageContentClass = css({
+  position: 'absolute',
+  inset: 0,
+  transition: 'opacity 520ms ease',
+});
+
+// On the terminal stage, bleed past the shell padding so the terminal reaches the
+// window's top, right, and bottom edges (the left keeps its gap from the floating
+// sidebar); the window's rounded-corner mask + the shell's overflow:hidden clip
+// it. Applied as an inline style (not a Panda selector) so it travels with the
+// component and can never desync from a CSS regeneration during hot reload.
+const STAGE_BLEED_STYLE = {
+  marginTop: 'calc(-1 * var(--reverie-shell-pad))',
+  marginRight: 'calc(-1 * var(--reverie-shell-pad))',
+  height: 'calc(100% + 2 * var(--reverie-shell-pad))',
+} as const;
+
 const activeSurfaceClass = css({
   position: 'relative',
   height: '100%',
@@ -543,17 +583,18 @@ const terminalDropHostClass = css({
 });
 
 // A massive, soft glow anchored to the whole window's top-left corner. It lives
-// in the canvas-stage stacking context (zIndex 2) at zIndex 1, which places it
-// ABOVE the terminal (zIndex auto) yet BELOW the lifted tabs (zIndex 2) and the
-// sidebar (zIndex 3): the light spills over the terminal but the chrome stays
-// crisp on top. position:fixed anchors it to the frame, not the terminal panel,
-// so it is never clipped to the panel; the native window mask rounds the corner.
+// in the canvas-stage stacking context (zIndex 2) at zIndex 4, which layers it
+// ABOVE the terminal canvas (zIndex auto) AND the top/bottom edge fades (zIndex
+// 3) so the light is cast over the gradients, yet BELOW the lifted tabs (zIndex
+// 5) and the sidebar (zIndex 3, in the parent context) so the chrome stays crisp.
+// position:fixed anchors it to the frame, not the terminal panel, so it is never
+// clipped to the panel; the native window mask rounds the corner.
 // pointer-events:none keeps the terminal fully interactive. Intentionally very
 // subtle (tune via --glow); this replaces the old backdrop radial-gradient.
 const terminalGlowClass = css({
   position: 'fixed',
   inset: 0,
-  zIndex: 1,
+  zIndex: 4,
   pointerEvents: 'none',
   // Span the whole window and give the falloff an EXPLICIT radius so the glow
   // fades to transparent on its own, well inside the viewport, instead of being

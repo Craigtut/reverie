@@ -3,6 +3,7 @@ import {
   agentLabel,
   errorMessage,
   folderNameFromPath,
+  isFollowingUp,
   rollupSessionStates,
   shortId,
 } from '../domain';
@@ -112,6 +113,21 @@ export function useWorkspaceMutations({
       );
     } catch (error) {
       appendLog(`Update keep awake failed: ${errorMessage(error)}`);
+    }
+  }
+
+  // Persist the opt-in CRT terminal effect toggle. The terminal hook reads the
+  // workspace flag and applies/removes the post-process on the live renderer.
+  async function setCrtEnabled(enabled: boolean) {
+    if ((shell.workspace.crtEnabled ?? false) === enabled) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_crt_enabled', {
+        request: { crtEnabled: enabled },
+      });
+      setShell(snapshot);
+      appendLog(enabled ? 'CRT terminal effect on.' : 'CRT terminal effect off.');
+    } catch (error) {
+      appendLog(`Update CRT effect failed: ${errorMessage(error)}`);
     }
   }
 
@@ -361,6 +377,31 @@ export function useWorkspaceMutations({
     });
     setShell(snapshot);
     return snapshot;
+  }
+
+  // Toggle a session's follow-up flag: a durable, hand-placed "come back to this"
+  // marker. Marking stamps the current time; clearing nulls it. Unlike viewing
+  // (which clears "Ready for you"), this survives until the user replies (a new
+  // working turn supersedes it, derived in isFollowingUp) or clears it here. We
+  // read the live state from the activity store so the toggle always flips the
+  // value the user is currently seeing.
+  async function toggleSessionFollowUp(session: ShellSession) {
+    const activity = activityForSession(session, useActivityStore.getState().cortexActivity);
+    const flagged = !isFollowingUp(session, activity);
+    const flaggedAt = flagged ? new Date().toISOString() : null;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_session_flagged_at', {
+        request: { shellSessionId: session.id, flaggedAt },
+      });
+      setShell(snapshot);
+      useOverlayStore.getState().pushToast({
+        message: flagged
+          ? `Following up on “${session.title}”`
+          : `Cleared follow-up on “${session.title}”`,
+      });
+    } catch (error) {
+      appendLog(`Update follow-up failed: ${errorMessage(error)}`);
+    }
   }
 
   // Closing a session archives it: the CLI process tree is terminated, its tab
@@ -659,6 +700,7 @@ export function useWorkspaceMutations({
     setWorkspaceDefaultDangerousMode,
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
+    setCrtEnabled,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     setWorkspaceSidebarWidth,
@@ -670,6 +712,7 @@ export function useWorkspaceMutations({
     renameProject,
     revealPath,
     copyPath,
+    toggleSessionFollowUp,
     archiveSession,
     restoreSessionTab,
     removeSessionRecord,

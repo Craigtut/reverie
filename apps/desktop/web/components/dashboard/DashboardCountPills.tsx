@@ -44,6 +44,20 @@ export function DashboardCountPills({ groups }: { groups: GroupedSessions }) {
         <i style={{ background: groups.finished.length > 0 ? 'var(--text-2)' : 'var(--text-4)' }} />
         {groups.finished.length} ready
       </Typography>
+      {groups.followup.length > 0 ? (
+        // Only when the user has held something: a calm row by default, with the
+        // follow-up tally surfacing exactly when it is relevant.
+        <Typography
+          as="span"
+          variant="caption"
+          tone="muted"
+          data-tone="recent"
+          data-testid="dashboard-followup-count"
+        >
+          <i style={{ background: 'var(--text-2)' }} />
+          {groups.followup.length} following up
+        </Typography>
+      ) : null}
       <Typography
         as="span"
         variant="caption"

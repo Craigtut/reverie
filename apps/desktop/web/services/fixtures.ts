@@ -67,6 +67,8 @@ export async function invokeBrowserFixture<T>(
       return updateFixtureSessionArchived(args) as T;
     case 'mark_session_viewed':
       return markFixtureSessionViewed(args) as T;
+    case 'set_session_flagged_at':
+      return setFixtureSessionFlaggedAt(args) as T;
     case 'rename_session':
       return renameFixtureSession(args) as T;
     case 'rename_focus':
@@ -116,6 +118,12 @@ export async function invokeBrowserFixture<T>(
       recordedTerminalInputs.push({ terminalId, input });
       return undefined as T;
     }
+    case 'paste_terminal_text': {
+      const terminalId = readDirectArg<string>(args, 'terminalId');
+      const input = (args?.text as string) ?? '';
+      recordedTerminalInputs.push({ terminalId, input });
+      return undefined as T;
+    }
     case 'resize_terminal':
       return undefined as T;
     case 'read_terminal_rows': {
@@ -143,6 +151,8 @@ export async function invokeBrowserFixture<T>(
       recordedRenderMetrics.push(clone(args?.metrics as RenderMetrics));
       return undefined as T;
     case 'record_terminal_diagnostics':
+      return undefined as T;
+    case 'webview_heartbeat':
       return undefined as T;
     case 'set_workspace_nav_state':
       // The desktop backend persists the last view so a reload/relaunch reopens
@@ -262,6 +272,7 @@ function createFixtureSession(args?: Record<string, unknown>) {
     status: 'not_started' as const,
     lastExitCode: null,
     archived: false,
+    flaggedAt: null,
   };
 
   fixtureShell = {
@@ -287,6 +298,15 @@ function markFixtureSessionViewed(args?: Record<string, unknown>) {
   const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
   if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
   session.lastViewedAt = request.viewedAt;
+  persistFixtureShellSnapshot();
+  return clone(fixtureShell);
+}
+
+function setFixtureSessionFlaggedAt(args?: Record<string, unknown>) {
+  const request = readRequest<{ shellSessionId: string; flaggedAt: string | null }>(args);
+  const session = fixtureShell.sessions.find(item => item.id === request.shellSessionId);
+  if (!session) throw new Error(`Unknown fixture session: ${request.shellSessionId}`);
+  session.flaggedAt = request.flaggedAt ?? null;
   persistFixtureShellSnapshot();
   return clone(fixtureShell);
 }
