@@ -468,15 +468,47 @@ export function createTerminalWebGl2Renderer(
     gl.flush();
   }
 
-  function clearTranslucentRows(rows: readonly TerminalRow[]) {
-    if (backgroundAlpha >= 1 || rows.length === 0) return;
-    gl.enable(gl.SCISSOR_TEST);
+  function clearTranslucentRows(paintRows: readonly TerminalRow[]) {
+    if (backgroundAlpha >= 1 || paintRows.length === 0) return;
     gl.clearColor(0, 0, 0, 0);
-    for (const row of rows) {
+
+    const rowHeightPx = cellHeight * dpr;
+    const width = Math.round(cols * cellWidth * dpr);
+    if (!Number.isInteger(rowHeightPx)) {
+      gl.enable(gl.SCISSOR_TEST);
+      for (const row of paintRows) {
+        const x = 0;
+        const y = Math.max(0, Math.round(canvas.height - (row.index + 1) * cellHeight * dpr));
+        const height = Math.round(cellHeight * dpr);
+        gl.scissor(x, y, width, height);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      gl.disable(gl.SCISSOR_TEST);
+      return;
+    }
+
+    const rowIndexes = Array.from(new Set(paintRows.map(row => row.index))).sort((a, b) => a - b);
+    if (
+      rowIndexes.length >= rows &&
+      rowIndexes[0] === 0 &&
+      rowIndexes[rowIndexes.length - 1] === rows - 1
+    ) {
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      return;
+    }
+
+    gl.enable(gl.SCISSOR_TEST);
+    for (let i = 0; i < rowIndexes.length; ) {
+      const start = rowIndexes[i];
+      let end = start;
+      i += 1;
+      while (i < rowIndexes.length && rowIndexes[i] === end + 1) {
+        end = rowIndexes[i];
+        i += 1;
+      }
       const x = 0;
-      const y = Math.max(0, Math.round(canvas.height - (row.index + 1) * cellHeight * dpr));
-      const width = Math.round(cols * cellWidth * dpr);
-      const height = Math.round(cellHeight * dpr);
+      const y = Math.max(0, Math.round(canvas.height - (end + 1) * rowHeightPx));
+      const height = Math.round((end - start + 1) * rowHeightPx);
       gl.scissor(x, y, width, height);
       gl.clear(gl.COLOR_BUFFER_BIT);
     }

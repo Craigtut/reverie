@@ -14,6 +14,10 @@ use std::path::Path;
 use gix::remote::Direction;
 use serde::{Deserialize, Serialize};
 
+const DIRTY_LINE_DELTA_PATH_LIMIT: usize = 512;
+const DIRTY_LINE_DELTA_FILE_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+const DIRTY_LINE_DELTA_AGGREGATE_LIMIT_BYTES: u64 = 32 * 1024 * 1024;
+
 /// A point-in-time snapshot of a project folder's git state. A `None` return
 /// from [`compute_repo_status`] means the folder is not a git repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,22 +146,54 @@ fn count_to_boundary(repo: &gix::Repository, tip: gix::ObjectId, boundary: gix::
 /// from HEAD and the total inserted/deleted lines across them. This is the
 /// "what have my agents changed since the last commit" view the dashboard shows.
 fn dirty_stat(repo: &gix::Repository) -> DirtyStat {
+    dirty_stat_with_budget(repo, LineDeltaBudget::default())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineDeltaBudget {
+    path_limit: usize,
+    file_limit_bytes: u64,
+    aggregate_limit_bytes: u64,
+}
+
+impl Default for LineDeltaBudget {
+    fn default() -> Self {
+        Self {
+            path_limit: DIRTY_LINE_DELTA_PATH_LIMIT,
+            file_limit_bytes: DIRTY_LINE_DELTA_FILE_LIMIT_BYTES,
+            aggregate_limit_bytes: DIRTY_LINE_DELTA_AGGREGATE_LIMIT_BYTES,
+        }
+    }
+}
+
+fn dirty_stat_with_budget(repo: &gix::Repository, budget: LineDeltaBudget) -> DirtyStat {
     let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
         return DirtyStat::default();
     };
     let paths = changed_paths(repo);
-    let head_tree = repo
-        .head_commit()
-        .ok()
-        .and_then(|commit| commit.tree().ok());
-
     let mut stat = DirtyStat {
         files_changed: paths.len(),
         insertions: 0,
         deletions: 0,
     };
+
+    if paths.len() > budget.path_limit {
+        return stat;
+    }
+
+    let head_tree = repo
+        .head_commit()
+        .ok()
+        .and_then(|commit| commit.tree().ok());
+    let mut remaining_bytes = budget.aggregate_limit_bytes;
     for path in &paths {
-        let (insertions, deletions) = line_delta(head_tree.as_ref(), &workdir, path);
+        let (insertions, deletions) = line_delta_with_budget(
+            head_tree.as_ref(),
+            &workdir,
+            path,
+            budget.file_limit_bytes,
+            &mut remaining_bytes,
+        );
         stat.insertions += insertions;
         stat.deletions += deletions;
     }
@@ -186,20 +222,45 @@ fn changed_paths(repo: &gix::Repository) -> std::collections::HashSet<Vec<u8>> {
     paths
 }
 
-/// Count inserted/deleted lines for one path comparing its HEAD blob to the file
-/// on disk. New files count every line as an insertion, deleted files count the
-/// old blob's lines as deletions, and binary files contribute no line counts.
-fn line_delta(head_tree: Option<&gix::Tree<'_>>, workdir: &Path, rel: &[u8]) -> (usize, usize) {
+fn line_delta_with_budget(
+    head_tree: Option<&gix::Tree<'_>>,
+    workdir: &Path,
+    rel: &[u8],
+    file_limit_bytes: u64,
+    remaining_bytes: &mut u64,
+) -> (usize, usize) {
     let rel_path = Path::new(std::str::from_utf8(rel).unwrap_or_default());
     if rel_path.as_os_str().is_empty() {
         return (0, 0);
     }
 
-    let old = head_tree
-        .and_then(|tree| tree.clone().lookup_entry_by_path(rel_path).ok().flatten())
+    let old_entry =
+        head_tree.and_then(|tree| tree.clone().lookup_entry_by_path(rel_path).ok().flatten());
+    let old_size = old_entry
+        .as_ref()
+        .and_then(|entry| entry.id().header().ok())
+        .filter(|header| header.kind() == gix::object::Kind::Blob)
+        .map(|header| header.size());
+    let new_size = std::fs::metadata(workdir.join(rel_path))
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len());
+
+    let required_bytes = old_size.unwrap_or(0).saturating_add(new_size.unwrap_or(0));
+    if old_size.is_some_and(|size| size > file_limit_bytes)
+        || new_size.is_some_and(|size| size > file_limit_bytes)
+        || required_bytes > *remaining_bytes
+    {
+        return (0, 0);
+    }
+
+    *remaining_bytes = remaining_bytes.saturating_sub(required_bytes);
+
+    let old = old_size
+        .and_then(|_| old_entry)
         .and_then(|entry| entry.object().ok())
         .map(|object| object.data.clone());
-    let new = std::fs::read(workdir.join(rel_path)).ok();
+    let new = new_size.and_then(|_| std::fs::read(workdir.join(rel_path)).ok());
 
     count_lines_delta(old.as_deref(), new.as_deref())
 }
@@ -311,5 +372,86 @@ mod tests {
             dirty.dirty.insertions, 0,
             "binary change contributes no lines"
         );
+    }
+
+    #[test]
+    fn dirty_stat_path_budget_preserves_file_count_and_skips_line_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "seed"]);
+
+        fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        fs::write(root.join("b.txt"), "new\n").unwrap();
+
+        let repo = gix::open(root).unwrap();
+        let dirty = dirty_stat_with_budget(
+            &repo,
+            LineDeltaBudget {
+                path_limit: 1,
+                file_limit_bytes: 1024,
+                aggregate_limit_bytes: 1024,
+            },
+        );
+
+        assert_eq!(dirty.files_changed, 2);
+        assert_eq!(dirty.insertions, 0);
+        assert_eq!(dirty.deletions, 0);
+    }
+
+    #[test]
+    fn dirty_stat_file_budget_skips_oversized_line_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        fs::write(root.join("a.txt"), "one\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "seed"]);
+
+        fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let repo = gix::open(root).unwrap();
+        let dirty = dirty_stat_with_budget(
+            &repo,
+            LineDeltaBudget {
+                path_limit: 8,
+                file_limit_bytes: 4,
+                aggregate_limit_bytes: 1024,
+            },
+        );
+
+        assert_eq!(dirty.files_changed, 1);
+        assert_eq!(dirty.insertions, 0);
+        assert_eq!(dirty.deletions, 0);
+    }
+
+    #[test]
+    fn dirty_stat_aggregate_budget_caps_total_diff_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        init_repo(root);
+        fs::write(root.join("a.txt"), "a\n").unwrap();
+        fs::write(root.join("b.txt"), "b\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "seed"]);
+
+        fs::write(root.join("a.txt"), "a\naa\n").unwrap();
+        fs::write(root.join("b.txt"), "b\nbb\n").unwrap();
+
+        let repo = gix::open(root).unwrap();
+        let dirty = dirty_stat_with_budget(
+            &repo,
+            LineDeltaBudget {
+                path_limit: 8,
+                file_limit_bytes: 1024,
+                aggregate_limit_bytes: 7,
+            },
+        );
+
+        assert_eq!(dirty.files_changed, 2);
+        assert_eq!(dirty.insertions, 1);
+        assert_eq!(dirty.deletions, 0);
     }
 }

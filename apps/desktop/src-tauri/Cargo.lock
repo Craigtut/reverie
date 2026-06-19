@@ -4454,6 +4454,7 @@ dependencies = [
  "anyhow",
  "block2",
  "cc",
+ "crossbeam-channel",
  "libc",
  "libghostty-vt",
  "libghostty-vt-sys",

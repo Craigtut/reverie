@@ -34,6 +34,7 @@ cc = "1"
 
 [dependencies]
 anyhow = "1"
+crossbeam-channel = "0.5"
 libghostty-vt = { version = "=0.2.0", default-features = false, features = ["link-dynamic"] }
 # Direct dependency purely to make dylib staging in build.rs correct and
 # deterministic. `libghostty-vt-sys` carries `links = "ghostty-vt"`, so depending

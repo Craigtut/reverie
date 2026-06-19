@@ -280,12 +280,10 @@ function decodeCell(reader: FrameReader): TerminalCell {
   const underline = UNDERLINE_BY_CODE[(styleBits & STYLE_UNDERLINE_MASK) >> STYLE_UNDERLINE_SHIFT];
   if (!underline) throw new Error('decodeTerminalFrame: invalid underline kind');
 
-  return {
+  const cell: TerminalCell = {
     col,
     width,
     text,
-    ...(fg ? { fg } : {}),
-    ...(bg ? { bg } : {}),
     style: {
       bold: (styleBits & STYLE_BOLD) !== 0,
       italic: (styleBits & STYLE_ITALIC) !== 0,
@@ -298,6 +296,9 @@ function decodeCell(reader: FrameReader): TerminalCell {
       overline: (styleBits & STYLE_OVERLINE) !== 0,
     },
   };
+  if (fg) cell.fg = fg;
+  if (bg) cell.bg = bg;
+  return cell;
 }
 
 // Decode base64 (as the harness SSE bridge sends) to bytes, then decode the

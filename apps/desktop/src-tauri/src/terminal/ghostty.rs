@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::collections::HashMap;
 
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
@@ -403,16 +402,13 @@ fn changed_rows(
     current: &[TerminalRow],
     current_offset: usize,
 ) -> Vec<TerminalRow> {
-    let previous_by_index = previous
-        .iter()
-        .map(|row| (previous_offset.saturating_add(row.index as usize), row))
-        .collect::<HashMap<_, _>>();
     current
         .iter()
         .filter_map(|row| {
             let absolute = current_offset.saturating_add(row.index as usize);
-            let changed = previous_by_index
-                .get(&absolute)
+            let changed = absolute
+                .checked_sub(previous_offset)
+                .and_then(|index| previous.get(index))
                 .is_none_or(|previous| row_cells_changed(previous, row));
             changed.then(|| {
                 let mut row = row.clone();
@@ -464,7 +460,8 @@ fn extract_frame<'alloc, 'cb>(
         let mut col = 0_u16;
 
         while let Some(cell) = cell_iteration.next() {
-            let width = match cell.raw_cell()?.wide()? {
+            let raw = cell.raw_cell()?;
+            let width = match raw.wide()? {
                 CellWide::Narrow => 1,
                 CellWide::Wide => 2,
                 CellWide::SpacerTail | CellWide::SpacerHead => {
@@ -472,7 +469,16 @@ fn extract_frame<'alloc, 'cb>(
                     continue;
                 }
             };
-            let text = cell_text(cell)?;
+            let has_text = raw.has_text()?;
+            if !has_text && !raw.has_styling()? {
+                col = col.saturating_add(1);
+                continue;
+            }
+            let text = if has_text {
+                cell_text(cell)?
+            } else {
+                " ".to_string()
+            };
             let fg = cell.fg_color()?.map(map_color);
             let bg = cell.bg_color()?.map(map_color);
             let style = map_cell_style(cell.style()?);
@@ -542,11 +548,9 @@ fn osc_set_color(code: u8, color: TerminalColor) -> Vec<u8> {
 }
 
 fn cell_text(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<String> {
-    if cell.graphemes_len()? == 0 {
-        return Ok(" ".to_string());
-    }
-
-    Ok(cell.graphemes()?.into_iter().collect())
+    let mut text = String::new();
+    cell.graphemes_utf8(&mut text)?;
+    Ok(text)
 }
 
 fn map_dirty(dirty: Dirty) -> TerminalDirtyState {

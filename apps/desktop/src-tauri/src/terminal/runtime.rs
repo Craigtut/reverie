@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use std::sync::{
-    Arc, Mutex,
-    mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError},
-};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded, select, unbounded};
 use reverie_core::TerminalSpawnSpec;
 use reverie_core::agents::derive_session_title;
 use reverie_core::domain::{AgentKind, NativeSessionRef, SessionId};
@@ -359,7 +357,7 @@ impl TerminalSessionRuntime {
         count: usize,
         generation: u32,
     ) -> Result<Vec<u8>> {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = unbounded();
         self.command_sender_for(terminal_id)?
             .send(TerminalRuntimeCommand::ReadRows {
                 start_id,
@@ -499,13 +497,13 @@ impl TerminalSessionRuntime {
             launch_started_ms,
         );
         let (reader, controller) = process.split();
-        let (read_tx, read_rx) = mpsc::sync_channel(PTY_READ_QUEUE_CAPACITY);
+        let (read_tx, read_rx) = bounded(PTY_READ_QUEUE_CAPACITY);
         if let Err(error) = spawn_pty_reader_thread(request.terminal_id, reader, read_tx) {
             let _ = controller.terminate();
             crate::terminal::orphans::clear_spawn(&app, request.terminal_id);
             return Err(error);
         }
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, command_rx) = unbounded();
         let response_controller = controller.clone();
         if let Err(error) = terminal.on_pty_write(move |data| {
             let _ = response_controller.write_input(data);
@@ -592,6 +590,32 @@ impl TerminalSessionRuntime {
         // a Full snapshot carrying the new generation, which the frontend adopts
         // and rebuilds from. See `wire-protocol.md` (generation rules).
         let mut generation: u32 = 1;
+        macro_rules! emit_frame_if_ready {
+            () => {{
+                if terminal_frame_ready(
+                    pending_frame,
+                    last_frame_emit,
+                    &viewport_state,
+                    &terminal,
+                    &mut sync_output_started_at,
+                    Instant::now(),
+                )? {
+                    let emit_ms =
+                        send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
+                    total_emit_ms += emit_ms;
+                    max_emit_ms = max_emit_ms.max(emit_ms);
+                    frames_emitted += 1;
+                    self.update_progress(
+                        request.terminal_id,
+                        frames_emitted,
+                        bytes_rendered,
+                        last_output_at,
+                    )?;
+                    pending_frame = false;
+                    last_frame_emit = Instant::now();
+                }
+            }};
+        }
         let child_success = loop {
             // Drains resize/read-rows/theme/active commands. Resizes bump the
             // shared `generation` in place (so a history-range reply drained after
@@ -608,30 +632,29 @@ impl TerminalSessionRuntime {
                 pending_frame = true;
             }
 
-            if terminal_frame_ready(
+            emit_frame_if_ready!();
+
+            let wait_timeout = terminal_frame_wait_timeout(
                 pending_frame,
                 last_frame_emit,
                 &viewport_state,
-                &terminal,
-                &mut sync_output_started_at,
+                sync_output_started_at,
                 Instant::now(),
-            )? {
-                let emit_ms = send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
-                total_emit_ms += emit_ms;
-                max_emit_ms = max_emit_ms.max(emit_ms);
-                frames_emitted += 1;
-                self.update_progress(
-                    request.terminal_id,
-                    frames_emitted,
-                    bytes_rendered,
-                    last_output_at,
-                )?;
-                pending_frame = false;
-                last_frame_emit = Instant::now();
-            }
-
-            match read_rx.recv_timeout(Duration::from_millis(4)) {
-                Ok(PtyReadEvent::Chunk(chunk)) => {
+            );
+            match wait_for_terminal_worker_event(&command_rx, &read_rx, wait_timeout)? {
+                TerminalWorkerEvent::Command(command) => {
+                    let applied = apply_terminal_command(
+                        request.terminal_id,
+                        command,
+                        &mut terminal,
+                        &mut viewport_state,
+                        &mut generation,
+                    )?;
+                    if applied.needs_frame {
+                        pending_frame = true;
+                    }
+                }
+                TerminalWorkerEvent::Pty(PtyReadEvent::Chunk(chunk)) => {
                     let PtyReadBatch {
                         bytes,
                         chunks,
@@ -670,38 +693,17 @@ impl TerminalSessionRuntime {
                         }
                     }
                 }
-                Ok(PtyReadEvent::Exited { child_success }) => break child_success,
-                Ok(PtyReadEvent::Failed(message)) => bail!(message),
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    bail!("terminal reader disconnected before reporting process exit")
+                TerminalWorkerEvent::Pty(PtyReadEvent::Exited { child_success }) => {
+                    break child_success;
                 }
+                TerminalWorkerEvent::Pty(PtyReadEvent::Failed(message)) => bail!(message),
+                TerminalWorkerEvent::FrameDeadline => {}
             }
 
             // Gate on `pending_frame` so an idle terminal (no new PTY output and
             // no applied commands) never emits. Without this guard the loop ships
             // a full grid frame every TERMINAL_FRAME_INTERVAL forever, per session.
-            if terminal_frame_ready(
-                pending_frame,
-                last_frame_emit,
-                &viewport_state,
-                &terminal,
-                &mut sync_output_started_at,
-                Instant::now(),
-            )? {
-                let emit_ms = send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
-                total_emit_ms += emit_ms;
-                max_emit_ms = max_emit_ms.max(emit_ms);
-                frames_emitted += 1;
-                self.update_progress(
-                    request.terminal_id,
-                    frames_emitted,
-                    bytes_rendered,
-                    last_output_at,
-                )?;
-                pending_frame = false;
-                last_frame_emit = Instant::now();
-            }
+            emit_frame_if_ready!();
         };
 
         if pending_frame {
@@ -988,7 +990,7 @@ fn drain_pty_read_batch(
 fn spawn_pty_reader_thread(
     terminal_id: TerminalId,
     mut reader: reverie_core::pty::PtyReader,
-    sender: SyncSender<PtyReadEvent>,
+    sender: Sender<PtyReadEvent>,
 ) -> Result<()> {
     thread::Builder::new()
         .name(format!("reverie-pty-reader-{terminal_id}"))
@@ -1031,6 +1033,12 @@ struct AppliedCommands {
     needs_frame: bool,
 }
 
+enum TerminalWorkerEvent {
+    Command(TerminalRuntimeCommand),
+    Pty(PtyReadEvent),
+    FrameDeadline,
+}
+
 fn apply_terminal_commands(
     terminal_id: TerminalId,
     receiver: &Receiver<TerminalRuntimeCommand>,
@@ -1041,76 +1049,115 @@ fn apply_terminal_commands(
     let mut applied = AppliedCommands::default();
 
     while let Ok(command) = receiver.try_recv() {
-        match command {
-            TerminalRuntimeCommand::Resize { cols, rows } => {
-                terminal.resize(cols, rows)?;
-                // Reflow renumbers rows, so bump the generation immediately; the
-                // forced Full frame that follows carries the new generation, and
-                // a history-range request drained after this resize is served at
-                // (and tagged with) the post-resize generation.
-                *generation = generation.saturating_add(1);
-                applied.needs_frame = true;
-            }
-            TerminalRuntimeCommand::ReadRows {
-                start_id,
-                count,
-                generation: requested_generation,
-                reply,
-            } => {
-                // Map the requested stable id to a buffer position using the live
-                // floor (oldest_id = lines_evicted): below the cap oldest_id is 0
-                // so id == position; a requested id below the floor (its row has
-                // evicted) clamps to position 0, the oldest still-buffered row.
-                let oldest_id = terminal.oldest_id();
-                let start = start_id.saturating_sub(oldest_id) as usize;
-                // Serve the band only if the frontend's generation still matches
-                // the live one; a resize the frontend has not seen yet renumbers
-                // rows, so an old-generation request is answered with an empty
-                // band (the frontend re-seeds and re-requests against the new
-                // generation). The reply is always stamped with the live
-                // generation so the frontend can re-check on receipt.
-                let rows = if requested_generation == *generation {
-                    // A read error must NOT kill the worker (that would take the
-                    // whole session down over a transient scroll-back read). Log
-                    // it and serve an empty band, which the `read_terminal_rows`
-                    // caller receives normally and the frontend re-requests.
-                    // `read_rows` already restores the viewport pin even on error.
-                    match terminal.read_rows(start, count) {
-                        Ok(rows) => rows,
-                        Err(error) => {
-                            eprintln!(
-                                "[reverie-terminal] read_rows failed for terminal {terminal_id} \
-                                 (start_id={start_id}, count={count}): {error}"
-                            );
-                            Vec::new()
-                        }
-                    }
-                } else {
-                    Vec::new()
-                };
-                // Echo the ACTUAL served start id (= served position + floor): a
-                // request whose id fell below the floor is keyed by the frontend
-                // at the floor, not at its (now evicted) requested id.
-                let served_start_id = oldest_id.saturating_add(start as u64);
-                let band = encode_row_band(&rows, *generation, served_start_id);
-                // The requester may have given up (dropped the receiver); ignore
-                // a send error rather than failing the worker.
-                let _ = reply.send(band);
-            }
-            TerminalRuntimeCommand::SetDefaultColors {
-                foreground,
-                background,
-            } => {
-                terminal.set_default_colors(foreground, background);
-                applied.needs_frame = true;
-            }
-            TerminalRuntimeCommand::SetFrontendActive(active) => {
-                viewport_state.frontend_active = active;
-            }
-        }
+        let next = apply_terminal_command(terminal_id, command, terminal, viewport_state, generation)?;
+        applied.needs_frame |= next.needs_frame;
     }
 
     Ok(applied)
+}
+
+fn apply_terminal_command(
+    terminal_id: TerminalId,
+    command: TerminalRuntimeCommand,
+    terminal: &mut GhosttyTerminalState<'_, '_>,
+    viewport_state: &mut TerminalViewportState,
+    generation: &mut u32,
+) -> Result<AppliedCommands> {
+    let mut applied = AppliedCommands::default();
+    match command {
+        TerminalRuntimeCommand::Resize { cols, rows } => {
+            terminal.resize(cols, rows)?;
+            // Reflow renumbers rows, so bump the generation immediately; the
+            // forced Full frame that follows carries the new generation, and
+            // a history-range request drained after this resize is served at
+            // (and tagged with) the post-resize generation.
+            *generation = generation.saturating_add(1);
+            applied.needs_frame = true;
+        }
+        TerminalRuntimeCommand::ReadRows {
+            start_id,
+            count,
+            generation: requested_generation,
+            reply,
+        } => {
+            // Map the requested stable id to a buffer position using the live
+            // floor (oldest_id = lines_evicted): below the cap oldest_id is 0
+            // so id == position; a requested id below the floor (its row has
+            // evicted) clamps to position 0, the oldest still-buffered row.
+            let oldest_id = terminal.oldest_id();
+            let start = start_id.saturating_sub(oldest_id) as usize;
+            // Serve the band only if the frontend's generation still matches
+            // the live one; a resize the frontend has not seen yet renumbers
+            // rows, so an old-generation request is answered with an empty
+            // band (the frontend re-seeds and re-requests against the new
+            // generation). The reply is always stamped with the live
+            // generation so the frontend can re-check on receipt.
+            let rows = if requested_generation == *generation {
+                // A read error must NOT kill the worker (that would take the
+                // whole session down over a transient scroll-back read). Log
+                // it and serve an empty band, which the `read_terminal_rows`
+                // caller receives normally and the frontend re-requests.
+                // `read_rows` already restores the viewport pin even on error.
+                match terminal.read_rows(start, count) {
+                    Ok(rows) => rows,
+                    Err(error) => {
+                        eprintln!(
+                            "[reverie-terminal] read_rows failed for terminal {terminal_id} \
+                             (start_id={start_id}, count={count}): {error}"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            // Echo the ACTUAL served start id (= served position + floor): a
+            // request whose id fell below the floor is keyed by the frontend
+            // at the floor, not at its (now evicted) requested id.
+            let served_start_id = oldest_id.saturating_add(start as u64);
+            let band = encode_row_band(&rows, *generation, served_start_id);
+            // The requester may have given up (dropped the receiver); ignore
+            // a send error rather than failing the worker.
+            let _ = reply.send(band);
+        }
+        TerminalRuntimeCommand::SetDefaultColors {
+            foreground,
+            background,
+        } => {
+            terminal.set_default_colors(foreground, background);
+            applied.needs_frame = true;
+        }
+        TerminalRuntimeCommand::SetFrontendActive(active) => {
+            viewport_state.frontend_active = active;
+        }
+    }
+    Ok(applied)
+}
+
+fn wait_for_terminal_worker_event(
+    command_rx: &Receiver<TerminalRuntimeCommand>,
+    read_rx: &Receiver<PtyReadEvent>,
+    frame_timeout: Option<Duration>,
+) -> Result<TerminalWorkerEvent> {
+    match frame_timeout {
+        Some(timeout) => select! {
+            recv(command_rx) -> command => command
+                .map(TerminalWorkerEvent::Command)
+                .context("terminal command channel disconnected"),
+            recv(read_rx) -> event => event
+                .map(TerminalWorkerEvent::Pty)
+                .context("terminal reader disconnected before reporting process exit"),
+            default(timeout) => Ok(TerminalWorkerEvent::FrameDeadline),
+        },
+        None => select! {
+            recv(command_rx) -> command => command
+                .map(TerminalWorkerEvent::Command)
+                .context("terminal command channel disconnected"),
+            recv(read_rx) -> event => event
+                .map(TerminalWorkerEvent::Pty)
+                .context("terminal reader disconnected before reporting process exit"),
+        },
+    }
 }
 
 fn terminal_frame_interval(state: &TerminalViewportState) -> Duration {
@@ -1129,6 +1176,30 @@ fn terminal_frame_due(
 ) -> bool {
     pending_frame
         && now.saturating_duration_since(last_frame_emit) >= terminal_frame_interval(state)
+}
+
+fn terminal_frame_wait_timeout(
+    pending_frame: bool,
+    last_frame_emit: Instant,
+    state: &TerminalViewportState,
+    sync_output_started_at: Option<Instant>,
+    now: Instant,
+) -> Option<Duration> {
+    if !pending_frame {
+        return None;
+    }
+    let frame_due_at = last_frame_emit
+        .checked_add(terminal_frame_interval(state))
+        .unwrap_or(now);
+    let deadline = if let Some(started_at) = sync_output_started_at {
+        let sync_due_at = started_at
+            .checked_add(SYNC_OUTPUT_FRAME_TIMEOUT)
+            .unwrap_or(now);
+        frame_due_at.max(sync_due_at)
+    } else {
+        frame_due_at
+    };
+    Some(deadline.saturating_duration_since(now))
 }
 
 fn terminal_frame_ready(
@@ -1745,7 +1816,7 @@ mod tests {
     fn read_rows_command_serves_a_decodable_band_at_the_current_generation() {
         use crate::terminal::wire::decode_row_band;
 
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
@@ -1758,7 +1829,7 @@ mod tests {
         terminal.scroll_bottom();
         let _ = terminal.frame().unwrap();
 
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = unbounded();
         sender
             .send(TerminalRuntimeCommand::ReadRows {
                 start_id: 0,
@@ -1799,7 +1870,7 @@ mod tests {
     fn read_rows_command_returns_an_empty_band_for_a_stale_generation() {
         use crate::terminal::wire::decode_row_band;
 
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
@@ -1812,7 +1883,7 @@ mod tests {
         }
         terminal.scroll_bottom();
 
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = unbounded();
         sender
             .send(TerminalRuntimeCommand::ReadRows {
                 start_id: 0,
@@ -1846,7 +1917,7 @@ mod tests {
         // of propagating).
         use crate::terminal::wire::decode_row_band;
 
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
@@ -1860,7 +1931,7 @@ mod tests {
         let _ = terminal.frame().unwrap();
 
         // A ReadRows followed by a SetFrontendActive in the same drain.
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = unbounded();
         sender
             .send(TerminalRuntimeCommand::ReadRows {
                 start_id: 0,
@@ -1899,7 +1970,7 @@ mod tests {
         // A resize bumps the per-session generation in place and the post-resize
         // frame is Full, which the frontend adopts as the new generation. This
         // pins both halves of that contract.
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
@@ -1937,7 +2008,7 @@ mod tests {
 
     #[test]
     fn terminal_commands_lower_frame_cadence_when_frontend_backgrounds_terminal() {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
@@ -1992,7 +2063,7 @@ mod tests {
 
     #[test]
     fn drain_pty_read_batch_coalesces_queued_chunks() {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         sender.send(PtyReadEvent::Chunk(b"b".to_vec())).unwrap();
         sender.send(PtyReadEvent::Chunk(b"c".to_vec())).unwrap();
 
@@ -2005,7 +2076,7 @@ mod tests {
 
     #[test]
     fn drain_pty_read_batch_defers_exit_until_after_chunks() {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = unbounded();
         sender.send(PtyReadEvent::Chunk(b"b".to_vec())).unwrap();
         sender
             .send(PtyReadEvent::Exited {
@@ -2066,6 +2137,64 @@ mod tests {
             &viewport_state,
             next_tick
         ));
+    }
+
+    #[test]
+    fn terminal_worker_wait_receives_commands_without_pty_output() {
+        let (command_tx, command_rx) = unbounded();
+        let (_read_tx, read_rx) = bounded::<PtyReadEvent>(1);
+
+        command_tx
+            .send(TerminalRuntimeCommand::SetFrontendActive(false))
+            .unwrap();
+
+        match wait_for_terminal_worker_event(&command_rx, &read_rx, None).unwrap() {
+            TerminalWorkerEvent::Command(TerminalRuntimeCommand::SetFrontendActive(false)) => {}
+            _ => panic!("expected frontend-active command"),
+        }
+    }
+
+    #[test]
+    fn terminal_worker_wait_reports_frame_deadline() {
+        let (_command_tx, command_rx) = unbounded::<TerminalRuntimeCommand>();
+        let (_read_tx, read_rx) = bounded::<PtyReadEvent>(1);
+
+        let event =
+            wait_for_terminal_worker_event(&command_rx, &read_rx, Some(Duration::ZERO)).unwrap();
+
+        assert!(matches!(event, TerminalWorkerEvent::FrameDeadline));
+    }
+
+    #[test]
+    fn terminal_frame_wait_timeout_tracks_frame_and_sync_deadlines() {
+        let start = Instant::now();
+        let viewport_state = TerminalViewportState {
+            frontend_active: true,
+        };
+
+        assert!(
+            terminal_frame_wait_timeout(false, start, &viewport_state, None, start).is_none()
+        );
+        assert_eq!(
+            terminal_frame_wait_timeout(
+                true,
+                start,
+                &viewport_state,
+                None,
+                start + Duration::from_millis(5),
+            ),
+            Some(TERMINAL_FRAME_INTERVAL - Duration::from_millis(5))
+        );
+        assert_eq!(
+            terminal_frame_wait_timeout(
+                true,
+                start,
+                &viewport_state,
+                Some(start),
+                start + Duration::from_millis(900),
+            ),
+            Some(Duration::from_millis(100))
+        );
     }
 
     #[test]
