@@ -375,6 +375,47 @@ describe('createTerminalGpuRenderer', () => {
     expect(Math.max(...redXs)).toBe(24);
   });
 
+  it('paints WebGL2 inverse blank cells as visible blocks', () => {
+    const gl = fakeWebGl2Context();
+    const canvas = fakeCanvas({ webgl2: gl });
+    const renderer = createTerminalGpuRenderer(canvas, {
+      cols: 4,
+      rows: 1,
+      cellWidth: 8,
+      cellHeight: 10,
+      foreground: '#EFE9DF',
+      background: '#0B0A09',
+    });
+
+    renderer.paintFrame({
+      dirty: 'full',
+      rows: [
+        {
+          index: 0,
+          dirty: true,
+          cells: [{ col: 2, text: ' ', style: { inverse: true } }],
+        },
+      ],
+      cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+    });
+
+    const rectUpload = gl.bufferData.mock.calls.find(
+      call => call[1] instanceof Float32Array,
+    )?.[1] as Float32Array | undefined;
+    expect(rectUpload).toBeDefined();
+    if (!rectUpload) throw new Error('expected WebGL rect upload');
+    const xs: number[] = [];
+    for (let offset = 0; offset < rectUpload.length; offset += 6) {
+      const red = Math.abs((rectUpload[offset + 2] ?? 0) - 0xef / 255) < 0.0001;
+      const green = Math.abs((rectUpload[offset + 3] ?? 0) - 0xe9 / 255) < 0.0001;
+      const blue = Math.abs((rectUpload[offset + 4] ?? 0) - 0xdf / 255) < 0.0001;
+      if (red && green && blue) xs.push(rectUpload[offset] ?? 0);
+    }
+
+    expect(Math.min(...xs)).toBe(16);
+    expect(Math.max(...xs)).toBe(24);
+  });
+
   it('positions WebGL2 wide right-half block glyphs from the full rendered width', () => {
     const gl = fakeWebGl2Context();
     const canvas = fakeCanvas({ webgl2: gl });

@@ -614,6 +614,38 @@ describe('terminal buffer model', () => {
     expect(terminalBufferRowText(state, 18, true)).toBe('new-tail');
   });
 
+  it('keeps inverse blank cursor cells during resize blank guards', () => {
+    let state = createTerminalBuffer(surface);
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'old-a'), row(1, 'old-b'), row(2, 'old-c')], {
+        scrollback: { totalRows: 3, viewportOffset: 0, viewportRows: 3, atBottom: true },
+      }),
+      surface,
+    );
+
+    state = applyViewportFrameToBuffer(
+      state,
+      frame(
+        [
+          row(0, ''),
+          { index: 1, dirty: true, cells: [{ col: 0, text: ' ', style: { inverse: true } }] },
+          row(2, ''),
+        ],
+        {
+          scrollback: { totalRows: 3, viewportOffset: 0, viewportRows: 3, atBottom: true },
+        },
+      ),
+      surface,
+      { preserveBlankRows: true },
+    );
+
+    expect([...state.rowsById.keys()]).toEqual([1]);
+    expect(state.rowsById.get(1)?.cells).toEqual([
+      { col: 0, width: 1, text: ' ', style: { inverse: true } },
+    ]);
+  });
+
   it('creates a paintable window frame with rows and cursor rebased to the window', () => {
     let state = createTerminalBuffer(surface);
     state = applyViewportFrameToBuffer(
@@ -636,6 +668,31 @@ describe('terminal buffer model', () => {
       ),
     ).toEqual(['one', 'two']);
     expect(windowFrame.cursor?.position).toEqual({ row: 1, col: 4 });
+  });
+
+  it('clamps a viewport cursor before storing it as an absolute buffer row', () => {
+    let state = createTerminalBuffer(surface);
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'zero'), row(1, 'one'), row(2, 'two')], {
+        scrollback: { totalRows: 10, viewportOffset: 7, viewportRows: 3, atBottom: true },
+        cursor: { visible: true, row: 3, col: 25, position: { row: 3, col: 25 } },
+      }),
+      surface,
+    );
+
+    expect(state.cursor?.position).toEqual({ row: 9, col: 19 });
+
+    const windowFrame = frameFromBufferWindow(state, 7, 3);
+
+    expect(windowFrame.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 2,
+        col: 19,
+        position: { row: 2, col: 19 },
+      }),
+    );
   });
 
   it('creates an absolute-row snapshot for selection and links', () => {

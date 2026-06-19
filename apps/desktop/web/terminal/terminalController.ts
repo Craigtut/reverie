@@ -13,6 +13,7 @@ import type {
   TerminalFrame,
   TerminalModes,
   TerminalOverlay,
+  TerminalPaintCursorSample,
   TerminalPaintReason,
   TerminalPaintSample,
   TerminalRenderer,
@@ -49,7 +50,11 @@ import { rowSpanInWindow, selectionWindowSpans } from './interaction/overlayPain
 import { detectLinks } from './interaction/linkProvider';
 import type { BufferCell, BufferLinkSpan, RowSpan, SelectionRange } from './interaction/types';
 import { TERMINAL_THEME, type TerminalThemeColors } from '../themes/terminalTheme';
-import { terminalRowTextLayout, terminalTextRangeToCellSpan } from './cellGeometry';
+import {
+  terminalCellHasVisiblePaint,
+  terminalRowTextLayout,
+  terminalTextRangeToCellSpan,
+} from './cellGeometry';
 
 // The terminal's default background is left transparent at the renderer so the
 // CSS-painted panel behind the canvas shows through for default cells. That CSS
@@ -62,12 +67,20 @@ import { terminalRowTextLayout, terminalTextRangeToCellSpan } from './cellGeomet
 // selection still paint on the canvas; only the default fill defers to CSS. The
 // theme color is still handed to the renderer (for inverse/cursor glyphs) and to
 // Ghostty via OSC 10/11, so any CLI that queries its background sees the surface.
+const LIVE_TAIL_ALLOWED_TOP_GAP_ROWS = 2;
 const TERMINAL_BACKGROUND_OPACITY = 0;
 // Backend resize redraws can arrive as sparse full or partial frames for several
 // animation frames, especially in the canvas fallback under resize churn. Keep
 // the guard long enough to bridge that redraw window without letting a transient
 // sparse frame clear stable rows.
 const RESIZE_REFLOW_BLANK_FRAME_GUARD_MS = 1_500;
+type CursorCoordinateSpace = 'buffer' | 'frame';
+
+interface SessionCursorFallback {
+  space: CursorCoordinateSpace;
+  cursor: TerminalCursor;
+}
+
 
 export interface TerminalDomRefs {
   canvas: HTMLCanvasElement | null;
@@ -151,6 +164,7 @@ export type TerminalControllerTraceEvent =
       frameDirty?: TerminalFrame['dirty'];
       frameRows: number;
       rowsPainted: number;
+      cursor?: TerminalPaintCursorSample;
       cellsPainted: number;
     }
   | {
@@ -254,6 +268,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let needsFullPaint = true;
   let lastStartRow: number | null = null;
   let lastDisplayRows: number | null = null;
+  let lastPaintedCursorAbsoluteRow: number | null = null;
   let lastOverlayRows = new Set<number>();
   let scheduledPaint: number | null = null;
   let scheduledPostRemountPaint: number | null = null;
@@ -298,6 +313,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   const sessionGenerations: Record<string, number> = {};
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
+  const sessionCursorFallbacks: Record<string, SessionCursorFallback> = {};
   const sessionBuffers: Record<string, TerminalBufferState> = {};
   const resizeReflowPendingSessions: Record<string, boolean> = {};
   const resizeReflowGuardTimers: Record<string, number> = {};
@@ -307,6 +323,45 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (TERMINAL_TRACE_FRESH_PROBE !== null) timed.freshProbe = TERMINAL_TRACE_FRESH_PROBE;
     onTrace?.(timed);
   }
+  function rememberSessionCursor(
+    sessionId: string,
+    space: CursorCoordinateSpace,
+    cursor: TerminalCursor | undefined,
+  ) {
+    const position = cursorPosition(cursor);
+    if (!position) return;
+    if (cursor?.visible === false) return;
+    sessionCursorFallbacks[sessionId] = {
+      space,
+      cursor: visibleCursorAt(cursor, position.row, position.col),
+    };
+  }
+
+  function rememberActiveViewCursor(view: SessionTerminalView, buffer: TerminalBufferState | null) {
+    if (!activeSessionId) return;
+    rememberSessionCursor(
+      activeSessionId,
+      buffer ? 'buffer' : 'frame',
+      buffer?.cursor ?? view.compositeFrame.cursor,
+    );
+  }
+
+  function frameWithActiveCursorFallback(
+    frame: TerminalFrame,
+    startRow: number,
+    displayRows: number,
+    space: CursorCoordinateSpace,
+  ) {
+    if (!activeSessionId) return frame;
+    return frameWithSessionCursorFallback(
+      frame,
+      sessionCursorFallbacks[activeSessionId],
+      startRow,
+      displayRows,
+      space,
+    );
+  }
+
 
   const handleRendererContextLost = (event: Event) => {
     event.preventDefault();
@@ -672,13 +727,14 @@ export function createTerminalController(options: TerminalControllerOptions) {
         const fallbackDisplayRows = Math.max(1, displayRows);
         const canPaintPartialLiveTail = (liveFollow || buffer.atBottom) && buffer.rowsById.size > 0;
         if (canPaintPartialLiveTail) {
-          const tailWindow = cachedLiveTailPaintWindow(
-            buffer,
-            visibleStart,
-            visibleRows,
-            fallbackDisplayRows,
-            true,
-          );
+          const tailWindow =
+            cachedLiveTailPaintWindow(
+              buffer,
+              visibleStart,
+              visibleRows,
+              fallbackDisplayRows,
+              true,
+            ) ?? cursorLiveTailPaintWindow(buffer, visibleStart, visibleRows, fallbackDisplayRows);
           if (!tailWindow) {
             emitScrollMetrics(forSurface);
             return;
@@ -694,9 +750,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
             cachedRange: cacheStatus.cachedRange,
             requested: cacheStatus.requested,
           });
-          const windowFrame = frameFromBufferWindow(
-            buffer,
+          const windowFrame = frameWithActiveCursorFallback(
+            frameFromBufferWindow(buffer, tailWindow.startRow, tailWindow.displayRows),
             tailWindow.startRow,
+            'buffer',
             tailWindow.displayRows,
           );
           const activeRenderer = ensureRenderer(forSurface, tailWindow.displayRows);
@@ -756,11 +813,17 @@ export function createTerminalController(options: TerminalControllerOptions) {
           cachedRange: cacheStatus.cachedRange,
           requested: cacheStatus.requested,
         });
-        const windowFrame = frameFromBufferWindow(buffer, sourceStartRow, fallbackDisplayRows);
+        const windowFrame = frameWithActiveCursorFallback(
+          frameFromBufferWindow(buffer, sourceStartRow, fallbackDisplayRows),
+          sourceStartRow,
+          fallbackDisplayRows,
+          'buffer',
+        );
         if (
           liveFollow &&
           terminalBufferHasRenderableRows(buffer) &&
-          !terminalFrameHasRenderableCells(windowFrame)
+          !terminalFrameHasRenderableCells(windowFrame) &&
+          !terminalFrameHasVisibleCursor(windowFrame)
         ) {
           emitScrollMetrics(forSurface);
           return;
@@ -790,13 +853,14 @@ export function createTerminalController(options: TerminalControllerOptions) {
       } else {
         const canPaintPartialLiveTail = (liveFollow || buffer.atBottom) && buffer.rowsById.size > 0;
         if (cacheStatus.requested && liveFollow && canPaintPartialLiveTail) {
-          const tailWindow = cachedLiveTailPaintWindow(
-            buffer,
-            visibleStart,
-            visibleRows,
-            displayRows,
-            renderer !== null,
-          );
+          const tailWindow =
+            cachedLiveTailPaintWindow(
+              buffer,
+              visibleStart,
+              visibleRows,
+              displayRows,
+              renderer !== null,
+            ) ?? cursorLiveTailPaintWindow(buffer, visibleStart, visibleRows, displayRows);
           if (!tailWindow) {
             emitScrollMetrics(forSurface);
             return;
@@ -814,7 +878,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
       }
     }
 
-    const windowFrame = frameFromBufferWindow(buffer, startRow, displayRows);
+    const windowFrame = frameWithActiveCursorFallback(
+      frameFromBufferWindow(buffer, startRow, displayRows),
+      startRow,
+      displayRows,
+      'buffer',
+    );
     // A scrolled-back miss paints blank placeholder rows (per the fall-through
     // above) so the gesture keeps moving while the band loads. Only suppress the
     // paint while following the live tail, where a blank flash during output churn
@@ -823,7 +892,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
       !cacheStatus.cached &&
       liveFollow &&
       terminalBufferHasRenderableRows(buffer) &&
-      !terminalFrameHasRenderableCells(windowFrame)
+      !terminalFrameHasRenderableCells(windowFrame) &&
+      !terminalFrameHasVisibleCursor(windowFrame)
     ) {
       emitScrollMetrics(forSurface);
       return;
@@ -837,7 +907,11 @@ export function createTerminalController(options: TerminalControllerOptions) {
       lastStartRow === startRow &&
       !selfContainedPaint;
     const frameToPaint = canPaintDirtyRows
-      ? frameWithDirtyLocalRows(windowFrame, dirtyRowsInWindow(dirtyAbsoluteRows, startRow))
+      ? frameWithDirtyLocalRows(
+          windowFrame,
+          dirtyRowsInWindow(dirtyAbsoluteRows, startRow),
+          cursorLocalRowInWindow(lastPaintedCursorAbsoluteRow, startRow, displayRows),
+        )
       : windowFrame;
     if (els.canvas) {
       els.canvas.style.top = `${startRow * forSurface.cellHeight + inset.top}px`;
@@ -906,8 +980,29 @@ export function createTerminalController(options: TerminalControllerOptions) {
     visibleStartRow: number,
     visibleRowCount: number,
   ) {
-    const rowCount = Math.max(1, Math.min(buffer.totalRows - startRow, displayRows));
-    const cachedRange = terminalBufferCachedRangeForRows(buffer, startRow, rowCount);
+    const requestedStart = Math.max(0, Math.floor(startRow));
+    const requestedEnd = Math.min(
+      buffer.totalRows,
+      requestedStart + Math.max(1, Math.floor(displayRows)),
+    );
+    let requiredStart = requestedStart;
+    let requiredEnd = requestedEnd;
+    if (liveFollow) {
+      const liveStart = Math.max(0, Math.floor(buffer.viewportOffset));
+      const liveEnd = Math.min(buffer.totalRows, liveStart + Math.max(1, buffer.viewportRows));
+      const overlapStart = Math.max(requestedStart, liveStart);
+      const overlapEnd = Math.min(requestedEnd, liveEnd);
+      const leadGapRows = liveStart - requestedStart;
+      if (
+        overlapEnd > overlapStart &&
+        (requestedStart >= liveStart || leadGapRows <= LIVE_TAIL_ALLOWED_TOP_GAP_ROWS)
+      ) {
+        requiredStart = overlapStart;
+        requiredEnd = overlapEnd;
+      }
+    }
+    const rowCount = Math.max(1, requiredEnd - requiredStart);
+    const cachedRange = terminalBufferCachedRangeForRows(buffer, requiredStart, rowCount);
     const shapeStale = buffer.cols !== forSurface.cols;
     const visibleRequiredRows = Math.max(
       1,
@@ -937,7 +1032,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       // Pull a big aligned band (paint window + lead above), not just the window,
       // so one round-trip warms the next stretch of scroll-up instead of stalling
       // per screen. The band reduces to the paint window at the live tail.
-      const band = historyPrefetchBand(buffer, startRow, rowCount, !liveFollow);
+      const band = historyPrefetchBand(buffer, requiredStart, rowCount, !liveFollow);
       // Fetch only if the band is not already covered by trusted provenance. Raw
       // row-map presence is not enough: blank rows from an old live viewport may
       // still be present in the mirror after drifting into scrollback, but they
@@ -1050,10 +1145,15 @@ export function createTerminalController(options: TerminalControllerOptions) {
     const canPaintDirtyRows =
       dirtyAbsoluteRows !== undefined &&
       !needsFullPaint &&
+    windowFrame = frameWithActiveCursorFallback(windowFrame, startRow, displayRows, 'frame');
       lastStartRow === startRow &&
       !selfContainedPaint;
     const frameToPaint = canPaintDirtyRows
-      ? frameWithDirtyLocalRows(windowFrame, dirtyRowsInWindow(dirtyAbsoluteRows, startRow))
+      ? frameWithDirtyLocalRows(
+          windowFrame,
+          dirtyRowsInWindow(dirtyAbsoluteRows, startRow),
+          cursorLocalRowInWindow(lastPaintedCursorAbsoluteRow, startRow, displayRows),
+        )
       : windowFrame;
 
     if (els.canvas) {
@@ -1116,6 +1216,9 @@ export function createTerminalController(options: TerminalControllerOptions) {
 
     onPaintSample?.({
       backend: renderer.capabilities.backend,
+    const cursor = cursorPaintSample(frame);
+    lastPaintedCursorAbsoluteRow =
+      cursor.visible && cursor.row !== null ? startRow + cursor.row : null;
       reason,
       elapsedMs,
       startRow,
@@ -1127,6 +1230,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       rendererStats,
     });
     trace({
+      cursor,
       kind: 'paint',
       backend: renderer.capabilities.backend,
       reason,
@@ -1141,6 +1245,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     });
   }
 
+      cursor,
   function schedulePaintWindow(reason: TerminalPaintReason = 'scroll') {
     if (scheduledPaint !== null) return;
     scheduledPaint = requestAnimationFrame(() => {
@@ -1422,6 +1527,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     recomputeLinks();
     onScrollbackRowCount(view.rowCount);
     let autoFollow = shouldAutoFollow();
+    rememberActiveViewCursor(view, buffer);
     if (autoFollow) autoScrolling = true;
     updateSpacer(buffer?.totalRows ?? view.compositeFrame.rows.length, forSurface);
     if (!autoFollow && buffer && options.restoreScrollForSession) {
@@ -1476,6 +1582,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     onScrollbackRowCount(view.rowCount);
     onLiveFollow(view.liveFollow);
     const autoFollow = shouldAutoFollow();
+    rememberActiveViewCursor(view, buffer);
     if (autoFollow) autoScrolling = true;
     updateSpacer(buffer.totalRows, forSurface);
     const alignedToTail = alignLiveViewportToTail();
@@ -1526,6 +1633,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     clearAllResizeReflowPending();
     needsFullPaint = true;
     lastStartRow = null;
+    if (activeSessionId) delete sessionCursorFallbacks[activeSessionId];
     lastDisplayRows = null;
     clearInteractionState();
     const view = emptyTerminalView(forSurface);
@@ -1543,6 +1651,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     clearAllResizeReflowPending();
     needsFullPaint = true;
     lastStartRow = null;
+    if (activeSessionId) delete sessionCursorFallbacks[activeSessionId];
     lastDisplayRows = null;
     clearInteractionState();
     setLiveFollow(true);
@@ -1749,13 +1858,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
         continue;
       }
       if (frame.dirty === 'full') primaryNeedsFullPaint = true;
+        rememberSessionCursor(sessionId, 'frame', nextAlternateView.compositeFrame.cursor);
       if (frame.dirty === 'partial') {
-        addCursorRowsToDirtySet(
-          primaryDirtyRows,
-          nextBuffer.cursor,
-          frame.cursor,
-          frame.scrollback?.viewportOffset ?? 0,
-        );
         const viewportOffset = frame.scrollback?.viewportOffset ?? 0;
         for (const row of frame.rows) {
           if (row.dirty !== false) primaryDirtyRows.add(viewportOffset + row.index);
@@ -1770,11 +1874,16 @@ export function createTerminalController(options: TerminalControllerOptions) {
       const preserveShapeRows = isActive && followIntent === false;
       nextBuffer = applyViewportFrameToBuffer(nextBuffer, frame, frameSurface, {
         preserveBlankRows,
+      const previousPrimaryCursor = nextBuffer.cursor;
         preserveShapeRows,
         anchorPreservedRowsToViewport: isActive && followIntent === true,
       });
     }
     sessionBuffers[sessionId] = nextBuffer;
+      rememberSessionCursor(sessionId, 'buffer', nextBuffer.cursor);
+      if (frame.dirty === 'partial') {
+        addCursorRowsToDirtySet(primaryDirtyRows, previousPrimaryCursor, nextBuffer.cursor, 0);
+      }
 
     if (isActive) {
       activeSessionId = sessionId;
@@ -2134,6 +2243,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete sessionViews[sessionId];
       delete sessionGenerations[sessionId];
       if (activeSessionId === sessionId) liveGeneration = 0;
+      delete sessionCursorFallbacks[sessionId];
       const view = viewWithLiveFollow(emptyTerminalView(surface), sessionId);
       sessionViews[sessionId] = view;
       sessionBuffers[sessionId] = createTerminalBuffer(surface);
@@ -2159,6 +2269,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete sessionScrollAnchors[sessionId];
       delete sessionGenerations[sessionId];
       clearSessionResizeReflowPending(sessionId);
+      delete sessionCursorFallbacks[sessionId];
       if (activeSessionId === sessionId) {
         activeSessionId = null;
         liveGeneration = 0;
@@ -2385,18 +2496,101 @@ function cursorPaintRow(cursor: TerminalCursor | undefined, rowOffset: number) {
   return rowOffset + (row as number);
 }
 
-function frameWithDirtyLocalRows(frame: TerminalFrame, dirtyLocalRows: ReadonlySet<number>) {
+function frameWithDirtyLocalRows(
+  frame: TerminalFrame,
+  dirtyLocalRows: ReadonlySet<number>,
+  previousCursorLocalRow: number | null = null,
+) {
+  const rowsToPaint = new Set(dirtyLocalRows);
+  if (previousCursorLocalRow !== null) rowsToPaint.add(previousCursorLocalRow);
+  const cursor = cursorPosition(frame.cursor);
+  if (frame.cursor?.visible !== false && cursor) rowsToPaint.add(cursor.row);
   return {
     ...frame,
     dirty: 'partial' as const,
     rows: frame.rows
-      .filter(row => dirtyLocalRows.has(row.index))
+      .filter(row => rowsToPaint.has(row.index))
       .map(row => ({ ...row, dirty: true })),
   };
 }
 
 function terminalPaintMode(
   frame: TerminalFrame | null,
+function cursorLocalRowInWindow(
+  absoluteRow: number | null,
+  startRow: number,
+  displayRows: number,
+): number | null {
+  if (absoluteRow === null) return null;
+  const localRow = absoluteRow - startRow;
+  return localRow >= 0 && localRow < displayRows ? localRow : null;
+}
+
+function cursorPosition(cursor: TerminalCursor | undefined): { row: number; col: number } | null {
+  const row = cursor?.position?.row ?? cursor?.row;
+  const col = cursor?.position?.col ?? cursor?.col;
+  if (!Number.isFinite(row) || !Number.isFinite(col)) return null;
+  return { row: row as number, col: col as number };
+}
+
+function visibleCursorAt(
+  cursor: TerminalCursor | undefined,
+  row: number,
+  col: number,
+): TerminalCursor {
+  return {
+    ...cursor,
+    visible: true,
+    row,
+    col,
+    position: { row, col },
+  };
+}
+
+function frameWithSessionCursorFallback(
+  frame: TerminalFrame,
+  fallback: SessionCursorFallback | undefined,
+  startRow: number,
+  displayRows: number,
+  space: CursorCoordinateSpace,
+) {
+  const current = cursorPosition(frame.cursor);
+  if (frame.cursor?.visible !== false && current) return frame;
+  if (!fallback || fallback.space !== space) return frame;
+  const fallbackPosition = cursorPosition(fallback.cursor);
+  if (!fallbackPosition) return frame;
+  const row = fallbackPosition.row - startRow;
+  if (row < 0 || row >= Math.max(1, displayRows)) return frame;
+  const col = clampCursorColumn(fallbackPosition.col, frame.cols);
+  return {
+    ...frame,
+    cursor: visibleCursorAt(fallback.cursor, row, col),
+  };
+}
+
+function clampCursorColumn(col: number, cols: number | undefined) {
+  if (!Number.isFinite(cols) || (cols as number) <= 0) return col;
+  return Math.min(Math.max(0, (cols as number) - 1), Math.max(0, col));
+}
+
+function terminalFrameHasVisibleCursor(frame: TerminalFrame): boolean {
+  if (frame.cursor?.visible === false) return false;
+  const cursor = cursorPosition(frame.cursor);
+  if (!cursor) return false;
+  return frame.rows.some(row => row.index === cursor.row);
+}
+
+function cursorPaintSample(frame: TerminalFrame): TerminalPaintCursorSample {
+  const cursor = cursorPosition(frame.cursor);
+  const visible = frame.cursor?.visible !== false && cursor !== null;
+  return {
+    visible,
+    row: cursor?.row ?? null,
+    col: cursor?.col ?? null,
+    inPaintRows: visible ? frame.rows.some(row => row.index === cursor.row) : false,
+  };
+}
+
   buffer: TerminalBufferState | null,
 ): 'none' | 'buffer' | 'alternate' | 'viewport' {
   if (buffer) return 'buffer';
@@ -2483,7 +2677,7 @@ function shouldHoldBlankResizeFrame(resizeReflowPending: boolean, frame: Termina
 }
 
 function terminalRowHasRenderableCells(row: TerminalRow) {
-  return row.cells.some(cell => !cell.style?.invisible && cell.text.trim().length > 0);
+  return row.cells.some(terminalCellHasVisiblePaint);
 }
 
 function markSessionViewDirtyRows(
@@ -2635,7 +2829,7 @@ function cachedLiveTailPaintWindow(
     range: { start: number; end: number };
     overlap: number;
   } | null = null;
-  for (const range of buffer.cachedRanges) {
+  for (const range of liveTailCoverageRanges(buffer)) {
     const overlap = Math.max(
       0,
       Math.min(visibleEnd, range.end) - Math.max(visibleStart, range.start),
@@ -2652,8 +2846,10 @@ function cachedLiveTailPaintWindow(
   if (!best) return null;
 
   if (requireVisibleCoverage) {
-    const allowedTopGapRows = 2;
-    if (best.range.start > visibleStart + allowedTopGapRows || best.range.end < visibleEnd) {
+    if (
+      best.range.start > visibleStart + LIVE_TAIL_ALLOWED_TOP_GAP_ROWS ||
+      best.range.end < visibleEnd
+    ) {
       return null;
     }
   }
@@ -2670,6 +2866,61 @@ function cachedLiveTailPaintWindow(
 
 function nowMs() {
   if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+function cursorLiveTailPaintWindow(
+  buffer: TerminalBufferState,
+  visibleStartRow: number,
+  visibleRowCount: number,
+  requestedDisplayRows: number,
+): { startRow: number; displayRows: number } | null {
+  if (buffer.cursor?.visible === false) return null;
+  const cursor = cursorPosition(buffer.cursor);
+  if (!cursor || buffer.totalRows <= 0) return null;
+
+  const liveStart = Math.max(0, Math.floor(buffer.viewportOffset));
+  const liveEnd = Math.min(buffer.totalRows, liveStart + Math.max(1, buffer.viewportRows));
+  if (cursor.row < liveStart || cursor.row >= liveEnd) return null;
+
+  const visibleStart = Math.max(0, Math.floor(visibleStartRow));
+  const visibleEnd = Math.min(
+    buffer.totalRows,
+    visibleStart + Math.max(1, Math.floor(visibleRowCount)),
+  );
+  if (visibleEnd <= visibleStart) return null;
+
+  const displayRows = Math.max(
+    1,
+    Math.min(Math.floor(requestedDisplayRows), Math.max(1, buffer.totalRows)),
+  );
+  const maxStart = Math.max(0, buffer.totalRows - displayRows);
+  const preferredStart = Math.min(visibleStart, cursor.row);
+  let startRow = Math.max(0, Math.min(preferredStart, maxStart));
+  if (cursor.row < startRow || cursor.row >= startRow + displayRows) {
+    startRow = Math.max(0, Math.min(cursor.row, maxStart));
+  }
+
+  return { startRow, displayRows };
+}
+
+function liveTailCoverageRanges(
+  buffer: TerminalBufferState,
+): Array<{ start: number; end: number }> {
+  const ranges = [...buffer.cachedRanges];
+  const liveEnd = Math.min(buffer.totalRows, buffer.viewportOffset + buffer.viewportRows);
+  let start: number | null = null;
+  for (let rowId = buffer.viewportOffset; rowId < liveEnd; rowId += 1) {
+    if (buffer.rowsById.has(rowId)) {
+      if (start === null) start = rowId;
+      continue;
+    }
+    if (start !== null) {
+      ranges.push({ start, end: rowId });
+      start = null;
+    }
+  }
+  if (start !== null) ranges.push({ start, end: liveEnd });
+  return ranges;
+}
+
     return performance.now();
   }
   return Date.now();

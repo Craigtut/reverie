@@ -134,6 +134,13 @@ export interface TerminalRendererStats {
 
 export type TerminalPaintReason = 'frame' | 'scroll' | 'overlay' | 'history' | 'clear';
 
+export interface TerminalPaintCursorSample {
+  visible: boolean;
+  row: number | null;
+  col: number | null;
+  inPaintRows: boolean;
+}
+
 export interface TerminalPaintSample {
   backend?: TerminalRendererBackend;
   reason: TerminalPaintReason;
@@ -144,6 +151,7 @@ export interface TerminalPaintSample {
   bufferBacked: boolean;
   rowsPainted: number;
   cellsPainted: number;
+  cursor?: TerminalPaintCursorSample;
   rendererStats?: TerminalRendererStats;
 }
 

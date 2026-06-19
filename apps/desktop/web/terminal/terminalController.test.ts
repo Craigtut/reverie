@@ -1436,6 +1436,276 @@ describe('createTerminalController', () => {
     expect(painted.rows.map(rowText)).toEqual(['zero', 'one', 'TWO']);
   });
 
+  it('paints a primary-buffer hardware cursor when only the cursor changes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, ''), row(3, 'three')]),
+        cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'partial',
+        cursor: { visible: true, row: 2, col: 4, position: { row: 2, col: 4 } },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 2,
+        col: 4,
+        position: { row: 2, col: 4 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toEqual([2]);
+    expect(painted.rows.map(rowText)).toEqual(['']);
+  });
+
+  it('retains a focused primary-buffer cursor after a hidden cursor frame', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, ''), row(3, 'three')]),
+        cursor: { visible: true, row: 2, col: 4, position: { row: 2, col: 4 } },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'partial',
+        cursor: { visible: false },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 2,
+        col: 4,
+        position: { row: 2, col: 4 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(2);
+  });
+
+  it('does not move a retained cursor to a hidden cursor position', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, ''), row(3, 'three')]),
+        cursor: { visible: true, row: 2, col: 4, position: { row: 2, col: 4 } },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'partial',
+        cursor: { visible: false, row: 1, col: 79, position: { row: 1, col: 79 } },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 2,
+        col: 4,
+        position: { row: 2, col: 4 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(2);
+    expect(painted.rows.map(row => row.index)).not.toContain(1);
+  });
+
+  it('repaints the previous retained cursor row when the cursor moves', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, ''), row(3, 'three')]),
+        cursor: { visible: true, row: 2, col: 4, position: { row: 2, col: 4 } },
+      },
+      true,
+    );
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'partial',
+        cursor: { visible: false },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'partial',
+        cursor: { visible: true, row: 1, col: 6, position: { row: 1, col: 6 } },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 1,
+        col: 6,
+        position: { row: 1, col: 6 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index).sort((left, right) => left - right)).toEqual([
+      1,
+      2,
+    ]);
+  });
+
+  it('retains a focused alternate-screen cursor after a hidden cursor frame', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, ''), row(3, 'three')]),
+        modes: { alternateScreen: true },
+        cursor: { visible: true, row: 2, col: 6, position: { row: 2, col: 6 } },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'partial',
+        modes: { alternateScreen: true },
+        cursor: { visible: false },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 2,
+        col: 6,
+        position: { row: 2, col: 6 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(2);
+  });
+
   it('paints a full live-buffer window for non-retained GPU partial updates', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 

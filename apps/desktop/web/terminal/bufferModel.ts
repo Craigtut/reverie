@@ -9,6 +9,7 @@ import type {
 import {
   terminalCellAtColumn,
   terminalCellEndCol,
+  terminalCellHasVisiblePaint,
   terminalCellWidth,
   terminalRowTextLayout,
   terminalRowTextSlice,
@@ -227,7 +228,7 @@ export function applyViewportFrameToBuffer(
     oldestId,
     rowsById,
     cachedRanges,
-    cursor: cursorWithAbsoluteRow(frame.cursor, viewportOffset),
+    cursor: cursorWithAbsoluteRow(frame.cursor, viewportOffset, viewportRows, surface.cols),
     modes: frame.modes,
     colors: frame.colors,
   };
@@ -535,7 +536,7 @@ function shouldStoreRow(
 }
 
 function rowIsBlank(row: TerminalRow): boolean {
-  return row.cells.every(cell => cell.text.trim().length === 0);
+  return !row.cells.some(terminalCellHasVisiblePaint);
 }
 
 function rowHasCells(row: TerminalRow): boolean {
@@ -559,17 +560,26 @@ function rangesFromCachedRowsWithCells(
 function cursorWithAbsoluteRow(
   cursor: TerminalCursor | undefined,
   rowOffset: number,
+  rowCount?: number,
+  colCount?: number,
 ): TerminalCursor | undefined {
   const row = cursor?.position?.row ?? cursor?.row;
   const col = cursor?.position?.col ?? cursor?.col;
   if (!Number.isFinite(row) || !Number.isFinite(col)) return cursor;
-  const absoluteRow = rowOffset + (row as number);
+  const localRow = clampCursorCoordinate(row as number, rowCount);
+  const localCol = clampCursorCoordinate(col as number, colCount);
+  const absoluteRow = rowOffset + localRow;
   return {
     ...cursor,
     row: absoluteRow,
-    col: col as number,
-    position: { row: absoluteRow, col: col as number },
+    col: localCol,
+    position: { row: absoluteRow, col: localCol },
   };
+}
+
+function clampCursorCoordinate(value: number, limit?: number): number {
+  if (limit === undefined || !Number.isFinite(limit) || limit <= 0) return value;
+  return Math.min(Math.max(0, limit - 1), Math.max(0, value));
 }
 
 function cursorForWindow(

@@ -14,6 +14,16 @@ export function terminalCellEndCol(cell: Pick<TerminalCell, 'col' | 'width'>, co
   return Math.max(0, Math.floor(cell.col)) + terminalCellWidth(cell, cols);
 }
 
+export function terminalCellHasVisiblePaint(cell: TerminalCell): boolean {
+  if (cell.bg !== undefined || cell.style?.inverse) return true;
+  if (cell.style?.invisible) return false;
+  if (cell.text.trim().length > 0) return true;
+  const underline = cell.style?.underline;
+  return Boolean(
+    (underline && underline !== 'none') || cell.style?.strikethrough || cell.style?.overline,
+  );
+}
+
 export interface TerminalRowTextLayout {
   text: string;
   boundaries: number[];

@@ -126,6 +126,33 @@ describe('renderer overlay pass', () => {
     expect(fills).toContainEqual(expect.objectContaining({ x: 9, y: 0, w: 18, h: 18 }));
   });
 
+  it('paints inverse blank cells as visible blocks', () => {
+    const { ctx, fills } = recordingContext();
+    const renderer = createTerminalCanvasRenderer(fakeCanvas(ctx), {
+      cols: 8,
+      rows: 1,
+      cellWidth: 9,
+      cellHeight: 18,
+      foreground: '#EFE9DF',
+      background: '#0B0A09',
+    });
+
+    renderer.paintFrame({
+      dirty: 'full',
+      rows: [
+        {
+          index: 0,
+          dirty: true,
+          cells: [{ col: 2, text: ' ', style: { inverse: true } }],
+        },
+      ],
+    });
+
+    expect(fills).toContainEqual(
+      expect.objectContaining({ style: '#EFE9DF', x: 18, y: 0, w: 9, h: 18 }),
+    );
+  });
+
   it('positions wide right-half block glyphs from the full rendered width', () => {
     const { ctx, fills } = recordingContext();
     const renderer = createTerminalCanvasRenderer(fakeCanvas(ctx), {
