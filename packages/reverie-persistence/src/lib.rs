@@ -223,6 +223,21 @@ const MIGRATIONS: &[&str] = &[
     // project minted on a platform without bookmark support; the service
     // backfills a bookmark for projects whose folder still exists.
     "ALTER TABLE projects ADD COLUMN bookmark BLOB;",
+    // v20 -> v21: per-session "follow up" flag. `flagged_at` (nullable ISO 8601)
+    // is when the user marked a session to come back to: a durable, hand-placed
+    // version of the transient "Ready for you" signal, kept even after the user
+    // has viewed the session (which clears "Ready for you" but not this). NULL
+    // for existing rows and any session never flagged. The follow-up state is
+    // derived by comparing this against the session's working_since (a reply
+    // starts a new turn, which clears it), so it is stored verbatim and never
+    // restamped here.
+    "ALTER TABLE sessions ADD COLUMN flagged_at TEXT;",
+    // v21 -> v22: opt-in CRT terminal post-process. `crt_enabled` holds whether
+    // the retro convex-glass shader is applied over the terminal (and the
+    // loading sequences). Defaults to 0 (off) so existing workspaces upgrade
+    // flat, matching the explicit-opt-in guardrail for non-default visual
+    // effects.
+    "ALTER TABLE workspace ADD COLUMN crt_enabled INTEGER NOT NULL DEFAULT 0;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -235,7 +250,7 @@ const CONNECTION_MESSAGE_COLUMNS: &str =
 const SESSION_COLUMNS: &str = "id, focus_id, title, agent_kind, cwd, native_session_ref_json, \
      launch_mode, dangerous_mode_override, status, last_exit_code, \
      latest_activity_json, archived, sort_order, last_viewed_at, state_timeline_json, \
-     custom_title";
+     custom_title, flagged_at";
 
 pub struct SqliteWorkspaceRepository {
     conn: Mutex<Connection>,
@@ -346,8 +361,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     (id, name, general_label, default_dangerous_mode,
                      disabled_agent_kinds,
                      theme, default_agent_kind, nav_state, terminal_font_size,
-                     keep_awake_enabled, keep_display_awake, sidebar_width)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     keep_awake_enabled, keep_display_awake, sidebar_width,
+                     crt_enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -361,6 +377,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     bool_to_int(seed.keep_awake_enabled),
                     bool_to_int(seed.keep_display_awake),
                     i64::from(seed.sidebar_width),
+                    bool_to_int(seed.crt_enabled),
                 ],
             )
             .map_err(backend)?;
@@ -375,8 +392,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 (id, name, general_label, default_dangerous_mode,
                  disabled_agent_kinds,
                  theme, default_agent_kind, nav_state, terminal_font_size,
-                 keep_awake_enabled, keep_display_awake, sidebar_width)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 keep_awake_enabled, keep_display_awake, sidebar_width,
+                 crt_enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -388,7 +406,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 terminal_font_size = excluded.terminal_font_size,
                 keep_awake_enabled = excluded.keep_awake_enabled,
                 keep_display_awake = excluded.keep_display_awake,
-                sidebar_width = excluded.sidebar_width",
+                sidebar_width = excluded.sidebar_width,
+                crt_enabled = excluded.crt_enabled",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -402,6 +421,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 bool_to_int(workspace.keep_awake_enabled),
                 bool_to_int(workspace.keep_display_awake),
                 i64::from(workspace.sidebar_width),
+                bool_to_int(workspace.crt_enabled),
             ],
         )
         .map_err(backend)?;
@@ -642,8 +662,9 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
         "INSERT INTO sessions (
             id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
             dangerous_mode_override, status, last_exit_code, latest_activity_json,
-            archived, sort_order, last_viewed_at, state_timeline_json, custom_title
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            archived, sort_order, last_viewed_at, state_timeline_json, custom_title,
+            flagged_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(id) DO UPDATE SET
             focus_id = excluded.focus_id, title = excluded.title,
             agent_kind = excluded.agent_kind, cwd = excluded.cwd,
@@ -656,7 +677,8 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             sort_order = excluded.sort_order,
             last_viewed_at = excluded.last_viewed_at,
             state_timeline_json = excluded.state_timeline_json,
-            custom_title = excluded.custom_title",
+            custom_title = excluded.custom_title,
+            flagged_at = excluded.flagged_at",
         params![
             session.id.to_string(),
             session.focus_id.to_string(),
@@ -674,6 +696,7 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             session.last_viewed_at,
             state_timeline_json,
             session.custom_title,
+            session.flagged_at,
         ],
     )
     .map_err(backend)?;
@@ -918,7 +941,8 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
         "SELECT id, name, general_label, default_dangerous_mode,
                 disabled_agent_kinds,
                 theme, default_agent_kind, nav_state, terminal_font_size,
-                keep_awake_enabled, keep_display_awake, sidebar_width
+                keep_awake_enabled, keep_display_awake, sidebar_width,
+                crt_enabled
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -935,6 +959,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 keep_awake_enabled: int_to_bool(row.get::<_, i64>(9)?),
                 keep_display_awake: int_to_bool(row.get::<_, i64>(10)?),
                 sidebar_width: sidebar_width_from_db(row.get::<_, i64>(11)?),
+                crt_enabled: int_to_bool(row.get::<_, i64>(12)?),
             })
         },
     )
@@ -1024,6 +1049,7 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         sort_order: row.get(12)?,
         last_viewed_at: row.get::<_, Option<String>>(13)?,
         state_timeline: state_timeline_from_db(row.get::<_, Option<String>>(14)?)?,
+        flagged_at: row.get::<_, Option<String>>(16)?,
     })
 }
 

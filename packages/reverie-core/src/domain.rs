@@ -70,6 +70,13 @@ pub struct Workspace {
     /// unless `keep_awake_enabled` is also set.
     #[serde(default)]
     pub keep_display_awake: bool,
+    /// Opt-in retro CRT post-process over the terminal: a convex-glass barrel
+    /// warp with faint vignette and chromatic aberration, plus a cranked variant
+    /// for the loading sequences. Off by default (explicit opt-in for a
+    /// non-default visual effect). The domain only stores the intent; the
+    /// frontend renderer owns the shader.
+    #[serde(default)]
+    pub crt_enabled: bool,
 }
 
 impl Workspace {
@@ -87,6 +94,7 @@ impl Workspace {
             nav_state: None,
             keep_awake_enabled: false,
             keep_display_awake: false,
+            crt_enabled: false,
         }
     }
 }
@@ -345,6 +353,16 @@ pub struct Session {
     /// contract. `Default` (all `None`) for pre-timeline persisted rows.
     #[serde(default)]
     pub state_timeline: SessionStateTimeline,
+    /// When the user marked this session for follow-up (ISO 8601 / RFC 3339,
+    /// frontend clock), or `None` when it is not flagged. A durable, hand-placed
+    /// counterpart to the transient `finished` ("Ready for you") signal: the user
+    /// has seen the session but is deliberately keeping it on their plate. Unlike
+    /// "Ready for you", viewing the session does not clear it. The follow-up state
+    /// is derived by comparing this against `state_timeline.working_since` (a reply
+    /// starts a new turn, which supersedes the flag), so this is stored verbatim
+    /// and never restamped server-side. `None` for pre-flag persisted rows.
+    #[serde(default)]
+    pub flagged_at: Option<String>,
 }
 
 /// Reverie's durable record of when a session last entered each meaningful
@@ -451,6 +469,7 @@ impl Session {
                 created_at: Some(crate::time::now_iso8601()),
                 ..SessionStateTimeline::default()
             },
+            flagged_at: None,
         }
     }
 

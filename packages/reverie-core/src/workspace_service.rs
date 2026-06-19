@@ -138,6 +138,7 @@ impl WorkspaceService {
             nav_state: None,
             keep_awake_enabled: false,
             keep_display_awake: false,
+            crt_enabled: false,
         };
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
@@ -279,6 +280,17 @@ impl WorkspaceService {
         }
         let mut updated = project.clone();
         updated.path = new_path.clone();
+        // Follow the folder's name too, but only while the project still carries
+        // the folder-derived name. A project is first named after its folder's
+        // basename, so if the stored name still matches the old folder we treat it
+        // as auto-derived and refresh it to the new folder. A name that no longer
+        // matches is a deliberate manual rename and must survive the move.
+        let old_basename = old_path.file_name().and_then(|name| name.to_str());
+        if old_basename == Some(updated.name.as_str()) {
+            if let Some(new_basename) = new_path.file_name().and_then(|name| name.to_str()) {
+                updated.name = new_basename.to_owned();
+            }
+        }
         if mint_bookmark {
             if let Some(bookmark) = self.bookmark.create(&new_path) {
                 updated.bookmark = Some(bookmark);
@@ -479,6 +491,22 @@ impl WorkspaceService {
         })
     }
 
+    /// Mark a session for follow-up, or clear that mark. `flagged_at` is the
+    /// frontend clock's ISO 8601 timestamp when flagging (stored verbatim so the
+    /// persisted value matches the optimistic one the renderer already applied),
+    /// or `None` to clear the flag. The follow-up state is derived from this
+    /// against the session's `working_since`, so the value is recorded as-is and
+    /// never restamped here.
+    pub fn set_session_flagged_at(
+        &self,
+        session_id: SessionId,
+        flagged_at: Option<String>,
+    ) -> Result<WorkspaceSnapshot> {
+        self.update_session(session_id, |session| {
+            session.flagged_at = flagged_at;
+        })
+    }
+
     pub fn set_workspace_default_dangerous_mode(
         &self,
         default_dangerous_mode: bool,
@@ -510,6 +538,16 @@ impl WorkspaceService {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.keep_awake_enabled = enabled;
         workspace.keep_display_awake = keep_display;
+        self.repo.save_workspace(&workspace)?;
+        self.snapshot()
+    }
+
+    /// Persist the opt-in CRT terminal effect toggle. The frontend renderer reads
+    /// it back on load and applies (or removes) the convex-glass post-process over
+    /// the terminal; the domain only stores the intent.
+    pub fn set_crt_enabled(&self, enabled: bool) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.crt_enabled = enabled;
         self.repo.save_workspace(&workspace)?;
         self.snapshot()
     }
@@ -3520,6 +3558,71 @@ mod tests {
         assert_eq!(project_in(&snap, project_id).path, new);
         assert_eq!(session_cwd_in(&snap, session_id), new);
         assert!(!project_in(&snap, project_id).folder_missing);
+    }
+
+    #[test]
+    fn relocate_follows_the_folder_name_when_auto_derived() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        // Named after its folder, as create_project_from_folder does.
+        let snapshot = service
+            .create_project("old".to_owned(), old.clone())
+            .unwrap();
+        let project_id = snapshot.projects.iter().find(|p| !p.archived).unwrap().id;
+
+        let snap = service.relocate_project(project_id, new.clone()).unwrap();
+        assert_eq!(project_in(&snap, project_id).path, new);
+        assert_eq!(project_in(&snap, project_id).name, "new");
+    }
+
+    #[test]
+    fn relocate_keeps_a_manual_project_rename() {
+        let (_repo, service, _fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let snapshot = service
+            .create_project("old".to_owned(), old.clone())
+            .unwrap();
+        let project_id = snapshot.projects.iter().find(|p| !p.archived).unwrap().id;
+        // A deliberate label that no longer matches the folder must survive a move.
+        service
+            .rename_project(project_id, "My Project".to_owned())
+            .unwrap();
+
+        let snap = service.relocate_project(project_id, new.clone()).unwrap();
+        assert_eq!(project_in(&snap, project_id).path, new);
+        assert_eq!(project_in(&snap, project_id).name, "My Project");
+    }
+
+    #[test]
+    fn reconcile_follows_the_folder_name_when_auto_derived() {
+        let (_repo, service, fake) = service_with_bookmarks();
+        let root = tempfile::TempDir::new().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let snapshot = service
+            .create_project("old".to_owned(), old.clone())
+            .unwrap();
+        let project_id = snapshot.projects.iter().find(|p| !p.archived).unwrap().id;
+
+        // Simulate a move the bookmark can follow, like the 5s reconcile poll sees.
+        fake.redirect(&old, &new);
+        std::fs::remove_dir_all(&old).unwrap();
+
+        let changed = service.reconcile_project_folders().unwrap();
+        assert!(changed);
+        let snap = service.snapshot().unwrap();
+        assert_eq!(project_in(&snap, project_id).path, new);
+        assert_eq!(project_in(&snap, project_id).name, "new");
     }
 
     #[test]
