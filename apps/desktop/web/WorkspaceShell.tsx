@@ -76,6 +76,12 @@ export function WorkspaceShell() {
   );
   useAppFocus();
   useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    void import('./agentAutomation').then(({ maybeInstallAgentAutomation }) => {
+      maybeInstallAgentAutomation();
+    });
+  }, []);
+  useEffect(() => {
     maybeRunHarnessSmokeTest();
   }, []);
 

@@ -18,6 +18,7 @@ Documentation for Reverie, a local-first agentic workspace. Start with the visio
 - [`technical/tech-stack.md`](technical/tech-stack.md) — factual map of languages, frameworks, and build constraints.
 - [`technical/technical-architecture.md`](technical/technical-architecture.md) — Rust/Tauri architecture, domain model, persistence, agent-adapter contracts, terminal boundary.
 - [`technical/frontend-architecture.md`](technical/frontend-architecture.md) — React/Panda shell direction and the imperative terminal-renderer boundary.
+- [`technical/agent-automation.md`](technical/agent-automation.md): dev-only local bridge for agents to inspect and interact with the real macOS Tauri UI.
 - [`technical/terminal/`](technical/terminal/README.md) — canonical terminal design: the `libghostty-vt` core in the Rust backend, the WebGL2 renderer boundary, what crosses the wire, scrollback and reflow, and the native-vs-WASM decision.
 - [`technical/implementation-queue.md`](technical/implementation-queue.md) — current build status, immediate build queue, and the "checks to keep green".
 - [`technical/packaging-and-distribution.md`](technical/packaging-and-distribution.md): how the app is bundled, how the Ghostty dylib is shipped without runtime `DYLD_LIBRARY_PATH`, code signing, and the tag-driven release flow.

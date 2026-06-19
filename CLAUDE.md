@@ -16,6 +16,7 @@ Start here, then drill down. `docs/README.md` is the full index.
 | Languages, frameworks, build constraints | [`docs/technical/tech-stack.md`](docs/technical/tech-stack.md) |
 | Backend/domain/persistence/adapters, the system's seams | [`docs/technical/technical-architecture.md`](docs/technical/technical-architecture.md) |
 | React/Panda shell and the terminal-renderer boundary | [`docs/technical/frontend-architecture.md`](docs/technical/frontend-architecture.md) |
+| Agents need to see or drive the real macOS Tauri UI | [`docs/technical/agent-automation.md`](docs/technical/agent-automation.md) |
 | The terminal pipeline: libghostty-vt core, the wire, the WebGL2 renderer, scrollback and reflow | [`docs/technical/terminal/`](docs/technical/terminal/README.md) |
 | What to build next + the canonical "checks to keep green" | [`docs/technical/implementation-queue.md`](docs/technical/implementation-queue.md) |
 | Bundling, the Ghostty dylib/rpath story, signing, and how to cut a release | [`docs/technical/packaging-and-distribution.md`](docs/technical/packaging-and-distribution.md) |
@@ -44,6 +45,7 @@ reverie/
 
 ```bash
 npm run dev               # run the desktop app on the DEV channel (separate data dir + "dev" badged icon)
+npm run dev:agent         # run the DEV channel with the local agent automation bridge
 npm run dev:harness       # browser-only React UI loop (Vite + Panda); load harness fixtures via the harness query param
 npm run dev:reset         # wipe the dev channel's data (only ever the com.muselab.reverie.dev folder)
 npm run check             # frontend typecheck/build + Rust tests/checks
@@ -82,6 +84,24 @@ The desktop app appends terminal renderer diagnostics (dev channel only) to its 
 ```
 
 Use this log when investigating real Tauri terminal behavior that the browser harness cannot fully show: resize flicker, blank or repeated history rows, scrollback cache misses, renderer remounts, slow paints, input focus stalls, or a running terminal that appears stuck. Each JSONL entry includes the selected session id, active terminal id, timestamp, and a payload such as `buffer_cache_miss`, `history_rows_request`, `history_jump_*`, renderer lifecycle traces, or slow paint samples. Check this file before guessing from screenshots when the running desktop app diverges from harness behavior.
+
+### Agent automation bridge
+
+When an agent needs to inspect or drive the real macOS Tauri UI, run:
+
+```bash
+npm run dev:agent
+```
+
+This builds the dev channel with the `agent-automation` Cargo feature and starts a token-protected HTTP bridge on `127.0.0.1` only. The app writes the manifest here:
+
+```bash
+~/Library/Application Support/com.muselab.reverie.dev/agent-automation.json
+```
+
+Use the manifest token for `/status`, `/app`, `/dom`, `/terminal`, `/eval`, `/click`, `/type`, `/press`, `/terminal/input`, `/terminal/paste`, `/devtools/open`, and `/screenshot`. The screenshot endpoint uses WebKit snapshotting first, with `screencapture` only as a fallback. The terminal is a canvas, so use `/terminal` for readable rows instead of DOM inspection.
+
+Do not broaden this into production. The bridge must stay behind all gates: `debug_assertions`, the explicit `agent-automation` Cargo feature, `REVERIE_AGENT_AUTOMATION=1`, the `.dev` bundle identifier, localhost binding, and per-run token auth. See [`docs/technical/agent-automation.md`](docs/technical/agent-automation.md).
 
 ### Releases
 

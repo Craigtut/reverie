@@ -14,6 +14,7 @@
     "rundev": "npm run dev:desktop",
     "run:dev": "npm run dev:desktop",
     "start": "npm run dev:desktop",
+    "dev:agent": "REVERIE_AGENT_AUTOMATION=1 npm run dev:desktop -- --features agent-automation",
     "dev:web": "panda --watch & PANDA_PID=$!; trap 'kill $PANDA_PID 2>/dev/null' EXIT INT TERM; vite --host 127.0.0.1 --port 1420",
     "dev:harness": "npm run dev:web",
     "dev:terminal-bridge": "npm run stage:bridge -- --profile debug || exit 1; node scripts/run-with-zig.mjs cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml --example terminal-debug-bridge & BRIDGE_PID=$!; panda --watch & PANDA_PID=$!; trap 'kill $BRIDGE_PID $PANDA_PID 2>/dev/null' EXIT INT TERM; VITE_REVERIE_TERMINAL_BRIDGE=1 vite --host 127.0.0.1 --port 1421",

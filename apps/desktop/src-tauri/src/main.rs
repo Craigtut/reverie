@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod activity_bridge;
+#[cfg(all(debug_assertions, feature = "agent-automation"))]
+mod agent_automation;
 mod agent_trust;
 #[cfg(target_os = "macos")]
 mod bookmark;
@@ -292,6 +294,11 @@ fn main() {
                 }
                 #[cfg(target_os = "macos")]
                 set_macos_dock_icon(DEV_DOCK_ICON_PNG);
+            }
+
+            #[cfg(all(debug_assertions, feature = "agent-automation"))]
+            if let Err(error) = agent_automation::maybe_start(app.handle()) {
+                eprintln!("[reverie-agent] automation bridge disabled: {error:#}");
             }
 
             // Activity file watcher: one active-file, incremental-tail engine that

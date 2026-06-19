@@ -51,7 +51,7 @@ reverie/
 | Build tool | **Vite 7** (`@vitejs/plugin-react`) | Root `apps/desktop/web/`, dev server on `127.0.0.1:1420`, builds to `dist/` |
 | Language | **TypeScript 5.9** | `strict`, `moduleResolution: Bundler`, `noEmit` (Vite transpiles) |
 | Styling | **Panda CSS** (`@pandacss/dev`) | Tokens, recipes, codegen to `apps/desktop/web/styled-system/` (gitignored) |
-| Animation | **Motion** (`motion`) | Restrained shell-level animation only — never in the terminal paint loop |
+| Animation | **Motion** (`motion`) | Restrained shell-level animation only, never in the terminal paint loop |
 | Icons | **Phosphor Icons** (`@phosphor-icons/react`) | App-shell iconography |
 | Terminal renderer | Imperative **WebGL2-first** canvas island | Consumes Ghostty-derived `TerminalFrame` events from Rust; Canvas 2D fallback remains available, and WebGPU stays behind the renderer boundary until Tauri's WebView runtime supports it reliably |
 | Tauri bridge | `@tauri-apps/api` | Commands/events between React and the Rust backend |
@@ -75,6 +75,7 @@ Because Tauri desktop WebDriver can't drive macOS WKWebView, the React shell has
 
 ```bash
 npm run dev               # start the desktop app (Panda watch + Vite + Tauri/cargo)
+npm run dev:agent         # start the dev-channel agent build with the local automation bridge
 npm run dev:harness       # browser-only React UI loop (alias of dev:web); load fixtures via the harness query param
 npm run build             # production desktop build (web assets + release binary)
 npm run build:web         # Panda codegen + tsc --noEmit + vite build
