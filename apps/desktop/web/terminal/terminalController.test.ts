@@ -30,6 +30,17 @@ function row(index: number, text = ''): TerminalRow {
   return { index, dirty: true, cells: text ? [{ col: 0, text }] : [] };
 }
 
+function rowWithSelfRenderedCursor(index: number, text: string, cursorCol: number): TerminalRow {
+  return {
+    index,
+    dirty: true,
+    cells: [
+      { col: 0, text },
+      { col: cursorCol, text: ' ', style: { inverse: true } },
+    ],
+  };
+}
+
 function rowRange(start: number, endExclusive: number) {
   const rows = new Map<number, TerminalRow>();
   for (let index = start; index < endExclusive; index += 1) {
@@ -1588,6 +1599,69 @@ describe('createTerminalController', () => {
     );
     expect(painted.rows.map(row => row.index)).toContain(2);
     expect(painted.rows.map(row => row.index)).not.toContain(1);
+  });
+
+  it('clears a retained hardware cursor when the terminal self-renders one', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'zero'), row(1, 'one'), row(2, ''), row(3, 'three')]),
+        cursor: { visible: true, row: 0, col: 0, position: { row: 0, col: 0 } },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([
+          row(0, 'zero'),
+          row(1, 'one'),
+          rowWithSelfRenderedCursor(2, 'prompt', 6),
+          row(3, 'three'),
+        ]),
+        cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.cursor?.visible).toBe(false);
+    expect(painted.rows.map(row => row.index)).toContain(0);
+    expect(painted.rows.map(row => row.index)).toContain(2);
+
+    paintFrame.mockClear();
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(1, 'ONE')]),
+        dirty: 'partial',
+        cursor: { visible: false },
+      },
+      true,
+    );
+
+    const nextPainted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(nextPainted.cursor?.visible).toBe(false);
+    expect(nextPainted.rows.map(row => row.index)).not.toContain(0);
   });
 
   it('repaints the previous retained cursor row when the cursor moves', () => {

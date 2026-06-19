@@ -337,13 +337,33 @@ export function createTerminalController(options: TerminalControllerOptions) {
     };
   }
 
+  function rememberSessionFrameCursor(
+    sessionId: string,
+    space: CursorCoordinateSpace,
+    frame: TerminalFrame,
+  ) {
+    if (terminalFrameSelfRenderedCursorPosition(frame)) {
+      delete sessionCursorFallbacks[sessionId];
+      return;
+    }
+    rememberSessionCursor(sessionId, space, frame.cursor);
+  }
+
+  function rememberSessionBufferCursor(sessionId: string, buffer: TerminalBufferState) {
+    if (terminalBufferSelfRenderedCursorPosition(buffer)) {
+      delete sessionCursorFallbacks[sessionId];
+      return;
+    }
+    rememberSessionCursor(sessionId, 'buffer', buffer.cursor);
+  }
+
   function rememberActiveViewCursor(view: SessionTerminalView, buffer: TerminalBufferState | null) {
     if (!activeSessionId) return;
-    rememberSessionCursor(
-      activeSessionId,
-      buffer ? 'buffer' : 'frame',
-      buffer?.cursor ?? view.compositeFrame.cursor,
-    );
+    if (buffer) {
+      rememberSessionBufferCursor(activeSessionId, buffer);
+      return;
+    }
+    rememberSessionFrameCursor(activeSessionId, 'frame', view.compositeFrame);
   }
 
   function frameWithActiveCursorFallback(
@@ -352,7 +372,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
     displayRows: number,
     space: CursorCoordinateSpace,
   ) {
-    if (!activeSessionId) return frame;
+    if (!activeSessionId) return frameWithSelfRenderedCursorPreference(frame);
+    if (terminalFrameSelfRenderedCursorPosition(frame)) {
+      delete sessionCursorFallbacks[activeSessionId];
+    }
     return frameWithSessionCursorFallback(
       frame,
       sessionCursorFallbacks[activeSessionId],
@@ -361,7 +384,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
       space,
     );
   }
-
 
   const handleRendererContextLost = (event: Event) => {
     event.preventDefault();
@@ -753,8 +775,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
           const windowFrame = frameWithActiveCursorFallback(
             frameFromBufferWindow(buffer, tailWindow.startRow, tailWindow.displayRows),
             tailWindow.startRow,
-            'buffer',
             tailWindow.displayRows,
+            'buffer',
           );
           const activeRenderer = ensureRenderer(forSurface, tailWindow.displayRows);
           if (!activeRenderer) {
@@ -1142,10 +1164,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
       });
       ({ startRow, displayRows, forceFullPaint, windowFrame } = paintWindow);
     }
+    windowFrame = frameWithActiveCursorFallback(windowFrame, startRow, displayRows, 'frame');
     const canPaintDirtyRows =
       dirtyAbsoluteRows !== undefined &&
       !needsFullPaint &&
-    windowFrame = frameWithActiveCursorFallback(windowFrame, startRow, displayRows, 'frame');
       lastStartRow === startRow &&
       !selfContainedPaint;
     const frameToPaint = canPaintDirtyRows
@@ -1213,12 +1235,12 @@ export function createTerminalController(options: TerminalControllerOptions) {
     renderer.paintFrame(frame, overlay);
     const elapsedMs = Math.max(0, nowMs() - started);
     const rendererStats = renderer.takeStats?.();
-
-    onPaintSample?.({
-      backend: renderer.capabilities.backend,
     const cursor = cursorPaintSample(frame);
     lastPaintedCursorAbsoluteRow =
       cursor.visible && cursor.row !== null ? startRow + cursor.row : null;
+
+    onPaintSample?.({
+      backend: renderer.capabilities.backend,
       reason,
       elapsedMs,
       startRow,
@@ -1227,6 +1249,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       bufferBacked,
       rowsPainted: rendererStats?.rowsPainted ?? fallbackRows?.length ?? 0,
       cellsPainted: rendererStats?.cellsPainted ?? fallbackCells,
+      cursor,
       rendererStats,
     });
     trace({
@@ -1245,7 +1268,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
     });
   }
 
-      cursor,
   function schedulePaintWindow(reason: TerminalPaintReason = 'scroll') {
     if (scheduledPaint !== null) return;
     scheduledPaint = requestAnimationFrame(() => {
@@ -1855,10 +1877,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
           sessionId,
         );
         sessionViews[sessionId] = nextAlternateView;
+        rememberSessionFrameCursor(sessionId, 'frame', nextAlternateView.compositeFrame);
         continue;
       }
       if (frame.dirty === 'full') primaryNeedsFullPaint = true;
-        rememberSessionCursor(sessionId, 'frame', nextAlternateView.compositeFrame.cursor);
       if (frame.dirty === 'partial') {
         const viewportOffset = frame.scrollback?.viewportOffset ?? 0;
         for (const row of frame.rows) {
@@ -1872,18 +1894,18 @@ export function createTerminalController(options: TerminalControllerOptions) {
       );
       const followIntent = followIntentForSession(sessionId);
       const preserveShapeRows = isActive && followIntent === false;
+      const previousPrimaryCursor = nextBuffer.cursor;
       nextBuffer = applyViewportFrameToBuffer(nextBuffer, frame, frameSurface, {
         preserveBlankRows,
-      const previousPrimaryCursor = nextBuffer.cursor;
         preserveShapeRows,
         anchorPreservedRowsToViewport: isActive && followIntent === true,
       });
-    }
-    sessionBuffers[sessionId] = nextBuffer;
-      rememberSessionCursor(sessionId, 'buffer', nextBuffer.cursor);
+      rememberSessionBufferCursor(sessionId, nextBuffer);
       if (frame.dirty === 'partial') {
         addCursorRowsToDirtySet(primaryDirtyRows, previousPrimaryCursor, nextBuffer.cursor, 0);
       }
+    }
+    sessionBuffers[sessionId] = nextBuffer;
 
     if (isActive) {
       activeSessionId = sessionId;
@@ -2514,8 +2536,6 @@ function frameWithDirtyLocalRows(
   };
 }
 
-function terminalPaintMode(
-  frame: TerminalFrame | null,
 function cursorLocalRowInWindow(
   absoluteRow: number | null,
   startRow: number,
@@ -2554,6 +2574,8 @@ function frameWithSessionCursorFallback(
   displayRows: number,
   space: CursorCoordinateSpace,
 ) {
+  const preferred = frameWithSelfRenderedCursorPreference(frame);
+  if (preferred !== frame) return preferred;
   const current = cursorPosition(frame.cursor);
   if (frame.cursor?.visible !== false && current) return frame;
   if (!fallback || fallback.space !== space) return frame;
@@ -2566,6 +2588,50 @@ function frameWithSessionCursorFallback(
     ...frame,
     cursor: visibleCursorAt(fallback.cursor, row, col),
   };
+}
+
+function frameWithSelfRenderedCursorPreference(frame: TerminalFrame) {
+  if (!terminalFrameSelfRenderedCursorPosition(frame)) return frame;
+  if (frame.cursor?.visible === false) return frame;
+  return {
+    ...frame,
+    cursor: {
+      ...frame.cursor,
+      visible: false,
+    },
+  };
+}
+
+function terminalFrameSelfRenderedCursorPosition(
+  frame: TerminalFrame,
+): { row: number; col: number } | null {
+  let cursor: { row: number; col: number } | null = null;
+  for (const row of frame.rows) {
+    for (const cell of row.cells) {
+      if (!terminalCellLooksLikeSelfRenderedCursor(cell)) continue;
+      if (cursor !== null) return null;
+      cursor = { row: row.index, col: cell.col };
+    }
+  }
+  return cursor;
+}
+
+function terminalBufferSelfRenderedCursorPosition(
+  buffer: TerminalBufferState,
+): { row: number; col: number } | null {
+  let cursor: { row: number; col: number } | null = null;
+  for (const row of buffer.rowsById.values()) {
+    for (const cell of row.cells) {
+      if (!terminalCellLooksLikeSelfRenderedCursor(cell)) continue;
+      if (cursor !== null) return null;
+      cursor = { row: row.index, col: cell.col };
+    }
+  }
+  return cursor;
+}
+
+function terminalCellLooksLikeSelfRenderedCursor(cell: TerminalRow['cells'][number]) {
+  return cell.style?.inverse === true && !cell.style?.invisible && cell.text.trim().length === 0;
 }
 
 function clampCursorColumn(col: number, cols: number | undefined) {
@@ -2591,6 +2657,8 @@ function cursorPaintSample(frame: TerminalFrame): TerminalPaintCursorSample {
   };
 }
 
+function terminalPaintMode(
+  frame: TerminalFrame | null,
   buffer: TerminalBufferState | null,
 ): 'none' | 'buffer' | 'alternate' | 'viewport' {
   if (buffer) return 'buffer';
@@ -2864,8 +2932,6 @@ function cachedLiveTailPaintWindow(
   };
 }
 
-function nowMs() {
-  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
 function cursorLiveTailPaintWindow(
   buffer: TerminalBufferState,
   visibleStartRow: number,
@@ -2921,6 +2987,8 @@ function liveTailCoverageRanges(
   return ranges;
 }
 
+function nowMs() {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
     return performance.now();
   }
   return Date.now();
