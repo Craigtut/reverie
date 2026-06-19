@@ -25,8 +25,10 @@ use tauri_plugin_opener::OpenerExt;
 
 #[cfg(unix)]
 use crate::bridge::{BridgeInfo, mint_session_secret};
-use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
-use crate::terminal::ghostty::GhosttyTerminalState;
+use crate::state::{
+    HookServerInfo, HookTokenRegistry, ShutdownState, WebviewHealth, WorkspaceBoot,
+};
+use crate::terminal::ghostty::{GhosttyTerminalState, TerminalResizeAnchor};
 use crate::terminal::runtime::{
     TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest,
 };
@@ -134,6 +136,15 @@ pub(crate) struct MarkSessionViewedRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetSessionFlaggedAtRequest {
+    shell_session_id: SessionId,
+    /// Frontend-clock ISO 8601 timestamp when the user marked the session for
+    /// follow-up, or `None` to clear the flag. Stored verbatim.
+    flagged_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceDefaultDangerousModeRequest {
     default_dangerous_mode: bool,
 }
@@ -161,6 +172,12 @@ pub(crate) struct SetWorkspaceDefaultAgentKindRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetTerminalFontSizeRequest {
     terminal_font_size: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetCrtEnabledRequest {
+    crt_enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -924,6 +941,20 @@ pub(crate) fn mark_session_viewed(
         .map_err(|err| err.to_string())
 }
 
+/// Mark a session for follow-up (a durable "come back to this" flag the user
+/// applies by hand), or clear it. Unlike `mark_session_viewed`, viewing the
+/// session never clears this; only a reply (a new working turn) or an explicit
+/// clear does.
+#[tauri::command]
+pub(crate) fn set_session_flagged_at(
+    service: State<'_, WorkspaceService>,
+    request: SetSessionFlaggedAtRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_session_flagged_at(request.shell_session_id, request.flagged_at)
+        .map_err(|err| err.to_string())
+}
+
 /// Rename a session: set or clear its user-chosen display name. An empty/blank
 /// title clears the override and the session falls back to its automatic title.
 #[tauri::command]
@@ -1020,6 +1051,16 @@ pub(crate) fn set_terminal_font_size(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .set_terminal_font_size(request.terminal_font_size)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_crt_enabled(
+    service: State<'_, WorkspaceService>,
+    request: SetCrtEnabledRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_crt_enabled(request.crt_enabled)
         .map_err(|err| err.to_string())
 }
 
@@ -1391,14 +1432,31 @@ pub(crate) fn write_terminal_input(
 }
 
 #[tauri::command]
+pub(crate) fn paste_terminal_text(
+    runtime: State<'_, TerminalSessionRuntime>,
+    terminal_id: TerminalId,
+    text: String,
+) -> Result<(), String> {
+    runtime
+        .paste_text(terminal_id, text)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn resize_terminal(
     runtime: State<'_, TerminalSessionRuntime>,
     terminal_id: TerminalId,
     cols: u16,
     rows: u16,
+    anchor_id: Option<u64>,
+    anchor_col: Option<u16>,
 ) -> Result<(), String> {
+    let anchor = anchor_id.map(|stable_id| TerminalResizeAnchor {
+        stable_id,
+        col: anchor_col.unwrap_or(0),
+    });
     runtime
-        .resize_terminal(terminal_id, cols, rows)
+        .resize_terminal(terminal_id, cols, rows, anchor)
         .map_err(|err| err.to_string())
 }
 
@@ -1586,6 +1644,11 @@ pub(crate) fn record_terminal_diagnostics(
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn webview_heartbeat(health: State<'_, WebviewHealth>) {
+    health.mark_heartbeat();
 }
 
 /// Open a URL in the user's default browser. Outward-facing, so the scheme is

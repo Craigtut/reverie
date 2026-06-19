@@ -37,10 +37,16 @@ use tauri::{Emitter, Listener, Manager, Url};
 use crate::activity_bridge::{drain_file_activity, drain_hook_activity};
 use crate::git_watch::GitWatch;
 use crate::keep_awake::KeepAwakeManager;
-use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
+use crate::state::{
+    HookServerInfo, HookTokenRegistry, ShutdownState, WebviewHealth, WorkspaceBoot,
+    unix_time_millis,
+};
 use crate::terminal::runtime::{TerminalRuntimeStatus, TerminalSessionRuntime};
 
 const WINDOW_CORNER_RADIUS: f64 = 28.0;
+const WEBVIEW_HEALTH_CHECK_DELAY_MS: u64 = 1_500;
+const WEBVIEW_HEARTBEAT_STALE_MS: i64 = 5_000;
+const WEBVIEW_RELOAD_COOLDOWN_MS: i64 = 30_000;
 
 /// Bring the macOS keep-awake assertion in line with the current setting and
 /// live-session count. Cheap and idempotent: call it whenever a session starts
@@ -76,10 +82,90 @@ pub(crate) fn reconcile_keep_awake(app: &tauri::AppHandle) {
     );
 }
 
+fn record_webview_health_diagnostic(
+    app: &tauri::AppHandle,
+    kind: &'static str,
+    payload: serde_json::Value,
+) {
+    let _ = commands::record_terminal_diagnostics(
+        app.clone(),
+        serde_json::json!({
+            "kind": kind,
+            "wallTimeMs": unix_time_millis(),
+            "payload": payload,
+        }),
+    );
+}
+
+fn reload_main_webview(app: &tauri::AppHandle, reason: &'static str, payload: serde_json::Value) {
+    record_webview_health_diagnostic(
+        app,
+        "webview.reload",
+        serde_json::json!({
+            "reason": reason,
+            "payload": payload,
+        }),
+    );
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[reverie] main webview reload skipped after {reason}: window missing");
+        record_webview_health_diagnostic(
+            app,
+            "webview.reload_missing",
+            serde_json::json!({
+                "reason": reason,
+            }),
+        );
+        return;
+    };
+    eprintln!("[reverie] reloading main webview after {reason}");
+    if let Err(error) = window.reload() {
+        eprintln!("[reverie] failed to reload main webview after {reason}: {error}");
+        record_webview_health_diagnostic(
+            app,
+            "webview.reload_failed",
+            serde_json::json!({
+                "reason": reason,
+                "error": error.to_string(),
+            }),
+        );
+    }
+}
+
+fn schedule_webview_recovery_check(app: tauri::AppHandle, reason: &'static str) {
+    std::thread::Builder::new()
+        .name("reverie-webview-health".to_owned())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                WEBVIEW_HEALTH_CHECK_DELAY_MS,
+            ));
+            let Some(health) = app.try_state::<WebviewHealth>() else {
+                return;
+            };
+            let now = unix_time_millis();
+            let last_heartbeat = health.last_heartbeat_ms();
+            let stale_for = now.saturating_sub(last_heartbeat);
+            if last_heartbeat > 0 && stale_for < WEBVIEW_HEARTBEAT_STALE_MS {
+                return;
+            }
+            if !health.claim_reload(now, WEBVIEW_RELOAD_COOLDOWN_MS) {
+                return;
+            }
+            reload_main_webview(
+                &app,
+                reason,
+                serde_json::json!({
+                    "lastHeartbeatMs": last_heartbeat,
+                    "staleForMs": stale_for,
+                }),
+            );
+        })
+        .ok();
+}
+
 #[cfg(target_os = "macos")]
 fn apply_macos_window_corners(window: &tauri::WebviewWindow, radius: f64) {
     use objc::runtime::{Object, YES};
-    use objc::{msg_send, sel, sel_impl};
+    use objc::{class, msg_send, sel, sel_impl};
 
     let ns_window_ptr = match window.ns_window() {
         Ok(ptr) => ptr,
@@ -99,6 +185,23 @@ fn apply_macos_window_corners(window: &tauri::WebviewWindow, radius: f64) {
         let layer: *mut Object = msg_send![content_view, layer];
         if layer.is_null() {
             return;
+        }
+        // Keep the native window transparent for rounded corners, but give the
+        // masked content view an opaque fallback so a dead WKWebView never leaves
+        // a see-through rectangle. The layer mask below clips this fill to the
+        // same rounded shape as the app shell.
+        let background: *mut Object = msg_send![
+            class!(NSColor),
+            colorWithCalibratedRed: 0.043137254901960784f64
+            green: 0.0392156862745098f64
+            blue: 0.03529411764705882f64
+            alpha: 1.0f64
+        ];
+        if !background.is_null() {
+            let cg_color: *mut Object = msg_send![background, CGColor];
+            if !cg_color.is_null() {
+                let _: () = msg_send![layer, setBackgroundColor: cg_color];
+            }
         }
         let _: () = msg_send![layer, setCornerRadius: radius];
         let _: () = msg_send![layer, setMasksToBounds: YES];
@@ -187,6 +290,31 @@ fn main() {
         // process plugin backs the post-install relaunch.
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_web_content_process_terminate(|webview| {
+            let app = webview.app_handle().clone();
+            let label = webview.label().to_owned();
+            if let Some(health) = app.try_state::<WebviewHealth>() {
+                let _ = health.claim_reload(unix_time_millis(), 0);
+            }
+            record_webview_health_diagnostic(
+                &app,
+                "webview.content_terminated",
+                serde_json::json!({ "label": label.clone() }),
+            );
+            eprintln!("[reverie] web content process terminated for webview {label}; reloading");
+            if let Err(error) = webview.reload() {
+                eprintln!("[reverie] failed to reload terminated webview {label}: {error}");
+                record_webview_health_diagnostic(
+                    &app,
+                    "webview.content_terminate_reload_failed",
+                    serde_json::json!({
+                        "label": label.clone(),
+                        "error": error.to_string(),
+                    }),
+                );
+            }
+            schedule_webview_recovery_check(app, "web_content_terminated");
+        })
         .on_window_event(|window, event| {
             // Closing the window (red traffic-light button) is a quit for this
             // single-window app. Defer it the first time so the frontend can
@@ -205,9 +333,16 @@ fn main() {
                 if let Some(watch) = window.app_handle().try_state::<GitWatch>() {
                     watch.set_active(*focused);
                 }
+                if *focused {
+                    schedule_webview_recovery_check(
+                        window.app_handle().clone(),
+                        "window_focused",
+                    );
+                }
             }
         })
         .setup(|app| {
+            app.state::<WebviewHealth>().mark_heartbeat();
             let store_path = app
                 .path()
                 .app_data_dir()?
@@ -459,6 +594,7 @@ fn main() {
         .manage(TerminalSessionRuntime::default())
         .manage(WorkspaceBoot::default())
         .manage(ShutdownState::default())
+        .manage(WebviewHealth::default())
         .manage(KeepAwakeManager::default())
         .manage(GitWatch::default())
         // Shared cross-source merge for Codex (hooks + rollout), read by the
@@ -482,6 +618,7 @@ fn main() {
             commands::remove_session,
             commands::set_session_dangerous_mode,
             commands::mark_session_viewed,
+            commands::set_session_flagged_at,
             commands::rename_session,
             commands::rename_focus,
             commands::rename_project,
@@ -491,6 +628,7 @@ fn main() {
             commands::set_workspace_keep_awake,
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,
+            commands::set_crt_enabled,
             commands::set_sidebar_width,
             commands::set_workspace_nav_state,
             commands::hook_server_port,
@@ -507,6 +645,7 @@ fn main() {
             commands::start_session,
             commands::list_terminal_sessions,
             commands::write_terminal_input,
+            commands::paste_terminal_text,
             commands::resize_terminal,
             commands::read_terminal_rows,
             commands::set_terminal_frontend_active,
@@ -516,6 +655,7 @@ fn main() {
             commands::prepare_update_relaunch,
             commands::record_render_metrics,
             commands::record_terminal_diagnostics,
+            commands::webview_heartbeat,
             commands::open_url,
             commands::system_home_dir,
             commands::read_clipboard_image,
@@ -590,6 +730,9 @@ fn main() {
                 // so the next boot reads a clean shutdown. A crash or SIGKILL never
                 // runs this, leaving the marker for the next boot to detect.
                 crate::shutdown_marker::note_clean_shutdown(&app_handle);
+            }
+            tauri::RunEvent::Resumed => {
+                schedule_webview_recovery_check(app_handle.clone(), "app_resumed");
             }
             _ => {}
         });
