@@ -1,78 +1,72 @@
 import { Play } from '@phosphor-icons/react';
-import { useRef } from 'react';
+import { motion } from 'motion/react';
 
 import { css } from '../../styled-system/css';
-import { agentLabel, agentTabLabel, isResumeLaunch, launchButtonLabel } from '../../domain';
+import { agentLabel, agentTabLabel, launchButtonLabel } from '../../domain';
 import type { ShellSession } from '../../domain';
-import { ResumeBloom } from '../chrome';
+import { CrtLoadingCanvas } from '../../crtLoading';
 import { Typography } from '../primitives/Typography';
 
-// Covers the terminal surface for a selected-but-not-running session: an idle
-// state with a launch/resume button, and a launching state where the session
-// "comes back to life" as a radial dot bloom on the bare terminal surface, with
-// the action word and the session title sitting directly on the background.
-// Returns null when no session is selected.
-export function SessionLaunchOverlay({
+// The "coming back to life" overlay for a session that is waking: a full-cover
+// breathing CRT canvas with the action word + title drawn inside it (so the
+// warp/bloom apply to the text too). Mount/unmount and the fade in/out are owned
+// by the parent's <AnimatePresence>; this only declares its enter/exit, so there
+// is no setTimeout / onTransitionEnd bookkeeping that a StrictMode double-invoke
+// can strand (which is what kept it stuck at opacity 0, blanking the canvas).
+// `resuming` picks the verb and is frozen by the parent at the instant the wake
+// begins (Claude gains its native session ref mid-launch, which would otherwise
+// flip "Starting" to "Resuming" on the user).
+export function SessionResumeOverlay({
   session,
-  launching,
+  resuming,
+}: {
+  session: ShellSession;
+  resuming: boolean;
+}) {
+  const actionLabel = resuming ? 'Resuming' : 'Starting';
+  const title = session.title?.trim() || agentTabLabel(session);
+  return (
+    <motion.div
+      className={resumeOverlayClass}
+      data-testid="session-launch-overlay"
+      data-state="launching"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      // A touch slower on the way out so the handoff to the live terminal stays calm.
+      exit={{ opacity: 0, transition: { duration: 0.6, ease: 'easeOut' } }}
+      transition={{ duration: 0.45, ease: 'easeOut' }}
+    >
+      <CrtLoadingCanvas variant="resume" label={actionLabel} sublabel={title} />
+      <div className={resumeCopySrOnlyClass}>
+        <Typography as="span" variant="title2" tone="default" data-testid="session-launching-label">
+          {actionLabel}
+        </Typography>
+        <Typography
+          as="span"
+          variant="smallBody"
+          tone="faint"
+          className={resumeTitleClass}
+          data-testid="session-launching-title"
+        >
+          {title}
+        </Typography>
+      </div>
+    </motion.div>
+  );
+}
+
+// The idle launch/resume card for a selected-but-not-running session: the Run /
+// Resume button with the agent + working directory. Shown only when nothing is
+// waking and the boot is not covering the screen (the parent decides).
+export function SessionIdleLaunchCard({
+  session,
   disabled,
   onLaunch,
 }: {
-  session: ShellSession | null;
-  launching: boolean;
+  session: ShellSession;
   disabled: boolean;
   onLaunch: () => void;
 }) {
-  // Freeze whether this launch is a resume at the instant launching begins.
-  // Claude captures its native session id via hooks within the launch window, so
-  // a fresh session gains a nativeSessionRef mid-launch; reading it live would
-  // flip "Starting" to "Resuming" on the user. Snapshot the pre-launch session
-  // on the rising edge and hold it until launching ends.
-  const wasLaunching = useRef(false);
-  const resumeAtLaunchStart = useRef(false);
-  if (launching && !wasLaunching.current) {
-    resumeAtLaunchStart.current = session ? isResumeLaunch(session) : false;
-  } else if (!launching) {
-    resumeAtLaunchStart.current = false;
-  }
-  wasLaunching.current = launching;
-
-  if (!session) return null;
-
-  if (launching) {
-    const actionLabel = resumeAtLaunchStart.current ? 'Resuming' : 'Starting';
-    const title = session.title?.trim() || agentTabLabel(session);
-
-    return (
-      <div
-        className={resumeOverlayClass}
-        data-testid="session-launch-overlay"
-        data-state="launching"
-      >
-        <ResumeBloom />
-        <div className={resumeCopyClass}>
-          <Typography
-            as="span"
-            variant="title2"
-            tone="default"
-            data-testid="session-launching-label"
-          >
-            {actionLabel}
-          </Typography>
-          <Typography
-            as="span"
-            variant="smallBody"
-            tone="faint"
-            className={resumeTitleClass}
-            data-testid="session-launching-title"
-          >
-            {title}
-          </Typography>
-        </div>
-      </div>
-    );
-  }
-
   const label = launchButtonLabel(session);
   return (
     <div className={launchOverlayClass} data-testid="session-launch-overlay" data-state="idle">
@@ -174,20 +168,18 @@ const resumeOverlayClass = css({
   zIndex: 5,
 });
 
-const resumeCopyClass = css({
+// The visible label/title are drawn inside the resume canvas (so the warp/bloom
+// apply); the DOM copy is hidden for screen readers + tests only.
+const resumeCopySrOnlyClass = css({
   position: 'absolute',
-  left: 0,
-  right: 0,
-  // Sit just below the bloom, which is lifted slightly above the surface center.
-  top: 'calc(50% + 38px)',
-  display: 'flex',
-  flexDirection: 'column',
-  alignItems: 'center',
-  gap: '7px',
-  padding: '0 24px',
-  textAlign: 'center',
-  // Rise in a beat after the bloom sparks to life; reduced-motion flattens it.
-  animation: 'reverieRiseIn 560ms cubic-bezier(0.16, 1, 0.3, 1) 220ms both',
+  width: '1px',
+  height: '1px',
+  margin: '-1px',
+  padding: 0,
+  overflow: 'hidden',
+  clip: 'rect(0, 0, 0, 0)',
+  whiteSpace: 'nowrap',
+  border: 0,
 });
 
 const resumeTitleClass = css({

@@ -1,12 +1,19 @@
 import { ArrowDown, ShieldWarning } from '@phosphor-icons/react';
+import { AnimatePresence } from 'motion/react';
+import { useEffect, useRef, useState } from 'react';
 import { css } from '../../styled-system/css';
-import { agentLabel } from '../../domain';
+import { agentLabel, isResumeLaunch } from '../../domain';
+import { useUiStore } from '../../store';
 import type { ActivityPermissionRequest, SessionTerminalBinding, ShellSession } from '../../domain';
 import type { TerminalSession } from '../../hooks';
 import { Typography } from '../primitives/Typography';
-import { SessionLaunchOverlay } from './SessionLaunchOverlay';
+import { SessionIdleLaunchCard, SessionResumeOverlay } from './SessionLaunchOverlay';
 import { TerminalContextMenu } from './TerminalContextMenu';
 import { TerminalScrollbar } from './TerminalScrollbar';
+
+// Minimum time the resume/start overlay stays up once shown, so a session that
+// wakes almost instantly does not flicker the loading visuals in and out.
+const MIN_RESUME_DWELL_MS = 1000;
 
 // The slice of the terminal session handle this surface binds: the DOM refs and
 // the input/scroll handlers. The shell passes the whole handle; structural
@@ -68,6 +75,84 @@ export function TerminalSurface({
   const waitingForTerminalContent = Boolean(terminalBinding && !terminalContentReady);
   const showLaunchOverlay = !terminalBinding || waitingForTerminalContent;
   const launchOverlayLaunching = launching || waitingForTerminalContent;
+
+  // The resume "coming back to life" overlay is presence-driven: <AnimatePresence>
+  // owns the fade-out + unmount, so there is no hand-rolled phase machine or exit
+  // timer to get stranded. `oweResume` latches that the selected session owes a
+  // resume moment the first time it is seen waking (so a session that wakes while
+  // the boot still covers the screen still gets its moment afterward); `dwellDone`
+  // marks the minimum on-screen time, so an instant wake still reads as a moment.
+  const bootSequenceActive = useUiStore(s => s.bootSequenceActive);
+  const waking = showLaunchOverlay && launchOverlayLaunching;
+  const [oweResume, setOweResume] = useState(false);
+  const [dwellDone, setDwellDone] = useState(false);
+  // Freeze resume-vs-start at the instant the wake begins: Claude gains its native
+  // session ref mid-launch, which would otherwise flip "Starting" to "Resuming".
+  const resumingRef = useRef(false);
+  const prevSessionIdRef = useRef(session.id);
+
+  // A session switch starts fresh: drop any owed resume so a stale latch never
+  // shows the wrong session's moment.
+  useEffect(() => {
+    if (prevSessionIdRef.current === session.id) return;
+    prevSessionIdRef.current = session.id;
+    setOweResume(false);
+    setDwellDone(false);
+  }, [session.id]);
+
+  // Latch the owed resume (and freeze the verb) the first time this session wakes.
+  useEffect(() => {
+    if (waking && !oweResume) {
+      resumingRef.current = isResumeLaunch(session);
+      setOweResume(true);
+    }
+  }, [waking, oweResume, session]);
+
+  // Retire the owed resume once the session is ready (not waking) AND the minimum
+  // dwell has elapsed. Clearing `oweResume` drops the overlay, which
+  // AnimatePresence then fades out over the now-live terminal.
+  useEffect(() => {
+    if (oweResume && dwellDone && !waking) {
+      setOweResume(false);
+      setDwellDone(false);
+    }
+  }, [oweResume, dwellDone, waking]);
+
+  // Present while a resume is owed and the boot is not covering the screen (the
+  // power-on plays first; the two never stack).
+  const resumePresent = oweResume && !bootSequenceActive;
+
+  // `resumeOccupying` covers the overlay's WHOLE life on screen, including its
+  // fade-out: it latches on when the overlay appears and clears only in
+  // AnimatePresence's onExitComplete (below), once the overlay has fully faded
+  // and unmounted. The terminal reveal gates on this, so the resume fades out
+  // COMPLETELY before the terminal fades in — a sequential handoff, never a
+  // cross-dissolve.
+  const [resumeOccupying, setResumeOccupying] = useState(false);
+  useEffect(() => {
+    if (resumePresent) setResumeOccupying(true);
+  }, [resumePresent]);
+  // Safety net: AnimatePresence's onExitComplete is the primary release, but if it
+  // ever fails to fire the terminal must not stay hidden. Once the overlay is
+  // exiting (occupying but no longer present), force-release a beat after the
+  // fade-out should have finished.
+  useEffect(() => {
+    if (!resumeOccupying || resumePresent) return;
+    const id = window.setTimeout(() => setResumeOccupying(false), 900);
+    return () => window.clearTimeout(id);
+  }, [resumeOccupying, resumePresent]);
+
+  // Run the minimum-dwell timer once, the moment the overlay first appears.
+  useEffect(() => {
+    if (!resumePresent) return;
+    const id = window.setTimeout(() => setDwellDone(true), MIN_RESUME_DWELL_MS);
+    return () => window.clearTimeout(id);
+  }, [resumePresent]);
+
+  // The idle launch card shows only when nothing is waking/owed and the boot is
+  // not covering the screen.
+  const showIdleCard =
+    showLaunchOverlay && !launchOverlayLaunching && !resumePresent && !bootSequenceActive;
 
   return (
     <div className={terminalRowClass}>
@@ -136,7 +221,12 @@ export function TerminalSurface({
           <div
             ref={terminal.terminalScrollSpacerRef}
             className={terminalScrollSpacerClass}
-            data-content-ready={terminalBinding && terminalContentReady ? 'true' : 'false'}
+            // The terminal stays hidden until the resume overlay has FULLY faded
+            // out and unmounted (resumeOccupying), then fades in — a sequential
+            // handoff, never a cross-dissolve with the still-fading loader.
+            data-content-ready={
+              terminalBinding && terminalContentReady && !resumeOccupying ? 'true' : 'false'
+            }
             data-testid="terminal-scroll-spacer"
           >
             <canvas
@@ -169,15 +259,35 @@ export function TerminalSurface({
               onPaste={terminal.handleTerminalPaste}
             />
           </div>
-          {showLaunchOverlay ? (
-            <SessionLaunchOverlay
+          {/* AnimatePresence owns the resume overlay's fade-out + unmount, so the
+            handoff to the live terminal needs no exit timer. onExitComplete fires
+            once the fade-out fully finishes, releasing the terminal to fade in. */}
+          <AnimatePresence onExitComplete={() => setResumeOccupying(false)}>
+            {resumePresent ? (
+              <SessionResumeOverlay
+                key={session.id}
+                session={session}
+                resuming={resumingRef.current}
+              />
+            ) : null}
+          </AnimatePresence>
+          {showIdleCard ? (
+            <SessionIdleLaunchCard
               session={session}
-              launching={launchOverlayLaunching}
               disabled={Boolean(terminalBinding) || (busy && !launchOverlayLaunching)}
               onLaunch={onLaunch}
             />
           ) : null}
         </div>
+        {/* Edge fades. The viewport runs edge to edge; these sit over its top and
+          bottom in the terminal body (which does not scroll), so content dips
+          under them as it scrolls. The top fade lives under the floating tab
+          band and hides scrolled-back rows showing through the gaps between the
+          pills; the bottom fade lets the live tail trail off the bottom edge.
+          Both fade from the terminal background, so the blend is seamless, and
+          are click-through. */}
+        <div className={topFadeClass} aria-hidden="true" />
+        <div className={bottomFadeClass} aria-hidden="true" />
         {/* Floating "jump to latest": only present once the user has scrolled up
           off the live tail. Anchored to the panel's bottom-right, it drops them
           back to the newest output. */}
@@ -284,7 +394,9 @@ const terminalScrollSpacerClass = css({
   overflow: 'hidden',
   background: 'var(--terminal-bg, #0B0A09)',
   '& .terminal-canvas': {
-    transition: 'opacity 180ms ease',
+    // Calm fade-in as it reveals, so the handoff from the resume overlay reads
+    // as a deliberate transition rather than a cut.
+    transition: 'opacity 340ms ease',
   },
   '&[data-content-ready="false"] .terminal-canvas': {
     opacity: 0,
@@ -292,6 +404,40 @@ const terminalScrollSpacerClass = css({
   '&[data-content-ready="true"] .terminal-canvas': {
     opacity: 1,
   },
+});
+
+// Top edge fade: content fills right up to the top and gently dissolves into the
+// terminal background under the floating tab band, instead of butting the chrome
+// or leaving a slab of dead space. A soft top-to-bottom fade (opaque only at the
+// very top edge so scrolled-back rows disappear cleanly, then a quick fade to
+// transparent) covers roughly the tab-band height, so the floating tabs sit over
+// a softened area rather than raw text. The fade runs ~24px past the bottom of
+// the floating tab band so content dissolves gradually below the tabs rather than
+// snapping in right at their edge. zIndex 3 keeps it above the canvas (in the
+// scrolling viewport) and below the tabs (zIndex 5) and jump button (4).
+const topFadeClass = css({
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  right: 0,
+  height: '84px',
+  zIndex: 3,
+  pointerEvents: 'none',
+  background: 'linear-gradient(to bottom, var(--terminal-bg) 0%, transparent 100%)',
+});
+
+// Bottom edge fade: lifts the live tail off the bottom edge and lets the last
+// rows trail off gradually rather than butting it. Taller than the bottom inset
+// so the dissolve spans a couple of rows.
+const bottomFadeClass = css({
+  position: 'absolute',
+  bottom: 0,
+  left: 0,
+  right: 0,
+  height: '56px',
+  zIndex: 3,
+  pointerEvents: 'none',
+  background: 'linear-gradient(to top, var(--terminal-bg) 0%, transparent 100%)',
 });
 
 const terminalTextInputClass = css({
