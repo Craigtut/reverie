@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { css } from '../../styled-system/css';
+import type { CellSessionState } from '../../domain';
 
 // The CLI's own logo, shown beside session titles so the agent behind a session
 // is instantly recognizable (and parallel sessions of different CLIs stay easy
@@ -8,16 +9,35 @@ import { css } from '../../styled-system/css';
 // Sizing is driven by the wrapping <span>: 14px by default, overridable by a
 // parent (e.g. the creation composer lifts it to 22px via `> span:first-child`).
 // The inner SVG always fills that box.
-export function AgentGlyph({ kind }: { kind: string }) {
+//
+// `state` (optional) modulates the mark's presence so the nav reads at a glance:
+// any live or attention-worthy session keeps its full brand color, an idle
+// session recedes the most, and a fresh (not-yet-launched) session sits at a
+// quiet baseline. Consumers that don't pass `state` render at full presence.
+export function AgentGlyph({ kind, state }: { kind: string; state?: CellSessionState }) {
   const brand = BRAND[kind] ?? CORTEX_PLACEHOLDER;
+  const opacity = state ? GLYPH_PRESENCE[state] : 1;
   return (
-    <span className={glyphClass} style={{ color: brand.color }} aria-hidden="true">
+    <span className={glyphClass} style={{ color: brand.color, opacity }} aria-hidden="true">
       <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
         {brand.mark}
       </svg>
     </span>
   );
 }
+
+// Presence tiers for the mark. Anything live, awaiting the user, or finished and
+// ready for review stays at full color so it pops in the rail; an idle session
+// (run, seen, now at rest) fades the most; a fresh session keeps a quiet,
+// in-between presence.
+const GLYPH_PRESENCE: Record<CellSessionState, number> = {
+  active: 1,
+  attention: 1,
+  error: 1,
+  finished: 1,
+  fresh: 0.55,
+  idle: 0.32,
+};
 
 type Brand = { color: string; mark: ReactNode };
 
@@ -74,6 +94,9 @@ const glyphClass = css({
   alignItems: 'center',
   justifyContent: 'center',
   flexShrink: 0,
+  // Ease the presence shift when a session moves between states (e.g. active ->
+  // idle) so the mark settles rather than snapping.
+  transition: 'opacity 200ms ease',
   '& svg': { width: '100%', height: '100%', display: 'block' },
 });
 

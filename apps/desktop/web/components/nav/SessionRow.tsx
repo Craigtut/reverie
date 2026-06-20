@@ -65,7 +65,7 @@ export function SessionRow({
       {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
       {renaming ? (
         <div className={cx(rowPrimaryClass, sessionPrimaryClass)}>
-          <AgentGlyph kind={session.agentKind} />
+          <AgentGlyph kind={session.agentKind} state={cellState} />
           {/* The ghost label reserves the row's resting height (one or two lines)
               so starting a rename never collapses an on-stage, two-line row; the
               single-line field floats centered over it. */}
@@ -94,7 +94,7 @@ export function SessionRow({
           data-session-id={session.id}
           data-session-state={cellState}
         >
-          <AgentGlyph kind={session.agentKind} />
+          <AgentGlyph kind={session.agentKind} state={cellState} />
           <Typography
             as="span"
             variant="smallBody"
