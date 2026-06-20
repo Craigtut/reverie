@@ -9,11 +9,13 @@ import {
   useCreationForm,
   useGitStatus,
   useNavPersistence,
+  useSpeechEngine,
   useSessionActivity,
   useSessionViewed,
   useSessionTitle,
   useShellNavigation,
   useTerminalSession,
+  useWebviewHeartbeat,
   useWorkspaceModel,
   useWorkspaceMutations,
 } from './hooks';
@@ -62,9 +64,11 @@ export function WorkspaceShell() {
 
   useCommandPalette();
   useAppQuit(writeLog);
+  useWebviewHeartbeat();
   useAutoUpdate();
   useSessionActivity(writeLog, model.loadWorkspaceShell);
   useGitStatus();
+  useSpeechEngine();
   useSessionViewed();
   useSessionTitle(writeLog);
   useAgentClis(

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Hardened-runtime entitlements, applied at code-signing time (the release
+		path through tauri-action). Microphone access for on-device voice input.
+		Reverie is a Developer ID app distributed outside the App Store and is NOT
+		sandboxed (it spawns PTYs and child agent CLIs), so this is the audio-input
+		device entitlement, not a sandbox temporary-exception.
+	-->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

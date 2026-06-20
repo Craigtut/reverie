@@ -30,7 +30,7 @@ These are not deferred milestones; they are no longer how Reverie's terminal wor
 In rough priority order:
 
 1. **Scroll-back collapse (fixed, verified in the running app).** Scrolling up moved only a few rows and could not reach the top; resumed Claude sessions showed blank scroll-back until a resize forced a refill. Three compounding causes, all fixed: (a) the synthetic scroll path *refused* to move into uncached rows, so scroll-back was hard-capped at the cached tail. It now scrolls freely and paints blank placeholders while the prefetch fills async, matching the documented "never block the gesture" model (`scrollBufferedToTop`). (b) A `total_rows` dip wiped the whole row mirror; since Ink redraws its bottom region every frame, `total_rows` oscillates and the cache was destroyed (then re-fetched) constantly, which read as blank/looping scroll-back. A redraw dip now KEEPS the mirror; only a genuine collapse to one screen (`totalRows <= viewportRows`), a reflow (cols change), or a metadata-less fresh frame resets it (`bufferModel.ts`). (c) Paint overscan was a fixed 3 rows and the prefetch led only upward; overscan is now ~one viewport each side and the prefetch leads both directions (`bufferPaintWindow`, `historyPrefetchBand`). Verified by hand: Cortex and Codex scroll-back are smooth, Claude resume scroll-back fills correctly.
-2. **Claude Code (Ink) resize reflow is an accepted limitation (D9), not a bug.** Resizing width while scrolled back reflows cleanly for line-oriented CLIs (Codex, Cortex) but jumbles a redraw-heavy TUI's history: widening does not refill the space, narrowing overflow-wraps characters to new lines. This is inherent, not our bug: Ink hard-wraps its output, so its scroll-back is frozen pre-wrapped lines that no terminal can re-flow. Confirmed against Ghostty's own macOS app, which reflows scrolled-back history identically. We do not attempt to fix the content. A position-only re-anchor across reflow (via libghostty's viewport pin, which our released binding does expose and which survives reflow) is a real but deferred improvement that fixes the scroll jump, not the content jumble. Full findings + decision: [`terminal/resize-reflow-anchoring.md`](terminal/resize-reflow-anchoring.md) and D9.
+2. **Claude Code (Ink) resize reflow is an accepted limitation (D9), not a bug.** Resizing width while scrolled back reflows cleanly for line-oriented CLIs (Codex, Cortex) but jumbles a redraw-heavy TUI's history: widening does not refill the space, narrowing overflow-wraps characters to new lines. This is inherent, not our bug: Ink hard-wraps its output, so its scroll-back is frozen pre-wrapped lines that no terminal can re-flow. Confirmed against Ghostty's own macOS app, which reflows scrolled-back history identically. We do not attempt to fix the content. A position-only re-anchor across reflow now uses libghostty 0.2 tracked grid refs for the top visible row while scrolled back on the primary screen. It fixes the scroll jump, not the content jumble. Full findings + decision: [`terminal/resize-reflow-anchoring.md`](terminal/resize-reflow-anchoring.md) and D9.
 3. **Interactive in-app manual pass + the branch merge decision.** macOS WKWebView cannot be WebDriver-automated, so the visual/interaction pass is by hand in the running desktop app. Confirmed so far: scroll-back through long history (Cortex, Codex, Claude resume), and the Ink resize behavior understood and accepted (item 2). Still to confirm before merging `refactor/terminal-overhaul` into `main`: input latency, and behavior across many concurrent sessions. A `freshProbe` build marker in `terminalController.ts` (behind a diagnostics flag) stamps trace events so the diagnostics log can prove a fresh WebView bundle is loaded when investigating; harmless, leave it off by default.
 
 The yardstick for "faithful to the design" is [`terminal/performance-and-acceptance.md`](terminal/performance-and-acceptance.md).
@@ -360,13 +360,45 @@ as the backstop.
 npm run check
 ```
 
+Note the desktop `cargo` legs now also build the on-device speech engine
+(`reverie-speech` with `capture` + `asr`), which compiles a Swift package via
+`fluidaudio-rs` and so needs the Xcode Command Line Tools (in addition to Zig).
+The root `cargo test` stays Swift-free because `reverie-speech`'s native deps are
+feature-gated and the root build enables no features.
+
 Useful subsets while iterating (all are covered by `npm run check`):
 
 ```bash
 npm run test:unit                                                              # Vitest (frontend unit/smoke)
 node scripts/run-with-zig.mjs cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml   # Zig-wrapped desktop Rust tests
 cargo test                                                                     # core (reverie-core) tests
+cargo test -p reverie-speech --features capture                                # speech resampling unit tests (no mic)
 ```
+
+The on-device speech engine end-to-end smoke test is **`#[ignore]` by default**
+(it downloads ~500MB and ANE-compiles the model on first run), so it is not part
+of `npm run check`. Run it deliberately on an Apple Silicon Mac:
+
+```bash
+cargo test -p reverie-speech --features asr -- --ignored
+```
+
+## On-device speech-to-text foundation (landed)
+
+The STT **foundation** is built: `reverie-core::speech` contracts + `voice_*`
+workspace settings, the `reverie-speech` engine (cpal capture → rubato → Parakeet
+on the ANE via `fluidaudio-rs`), the Tauri command/event/`Channel` seam, and the
+frontend client (`speechApi`, `speechEngineStore`, `useSpeechEngine`,
+`useSpeechCapture`) plus a Settings `VoiceSection`. The model is downloaded at
+runtime (eager on first launch) and the engine returns a transcript and routes it
+nowhere. See [voice input](../product/core-experience/voice-input.md).
+
+**Follow-on features (not built):** the in-terminal floating voice button (routes
+the transcript through `write_input` bracketed-paste) and the dispatch global
+shortcut (routes it to the completion/classification surface). Dispatch's intent
+classification depends on the completion surface, tracked separately. Streaming
+partials and VAD endpointing are wired as seams (the reserved `CaptureSignal::Partial`
+and fluidaudio's `streaming_asr_*`/`init_vad`) for a future voice mode.
 
 Manual terminal stress route (a hidden multi-terminal route, not part of `npm run check`):
 

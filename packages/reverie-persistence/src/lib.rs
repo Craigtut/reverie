@@ -21,8 +21,8 @@ use reverie_core::connection::{
 };
 use reverie_core::connection_repository::ConnectionRepository;
 use reverie_core::domain::{
-    AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, Session,
-    SessionId, SessionStateTimeline, SessionStatus, ThemeMode, Workspace, WorkspaceId,
+    AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, ReentrySummary,
+    Session, SessionId, SessionStateTimeline, SessionStatus, ThemeMode, Workspace, WorkspaceId,
     WorkspaceSnapshot,
 };
 use reverie_core::repository::{PersistenceError, RepoResult, WorkspaceRepository};
@@ -238,6 +238,24 @@ const MIGRATIONS: &[&str] = &[
     // flat, matching the explicit-opt-in guardrail for non-default visual
     // effects.
     "ALTER TABLE workspace ADD COLUMN crt_enabled INTEGER NOT NULL DEFAULT 0;",
+    // v22 -> v23: the per-session "re-entry header" catch-up summary. A nullable
+    // JSON blob holding the model-written summary fields plus the rest it was
+    // generated for (`generatedForRestingSince`), the producing CLI, a dismissed
+    // flag, and a schema version. Generated once when a session comes to rest
+    // while the user is away; persisted so it survives an app restart and is
+    // there when the user reopens the session. NULL for existing rows and any
+    // session that has not yet rested unseen.
+    "ALTER TABLE sessions ADD COLUMN reentry_summary_json TEXT;",
+    // v23 -> v24: on-device voice input settings. `voice_enabled` governs whether
+    // the voice affordances show (defaults on, a first-class feature; the speech
+    // model is provisioned eagerly on first launch regardless, so this is UI
+    // visibility only). `voice_language` is the transcription hint ("auto" =
+    // detect, else an ISO 639-1 code). `voice_push_to_talk` picks press-and-hold
+    // vs a click toggle. Defaults are chosen so existing workspaces upgrade with
+    // voice on, English-auto, push-to-talk.
+    "ALTER TABLE workspace ADD COLUMN voice_enabled INTEGER NOT NULL DEFAULT 1;
+     ALTER TABLE workspace ADD COLUMN voice_language TEXT NOT NULL DEFAULT 'auto';
+     ALTER TABLE workspace ADD COLUMN voice_push_to_talk INTEGER NOT NULL DEFAULT 1;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -250,7 +268,7 @@ const CONNECTION_MESSAGE_COLUMNS: &str =
 const SESSION_COLUMNS: &str = "id, focus_id, title, agent_kind, cwd, native_session_ref_json, \
      launch_mode, dangerous_mode_override, status, last_exit_code, \
      latest_activity_json, archived, sort_order, last_viewed_at, state_timeline_json, \
-     custom_title, flagged_at";
+     custom_title, flagged_at, reentry_summary_json";
 
 pub struct SqliteWorkspaceRepository {
     conn: Mutex<Connection>,
@@ -362,8 +380,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                      disabled_agent_kinds,
                      theme, default_agent_kind, nav_state, terminal_font_size,
                      keep_awake_enabled, keep_display_awake, sidebar_width,
-                     crt_enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                     crt_enabled, voice_enabled, voice_language,
+                     voice_push_to_talk)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?16)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -378,6 +398,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     bool_to_int(seed.keep_display_awake),
                     i64::from(seed.sidebar_width),
                     bool_to_int(seed.crt_enabled),
+                    bool_to_int(seed.voice_enabled),
+                    seed.voice_language,
+                    bool_to_int(seed.voice_push_to_talk),
                 ],
             )
             .map_err(backend)?;
@@ -393,8 +416,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                  disabled_agent_kinds,
                  theme, default_agent_kind, nav_state, terminal_font_size,
                  keep_awake_enabled, keep_display_awake, sidebar_width,
-                 crt_enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 crt_enabled, voice_enabled, voice_language,
+                 voice_push_to_talk)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                 ?14, ?15, ?16)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -407,7 +432,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 keep_awake_enabled = excluded.keep_awake_enabled,
                 keep_display_awake = excluded.keep_display_awake,
                 sidebar_width = excluded.sidebar_width,
-                crt_enabled = excluded.crt_enabled",
+                crt_enabled = excluded.crt_enabled,
+                voice_enabled = excluded.voice_enabled,
+                voice_language = excluded.voice_language,
+                voice_push_to_talk = excluded.voice_push_to_talk",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -422,6 +450,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 bool_to_int(workspace.keep_display_awake),
                 i64::from(workspace.sidebar_width),
                 bool_to_int(workspace.crt_enabled),
+                bool_to_int(workspace.voice_enabled),
+                workspace.voice_language,
+                bool_to_int(workspace.voice_push_to_talk),
             ],
         )
         .map_err(backend)?;
@@ -658,13 +689,14 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
         None => None,
     };
     let state_timeline_json = state_timeline_to_db(&session.state_timeline)?;
+    let reentry_summary_json = reentry_summary_to_db(&session.reentry_summary)?;
     conn.execute(
         "INSERT INTO sessions (
             id, focus_id, title, agent_kind, cwd, native_session_ref_json, launch_mode,
             dangerous_mode_override, status, last_exit_code, latest_activity_json,
             archived, sort_order, last_viewed_at, state_timeline_json, custom_title,
-            flagged_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+            flagged_at, reentry_summary_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
          ON CONFLICT(id) DO UPDATE SET
             focus_id = excluded.focus_id, title = excluded.title,
             agent_kind = excluded.agent_kind, cwd = excluded.cwd,
@@ -678,7 +710,8 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             last_viewed_at = excluded.last_viewed_at,
             state_timeline_json = excluded.state_timeline_json,
             custom_title = excluded.custom_title,
-            flagged_at = excluded.flagged_at",
+            flagged_at = excluded.flagged_at,
+            reentry_summary_json = excluded.reentry_summary_json",
         params![
             session.id.to_string(),
             session.focus_id.to_string(),
@@ -697,6 +730,7 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> RepoResult<()> {
             state_timeline_json,
             session.custom_title,
             session.flagged_at,
+            reentry_summary_json,
         ],
     )
     .map_err(backend)?;
@@ -942,7 +976,8 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 disabled_agent_kinds,
                 theme, default_agent_kind, nav_state, terminal_font_size,
                 keep_awake_enabled, keep_display_awake, sidebar_width,
-                crt_enabled
+                crt_enabled, voice_enabled, voice_language,
+                voice_push_to_talk
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -960,6 +995,9 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 keep_display_awake: int_to_bool(row.get::<_, i64>(10)?),
                 sidebar_width: sidebar_width_from_db(row.get::<_, i64>(11)?),
                 crt_enabled: int_to_bool(row.get::<_, i64>(12)?),
+                voice_enabled: int_to_bool(row.get::<_, i64>(13)?),
+                voice_language: row.get::<_, String>(14)?,
+                voice_push_to_talk: int_to_bool(row.get::<_, i64>(15)?),
             })
         },
     )
@@ -1050,6 +1088,7 @@ fn read_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         last_viewed_at: row.get::<_, Option<String>>(13)?,
         state_timeline: state_timeline_from_db(row.get::<_, Option<String>>(14)?)?,
         flagged_at: row.get::<_, Option<String>>(16)?,
+        reentry_summary: reentry_summary_from_db(row.get::<_, Option<String>>(17)?)?,
     })
 }
 
@@ -1159,6 +1198,24 @@ fn native_session_ref_from_db(value: Option<String>) -> rusqlite::Result<Option<
 fn activity_state_from_db(value: Option<String>) -> rusqlite::Result<Option<ActivityState>> {
     match value {
         Some(text) if !text.is_empty() => serde_json::from_str::<ActivityState>(&text)
+            .map(Some)
+            .map_err(conversion_failure),
+        _ => Ok(None),
+    }
+}
+
+fn reentry_summary_to_db(value: &Option<ReentrySummary>) -> RepoResult<Option<String>> {
+    match value {
+        Some(summary) => serde_json::to_string(summary)
+            .map(Some)
+            .map_err(|err| PersistenceError::Serialization(err.to_string())),
+        None => Ok(None),
+    }
+}
+
+fn reentry_summary_from_db(value: Option<String>) -> rusqlite::Result<Option<ReentrySummary>> {
+    match value {
+        Some(text) if !text.is_empty() => serde_json::from_str::<ReentrySummary>(&text)
             .map(Some)
             .map_err(conversion_failure),
         _ => Ok(None),
@@ -1297,6 +1354,18 @@ mod tests {
         session.state_timeline.working_since = Some("2026-06-06T15:10:02.000Z".to_owned());
         session.state_timeline.resting_since = Some("2026-06-06T15:12:40.000Z".to_owned());
         session.custom_title = Some("Pinned name".to_owned());
+        session.reentry_summary = Some(reverie_core::domain::ReentrySummary {
+            fields: reverie_core::domain::ReentrySummaryFields {
+                current_goal: "Wire the re-entry header".to_owned(),
+                where_we_left_off: vec!["Read completion.rs".to_owned(), "Added a column".to_owned()],
+                what_changed: Some("Migration landed".to_owned()),
+                pending_decision: None,
+            },
+            generated_for_resting_since: "2026-06-06T15:12:40.000Z".to_owned(),
+            cli: AgentKind::CortexCode,
+            dismissed: false,
+            schema_version: 1,
+        });
         repo.upsert_session(&session).unwrap();
 
         let loaded = repo.get_session(session.id).unwrap().unwrap();
@@ -1318,6 +1387,16 @@ mod tests {
             Some("2026-06-06T15:12:40.000Z")
         );
         assert_eq!(loaded.custom_title.as_deref(), Some("Pinned name"));
+        let reentry = loaded.reentry_summary.expect("reentry summary round-trips");
+        assert_eq!(reentry.fields.current_goal, "Wire the re-entry header");
+        assert_eq!(reentry.fields.where_we_left_off.len(), 2);
+        assert_eq!(reentry.fields.what_changed.as_deref(), Some("Migration landed"));
+        assert_eq!(
+            reentry.generated_for_resting_since,
+            "2026-06-06T15:12:40.000Z"
+        );
+        assert_eq!(reentry.cli, AgentKind::CortexCode);
+        assert!(!reentry.dismissed);
 
         let by_native = repo.find_session_by_native_id("native-42").unwrap();
         assert_eq!(by_native.map(|s| s.id), Some(session.id));
@@ -1579,6 +1658,27 @@ mod tests {
         let loaded = repo.load_snapshot().unwrap().workspace;
         assert!(loaded.keep_awake_enabled);
         assert!(loaded.keep_display_awake);
+    }
+
+    #[test]
+    fn save_workspace_round_trips_voice_settings() {
+        let repo = seeded();
+        // A fresh workspace seeds voice on, auto language, push-to-talk.
+        let workspace = repo.load_snapshot().unwrap().workspace;
+        assert!(workspace.voice_enabled);
+        assert_eq!(workspace.voice_language, "auto");
+        assert!(workspace.voice_push_to_talk);
+
+        // All three round-trip together.
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.voice_enabled = false;
+        workspace.voice_language = "en".to_owned();
+        workspace.voice_push_to_talk = false;
+        repo.save_workspace(&workspace).unwrap();
+        let loaded = repo.load_snapshot().unwrap().workspace;
+        assert!(!loaded.voice_enabled);
+        assert_eq!(loaded.voice_language, "en");
+        assert!(!loaded.voice_push_to_talk);
     }
 
     #[test]

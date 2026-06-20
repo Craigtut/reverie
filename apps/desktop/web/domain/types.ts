@@ -187,6 +187,16 @@ export interface ShellWorkspace {
   // vignette/aberration, plus a cranked variant for the loading sequences). Off
   // by default; absent (pre-migration) means off.
   crtEnabled?: boolean;
+  // Whether on-device voice input affordances are shown. On by default (a
+  // first-class feature); absent (pre-migration) means on. UI visibility only:
+  // the speech model provisions eagerly on first launch regardless. macOS /
+  // Apple-Silicon only.
+  voiceEnabled?: boolean;
+  // Transcription language hint: 'auto' (detect) or an ISO 639-1 code.
+  voiceLanguage?: string;
+  // Voice control style: press-and-hold (push-to-talk) vs a click toggle.
+  // True (push-to-talk) by default.
+  voicePushToTalk?: boolean;
 }
 
 // The navigation we persist so a reload or relaunch reopens the last view
@@ -320,6 +330,42 @@ export interface ShellSession {
   // session's workingSince, so a reply (which starts a new turn) supersedes it.
   // See isFollowingUp / deriveSessionState.
   flaggedAt?: string | null;
+  // The catch-up "where we left off" summary generated when this session came to
+  // rest while the user was away (the re-entry header). Backend-owned, rides the
+  // snapshot and the session_record_changed event. Shown only while it still
+  // describes the current rest (generatedForRestingSince === restingSince) and
+  // the session is not working again; absent/null until the first unseen rest.
+  // See ReentrySummary, useReentryHeader.
+  reentrySummary?: ReentrySummary | null;
+}
+
+// The model-written catch-up summary shown when returning to a session that
+// finished while you were away. Mirrors reverie-core's ReentrySummary.
+export interface ReentrySummary {
+  fields: ReentrySummaryFields;
+  // The session's stateTimeline.restingSince this summary was generated for. The
+  // header is visible only while this still equals the session's current resting
+  // marker; a new turn advances the marker and supersedes this summary.
+  generatedForRestingSince: string;
+  // The CLI whose completion engine produced it (snake_case, e.g. "codex_cli").
+  cli: string;
+  // Whether the user dismissed the header for this rest. A fresh summary for a
+  // later rest resets this to false.
+  dismissed?: boolean;
+  schemaVersion?: number;
+}
+
+// The four things the re-entry header shows. Mirrors reverie-core's
+// ReentrySummaryFields. See docs/product/core-experience/completions-and-reentry.md.
+export interface ReentrySummaryFields {
+  // The thread of work in one line.
+  currentGoal: string;
+  // The last two or three meaningful actions, newest last.
+  whereWeLeftOff?: string[];
+  // What is new since the user last looked, one line (absent when nothing notable).
+  whatChanged?: string | null;
+  // The exact thing being asked, when the session is blocked on the user.
+  pendingDecision?: string | null;
 }
 
 // Reverie's record of when a session last entered each meaningful state. Mirrors

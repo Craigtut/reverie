@@ -77,6 +77,23 @@ pub struct Workspace {
     /// frontend renderer owns the shader.
     #[serde(default)]
     pub crt_enabled: bool,
+    /// Whether on-device voice input affordances are shown. On by default
+    /// because voice is a first-class feature. This governs UI visibility only:
+    /// the speech model is provisioned eagerly on first launch regardless, so
+    /// flipping this off does not undo the one-time download. Has no effect off
+    /// macOS / off Apple Silicon, where the engine is unavailable.
+    #[serde(default = "default_voice_enabled")]
+    pub voice_enabled: bool,
+    /// Spoken language hint for transcription. `"auto"` lets the engine detect;
+    /// otherwise an ISO 639-1 code (e.g. `"en"`). The domain stores it verbatim;
+    /// the speech engine validates it.
+    #[serde(default = "default_voice_language")]
+    pub voice_language: String,
+    /// Whether the voice control is press-and-hold (push-to-talk) versus a
+    /// click-to-start/click-to-stop toggle. Push-to-talk by default. Consumed by
+    /// the future voice surfaces; the domain only records the preference.
+    #[serde(default = "default_voice_push_to_talk")]
+    pub voice_push_to_talk: bool,
 }
 
 impl Workspace {
@@ -95,6 +112,9 @@ impl Workspace {
             keep_awake_enabled: false,
             keep_display_awake: false,
             crt_enabled: false,
+            voice_enabled: default_voice_enabled(),
+            voice_language: default_voice_language(),
+            voice_push_to_talk: default_voice_push_to_talk(),
         }
     }
 }
@@ -119,6 +139,22 @@ fn default_terminal_font_size() -> u16 {
 /// data, matching the shell's default grid column.
 fn default_sidebar_width() -> u16 {
     288
+}
+
+/// Voice input ships on by default (a first-class feature); used when the field
+/// is absent from persisted or serialized data.
+fn default_voice_enabled() -> bool {
+    true
+}
+
+/// Default transcription language hint: auto-detect.
+fn default_voice_language() -> String {
+    "auto".to_owned()
+}
+
+/// Voice control defaults to press-and-hold (push-to-talk).
+fn default_voice_push_to_talk() -> bool {
+    true
 }
 
 /// Persisted light/dark appearance. Serializes as "light"/"dark" to match the
@@ -363,6 +399,63 @@ pub struct Session {
     /// and never restamped server-side. `None` for pre-flag persisted rows.
     #[serde(default)]
     pub flagged_at: Option<String>,
+    /// The catch-up summary generated when this session came to rest while the
+    /// user was away (the "re-entry header"). Produced by the session's own CLI
+    /// over a windowed read of its transcript, persisted so it survives an app
+    /// restart and is there when the user reopens the session later. Keyed to the
+    /// rest it summarizes via [`ReentrySummary::generated_for_resting_since`], so
+    /// it is shown only until the agent works again and rests anew. `None` until
+    /// the first such rest, and for pre-feature persisted rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reentry_summary: Option<ReentrySummary>,
+}
+
+/// The "where did I leave off" catch-up artifact shown above the terminal when a
+/// user returns to a session that finished while they were away. Generated once,
+/// on the active -> rest transition into the "Ready for you" tier, by the
+/// session's own CLI completion engine; never regenerated per turn or while the
+/// agent is active. Reverie-owned; not part of any CLI contract.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReentrySummary {
+    /// The model-written summary fields rendered in the header.
+    pub fields: ReentrySummaryFields,
+    /// The `state_timeline.resting_since` this summary was generated for. The
+    /// header is visible only while this still equals the session's current
+    /// resting marker; when the agent works and rests again the marker advances,
+    /// superseding this summary (the frontend hides it) without deleting the row,
+    /// so a resume-after-restart still shows the last summary until it is replaced.
+    pub generated_for_resting_since: String,
+    /// The CLI whose completion engine produced this summary.
+    pub cli: AgentKind,
+    /// Whether the user dismissed the header for the above rest. Reset to false
+    /// whenever a fresh summary is generated for a new rest.
+    #[serde(default)]
+    pub dismissed: bool,
+    /// Bumped when the prompt/field shape changes, so a stale-shaped persisted
+    /// summary can be ignored or regenerated rather than mis-rendered.
+    #[serde(default)]
+    pub schema_version: u32,
+}
+
+/// The model-written fields of a [`ReentrySummary`]. Mirrors the four things the
+/// re-entry header shows; see `docs/product/core-experience/completions-and-reentry.md`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReentrySummaryFields {
+    /// The thread of work in one line.
+    pub current_goal: String,
+    /// The last two or three meaningful actions, newest last.
+    #[serde(default)]
+    pub where_we_left_off: Vec<String>,
+    /// What is new since the user last looked, in one line. `None` when nothing
+    /// notable changed or the model declined to fill it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub what_changed: Option<String>,
+    /// The exact thing being asked, if the session is blocked on the user. `None`
+    /// when the session is simply at rest and not waiting on a decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_decision: Option<String>,
 }
 
 /// Reverie's durable record of when a session last entered each meaningful
@@ -470,6 +563,7 @@ impl Session {
                 ..SessionStateTimeline::default()
             },
             flagged_at: None,
+            reentry_summary: None,
         }
     }
 
@@ -508,6 +602,29 @@ impl Session {
     /// failure (e.g. a failed resume), distinct from an activity-driven block.
     pub fn note_blocked(&mut self, at: String) {
         self.state_timeline.blocked_since = Some(at);
+    }
+
+    /// Whether the session came to rest after the user last viewed it: it
+    /// finished a turn while the user was away (the "Ready for you" /
+    /// finished-unseen condition). Mirrors the frontend `hasUnseenCompletion`
+    /// (`web/domain/activity.ts`), comparing `state_timeline.resting_since`
+    /// against `last_viewed_at`. A never-viewed session (`last_viewed_at` absent)
+    /// counts as unseen. `false` when the session has never come to rest.
+    pub fn rested_unseen(&self) -> bool {
+        let Some(rested) = self
+            .state_timeline
+            .resting_since
+            .as_deref()
+            .and_then(crate::time::iso8601_to_epoch_millis)
+        else {
+            return false;
+        };
+        let seen = self
+            .last_viewed_at
+            .as_deref()
+            .and_then(crate::time::iso8601_to_epoch_millis)
+            .unwrap_or(0);
+        rested > seen
     }
 
     /// Resolve the effective dangerous mode: the session's own override

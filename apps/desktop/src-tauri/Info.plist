@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Merged into the bundle's generated Info.plist by Tauri v2. Only keys Tauri
+		does not already manage belong here. NSMicrophoneUsageDescription is the
+		TCC prompt string for on-device voice input; without it macOS denies
+		microphone access outright.
+	-->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Reverie uses the microphone for on-device voice input. Audio is transcribed locally and never leaves your Mac.</string>
+</dict>
+</plist>

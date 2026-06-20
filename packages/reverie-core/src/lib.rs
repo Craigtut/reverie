@@ -18,13 +18,16 @@ pub mod connection;
 pub mod connection_repository;
 pub mod connection_service;
 pub mod cortex_state;
+pub mod cortex_transcript;
 pub mod domain;
 pub mod git_status;
 pub mod hook_config;
 pub mod hook_server;
 pub mod pty;
+pub mod reentry_context;
 pub mod repository;
 pub mod session_log;
+pub mod speech;
 pub mod terminal;
 mod time;
 pub mod workspace_service;
@@ -37,17 +40,20 @@ pub use activity::{
     parse_events, parse_state,
 };
 pub use activity_source::{ActivitySourceKind, ActivityUpdate, Fidelity, SessionKey};
-pub use bookmark::{BookmarkProvider, NoopBookmarkProvider};
 pub use agents::{
     AdapterDetection, AgentAdapter, CommandSpec, CortexAdapter, CortexSessionDiscovery,
-    CortexSessionMetadata, DiscoveryContext, LaunchContext,
+    CortexSessionMetadata, DiscoveryContext, LaunchContext, find_claude_transcript_by_native_id,
+    read_claude_reentry_context,
 };
+pub use bookmark::{BookmarkProvider, NoopBookmarkProvider};
 pub use bridge_server::{
     BridgeSession, Clock, FixedClock, HandshakeOutcome, PROTOCOL_VERSION, SystemClock,
     dispatch_request, handle_handshake, serve_connection,
 };
 pub use codex_rollout::CodexLogSource;
 pub use completion::{CompletionRequest, complete_structured, string_object_schema};
+pub use cortex_transcript::{cortex_transcript_path, read_cortex_reentry_context};
+pub use reentry_context::{ReentryBudget, ReentryContext, ReentryEntry, ReentryRole};
 pub use connection::{
     Connection, ConnectionClosedBy, ConnectionId, ConnectionInitiator, ConnectionMessage,
     ConnectionPolicy, ConnectionStatus, ConnectionTransitionError, MessageId, PendingRequest,
@@ -61,8 +67,8 @@ pub use connection_service::{
 };
 pub use cortex_state::CortexStateSource;
 pub use domain::{
-    AgentKind, Focus, NativeSessionRef, Project, Session, SessionStateTimeline, SessionStatus,
-    Workspace, WorkspaceSnapshot,
+    AgentKind, Focus, NativeSessionRef, Project, ReentrySummary, ReentrySummaryFields, Session,
+    SessionStateTimeline, SessionStatus, Workspace, WorkspaceSnapshot,
 };
 pub use git_status::{CommitSummary, DirtyStat, RepoStatus, compute_repo_status};
 pub use hook_config::{WrittenHookConfig, hook_url, write_claude_settings};
@@ -74,6 +80,7 @@ pub use session_log::{
     CompositeLogSource, LogReadMode, SessionLogControl, SessionLogFold, SessionLogSource,
     SessionLogWatcher, start_session_log_watcher,
 };
+pub use speech::{CaptureId, CaptureSignal, EngineState, MicPermission, TranscriptResult};
 pub use terminal::{
     TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors, TerminalCursor,
     TerminalCursorStyle, TerminalDirtyState, TerminalFrame, TerminalId, TerminalPosition,

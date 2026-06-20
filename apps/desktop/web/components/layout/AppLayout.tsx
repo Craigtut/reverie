@@ -31,6 +31,7 @@ import { CrtBootSequence } from '../../crtLoading';
 import { DotField } from '../chrome';
 import { Sidebar } from '../nav';
 import {
+  ReentryHeader,
   SessionHistorySurface,
   SessionTabsBar,
   TerminalDropOverlay,
@@ -135,6 +136,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
     setCrtEnabled,
+    setVoiceSettings,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     setWorkspaceSidebarWidth,
@@ -356,6 +358,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
               onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
               crtEnabled={shell.workspace.crtEnabled ?? false}
               onSetCrtEnabled={next => void setCrtEnabled(next)}
+              voiceEnabled={shell.workspace.voiceEnabled ?? true}
+              voiceLanguage={shell.workspace.voiceLanguage ?? 'auto'}
+              voicePushToTalk={shell.workspace.voicePushToTalk ?? true}
+              onSetVoiceSettings={next => void setVoiceSettings(next)}
               onDeleteProject={project => void deleteProjectRecord(project)}
             />
           ) : surfaceMode === 'session-history' ? (
@@ -410,6 +416,10 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
                   onCreateSession={() => openCreation('session')}
                   onToggleDangerousMode={() => void toggleSelectedSessionYolo()}
                 />
+              ) : null}
+
+              {selectedSession && !creationMode ? (
+                <ReentryHeader session={selectedSession} cortexActivity={cortexActivity} />
               ) : null}
 
               {creationMode ? (

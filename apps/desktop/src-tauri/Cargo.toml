@@ -49,6 +49,11 @@ libghostty-vt-sys = { version = "=0.2.0", default-features = false, features = [
 portable-pty = "0.9"
 reverie-core = { path = "../../../packages/reverie-core" }
 reverie-persistence = { path = "../../../packages/reverie-persistence" }
+# On-device speech engine. The native `capture` (cpal/rubato) and `asr`
+# (fluidaudio/Swift build) features are enabled in their respective build
+# phases; until then this is the pure command/event scaffold (the engine reports
+# Unavailable). The crate stays Swift-free in the root workspace's `cargo test`.
+reverie-speech = { path = "../../../packages/reverie-speech", features = ["capture", "asr"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

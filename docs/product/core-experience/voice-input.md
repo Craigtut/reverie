@@ -29,10 +29,17 @@ Both this button and [dispatch](dispatch.md) use one on-device speech-to-text en
 
 Parakeet is an offline/batch model, which fits push-to-talk perfectly: **record while held, transcribe on release.** No streaming needed; the real-time factor is high enough that a normal utterance returns effectively instantly.
 
-### Implementation path (two stages)
+### Implementation (built foundation)
 
-1. **Pure-Rust ONNX first, to de-risk.** `parakeet-rs` (or `transcribe-rs`) over the `ort` crate, INT8 model (~670 MB on disk), running on CPU. Fully local, no Swift, simplest packaging. Latency is "fine, not instant" for normal utterances. Ship this to validate the whole feature end to end.
-2. **CoreML / ANE upgrade if we want snappy.** The production recipe for Mac dictation apps is Parakeet on the Apple Neural Engine via FluidAudio (CoreML), which hits sub-100ms ("feels instant"). Reaching it from Rust needs a thin Swift FFI bridge (the `fluidaudio-rs` wrapper exists but is immature, ~17 stars; be ready to vendor it or write a small `@_cdecl` bridge directly over FluidAudio, which is mature). We already carry a native-dylib packaging story for Ghostty, so a Swift build step is in our wheelhouse.
+Because Reverie is Apple-Silicon-only, we went straight to **Parakeet on the Apple Neural Engine via `fluidaudio-rs`** (the CoreML path), skipping the planned pure-Rust ONNX de-risk stage. On Apple Silicon, ANE is exactly the speed/footprint win we want, and the cross-platform advantage of a pure-Rust ONNX runtime is worthless to a Mac-only app. The Swift build step is in our wheelhouse (we already build libghostty through a non-Rust toolchain).
+
+The engine is a foundation, separate from the features above:
+
+- **`packages/reverie-speech`** (macOS, feature-gated `capture` + `asr`): a worker-thread engine that owns native microphone capture (`cpal`), resampling to 16 kHz mono (`rubato`), and transcription (`fluidaudio-rs` → Parakeet on the ANE). `cpal`/`fluidaudio` handles are `!Send`, so they live on the one worker thread; a `Send`-safe handle sits in Tauri managed state. The crate is a path dep of the desktop app only, so the root `cargo test` never triggers the Swift build.
+- **The seam features consume**: Tauri commands (`speech_start_capture`, `speech_stop_capture`, `speech_cancel_capture`, `speech_provision`, `speech_engine_status`, `speech_mic_permission_status`), a `speech_engine_state` event, and a per-capture `Channel<CaptureSignal>` (RMS level now, partial transcripts reserved). The foundation returns the transcript and routes it nowhere; the floating button sends it through `write_input`, dispatch sends it to the completion surface. Frontend client: `services/speechApi.ts`, `store/speechEngineStore.ts`, `hooks/useSpeechEngine` + `useSpeechCapture`.
+- **Model is downloaded at runtime, not bundled**, and provisioned **eagerly on first launch** (a one-time ~500MB background download + ANE compile; cached ~1s after). It is not gated on the voice-enabled setting; the download happens once for everyone. The UI dwell-gates the provisioning screen so warm starts never flash it.
+
+`fluidaudio-rs` is young; it is pinned and wrapped behind the `reverie-speech` facade so a future swap (or a vendored copy) does not ripple. Streaming (`streaming_asr_*`) and VAD endpointing are wired as seams in the worker but not exposed as commands; a future voice mode turns them on without re-architecting.
 
 ### Local-first
 

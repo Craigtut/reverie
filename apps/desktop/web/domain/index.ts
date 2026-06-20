@@ -14,3 +14,4 @@ export * from './shortcuts';
 export * from './terminalInput';
 export * from './shellPath';
 export * from './connection';
+export * from './speech';

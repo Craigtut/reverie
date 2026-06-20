@@ -131,6 +131,24 @@ export function useWorkspaceMutations({
     }
   }
 
+  // Persist the on-device voice-input settings (enable flag, language hint,
+  // push-to-talk vs toggle). The desktop app reads these back; the speech model
+  // still provisions eagerly on first launch regardless of the enable flag.
+  async function setVoiceSettings(next: {
+    voiceEnabled: boolean;
+    voiceLanguage: string;
+    voicePushToTalk: boolean;
+  }) {
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_voice_settings', {
+        request: next,
+      });
+      setShell(snapshot);
+    } catch (error) {
+      appendLog(`Update voice settings failed: ${errorMessage(error)}`);
+    }
+  }
+
   // Persist the default agent kind seeded into the new-session composer. Only a
   // starting value for future new-session forms; it does not touch any existing
   // session. The caller also seeds the live composer state.
@@ -701,6 +719,7 @@ export function useWorkspaceMutations({
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
     setCrtEnabled,
+    setVoiceSettings,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     setWorkspaceSidebarWidth,

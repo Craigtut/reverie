@@ -6,6 +6,7 @@ export { useUiStore } from './uiStore';
 export { usePaletteStore } from './paletteStore';
 export { useActivityStore } from './activityStore';
 export { useGitStatusStore } from './gitStatusStore';
+export { useSpeechEngineStore } from './speechEngineStore';
 export { useShellStore } from './shellStore';
 export { useTerminalStore } from './terminalStore';
 export { useConnectionPanelStore } from './connectionPanelStore';

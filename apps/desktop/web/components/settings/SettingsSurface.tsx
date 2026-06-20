@@ -13,6 +13,7 @@ import { Switch } from '../primitives/Switch';
 import { Typography } from '../primitives/Typography';
 import { AboutSection } from './AboutSection';
 import { AgentsSection } from './AgentsSection';
+import { VoiceSection } from './VoiceSection';
 import { ArchivedProjectsSection } from './ArchivedProjectsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
 import { ShortcutsPanel } from './ShortcutsPanel';
@@ -36,6 +37,12 @@ export function SettingsSurface({
   onSetKeepAwake,
   terminalFontSize,
   onSetTerminalFontSize,
+  crtEnabled,
+  onSetCrtEnabled,
+  voiceEnabled,
+  voiceLanguage,
+  voicePushToTalk,
+  onSetVoiceSettings,
   onDeleteProject,
 }: {
   // The persisted workspace theme; the handler flips the live UI and persists.
@@ -63,6 +70,20 @@ export function SettingsSurface({
   // terminals.
   terminalFontSize: number;
   onSetTerminalFontSize: (value: number) => void;
+  // The persisted opt-in CRT terminal effect. The toggle reflects and writes
+  // this; the terminal hook applies/removes the post-process on open terminals.
+  crtEnabled: boolean;
+  onSetCrtEnabled: (value: boolean) => void;
+  // The persisted on-device voice-input settings. The Voice section reflects and
+  // writes these; the engine + mic state it shows come from the live speech store.
+  voiceEnabled: boolean;
+  voiceLanguage: string;
+  voicePushToTalk: boolean;
+  onSetVoiceSettings: (next: {
+    voiceEnabled: boolean;
+    voiceLanguage: string;
+    voicePushToTalk: boolean;
+  }) => void;
   // Permanently purge an archived project and its data (no restore: re-adding
   // the folder reconnects). Wired to the workspace mutation in AppLayout.
   onDeleteProject: (project: ShellProject) => void;
@@ -240,6 +261,33 @@ export function SettingsSurface({
                     </button>
                   </div>
                 </li>
+                <li className={settingsRowClass}>
+                  <div className={settingsRowTextClass}>
+                    <Typography
+                      as="span"
+                      variant="smallBody"
+                      tone="default"
+                      style={{ letterSpacing: '-0.005em' }}
+                    >
+                      CRT terminal effect
+                    </Typography>
+                    <Typography
+                      as="span"
+                      variant="caption"
+                      tone="faint"
+                      style={{ lineHeight: 1.5 }}
+                    >
+                      Renders the terminal through a retro convex-glass CRT: a gentle barrel warp
+                      with a faint vignette. Applies to open terminals and the startup sequence.
+                    </Typography>
+                  </div>
+                  <Switch
+                    checked={crtEnabled}
+                    onChange={onSetCrtEnabled}
+                    ariaLabel="CRT terminal effect"
+                    testId="settings-crt-toggle"
+                  />
+                </li>
               </ul>
             </section>
 
@@ -314,6 +362,13 @@ export function SettingsSurface({
                 ) : null}
               </ul>
             </section>
+
+            <VoiceSection
+              voiceEnabled={voiceEnabled}
+              voiceLanguage={voiceLanguage}
+              voicePushToTalk={voicePushToTalk}
+              onSetVoiceSettings={onSetVoiceSettings}
+            />
 
             <SoftwareUpdateSection />
             <AboutSection />

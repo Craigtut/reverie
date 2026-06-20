@@ -25,7 +25,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "frameworks": ["frameworks/libghostty-vt.dylib"]
+      "frameworks": ["frameworks/libghostty-vt.dylib"],
+      "entitlements": "Entitlements.plist"
     }
   },
   "app": {

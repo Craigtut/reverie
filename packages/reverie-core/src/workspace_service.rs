@@ -21,8 +21,8 @@ use crate::agents::{
 use crate::bookmark::{BookmarkProvider, NoopBookmarkProvider};
 use crate::codex_rollout::find_codex_rollout_by_native_id;
 use crate::domain::{
-    AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, Session,
-    SessionId, SessionStateTimeline, SessionStatus, ThemeMode, Workspace, WorkspaceId,
+    AgentKind, Focus, FocusId, LaunchMode, NativeSessionRef, Project, ProjectId, ReentrySummary,
+    Session, SessionId, SessionStateTimeline, SessionStatus, ThemeMode, Workspace, WorkspaceId,
     WorkspaceSnapshot,
 };
 use crate::repository::WorkspaceRepository;
@@ -139,6 +139,9 @@ impl WorkspaceService {
             keep_awake_enabled: false,
             keep_display_awake: false,
             crt_enabled: false,
+            voice_enabled: true,
+            voice_language: "auto".to_owned(),
+            voice_push_to_talk: true,
         };
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
@@ -552,6 +555,25 @@ impl WorkspaceService {
         self.snapshot()
     }
 
+    /// Persist the on-device voice-input settings. `enabled` toggles whether the
+    /// voice affordances show (the model is still provisioned eagerly on first
+    /// launch); `language` is the transcription hint (`"auto"` or an ISO 639-1
+    /// code); `push_to_talk` chooses press-and-hold versus toggle. The desktop
+    /// app reads these back; the domain only records intent.
+    pub fn set_voice_settings(
+        &self,
+        enabled: bool,
+        language: String,
+        push_to_talk: bool,
+    ) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.voice_enabled = enabled;
+        workspace.voice_language = language;
+        workspace.voice_push_to_talk = push_to_talk;
+        self.repo.save_workspace(&workspace)?;
+        self.snapshot()
+    }
+
     /// Persist the default agent kind seeded into the new-session composer. This
     /// only affects the starting value of future new-session forms; it does not
     /// touch any existing session.
@@ -911,6 +933,33 @@ impl WorkspaceService {
         native.adapter_payload = Value::Object(payload);
         self.repo.upsert_session(&session)?;
         self.snapshot()
+    }
+
+    /// Persist a freshly generated re-entry ("where we left off") summary for a
+    /// session. The re-entry generator builds the full payload, keyed to the rest
+    /// it summarizes (`generated_for_resting_since`); this just stores it and
+    /// refreshes the snapshot. Replaces any prior summary, which resets the
+    /// dismissed flag because the new payload carries `dismissed = false`.
+    pub fn set_session_reentry_summary(
+        &self,
+        session_id: SessionId,
+        summary: ReentrySummary,
+    ) -> Result<WorkspaceSnapshot> {
+        self.update_session(session_id, move |session| {
+            session.reentry_summary = Some(summary);
+        })
+    }
+
+    /// Mark the current re-entry summary as dismissed so its header hides. A no-op
+    /// when there is no summary. Dismissal is scoped to the rest the summary was
+    /// generated for; a later rest generates a fresh summary with `dismissed`
+    /// false, so the header returns the next time the session finishes unseen.
+    pub fn dismiss_session_reentry(&self, session_id: SessionId) -> Result<WorkspaceSnapshot> {
+        self.update_session(session_id, |session| {
+            if let Some(summary) = session.reentry_summary.as_mut() {
+                summary.dismissed = true;
+            }
+        })
     }
 
     /// Explicit Cortex capture (FE-triggered): read the session's `meta.json`,

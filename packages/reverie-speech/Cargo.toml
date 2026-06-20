@@ -1,0 +1,28 @@
+[package]
+name = "reverie-speech"
+version = "0.5.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# On-device speech-to-text engine: native microphone capture + Parakeet on the
+# Apple Neural Engine. The heavy native dependencies are OPTIONAL and gated
+# behind features so the root workspace's `cargo test` (which builds this crate
+# with no features) never pulls cpal or triggers fluidaudio's Swift build. Only
+# the desktop app turns the features on.
+[features]
+default = []
+# Microphone capture + resampling (adds cpal/rubato/ringbuf). Phase: capture.
+capture = ["dep:cpal", "dep:rubato", "dep:ringbuf"]
+# Parakeet/ANE transcription via fluidaudio-rs (adds the Swift build). Phase: asr.
+asr = ["dep:fluidaudio-rs"]
+
+[dependencies]
+reverie-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = { version = "0.15", optional = true }
+rubato = { version = "0.16", optional = true }
+ringbuf = { version = "0.4", optional = true }
+fluidaudio-rs = { git = "https://github.com/FluidInference/fluidaudio-rs", tag = "v0.14.1", optional = true }

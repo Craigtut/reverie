@@ -145,6 +145,12 @@ pub(crate) struct SetSessionFlaggedAtRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct DismissSessionReentryRequest {
+    shell_session_id: SessionId,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceDefaultDangerousModeRequest {
     default_dangerous_mode: bool,
 }
@@ -178,6 +184,14 @@ pub(crate) struct SetTerminalFontSizeRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SetCrtEnabledRequest {
     crt_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetVoiceSettingsRequest {
+    voice_enabled: bool,
+    voice_language: String,
+    voice_push_to_talk: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -955,6 +969,19 @@ pub(crate) fn set_session_flagged_at(
         .map_err(|err| err.to_string())
 }
 
+/// Dismiss a session's re-entry ("where we left off") header. Marks the current
+/// summary dismissed so it hides; the header returns the next time the session
+/// finishes a turn while the user is away.
+#[tauri::command]
+pub(crate) fn dismiss_session_reentry(
+    service: State<'_, WorkspaceService>,
+    request: DismissSessionReentryRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .dismiss_session_reentry(request.shell_session_id)
+        .map_err(|err| err.to_string())
+}
+
 /// Rename a session: set or clear its user-chosen display name. An empty/blank
 /// title clears the override and the session falls back to its automatic title.
 #[tauri::command]
@@ -1061,6 +1088,20 @@ pub(crate) fn set_crt_enabled(
 ) -> Result<WorkspaceSnapshot, String> {
     service
         .set_crt_enabled(request.crt_enabled)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub(crate) fn set_voice_settings(
+    service: State<'_, WorkspaceService>,
+    request: SetVoiceSettingsRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_voice_settings(
+            request.voice_enabled,
+            request.voice_language,
+            request.voice_push_to_talk,
+        )
         .map_err(|err| err.to_string())
 }
 

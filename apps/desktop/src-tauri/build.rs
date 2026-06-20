@@ -16,6 +16,32 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/../Frameworks");
     }
 
+    // The on-device speech engine (reverie-speech, fluidaudio) builds a Swift
+    // package in its own build script, so a Swift toolchain (Xcode Command Line
+    // Tools) must be present. Fail loudly with install guidance now, rather than
+    // letting the Swift build fail with a noisier error later. Mirrors the
+    // "fail loudly" philosophy of the Zig 0.15 requirement.
+    if target_os == "macos" {
+        let has_swift = std::process::Command::new("xcrun")
+            .args(["--find", "swift"])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !has_swift {
+            panic!(
+                "Swift toolchain not found (needed to build the on-device speech \
+                 engine). Install the Xcode Command Line Tools: `xcode-select --install`."
+            );
+        }
+
+        // The FluidAudio Swift bridge references the OS Swift runtime libraries
+        // (e.g. `@rpath/libswift_Concurrency.dylib`), which live in `/usr/lib/swift`
+        // (in the dyld shared cache). Bake that rpath so the app resolves them at
+        // launch. A dependency's `rustc-link-arg` does not propagate, so this is
+        // added here in addition to reverie-speech's own build script.
+        println!("cargo:rustc-link-arg-bins=-Wl,-rpath,/usr/lib/swift");
+    }
+
     // Compile the Objective-C folder-identity bookmark shim and link Foundation.
     // Backs project auto-reconnect (following a project folder across a rename or
     // move). macOS-only, like the rest of the app.

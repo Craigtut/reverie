@@ -228,6 +228,40 @@ ships next to the `.exe` via a `bundle.resources` map (the installer co-locates
 them, so users still get a single installer). Linux would mirror macOS with an
 `$ORIGIN`-relative rpath. Neither is in scope now.
 
+## On-device speech (Swift build, runtime model, microphone)
+
+The `reverie-speech` crate's `asr` feature pulls `fluidaudio-rs`, whose build
+script runs `swift build -c release` to compile a Swift `FluidAudioBridge` over
+CoreML. Unlike Ghostty this **static-links** into the executable, so there is no
+dylib to stage or bundle. Three consequences for packaging:
+
+- **Swift toolchain at build time.** Xcode Command Line Tools must be present
+  (`swift` resolves from there; the desktop `build.rs` preflights it). CI macOS
+  runners already have it.
+- **Swift runtime rpath.** The static bridge references the OS Swift runtime
+  (`@rpath/libswift_Concurrency.dylib`, etc.), which lives in `/usr/lib/swift`
+  (in the dyld shared cache). Both `reverie-speech`'s and the desktop's build
+  scripts bake `-rpath /usr/lib/swift` so the app loads. No Swift runtime ships
+  in the bundle (it is part of the OS on macOS 14+).
+- **Model downloaded at runtime, not bundled.** The ~500MB Parakeet model is
+  fetched by FluidAudio from Hugging Face into its home cache
+  (`~/.cache/fluidaudio/...`), provisioned eagerly on first launch. It lives
+  **outside the signed `.app` bundle**, so it cannot break the code signature or
+  notarization seal, and it is shared across the dev and prod channels (model
+  weights, not user data; `npm run dev:reset` does not wipe it). The download is
+  native Rust/Swift HTTP, unaffected by the WebView CSP.
+
+Microphone access needs two files next to `tauri.conf.json`, both new:
+`Info.plist` (Tauri v2 merges it) carries `NSMicrophoneUsageDescription` (the TCC
+prompt string), and `Entitlements.plist` (referenced by `bundle.macOS.entitlements`)
+carries `com.apple.security.device.audio-input` for the hardened runtime. The app
+is **not** sandboxed (it spawns PTYs and child CLIs), so this is the device
+entitlement, not a sandbox exception. **Dev-channel caveat:** `npm run dev` runs a
+bare `cargo run` binary with no merged Info.plist/entitlements, so the TCC prompt
+may misattribute; live microphone capture must be verified in a built bundle
+(`npm run bundle`), while `npm run dev` is fine for provisioning/permission UI
+state and the fixture-based transcription test.
+
 ## Code signing and notarization
 
 - **macOS**: distribution outside the App Store requires a Developer ID

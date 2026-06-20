@@ -19,7 +19,9 @@ mod correlator;
 mod git_watch;
 mod keep_awake;
 mod path_env;
+mod reentry_summary;
 mod shutdown_marker;
+mod speech_commands;
 mod state;
 mod terminal;
 
@@ -589,6 +591,35 @@ fn main() {
             // to the WebView. Read-only and calm; see `git_watch`.
             git_watch::start(app.handle());
 
+            // On-device speech engine. The worker emits lifecycle/error events
+            // here, which we relay to the WebView. Provisioning is kicked eagerly
+            // on first launch (a one-time background model download); it never
+            // blocks boot and is a no-op when the model is already cached.
+            {
+                let speech_app = app.handle().clone();
+                let speech_events: reverie_speech::EventSink =
+                    std::sync::Arc::new(move |event| match event {
+                        reverie_speech::SpeechEvent::State(state) => {
+                            let _ = speech_app.emit("speech_engine_state", state);
+                        }
+                        reverie_speech::SpeechEvent::Error {
+                            message,
+                            capture_id,
+                        } => {
+                            let _ = speech_app.emit(
+                                "speech_error",
+                                speech_commands::SpeechErrorPayload {
+                                    message,
+                                    capture_id,
+                                },
+                            );
+                        }
+                    });
+                let speech_engine = reverie_speech::SpeechEngine::new(speech_events);
+                speech_engine.provision();
+                app.manage(speech_engine);
+            }
+
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
@@ -619,6 +650,7 @@ fn main() {
             commands::set_session_dangerous_mode,
             commands::mark_session_viewed,
             commands::set_session_flagged_at,
+            commands::dismiss_session_reentry,
             commands::rename_session,
             commands::rename_focus,
             commands::rename_project,
@@ -629,6 +661,13 @@ fn main() {
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,
             commands::set_crt_enabled,
+            commands::set_voice_settings,
+            speech_commands::speech_engine_status,
+            speech_commands::speech_provision,
+            speech_commands::speech_mic_permission_status,
+            speech_commands::speech_start_capture,
+            speech_commands::speech_stop_capture,
+            speech_commands::speech_cancel_capture,
             commands::set_sidebar_width,
             commands::set_workspace_nav_state,
             commands::hook_server_port,

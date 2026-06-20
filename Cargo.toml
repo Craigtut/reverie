@@ -1,5 +1,10 @@
 [workspace]
-members = ["apps/reverie-bridge", "packages/reverie-core", "packages/reverie-persistence"]
+members = [
+    "apps/reverie-bridge",
+    "packages/reverie-core",
+    "packages/reverie-persistence",
+    "packages/reverie-speech",
+]
 resolver = "2"
 
 [workspace.package]
