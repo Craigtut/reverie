@@ -113,16 +113,30 @@ export function ReentryHeader({ session, cortexActivity }: ReentryHeaderProps) {
 }
 
 const containerClass = css({
+  // Floats over the terminal, just below the floating tab band, mirroring how
+  // SessionTabsBar overlays the stage. The terminal viewport runs full height
+  // under it (the band/header are chrome on top), so this is positioned rather
+  // than in flow, or the band would paint over it at the top of the stage.
+  position: 'absolute',
+  // The tab band sits at top: var(--reverie-shell-pad) and is ~54px tall; clear
+  // it with a small gap so the header reads as sitting just beneath the tabs.
+  top: 'calc(var(--reverie-shell-pad) + 56px)',
+  left: 'var(--reverie-shell-pad)',
+  right: 'var(--reverie-shell-pad)',
+  // Above the terminal canvas (zIndex 2), the edge fades (3), and the jump button
+  // (4); level with the tab band (5) since the two never overlap spatially.
+  zIndex: 5,
   display: 'flex',
   alignItems: 'flex-start',
   gap: '10px',
-  margin: '6px 0 4px',
   padding: '8px 10px 8px 12px',
   borderRadius: '10px',
-  background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
+  // Near-opaque over the dark terminal so the catch-up text reads cleanly, with
+  // the same elevation shadow the tab pills use so it floats above the canvas.
+  background: 'color-mix(in srgb, var(--surface-1) 92%, transparent)',
   border: '1px solid var(--line)',
-  boxShadow: '0 1px 2px color-mix(in srgb, var(--shadow, #000) 6%, transparent)',
-  backdropFilter: 'blur(6px)',
+  boxShadow: 'var(--shadow)',
+  backdropFilter: 'blur(8px)',
 });
 
 const bodyClass = css({
