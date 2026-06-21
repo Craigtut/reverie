@@ -20,17 +20,17 @@ A small Rust trait with one implementation per CLI, each shelling out to the alr
 
 Current implementation status:
 
-- The shared Rust completion helper exists for Claude, Codex, and Cortex command shapes.
-- Codex session titles use it today as a fallback/generator, keyed off the session's rollout file.
+- The shared Rust completion helper is proven end to end for all three CLIs (Claude `claude -p --json-schema`, Codex `codex exec --output-schema`, Cortex `cortex complete --schema`). A dev smoke (`cargo run -p reverie-core --example completion-smoke`) round-trips structured output against each installed CLI.
+- Codex session titles use it today as a fallback/generator, keyed off the session's rollout file. Title generation stays Codex-only by design; Claude and Cortex keep their OSC-derived titles.
 - Title generation starts shortly after the first Codex user prompt once the rollout contains the prompt text, with the turn-complete signal kept as a fallback.
-- The re-entry header and dispatch classification are still product work.
+- The re-entry header is built (see below). Dispatch classification is still product work.
 
 Policy for which engine runs a given job:
 
 - **Session-scoped jobs** (re-entry header, title for a session) use that session's own CLI, so it spends the provider the user already chose for that work.
 - **Session-less jobs** (dispatch classification, before any session exists) use a configured default engine.
 
-Rejected alternatives, for the record: **Apple Foundation Models** (Swift-only; Rust is beta FFI) and an embedded **PydanticAI sidecar** (Python runtime weight for two tiny jobs, and Cortex is not even PydanticAI). A Rust-native remote client (`rust-genai` / `async-openai`) stays available as a third path for a user who has a bare API key but no CLI, but it reintroduces a key relationship the CLIs already solved, so it is not the default.
+Rejected alternatives, for the record: **Apple Foundation Models** (Swift-only; Rust is beta FFI) and an embedded 
 
 ### The Cortex command
 
@@ -56,23 +56,24 @@ When you open (or re-open) a session, pin a compact header above the terminal wi
 3. **What changed since you left** — new since your last view (ties to the finished-unseen state).
 4. **The pending decision** — the exact thing being asked, if blocked.
 
-The transcript is already on disk for every CLI and already scanned by the adapters: Claude `~/.claude/projects/<hash>/<session-id>.jsonl`, Codex `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, Cortex `~/.cortex/sessions/<id>/history.json`. The header is the completion surface applied to a windowed read of that file.
+The transcript is on disk for every CLI: Claude `~/.claude/projects/<hash>/<session-id>.jsonl`, Codex `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, Cortex `~/.cortex/sessions/<id>/transcript.jsonl` (a new append-only log `cortex-code` writes alongside the lossy `history.json` snapshot, since the snapshot is not a usable conversation log). The header is the completion surface applied to a windowed read of that file, normalized per CLI into one shared `ReentryContext` (recent user/assistant turns plus tool actions, bounded).
 
-### When it regenerates
+### As built
 
-- On session open, if stale.
-- After the agent completes a turn while unviewed (so the "what changed" line is fresh when you come back).
-- Cache the result keyed to the transcript's last-seen offset so re-opening a session you just looked at is free.
+The header is a catch-up artifact, not a live status bar:
+
+- **Generated once, on the active -> rest transition while the user is away** (the same moment a session lands in the finished-unseen / "Ready for you" tier). Never per turn, never while the agent is active. The trigger rides the activity correlator (`reentry_summary.rs`, the all-CLI choke point), with a short settle delay; eligibility (still at rest, unseen, not already summarized) is re-checked at run time so a view during the delay wins.
+- **Keyed to `state_timeline.resting_since`**, not a transcript byte offset. The summary stores the rest it was generated for; the frontend shows it only while that still equals the session's current resting marker. A new turn advances the marker and supersedes the summary (the header hides) without deleting it, so a resume-after-restart still shows the last one.
+- **Persisted to the session record** (`reentry_summary_json`, migration v23), so it survives an app restart and is there when the user reopens the session later.
+- **Small, dense, closable**, floating just below the session tab bar. Dismiss is per-rest (`dismiss_session_reentry`); the next unseen rest generates a fresh one. No manual refresh.
 
 ## Builds on
 
-- Transcript discovery already exists in the adapters (`agents.rs` and the per-CLI scanners).
-- The first shipped use is Codex session title generation through the CLI-backed structured-completion helper.
+- Transcript discovery already exists in the adapters (`agents.rs` and the per-CLI scanners); the per-CLI re-entry readers are `codex_rollout::read_codex_reentry_context`, `agents::read_claude_reentry_context` (path derived by native id since Claude usually leaves `metadata_path` unset), and `cortex_transcript::read_cortex_reentry_context`.
+- The CLI-backed structured-completion helper, first shipped for Codex session titles, now proven for all three CLIs (the header is its second consumer).
 
 ## Open questions
 
 - Default model/effort per CLI for these tiny jobs.
-- Transcript windowing strategy (how much history the summary needs to be accurate without being expensive).
-- Where the header is cached and how invalidation keys to transcript growth.
-- The exact `cortex complete` flag shape and whether it streams or returns whole.
-- Whether Claude and Cortex titles move to this surface or stay OSC-first with completion as a fallback.
+- Transcript windowing strategy (how much history the summary needs to be accurate without being expensive); the current window is a bounded recent tail (`ReentryBudget`).
+- Whether boot-reconciled (crash-rested) sessions should generate a header on startup; v1 skips them to avoid a startup completion stampede and shows the last persisted summary instead.

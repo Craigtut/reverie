@@ -256,6 +256,17 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE workspace ADD COLUMN voice_enabled INTEGER NOT NULL DEFAULT 1;
      ALTER TABLE workspace ADD COLUMN voice_language TEXT NOT NULL DEFAULT 'auto';
      ALTER TABLE workspace ADD COLUMN voice_push_to_talk INTEGER NOT NULL DEFAULT 1;",
+    // v24 -> v25: dispatch (the global-shortcut quick-launch popup) settings.
+    // `dispatch_shortcut` is the Tauri accelerator that opens the capture window
+    // (default Cmd+Shift+Space, not Cmd+Space which is Spotlight).
+    // `dispatch_default_voice` makes opening dispatch start in voice mode
+    // (auto-listen) versus typed. `dispatch_window_x`/`_y` are the saved window
+    // position (physical px, top-left); NULL centers on open. Defaults upgrade
+    // existing workspaces to the default shortcut, voice-first, no saved position.
+    "ALTER TABLE workspace ADD COLUMN dispatch_shortcut TEXT NOT NULL DEFAULT 'CommandOrControl+Shift+Space';
+     ALTER TABLE workspace ADD COLUMN dispatch_default_voice INTEGER NOT NULL DEFAULT 1;
+     ALTER TABLE workspace ADD COLUMN dispatch_window_x INTEGER;
+     ALTER TABLE workspace ADD COLUMN dispatch_window_y INTEGER;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -381,9 +392,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                      theme, default_agent_kind, nav_state, terminal_font_size,
                      keep_awake_enabled, keep_display_awake, sidebar_width,
                      crt_enabled, voice_enabled, voice_language,
-                     voice_push_to_talk)
+                     voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
+                     dispatch_window_x, dispatch_window_y)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16)",
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -401,6 +413,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     bool_to_int(seed.voice_enabled),
                     seed.voice_language,
                     bool_to_int(seed.voice_push_to_talk),
+                    seed.dispatch_shortcut,
+                    bool_to_int(seed.dispatch_default_voice),
+                    seed.dispatch_window_x.map(i64::from),
+                    seed.dispatch_window_y.map(i64::from),
                 ],
             )
             .map_err(backend)?;
@@ -417,9 +433,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                  theme, default_agent_kind, nav_state, terminal_font_size,
                  keep_awake_enabled, keep_display_awake, sidebar_width,
                  crt_enabled, voice_enabled, voice_language,
-                 voice_push_to_talk)
+                 voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
+                 dispatch_window_x, dispatch_window_y)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16)
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -435,7 +452,11 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 crt_enabled = excluded.crt_enabled,
                 voice_enabled = excluded.voice_enabled,
                 voice_language = excluded.voice_language,
-                voice_push_to_talk = excluded.voice_push_to_talk",
+                voice_push_to_talk = excluded.voice_push_to_talk,
+                dispatch_shortcut = excluded.dispatch_shortcut,
+                dispatch_default_voice = excluded.dispatch_default_voice,
+                dispatch_window_x = excluded.dispatch_window_x,
+                dispatch_window_y = excluded.dispatch_window_y",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -453,6 +474,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 bool_to_int(workspace.voice_enabled),
                 workspace.voice_language,
                 bool_to_int(workspace.voice_push_to_talk),
+                workspace.dispatch_shortcut,
+                bool_to_int(workspace.dispatch_default_voice),
+                workspace.dispatch_window_x.map(i64::from),
+                workspace.dispatch_window_y.map(i64::from),
             ],
         )
         .map_err(backend)?;
@@ -977,7 +1002,8 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 theme, default_agent_kind, nav_state, terminal_font_size,
                 keep_awake_enabled, keep_display_awake, sidebar_width,
                 crt_enabled, voice_enabled, voice_language,
-                voice_push_to_talk
+                voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
+                dispatch_window_x, dispatch_window_y
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -998,6 +1024,14 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 voice_enabled: int_to_bool(row.get::<_, i64>(13)?),
                 voice_language: row.get::<_, String>(14)?,
                 voice_push_to_talk: int_to_bool(row.get::<_, i64>(15)?),
+                dispatch_shortcut: row.get::<_, String>(16)?,
+                dispatch_default_voice: int_to_bool(row.get::<_, i64>(17)?),
+                dispatch_window_x: row
+                    .get::<_, Option<i64>>(18)?
+                    .map(|value| value as i32),
+                dispatch_window_y: row
+                    .get::<_, Option<i64>>(19)?
+                    .map(|value| value as i32),
             })
         },
     )

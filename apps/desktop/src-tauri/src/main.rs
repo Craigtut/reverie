@@ -16,6 +16,9 @@ mod commands;
 #[cfg(unix)]
 mod connection_commands;
 mod correlator;
+mod dispatch;
+#[cfg(target_os = "macos")]
+mod dispatch_tap;
 mod git_watch;
 mod keep_awake;
 mod path_env;
@@ -292,6 +295,10 @@ fn main() {
         // process plugin backs the post-install relaunch.
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Global shortcut that toggles the dispatch capture window. The window
+        // itself is created hidden in `setup`; the accelerator is registered
+        // there too. See `dispatch.rs`.
+        .plugin(dispatch::global_shortcut_plugin())
         .on_web_content_process_terminate(|webview| {
             let app = webview.app_handle().clone();
             let label = webview.label().to_owned();
@@ -318,6 +325,23 @@ fn main() {
             schedule_webview_recovery_check(app, "web_content_terminated");
         })
         .on_window_event(|window, event| {
+            // The dispatch popup is a secondary window. Closing it must not quit
+            // the app, and its focus changes must not drive the main window's
+            // git-watch / webview-recovery logic. Dismiss-not-destroy keeps the
+            // pre-warmed bundle alive; blur hides it, Spotlight-style.
+            if window.label() != "main" {
+                match event {
+                    tauri::WindowEvent::CloseRequested { api, .. } => {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    }
+                    tauri::WindowEvent::Focused(false) => {
+                        let _ = window.hide();
+                    }
+                    _ => {}
+                }
+                return;
+            }
             // Closing the window (red traffic-light button) is a quit for this
             // single-window app. Defer it the first time so the frontend can
             // confirm any in-flight agent work, then it calls `confirm_quit`,
@@ -620,6 +644,30 @@ fn main() {
                 app.manage(speech_engine);
             }
 
+            // Dispatch: create the capture window hidden (pre-warm the bundle so
+            // the shortcut shows it instantly) and bind the global shortcut.
+            // Both failures are non-fatal: the rest of the app runs fine without
+            // dispatch.
+            if let Err(error) = dispatch::create_dispatch_window(app.handle()) {
+                eprintln!("[reverie] failed to create dispatch window: {error}");
+            }
+            // The modifier-tap trigger (lone/handed modifier shortcuts) is macOS
+            // only; manage it before applying the shortcut so the tap path can
+            // resolve it.
+            #[cfg(target_os = "macos")]
+            app.manage(dispatch_tap::ModifierTap::default());
+            // Bind the persisted accelerator (falling back to the default if the
+            // workspace row is somehow unavailable this early). `apply` routes a
+            // `tap:` spec to the event tap and a regular accelerator to the plugin.
+            let dispatch_shortcut = app
+                .try_state::<WorkspaceService>()
+                .and_then(|service| service.snapshot().ok())
+                .map(|snapshot| snapshot.workspace.dispatch_shortcut)
+                .unwrap_or_else(|| dispatch::DEFAULT_DISPATCH_SHORTCUT.to_owned());
+            if let Err(error) = dispatch::apply_dispatch_shortcut(app.handle(), &dispatch_shortcut) {
+                eprintln!("[reverie] failed to register dispatch shortcut: {error}");
+            }
+
             Ok(())
         })
         .manage(TerminalSessionRuntime::default())
@@ -651,6 +699,7 @@ fn main() {
             commands::mark_session_viewed,
             commands::set_session_flagged_at,
             commands::dismiss_session_reentry,
+            commands::resolve_permission,
             commands::rename_session,
             commands::rename_focus,
             commands::rename_project,
@@ -661,7 +710,8 @@ fn main() {
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,
             commands::set_crt_enabled,
-            commands::set_voice_settings,
+            commands::set_dispatch_settings,
+            commands::classify_dispatch,
             speech_commands::speech_engine_status,
             speech_commands::speech_provision,
             speech_commands::speech_mic_permission_status,

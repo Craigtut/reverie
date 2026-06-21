@@ -36,3 +36,43 @@ describe('shellStore.patchSessionTitle', () => {
     expect(useShellStore.getState().shell).toBe(before);
   });
 });
+
+describe('shellStore.dismissSessionReentry', () => {
+  beforeEach(() => {
+    useShellStore.setState({ shell: fallbackShellSnapshot() });
+  });
+
+  it('marks only the matching session summary dismissed', () => {
+    const base = fallbackShellSnapshot();
+    const sessions = [
+      { id: 'a', reentrySummary: { fields: { currentGoal: 'g' }, dismissed: false } },
+      { id: 'b', reentrySummary: { fields: { currentGoal: 'g' }, dismissed: false } },
+    ] as unknown as typeof base.sessions;
+    useShellStore.setState({ shell: { ...base, sessions } });
+
+    useShellStore.getState().dismissSessionReentry('a');
+
+    const after = useShellStore.getState().shell.sessions;
+    expect(after.find(s => s.id === 'a')?.reentrySummary?.dismissed).toBe(true);
+    expect(after.find(s => s.id === 'b')?.reentrySummary?.dismissed).toBe(false);
+  });
+
+  it('is a no-op when already dismissed or no summary (keeps reference)', () => {
+    const base = fallbackShellSnapshot();
+    const sessions = [
+      { id: 'a', reentrySummary: { fields: { currentGoal: 'g' }, dismissed: true } },
+      { id: 'b' },
+    ] as unknown as typeof base.sessions;
+    useShellStore.setState({ shell: { ...base, sessions } });
+
+    const before = useShellStore.getState().shell;
+    useShellStore.getState().dismissSessionReentry('a');
+    expect(useShellStore.getState().shell).toBe(before);
+
+    useShellStore.getState().dismissSessionReentry('b');
+    expect(useShellStore.getState().shell).toBe(before);
+
+    useShellStore.getState().dismissSessionReentry('missing');
+    expect(useShellStore.getState().shell).toBe(before);
+  });
+});

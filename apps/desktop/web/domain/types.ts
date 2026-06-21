@@ -100,6 +100,10 @@ export interface StartSessionRequest {
   spawnSpec?: TerminalSpawnSpec;
   cols?: number;
   rows?: number;
+  // Optional initial prompt to deliver to a freshly launched agent (dispatch).
+  // The backend passes it to the CLI as a launch arg where supported, else
+  // types it into the PTY once running.
+  initialPrompt?: string;
 }
 
 export interface TerminalSpawnSpec {
@@ -107,6 +111,7 @@ export interface TerminalSpawnSpec {
   cols: number;
   rows: number;
   title?: string | null;
+  initialInput?: string | null;
 }
 
 export interface TerminalCommandSpec {
@@ -197,6 +202,15 @@ export interface ShellWorkspace {
   // Voice control style: press-and-hold (push-to-talk) vs a click toggle.
   // True (push-to-talk) by default.
   voicePushToTalk?: boolean;
+  // Global-shortcut accelerator (Tauri syntax) that opens the dispatch popup.
+  // Absent (pre-migration) falls back to the default Cmd+Shift+Space.
+  dispatchShortcut?: string;
+  // Whether opening dispatch starts in voice mode (auto-listen) vs typed. On by
+  // default; absent (pre-migration) means on.
+  dispatchDefaultVoice?: boolean;
+  // Saved dispatch-window position (physical px, top-left). Absent centers it.
+  dispatchWindowX?: number | null;
+  dispatchWindowY?: number | null;
 }
 
 // The navigation we persist so a reload or relaunch reopens the last view
@@ -551,12 +565,18 @@ export type DashboardStatus = 'attention' | 'live' | 'recent';
 // The user-facing lifecycle state a session is grouped under on Home and in the
 // focus view. Derived from the live activity feed when present, the persisted
 // record status otherwise. `archived` is handled separately (a filter, not a
-// group), so it is not part of this set.
+// group), so it is not part of this set. Listed in the order the home renders
+// them, top (most demanding of you) to bottom:
+//   errored  = an unrecoverable error, or a failed restore: the agent is stuck
+//              and cannot continue on its own. The loudest tier.
+//   blocked  = the agent raised a blocking ask mid-turn (a tool permission gate,
+//              or a question / plan approval) and cannot proceed until you answer.
+//              Both errored and blocked mean "act now".
 //   active   = the agent is mid-turn, actively working
 //   finished = the agent finished a turn (or paused for input) while you were
 //              NOT looking at it: "Ready for you, come take a look." The unseen
 //              variant of idle, cleared by viewing the session. Reads quieter
-//              than attention (which means blocked, act now); this is invitational.
+//              than errored/blocked (act now); this is invitational.
 //   followup = the user hand-flagged this session to come back to it ("Following
 //              up"). The durable, user-applied counterpart to `finished`: it
 //              survives viewing (unlike `finished`) and clears only when the user
@@ -567,6 +587,13 @@ export type DashboardStatus = 'attention' | 'live' | 'recent';
 //              deliberately not surfaced: opening it re-attaches if live and
 //              resumes if not, so both read the same to a user. `fresh` (never
 //              launched) stays separate because there is no conversation to reopen yet.
-export type SessionState = 'attention' | 'active' | 'finished' | 'followup' | 'idle' | 'fresh';
+export type SessionState =
+  | 'errored'
+  | 'blocked'
+  | 'active'
+  | 'finished'
+  | 'followup'
+  | 'idle'
+  | 'fresh';
 
 export type GlyphState = 'working' | 'attention' | 'error' | 'idle';

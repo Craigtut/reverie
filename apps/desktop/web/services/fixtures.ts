@@ -1050,6 +1050,23 @@ function makePopulatedFixtureSnapshot(
         // it sorts under it in the dashboard's "Ready for you" group.
         latestActivity: activity('native-branding-done', 'done', '2026-06-02T09:00:00.000Z'),
         stateTimeline: { restingSince: '2026-06-02T09:00:00.000Z' },
+        // Finished unseen, so it carries a re-entry summary: open this session's
+        // terminal in the harness to see the "Where you left off" header.
+        reentrySummary: {
+          fields: {
+            currentGoal: 'Explore wordmark logo directions for the brand refresh',
+            whereWeLeftOff: [
+              'Generated three serif wordmark options',
+              'Rendered them on the dark palette',
+            ],
+            whatChanged: 'Two new options are ready for review',
+            pendingDecision: 'Which wordmark direction should I refine next?',
+          },
+          generatedForRestingSince: '2026-06-02T09:00:00.000Z',
+          cli: 'codex_cli',
+          dismissed: false,
+          schemaVersion: 1,
+        },
       }),
       session({
         id: 'session-general-fresh',

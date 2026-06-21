@@ -32,6 +32,7 @@ use crate::activity::{
 use crate::activity_source::{ActivitySourceKind, Fidelity};
 use crate::agents::{file_modified_ms, same_logical_path};
 use crate::domain::NativeSessionRef;
+use crate::reentry_context::{ReentryBudget, ReentryContext, ReentryEntry};
 use crate::session_log::{LogReadMode, SessionLogFold, SessionLogSource};
 
 const ACTIVITY_VERSION: u32 = 1;
@@ -132,6 +133,44 @@ pub fn read_codex_title_context(
         user_message_count,
         sequence,
     }))
+}
+
+/// Read a re-entry window (recent user/assistant messages and tool actions) from
+/// a Codex rollout, distilled into the CLI-agnostic [`ReentryContext`]. Unlike
+/// [`read_codex_title_context`] (user messages only), this keeps the back-and-
+/// forth so the summary can describe what the agent did and what it is asking.
+pub fn read_codex_reentry_context(
+    path: &Path,
+    budget: ReentryBudget,
+) -> Result<Option<ReentryContext>> {
+    let reader = BufReader::new(
+        fs::File::open(path).with_context(|| format!("open Codex rollout {}", path.display()))?,
+    );
+    let mut entries = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<RolloutLine>(line) else {
+            continue;
+        };
+        if let Some(text) = extract_user_message_text(&record.payload) {
+            entries.push(ReentryEntry::user(text));
+        } else if let Some(text) = extract_assistant_message_text(&record.payload) {
+            entries.push(ReentryEntry::assistant(text));
+        } else if let Some(text) = extract_tool_summary(&record.payload) {
+            entries.push(ReentryEntry::tool(text));
+        }
+    }
+
+    let context = ReentryContext::from_entries(entries, budget);
+    if context.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(context))
+    }
 }
 
 /// The Codex source: recognizes `rollout-*.jsonl` files and makes folds. This is
@@ -689,6 +728,38 @@ fn extract_user_message_text(payload: &Value) -> Option<String> {
     None
 }
 
+fn extract_assistant_message_text(payload: &Value) -> Option<String> {
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    if payload_type == "message"
+        && payload.get("role").and_then(Value::as_str) == Some("assistant")
+    {
+        return message_text_from_value(payload.get("content")?);
+    }
+    if payload
+        .get("message")
+        .and_then(|message| message.get("role").and_then(Value::as_str))
+        == Some("assistant")
+    {
+        return payload
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(message_text_from_value);
+    }
+    None
+}
+
+/// A one-line description of a tool call record, reusing the same renderer the
+/// activity fold uses for the permission/active-tool summary.
+fn extract_tool_summary(payload: &Value) -> Option<String> {
+    let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
+    if payload_type != "function_call" && payload_type != "custom_tool_call" {
+        return None;
+    }
+    let name = payload.get("name").and_then(Value::as_str)?;
+    let arguments = payload.get("arguments").and_then(Value::as_str);
+    Some(codex_tool_summary(name, arguments))
+}
+
 fn message_text_from_value(value: &Value) -> Option<String> {
     let mut parts = Vec::new();
     collect_message_text(value, &mut parts);
@@ -892,6 +963,43 @@ mod tests {
             ]
         );
         assert_eq!(context.sequence, 4);
+    }
+
+    #[test]
+    fn reentry_context_keeps_users_assistants_and_tools_in_order() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-reentry.jsonl",
+            &[
+                META,
+                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the failing parser test"}]}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"command\":[\"bash\",\"-lc\",\"npm test\"]}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The parser test passes now."}]}}"#,
+            ],
+        );
+
+        let context = read_codex_reentry_context(&path, ReentryBudget::default())
+            .unwrap()
+            .expect("reentry context");
+        assert_eq!(context.entries.len(), 3);
+        assert_eq!(context.entries[0].role, crate::reentry_context::ReentryRole::User);
+        assert_eq!(context.entries[0].text, "Fix the failing parser test");
+        assert_eq!(context.entries[1].role, crate::reentry_context::ReentryRole::Tool);
+        assert_eq!(context.entries[1].text, "Run shell: bash -lc npm test");
+        assert_eq!(
+            context.entries[2].role,
+            crate::reentry_context::ReentryRole::Assistant
+        );
+        assert_eq!(context.entries[2].text, "The parser test passes now.");
+    }
+
+    #[test]
+    fn reentry_context_is_none_for_an_empty_rollout() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(dir.path(), "rollout-empty.jsonl", &[META]);
+        let context = read_codex_reentry_context(&path, ReentryBudget::default()).unwrap();
+        assert!(context.is_none());
     }
 
     #[test]

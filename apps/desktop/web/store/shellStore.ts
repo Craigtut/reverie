@@ -25,6 +25,11 @@ interface ShellStoreState {
   // round-trip so the badge clears the instant the user opens the session. See
   // useSessionViewed.
   markSessionViewed: (sessionId: string, viewedAt: string) => void;
+  // Optimistically dismiss a session's re-entry header (mark its summary
+  // dismissed) so it hides immediately. The backend persists the same via
+  // shellApi.dismissSessionReentry. No-op if there is no summary. See
+  // useReentryHeader.
+  dismissSessionReentry: (sessionId: string) => void;
 }
 
 export const useShellStore = create<ShellStoreState>(set => ({
@@ -60,6 +65,26 @@ export const useShellStore = create<ShellStoreState>(set => ({
           ...s.shell,
           sessions: s.shell.sessions.map(session =>
             session.id === sessionId ? { ...session, lastViewedAt: viewedAt } : session,
+          ),
+        },
+      };
+    }),
+  dismissSessionReentry: sessionId =>
+    set(s => {
+      const current = s.shell.sessions.find(session => session.id === sessionId);
+      // No-op when there is no summary or it is already dismissed, so the
+      // snapshot reference is preserved and no subscriber re-renders.
+      if (!current?.reentrySummary || current.reentrySummary.dismissed) return s;
+      return {
+        shell: {
+          ...s.shell,
+          sessions: s.shell.sessions.map(session =>
+            session.id === sessionId && session.reentrySummary
+              ? {
+                  ...session,
+                  reentrySummary: { ...session.reentrySummary, dismissed: true },
+                }
+              : session,
           ),
         },
       };

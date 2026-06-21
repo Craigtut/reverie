@@ -2,6 +2,7 @@ import type {
   ActivityState,
   DashboardStatus,
   GlyphState,
+  ReentrySummary,
   SessionState,
   SessionStateTimeline,
   SessionTerminalBinding,
@@ -108,6 +109,36 @@ function hasUnseenCompletion(
   return completedMs > (Number.isNaN(seenMs) ? 0 : seenMs);
 }
 
+// The session's re-entry ("where we left off") summary, but only while it still
+// describes the session's current rest and the user has not dismissed it. A new
+// turn advances `restingSince` and supersedes the summary; this returns null then
+// (the record is kept for resume, but no longer shown). Shared by the re-entry
+// header and the dashboard card so both gate identically. See ReentrySummary.
+export function activeReentrySummary(session: ShellSession): ReentrySummary | null {
+  const summary = session.reentrySummary;
+  if (!summary || summary.dismissed) return null;
+  const restingSince = session.stateTimeline?.restingSince ?? null;
+  if (!summary.generatedForRestingSince || summary.generatedForRestingSince !== restingSince)
+    return null;
+  return summary;
+}
+
+// One line answering "what does this agent need from you next?", picked from the
+// re-entry summary: the explicit ask if there is one, else what changed, else the
+// goal. `isAsk` is true only for an explicit pending decision, so the surface can
+// accent a genuine question differently from informational catch-up. Null when no
+// field has usable text.
+export function reentryNeedsLine(summary: ReentrySummary): { text: string; isAsk: boolean } | null {
+  const fields = summary.fields;
+  const pending = fields.pendingDecision?.trim();
+  if (pending) return { text: pending, isAsk: true };
+  const changed = fields.whatChanged?.trim();
+  if (changed) return { text: changed, isAsk: false };
+  const goal = fields.currentGoal?.trim();
+  if (goal) return { text: goal, isAsk: false };
+  return null;
+}
+
 // The moment this session last started working, in epoch ms, from whichever
 // signal is freshest: the live activity's current/last turn start (a reply kicks
 // off a new turn, so this is effectively "when you last replied") combined with
@@ -151,8 +182,10 @@ export function isFollowingUp(session: ShellSession, activity: ActivityState | n
 //                unseen result still surfaces first, and below `active`/`working`
 //                so an in-progress reply reads truthfully; it clears once the user
 //                replies. Surfaces only for at-rest sessions.
-//   - attention only means a blocking ask (permission) or a hard failure, not
-//                the everyday "waiting for input" rest state.
+//   - errored  = an unrecoverable error or a failed restore: the agent is stuck.
+//   - blocked  = a blocking ask the agent raised (a permission gate, or a
+//                question / plan approval), not the everyday "waiting for input"
+//                rest state. Both errored and blocked mean "act now".
 //   - fresh    = never launched, so there is no conversation to reopen yet.
 // `isViewed` is true when this session is the one currently on screen (the
 // selected terminal); a viewed session is never `finished` (but can be `followup`,
@@ -164,13 +197,16 @@ export function deriveSessionState(
   isViewed = false,
 ): SessionState {
   if (activity) {
+    // An unrecoverable error means the agent is stuck and cannot continue on its
+    // own: the loudest tier, ranked above a blocking ask. Checked even while the
+    // status still reads `working`, because the error is the truth of the session.
+    if (activity.lastError && !activity.lastError.recoverable) return 'errored';
     // A blocking ask the agent raised mid-turn (permission gate, or a question /
-    // plan approval) is attention: it cannot proceed without you. This is NOT
-    // the everyday awaiting_input rest state, and it must win over `working` so
-    // an AskUserQuestion pause stops reading as a green, busy agent.
+    // plan approval) is `blocked`: it cannot proceed without you. This is NOT the
+    // everyday awaiting_input rest state, and it must win over `working` so an
+    // AskUserQuestion pause stops reading as a green, busy agent.
     if (activity.status === 'awaiting_permission' || activity.status === 'awaiting_response')
-      return 'attention';
-    if (activity.lastError && !activity.lastError.recoverable) return 'attention';
+      return 'blocked';
     if (activity.status === 'working') return 'active';
     // awaiting_input | done | recoverable error: alive, waiting on you. If the
     // rest happened off-screen and is unseen, surface it as finished.
@@ -180,7 +216,7 @@ export function deriveSessionState(
     if (isFollowingUp(session, activity)) return 'followup';
     return 'idle';
   }
-  if (session.status === 'restore_failed') return 'attention';
+  if (session.status === 'restore_failed') return 'errored';
   // A follow-up flag stands even for a session with no live activity feed.
   if (isFollowingUp(session, null)) return 'followup';
   // fresh = never launched, not currently bound, and no resume handle: there is
@@ -197,9 +233,9 @@ export function deriveSessionState(
 // (the design is monochrome plus amber/green only); it reads as a neutral
 // "recent" tone and is distinguished by the StateCell's brighter resting look.
 export function dashboardToneForState(state: SessionState): DashboardStatus {
-  if (state === 'attention') return 'attention';
+  if (state === 'errored' || state === 'blocked') return 'attention';
   if (state === 'active') return 'live';
-  return 'recent'; // finished | idle | fresh
+  return 'recent'; // finished | followup | idle | fresh
 }
 
 // What the left nav surfaces about a group of sessions (a focus, a project, or
@@ -238,7 +274,10 @@ export function rollupSessionStates(
     const isBound = Boolean(bindings[session.id]);
     const activity = activityForSession(session, cortexActivity);
     const state = deriveSessionState(session, isBound, activity, session.id === viewedSessionId);
-    if (state === 'attention') attention += 1;
+    // The nav rolls "needs you" up as one number: errored and blocked both count
+    // toward attention so a container row can say "2 need you" without splitting
+    // stuck-vs-blocked, which only the home's tiers distinguish.
+    if (state === 'errored' || state === 'blocked') attention += 1;
     else if (state === 'active') active += 1;
     else if (state === 'finished') finished += 1;
     else if (state === 'followup') followup += 1;
@@ -259,10 +298,15 @@ export function cellStateFor(
 ): CellSessionState {
   if (activity?.lastError && !activity.lastError.recoverable) return 'error';
   const state = deriveSessionState(session, isBound, activity, isViewed);
-  // The follow-up flag is an orthogonal user marker shown by a separate bookmark,
-  // not the state cell: the cell keeps rendering the underlying agent lifecycle
-  // (a flagged session is at rest, i.e. idle), so the dot never invents a state.
-  return state === 'followup' ? 'idle' : state;
+  // Map the home's tier states onto the dot's narrower vocabulary: a hard error
+  // pings red (`error`), a blocking ask pings amber (`attention`). The follow-up
+  // flag is an orthogonal user marker shown by a separate bookmark, not the dot,
+  // so a flagged at-rest session keeps rendering as idle and the dot never
+  // invents a state.
+  if (state === 'errored') return 'error';
+  if (state === 'blocked') return 'attention';
+  if (state === 'followup') return 'idle';
+  return state;
 }
 
 export type GroupedSessions = Record<SessionState, ShellSession[]>;
@@ -279,7 +323,8 @@ export function groupSessionsByState(
   viewedSessionId: string | null = null,
 ): GroupedSessions {
   const groups: GroupedSessions = {
-    attention: [],
+    errored: [],
+    blocked: [],
     active: [],
     finished: [],
     followup: [],
@@ -368,7 +413,11 @@ export function enteredCurrentStateAt(
 ): number | null {
   const tl = timeline ?? {};
   switch (groupState) {
-    case 'attention':
+    case 'errored':
+      // The error moment, or the block marker when the timeline lacks one (a
+      // restore_failed has no activity feed, so it falls back to blockedSince).
+      return parseMs(activity?.lastError?.occurredAt) ?? parseMs(tl.blockedSince);
+    case 'blocked':
       return parseMs(tl.blockedSince);
     case 'active':
       return parseMs(tl.workingSince);

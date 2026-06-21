@@ -3,10 +3,13 @@ import { BookmarkSimple } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import {
+  activeReentrySummary,
   agentTabLabel,
   cellStateFor,
+  deriveSessionState,
   isFollowingUp,
   plainLanguageStatus,
+  reentryNeedsLine,
   sessionContext,
 } from '../../domain';
 import type {
@@ -18,6 +21,9 @@ import type {
 import { AgentGlyph, StateCell } from '../glyphs';
 import { InlineRename } from '../nav/InlineRename';
 import { ConnectionChip } from '../connections';
+// Imported from the file (not the ../session barrel) to avoid the dashboard <->
+// session import cycle the barrel would create via SessionHistorySurface.
+import { ApprovalActions } from '../session/ApprovalActions';
 import { Typography } from '../primitives/Typography';
 import { useConnectionPanelStore } from '../../store';
 
@@ -34,6 +40,7 @@ export function SessionDashboardCard({
   isBound,
   activity,
   tone,
+  prominent = false,
   renaming,
   onOpen,
   onContextMenu,
@@ -45,6 +52,9 @@ export function SessionDashboardCard({
   isBound: boolean;
   activity: ActivityState | null;
   tone: DashboardStatus;
+  // The "act now" tiers (errored / blocked) render heavier: wider columns, more
+  // padding, and the home for the inline approve/deny actions.
+  prominent?: boolean;
   renaming: boolean;
   onOpen: () => void;
   onContextMenu: (event: MouseEvent<HTMLElement>) => void;
@@ -58,6 +68,15 @@ export function SessionDashboardCard({
     activity?.status === 'working' || activity?.status === 'awaiting_response'
       ? plainLanguageStatus(session, isBound, activity)
       : null;
+  // For a finished ("Ready for you") card, surface what the agent needs from you
+  // next, from the re-entry summary we already generated when it came to rest. It
+  // is the one line the rail and cell can't say. Only on the finished tier:
+  // working owns its own live caption, idle is already caught up, fresh has none.
+  const reentrySummary = activeReentrySummary(session);
+  const reentryLine =
+    reentrySummary && deriveSessionState(session, isBound, activity) === 'finished'
+      ? reentryNeedsLine(reentrySummary)
+      : null;
   const openConnectionPanel = useConnectionPanelStore(s => s.openForSession);
 
   // The card is a `role="button"` div rather than a native `<button>` so the
@@ -69,6 +88,7 @@ export function SessionDashboardCard({
       tabIndex={0}
       className={dashboardCardClass}
       data-tone={tone}
+      data-prominent={prominent ? 'true' : undefined}
       data-activity-status={activity?.status ?? 'none'}
       data-testid="dashboard-session-card"
       data-session-id={session.id}
@@ -140,18 +160,37 @@ export function SessionDashboardCard({
       ) : null}
 
       {permission ? (
+        <div className={dashboardCardPermissionClass} data-testid="dashboard-card-permission">
+          <Typography
+            as="div"
+            variant="caption"
+            tone="warn"
+            selectable
+            className={permissionSummaryTextClass}
+            style={{
+              fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            }}
+            data-testid="dashboard-card-permission-summary"
+          >
+            {permission.displaySummary}
+          </Typography>
+          <ApprovalActions
+            sessionId={session.id}
+            permission={permission}
+            agentKind={session.agentKind}
+          />
+        </div>
+      ) : null}
+
+      {reentryLine ? (
         <Typography
           as="div"
           variant="caption"
-          tone="warn"
-          selectable
-          className={dashboardCardPermissionClass}
-          style={{
-            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-          }}
-          data-testid="dashboard-card-permission-summary"
+          tone={reentryLine.isAsk ? 'warn' : 'muted'}
+          className={dashboardCardReentryClass}
+          data-testid="dashboard-card-reentry"
         >
-          {permission.displaySummary}
+          {reentryLine.text}
         </Typography>
       ) : null}
     </div>
@@ -181,6 +220,17 @@ const dashboardCardClass = css({
   },
   '&[data-tone="attention"]': {
     borderColor: 'color-mix(in srgb, var(--warn) 35%, var(--line) 65%)',
+  },
+  // The act-now tiers read heavier: more padding and a warmer surface so they
+  // sit above the quieter cards.
+  '&[data-prominent="true"]': {
+    gap: '12px',
+    padding: '16px 17px',
+    borderRadius: '15px',
+    background: 'color-mix(in srgb, var(--surface-1) 88%, transparent)',
+  },
+  '&[data-prominent="true"][data-tone="attention"]': {
+    background: 'color-mix(in srgb, var(--warn) 6%, var(--surface-1) 86%)',
   },
 });
 
@@ -257,11 +307,30 @@ const dashboardCardStatusClass = css({
 
 const dashboardCardPermissionClass = css({
   width: '100%',
-  padding: '6px 8px',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '8px',
+  padding: '8px 9px',
   background: 'color-mix(in srgb, var(--warn) 10%, transparent)',
   border: '1px solid color-mix(in srgb, var(--warn) 28%, transparent)',
   borderRadius: '8px',
   overflow: 'hidden',
-  textOverflow: 'ellipsis',
-  whiteSpace: 'nowrap',
+});
+
+// The command/patch summary inside the permission box. Clamped to two lines so a
+// longer command stays readable for the decision without unbounding the card.
+const permissionSummaryTextClass = css({
+  width: '100%',
+  lineClamp: 2,
+  overflow: 'hidden',
+  overflowWrap: 'anywhere',
+});
+
+// The "what does this agent need from you next" line on a finished card. Clamped
+// to two lines so a short question reads in full while a longer one stays bounded;
+// the complete four-line catch-up lives in the re-entry header on open.
+const dashboardCardReentryClass = css({
+  width: '100%',
+  lineClamp: 2,
+  overflow: 'hidden',
 });

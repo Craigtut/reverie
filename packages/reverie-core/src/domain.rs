@@ -94,6 +94,25 @@ pub struct Workspace {
     /// the future voice surfaces; the domain only records the preference.
     #[serde(default = "default_voice_push_to_talk")]
     pub voice_push_to_talk: bool,
+    /// Global-shortcut accelerator that opens the dispatch capture window, in
+    /// Tauri accelerator syntax (e.g. `"CommandOrControl+Shift+Space"`). Stored
+    /// verbatim; the desktop app parses and registers it. Defaults to
+    /// Cmd+Shift+Space (deliberately not Cmd+Space, which is Spotlight). Has no
+    /// effect where the global-shortcut surface is unavailable.
+    #[serde(default = "default_dispatch_shortcut")]
+    pub dispatch_shortcut: String,
+    /// Whether opening dispatch starts in voice mode (auto-listen) rather than
+    /// typed. On by default; the overlay still falls back to typed input when
+    /// the speech engine is unavailable or voice is switched off.
+    #[serde(default = "default_dispatch_default_voice")]
+    pub dispatch_default_voice: bool,
+    /// Saved on-screen position of the dispatch window (physical pixels,
+    /// top-left), so it reopens where the user dragged it. `None` centers it on
+    /// open (the unset / fresh state).
+    #[serde(default)]
+    pub dispatch_window_x: Option<i32>,
+    #[serde(default)]
+    pub dispatch_window_y: Option<i32>,
 }
 
 impl Workspace {
@@ -115,6 +134,10 @@ impl Workspace {
             voice_enabled: default_voice_enabled(),
             voice_language: default_voice_language(),
             voice_push_to_talk: default_voice_push_to_talk(),
+            dispatch_shortcut: default_dispatch_shortcut(),
+            dispatch_default_voice: default_dispatch_default_voice(),
+            dispatch_window_x: None,
+            dispatch_window_y: None,
         }
     }
 }
@@ -154,6 +177,18 @@ fn default_voice_language() -> String {
 
 /// Voice control defaults to press-and-hold (push-to-talk).
 fn default_voice_push_to_talk() -> bool {
+    true
+}
+
+/// Default dispatch global shortcut: Cmd+Shift+Space. Used when absent from
+/// persisted or serialized data. Avoids Cmd+Space (Spotlight) on purpose.
+fn default_dispatch_shortcut() -> String {
+    "CommandOrControl+Shift+Space".to_owned()
+}
+
+/// Dispatch opens in voice mode by default (the lowest-friction path); used when
+/// the field is absent from persisted or serialized data.
+fn default_dispatch_default_voice() -> bool {
     true
 }
 

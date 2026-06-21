@@ -136,7 +136,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
     setCrtEnabled,
-    setVoiceSettings,
+    setDispatchSettings,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     setWorkspaceSidebarWidth,
@@ -358,10 +358,11 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
               onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
               crtEnabled={shell.workspace.crtEnabled ?? false}
               onSetCrtEnabled={next => void setCrtEnabled(next)}
-              voiceEnabled={shell.workspace.voiceEnabled ?? true}
-              voiceLanguage={shell.workspace.voiceLanguage ?? 'auto'}
-              voicePushToTalk={shell.workspace.voicePushToTalk ?? true}
-              onSetVoiceSettings={next => void setVoiceSettings(next)}
+              dispatchShortcut={shell.workspace.dispatchShortcut ?? 'CommandOrControl+Shift+Space'}
+              dispatchDefaultVoice={shell.workspace.dispatchDefaultVoice ?? true}
+              dispatchWindowX={shell.workspace.dispatchWindowX ?? null}
+              dispatchWindowY={shell.workspace.dispatchWindowY ?? null}
+              onSetDispatchSettings={next => void setDispatchSettings(next)}
               onDeleteProject={project => void deleteProjectRecord(project)}
             />
           ) : surfaceMode === 'session-history' ? (

@@ -17,6 +17,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::codex_titles::maybe_schedule_codex_title;
+use crate::reentry_summary::maybe_schedule_reentry_summary;
 
 const SESSION_ACTIVITY_EVENT: &str = "session_activity_changed";
 /// Emitted when an update captures a CLI's native session id into a session
@@ -82,6 +83,10 @@ pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
             if source == ActivitySourceKind::CodexCli {
                 maybe_schedule_codex_title(app, &native_session_id, &state);
             }
+            // Re-entry summary fires for every CLI when a session comes to rest;
+            // eligibility (unseen, still resting, not already summarized) is
+            // re-checked after a settle delay inside the scheduler.
+            maybe_schedule_reentry_summary(app, &native_session_id, &state);
             emit(
                 app,
                 SessionActivityEvent::Updated {

@@ -6,8 +6,11 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::approval::ApprovalCapability;
 use crate::domain::{AgentKind, LaunchMode, NativeSessionRef, Session, SessionId};
+use crate::reentry_context::{ReentryBudget, ReentryContext, ReentryEntry, ReentryRole};
 use crate::terminal::TerminalSpawnSpec;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -135,6 +138,17 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Whether a brand-new interactive launch can take the user's initial prompt
+    /// as a trailing positional argument (`claude "<prompt>"`, `codex
+    /// "<prompt>"`), which submits it on startup. Adapters that report `true`
+    /// get the dispatch prompt appended to their new-session command; adapters
+    /// that report `false` (e.g. Cortex, whose CLI rejects positional args)
+    /// receive it via [`TerminalSpawnSpec::initial_input`] instead, typed into
+    /// the PTY after the session starts. Defaults to false.
+    fn supports_initial_prompt_arg(&self) -> bool {
+        false
+    }
+
     /// Discover the native session this CLI created for `ctx.cwd`, if any.
     /// Defaults to no discovery: adapters that record sessions on disk override
     /// this (Cortex via `meta.json`, Claude via its transcript scanner; Codex's
@@ -157,6 +171,15 @@ pub trait AgentAdapter: Send + Sync {
     fn hook_config_args(&self, config_file: &Path) -> Vec<String> {
         let _ = config_file;
         Vec::new()
+    }
+
+    /// What this adapter can do when its agent blocks on a tool-permission
+    /// request (see [`crate::approval`] and the approval-cards design). Defaults
+    /// to [`ApprovalCapability::None`]: a new CLI shows as blocked and the user
+    /// opens the terminal until its decision channel is wired. Claude, Codex, and
+    /// Cortex override this to [`ApprovalCapability::AnswerFromCard`].
+    fn approval_capability(&self) -> ApprovalCapability {
+        ApprovalCapability::None
     }
 
     /// Turn a raw OSC terminal title this CLI emitted into a displayable session
@@ -374,6 +397,12 @@ impl AgentAdapter for CortexAdapter {
         AgentKind::CortexCode
     }
 
+    fn approval_capability(&self) -> ApprovalCapability {
+        // Cortex is ours: its permission handler awaits an external decision file
+        // before falling back to the TUI prompt. See `cortex-mono` session.ts.
+        ApprovalCapability::AnswerFromCard
+    }
+
     fn display_name(&self) -> &'static str {
         "Cortex Code"
     }
@@ -457,6 +486,12 @@ impl AgentAdapter for ClaudeCodeAdapter {
         AgentKind::ClaudeCode
     }
 
+    fn approval_capability(&self) -> ApprovalCapability {
+        // The PermissionRequest HTTP hook returns an allow/deny decision that
+        // short-circuits Claude's own prompt. See `hook_server`.
+        ApprovalCapability::AnswerFromCard
+    }
+
     fn display_name(&self) -> &'static str {
         "Claude Code"
     }
@@ -494,6 +529,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn mints_new_session_id(&self) -> bool {
+        true
+    }
+
+    fn supports_initial_prompt_arg(&self) -> bool {
+        // `claude [options] [prompt]` submits a trailing positional prompt.
         true
     }
 
@@ -570,12 +610,23 @@ impl AgentAdapter for CodexCliAdapter {
         AgentKind::CodexCli
     }
 
+    fn approval_capability(&self) -> ApprovalCapability {
+        // The PermissionRequest command hook blocks on Reverie's reply (relayed by
+        // the reverie-bridge-codex-hook forwarder) and short-circuits the prompt.
+        ApprovalCapability::AnswerFromCard
+    }
+
     fn display_name(&self) -> &'static str {
         "Codex CLI"
     }
 
     fn executable_candidates(&self) -> &'static [&'static str] {
         &["codex"]
+    }
+
+    fn supports_initial_prompt_arg(&self) -> bool {
+        // `codex [OPTIONS] [PROMPT]` accepts a trailing positional prompt.
+        true
     }
 
     fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
@@ -883,6 +934,142 @@ fn read_claude_transcript_envelope(path: &Path) -> Option<ClaudeTranscriptEnvelo
     Some(ClaudeTranscriptEnvelope { cwd, session_id })
 }
 
+/// Locate a Claude transcript by its native session id. The Claude adapter mints
+/// the id at launch (`--session-id <uuid>`) and Claude names the transcript file
+/// `<session-id>.jsonl`, but the adapter usually leaves the ref's `metadata_path`
+/// unset (disk discovery is retired), so the re-entry reader needs to find the
+/// file itself. The project directory name is a lossy encoding of the cwd, so we
+/// scan the project dirs for `<id>.jsonl` and soft-validate the cwd recorded
+/// inside the file when it is present.
+pub fn find_claude_transcript_by_native_id(
+    claude_home: impl AsRef<Path>,
+    cwd: impl AsRef<Path>,
+    session_id: &str,
+) -> Option<PathBuf> {
+    let projects_dir = claude_home.as_ref().join("projects");
+    if !projects_dir.exists() {
+        return None;
+    }
+    let cwd = cwd.as_ref();
+    let filename = format!("{session_id}.jsonl");
+    for project_entry in fs::read_dir(&projects_dir).ok()?.flatten() {
+        let candidate = project_entry.path().join(&filename);
+        if !candidate.is_file() {
+            continue;
+        }
+        // The filename stem is the (globally unique) session id, so this is
+        // already an authoritative match; when the envelope exposes a cwd that
+        // disagrees, skip it as a guard against a hand-copied transcript.
+        if let Some(file_cwd) = read_claude_transcript_envelope(&candidate).and_then(|e| e.cwd) {
+            if !same_logical_path(Path::new(&file_cwd), cwd) {
+                continue;
+            }
+        }
+        return Some(candidate);
+    }
+    None
+}
+
+/// Read a re-entry window from a Claude transcript, distilled into the
+/// CLI-agnostic [`ReentryContext`]. Claude records are flat JSONL lines typed
+/// `user` / `assistant`, whose `message.content` is either a string or an array
+/// of content blocks (`text`, `tool_use`, `tool_result`); we keep text as the
+/// speaker's turn and render tool use/results as `Tool` entries.
+pub fn read_claude_reentry_context(
+    path: &Path,
+    budget: ReentryBudget,
+) -> Result<Option<ReentryContext>> {
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(
+        fs::File::open(path).with_context(|| format!("open Claude transcript {}", path.display()))?,
+    );
+    let mut entries = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let role = match record.get("type").and_then(Value::as_str) {
+            Some("user") => ReentryRole::User,
+            Some("assistant") => ReentryRole::Assistant,
+            _ => continue,
+        };
+        let Some(content) = record.get("message").and_then(|message| message.get("content")) else {
+            continue;
+        };
+        collect_claude_entries(content, role, &mut entries);
+    }
+
+    let context = ReentryContext::from_entries(entries, budget);
+    if context.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(context))
+    }
+}
+
+/// Flatten a Claude `message.content` (a string or an array of content blocks)
+/// into re-entry entries. Plain text takes the speaker's role; `tool_use` and
+/// `tool_result` blocks render as `Tool` actions; `thinking` blocks are dropped.
+fn collect_claude_entries(content: &Value, role: ReentryRole, entries: &mut Vec<ReentryEntry>) {
+    match content {
+        Value::String(text) => {
+            entries.push(ReentryEntry { role, text: text.clone() });
+        }
+        Value::Array(blocks) => {
+            for block in blocks {
+                match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "text" => {
+                        if let Some(text) = block.get("text").and_then(Value::as_str) {
+                            entries.push(ReentryEntry {
+                                role,
+                                text: text.to_owned(),
+                            });
+                        }
+                    }
+                    "tool_use" => {
+                        let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        entries.push(ReentryEntry::tool(format!("Use {name}")));
+                    }
+                    "tool_result" => {
+                        if let Some(text) = claude_tool_result_text(block.get("content")) {
+                            entries.push(ReentryEntry::tool(text));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract the text of a Claude `tool_result` block, whose `content` is a string
+/// or an array of `{type:"text", text}` blocks.
+fn claude_tool_result_text(content: Option<&Value>) -> Option<String> {
+    match content? {
+        Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
+        Value::Array(blocks) => {
+            let joined = blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = joined.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }
+        _ => None,
+    }
+}
+
 fn program_or_default(ctx: &LaunchContext, fallback: &'static str) -> PathBuf {
     ctx.executable_path
         .clone()
@@ -1140,6 +1327,68 @@ mod tests {
             .expect("cwd-matching transcript is found");
         assert_eq!(found.kind, AgentKind::ClaudeCode);
         assert_eq!(found.session_id.as_deref(), Some("sess-123"));
+    }
+
+    #[test]
+    fn claude_reentry_reader_finds_by_id_and_distills_the_window() {
+        use std::io::Write;
+        let home = tempfile::TempDir::new().unwrap();
+        let cwd = "/Users/dev/Code/proj";
+        let project = home.path().join("projects").join("-Users-dev-Code-proj");
+        fs::create_dir_all(&project).unwrap();
+        let mut f = fs::File::create(project.join("sess-abc.jsonl")).unwrap();
+        writeln!(f, r#"{{"type":"mode","mode":"default"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","sessionId":"sess-abc","cwd":"{cwd}","message":{{"role":"user","content":"Add a re-entry header"}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Working on it"}},{{"type":"tool_use","name":"Edit","input":{{}}}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"x","content":[{{"type":"text","text":"file edited"}}]}}]}}}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        let path = find_claude_transcript_by_native_id(home.path(), cwd, "sess-abc")
+            .expect("transcript located by id");
+        let context = read_claude_reentry_context(&path, ReentryBudget::default())
+            .unwrap()
+            .expect("reentry context");
+        assert_eq!(context.entries.len(), 4);
+        assert_eq!(context.entries[0].role, ReentryRole::User);
+        assert_eq!(context.entries[0].text, "Add a re-entry header");
+        assert_eq!(context.entries[1].role, ReentryRole::Assistant);
+        assert_eq!(context.entries[1].text, "Working on it");
+        assert_eq!(context.entries[2].role, ReentryRole::Tool);
+        assert_eq!(context.entries[2].text, "Use Edit");
+        assert_eq!(context.entries[3].role, ReentryRole::Tool);
+        assert_eq!(context.entries[3].text, "file edited");
+    }
+
+    #[test]
+    fn claude_reentry_reader_skips_mismatched_cwd() {
+        use std::io::Write;
+        let home = tempfile::TempDir::new().unwrap();
+        let project = home.path().join("projects").join("-Users-dev-Code-proj");
+        fs::create_dir_all(&project).unwrap();
+        let mut f = fs::File::create(project.join("sess-zzz.jsonl")).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","sessionId":"sess-zzz","cwd":"/Users/dev/Code/proj","message":{{"role":"user","content":"hi"}}}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        assert!(
+            find_claude_transcript_by_native_id(home.path(), "/some/other/dir", "sess-zzz")
+                .is_none()
+        );
     }
 
     #[test]

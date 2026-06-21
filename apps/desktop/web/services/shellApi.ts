@@ -18,6 +18,10 @@ export function fetchWorkspaceShell() {
   return invoke<WorkspaceShellSnapshot>('workspace_shell');
 }
 
+export function recordWebviewHeartbeat() {
+  return invoke('webview_heartbeat');
+}
+
 export function listAgentClis() {
   return invoke<AgentCliDetection[]>('list_agent_clis');
 }
@@ -92,5 +96,30 @@ export function setSessionDangerousMode(sessionId: string, dangerousModeOverride
 export function markSessionViewed(shellSessionId: string, viewedAt: string) {
   return invoke<WorkspaceShellSnapshot>('mark_session_viewed', {
     request: { shellSessionId, viewedAt },
+  });
+}
+
+// Dismiss a session's re-entry ("where we left off") header. Marks the current
+// summary dismissed so it hides; it returns the next time the session finishes a
+// turn while the user is away. Fire-and-forget like markSessionViewed: callers
+// apply the optimistic store update and do not need the returned snapshot.
+export function dismissSessionReentry(shellSessionId: string) {
+  return invoke<WorkspaceShellSnapshot>('dismiss_session_reentry', {
+    request: { shellSessionId },
+  });
+}
+
+// Answer a tool-permission request from the native approval card. Routes the
+// decision to the blocked CLI hook (Claude / Codex) or the Cortex decision file.
+// Resolves to whether the decision was delivered: `false` means no waiter was
+// found (the request already timed out, or the session is not wired for inline
+// answers), so the caller should fall back to "respond in the terminal".
+export function resolvePermission(
+  shellSessionId: string,
+  requestId: string,
+  decision: 'allow' | 'deny',
+) {
+  return invoke<boolean>('resolve_permission', {
+    request: { shellSessionId, requestId, decision },
   });
 }

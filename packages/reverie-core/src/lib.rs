@@ -8,6 +8,7 @@ pub mod activity;
 pub mod activity_reconciler;
 pub mod activity_source;
 pub mod agents;
+pub mod approval;
 pub mod bookmark;
 pub mod bridge_protocol;
 pub mod bridge_server;
@@ -19,6 +20,7 @@ pub mod connection_repository;
 pub mod connection_service;
 pub mod cortex_state;
 pub mod cortex_transcript;
+pub mod dispatch;
 pub mod domain;
 pub mod git_status;
 pub mod hook_config;
@@ -40,6 +42,7 @@ pub use activity::{
     parse_events, parse_state,
 };
 pub use activity_source::{ActivitySourceKind, ActivityUpdate, Fidelity, SessionKey};
+pub use approval::{ApprovalCapability, ApprovalDecision, ApprovalKey, ApprovalRegistry};
 pub use agents::{
     AdapterDetection, AgentAdapter, CommandSpec, CortexAdapter, CortexSessionDiscovery,
     CortexSessionMetadata, DiscoveryContext, LaunchContext, find_claude_transcript_by_native_id,
@@ -52,6 +55,9 @@ pub use bridge_server::{
 };
 pub use codex_rollout::CodexLogSource;
 pub use completion::{CompletionRequest, complete_structured, string_object_schema};
+pub use dispatch::{
+    DISPATCH_CLASSIFY_TIMEOUT, DispatchRouting, DispatchScope, classify_dispatch, utility_model,
+};
 pub use cortex_transcript::{cortex_transcript_path, read_cortex_reentry_context};
 pub use reentry_context::{ReentryBudget, ReentryContext, ReentryEntry, ReentryRole};
 pub use connection::{

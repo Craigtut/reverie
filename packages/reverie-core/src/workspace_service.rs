@@ -142,6 +142,10 @@ impl WorkspaceService {
             voice_enabled: true,
             voice_language: "auto".to_owned(),
             voice_push_to_talk: true,
+            dispatch_shortcut: "CommandOrControl+Shift+Space".to_owned(),
+            dispatch_default_voice: true,
+            dispatch_window_x: None,
+            dispatch_window_y: None,
         };
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
@@ -555,21 +559,23 @@ impl WorkspaceService {
         self.snapshot()
     }
 
-    /// Persist the on-device voice-input settings. `enabled` toggles whether the
-    /// voice affordances show (the model is still provisioned eagerly on first
-    /// launch); `language` is the transcription hint (`"auto"` or an ISO 639-1
-    /// code); `push_to_talk` chooses press-and-hold versus toggle. The desktop
-    /// app reads these back; the domain only records intent.
-    pub fn set_voice_settings(
+    /// Persist the dispatch settings: the global-shortcut accelerator, whether
+    /// dispatch opens in voice mode, and the saved window position. The desktop
+    /// app reads these back (re-registers the shortcut, decides auto-listen,
+    /// restores the window position); the domain only records intent. Passing
+    /// `None` for a position component leaves it unset (centers on open).
+    pub fn set_dispatch_settings(
         &self,
-        enabled: bool,
-        language: String,
-        push_to_talk: bool,
+        shortcut: String,
+        default_voice: bool,
+        window_x: Option<i32>,
+        window_y: Option<i32>,
     ) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
-        workspace.voice_enabled = enabled;
-        workspace.voice_language = language;
-        workspace.voice_push_to_talk = push_to_talk;
+        workspace.dispatch_shortcut = shortcut;
+        workspace.dispatch_default_voice = default_voice;
+        workspace.dispatch_window_x = window_x;
+        workspace.dispatch_window_y = window_y;
         self.repo.save_workspace(&workspace)?;
         self.snapshot()
     }
@@ -1386,7 +1392,7 @@ impl WorkspaceService {
         cols: u16,
         rows: u16,
     ) -> Result<TerminalSpawnSpec> {
-        Ok(self.build_agent_launch(session_id, cols, rows)?.spec)
+        Ok(self.build_agent_launch(session_id, cols, rows, None)?.spec)
     }
 
     /// Build the spawn spec plus the launch context the terminal runtime needs
@@ -1398,6 +1404,7 @@ impl WorkspaceService {
         session_id: SessionId,
         cols: u16,
         rows: u16,
+        initial_prompt: Option<String>,
     ) -> Result<AgentLaunch> {
         let mut snapshot = self.repo.load_snapshot()?;
         // If the session's folder is gone (its project moved or was renamed),
@@ -1463,7 +1470,7 @@ impl WorkspaceService {
             } else {
                 None
             };
-        let spec = build_spawn_spec(
+        let mut spec = build_spawn_spec(
             session,
             focus_or_workspace_default,
             cols,
@@ -1472,6 +1479,19 @@ impl WorkspaceService {
             adapter.as_ref(),
             injected_native_id.clone(),
         )?;
+        // Deliver the dispatch initial prompt on a brand-new launch only. CLIs
+        // that take a trailing positional prompt get it appended (it submits on
+        // startup); the rest receive it as deferred PTY input the runtime types
+        // in once the session is running. Resumes never carry an initial prompt.
+        if !crate::agents::session_should_resume(session) {
+            if let Some(prompt) = initial_prompt.filter(|prompt| !prompt.trim().is_empty()) {
+                if adapter.supports_initial_prompt_arg() {
+                    spec.command.args.push(prompt);
+                } else {
+                    spec.initial_input = Some(prompt);
+                }
+            }
+        }
         Ok(AgentLaunch {
             spec,
             agent_kind,
@@ -3589,7 +3609,9 @@ mod tests {
         std::fs::create_dir(&folder).unwrap();
         let (_project_id, session_id) = project_with_session(&service, &folder);
         std::fs::remove_dir_all(&folder).unwrap();
-        let err = service.build_agent_launch(session_id, 80, 24).unwrap_err();
+        let err = service
+            .build_agent_launch(session_id, 80, 24, None)
+            .unwrap_err();
         assert!(err.to_string().contains("folder is missing"), "got: {err}");
     }
 

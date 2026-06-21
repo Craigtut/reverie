@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use reverie_core::agents::{AgentAdapter, ClaudeCodeAdapter, built_in_adapters};
 use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId, ThemeMode};
+use reverie_core::approval::ApprovalDecision;
 use reverie_core::hook_config::{hook_url, write_claude_settings};
 use reverie_core::hook_server::{HookServerControl, HookSource};
 use reverie_core::terminal::{TerminalFrame, TerminalId};
@@ -54,6 +55,10 @@ pub(crate) struct StartSessionRequest {
     spawn_spec: Option<TerminalSpawnSpec>,
     cols: Option<u16>,
     rows: Option<u16>,
+    /// Optional initial prompt to deliver to the freshly launched agent (used by
+    /// dispatch). Passed to the CLI as a positional arg where supported, else
+    /// typed into the PTY after start. Ignored on the dev spawn-spec path.
+    initial_prompt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,6 +156,17 @@ pub(crate) struct DismissSessionReentryRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ResolvePermissionRequest {
+    shell_session_id: SessionId,
+    /// The permission id the card was shown for (`awaitingPermission.id`, shaped
+    /// `perm-<sequence>`), so the decision routes to the exact blocked hook.
+    request_id: String,
+    /// "allow" or "deny".
+    decision: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetWorkspaceDefaultDangerousModeRequest {
     default_dangerous_mode: bool,
 }
@@ -188,10 +204,17 @@ pub(crate) struct SetCrtEnabledRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SetVoiceSettingsRequest {
-    voice_enabled: bool,
-    voice_language: String,
-    voice_push_to_talk: bool,
+pub(crate) struct SetDispatchSettingsRequest {
+    dispatch_shortcut: String,
+    dispatch_default_voice: bool,
+    dispatch_window_x: Option<i32>,
+    dispatch_window_y: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClassifyDispatchRequest {
+    transcript: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -969,6 +992,76 @@ pub(crate) fn set_session_flagged_at(
         .map_err(|err| err.to_string())
 }
 
+/// Answer a tool-permission request from the native approval card. Hands the
+/// decision to the blocked CLI hook over the connection the hook server is
+/// holding open (Claude / Codex), so the agent proceeds without ever drawing its
+/// own in-TUI prompt. Returns whether the decision was delivered: `false` means
+/// no hook was waiting (it already timed out, or the session answers over a
+/// channel not wired here), so the UI should fall back to "respond in the
+/// terminal" rather than claim success.
+#[tauri::command]
+pub(crate) fn resolve_permission(
+    service: State<'_, WorkspaceService>,
+    hook_control: State<'_, HookServerControl>,
+    request: ResolvePermissionRequest,
+) -> Result<bool, String> {
+    let decision = match request.decision.as_str() {
+        "allow" => ApprovalDecision::Allow,
+        "deny" => ApprovalDecision::Deny,
+        other => return Err(format!("unknown approval decision: {other}")),
+    };
+
+    // Claude and Codex answer over the connection the hook server is holding open.
+    let key = (request.shell_session_id, request.request_id.clone());
+    if hook_control.approvals.resolve(&key, decision) {
+        return Ok(true);
+    }
+
+    // Otherwise the session may answer over a decision file it polls (Cortex,
+    // which we own). Only a Cortex session with a known native id has that
+    // channel; anything else falls through to "respond in the terminal".
+    let snapshot = service.snapshot().map_err(|err| err.to_string())?;
+    let cortex_native_id = snapshot
+        .sessions
+        .into_iter()
+        .find(|session| session.id == request.shell_session_id)
+        .filter(|session| session.agent_kind == AgentKind::CortexCode)
+        .and_then(|session| session.native_session_ref)
+        .and_then(|reference| reference.session_id);
+    if let Some(native_id) = cortex_native_id {
+        write_cortex_decision(&native_id, &request.request_id, decision)?;
+        return Ok(true);
+    }
+
+    // No channel was available: the hook already timed out, or the session is not
+    // wired for inline answers. The UI falls back to "respond in the terminal".
+    Ok(false)
+}
+
+/// Write the external-decision file a running Cortex session polls (see
+/// `resolvePermission` in cortex-mono). The path mirrors the activity contract: a
+/// `control/` sibling of the session's `activity/` dir, never the activity dir
+/// itself, so that surface stays one-way (Cortex writes, Reverie reads).
+fn write_cortex_decision(
+    native_id: &str,
+    request_id: &str,
+    decision: ApprovalDecision,
+) -> Result<(), String> {
+    let behavior = match decision {
+        ApprovalDecision::Allow => "allow",
+        ApprovalDecision::Deny => "deny",
+    };
+    let dir = cortex_home_dir()?
+        .join("sessions")
+        .join(native_id)
+        .join("control");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("creating {}: {err}", dir.display()))?;
+    let path = dir.join(format!("{request_id}.json"));
+    let body = serde_json::json!({ "decision": behavior }).to_string();
+    std::fs::write(&path, body).map_err(|err| format!("writing {}: {err}", path.display()))?;
+    Ok(())
+}
+
 /// Dismiss a session's re-entry ("where we left off") header. Marks the current
 /// summary dismissed so it hides; the header returns the next time the session
 /// finishes a turn while the user is away.
@@ -1092,17 +1185,59 @@ pub(crate) fn set_crt_enabled(
 }
 
 #[tauri::command]
-pub(crate) fn set_voice_settings(
+pub(crate) fn set_dispatch_settings(
+    app: AppHandle,
     service: State<'_, WorkspaceService>,
-    request: SetVoiceSettingsRequest,
+    request: SetDispatchSettingsRequest,
 ) -> Result<WorkspaceSnapshot, String> {
-    service
-        .set_voice_settings(
-            request.voice_enabled,
-            request.voice_language,
-            request.voice_push_to_talk,
+    let snapshot = service
+        .set_dispatch_settings(
+            request.dispatch_shortcut.clone(),
+            request.dispatch_default_voice,
+            request.dispatch_window_x,
+            request.dispatch_window_y,
         )
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    // Re-bind the (possibly changed) accelerator. Non-fatal: the setting is
+    // already persisted, and the next launch registers it regardless.
+    if let Err(error) =
+        crate::dispatch::reregister_dispatch_shortcut(&app, &request.dispatch_shortcut)
+    {
+        eprintln!("[reverie] failed to re-register dispatch shortcut: {error}");
+    }
+    Ok(snapshot)
+}
+
+/// Classify a dispatch request (session-less) into a routing suggestion. Runs
+/// the workspace default agent's CLI at its utility-model tier through the
+/// shared completion surface, off the main thread. The helper itself falls back
+/// to a General route on inconsistent model output; a hard error here (e.g. the
+/// CLI is missing) surfaces to the overlay, which then defaults to General.
+#[tauri::command]
+pub(crate) async fn classify_dispatch(
+    service: State<'_, WorkspaceService>,
+    request: ClassifyDispatchRequest,
+) -> Result<reverie_core::DispatchRouting, String> {
+    let snapshot = service.snapshot().map_err(|err| err.to_string())?;
+    let engine = snapshot.workspace.default_agent_kind;
+    let general_label = snapshot.workspace.general_label;
+    let projects = snapshot.projects;
+    let focuses = snapshot.focuses;
+    let transcript = request.transcript;
+    let cwd = std::env::temp_dir();
+    tauri::async_runtime::spawn_blocking(move || {
+        reverie_core::classify_dispatch(
+            engine,
+            &cwd,
+            &transcript,
+            &projects,
+            &focuses,
+            &general_label,
+        )
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -1362,6 +1497,7 @@ pub(crate) fn start_session(
                     shell_session_id,
                     request.cols.unwrap_or(120),
                     request.rows.unwrap_or(32),
+                    request.initial_prompt,
                 )
                 .map_err(|err| err.to_string())?;
             (
