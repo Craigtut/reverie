@@ -76,7 +76,15 @@ pub(crate) fn maybe_schedule_reentry_summary(
     native_session_id: &str,
     state: &reverie_core::activity::ActivityState,
 ) {
-    if !is_resting(state) || state.turn.is_none() {
+    // Gate on the rest status alone. Do NOT require `state.turn` to be present:
+    // that field is Codex-rollout-specific (the Codex title scheduler can rely on
+    // it), but Claude's hook states and Cortex's snapshot states always carry
+    // `turn: None`, so requiring it silently disabled the feature for every
+    // non-Codex CLI. The "is this a real finish vs a bare SessionStart" concern
+    // is handled downstream: SessionStart maps to `working` (not resting) for
+    // Claude, and the run-time checks (unseen, dedup by restingSince, empty
+    // transcript window) drop any session that has not actually done work.
+    if !is_resting(state) {
         return;
     }
     // One in-flight schedule per native id at a time, so repeated rest updates
@@ -85,6 +93,15 @@ pub(crate) fn maybe_schedule_reentry_summary(
     if !mark_schedule_in_flight(native_session_id) {
         return;
     }
+    record_diagnostic(
+        app,
+        "scheduled",
+        None,
+        json!({
+            "nativeSessionId": native_session_id,
+            "status": format!("{:?}", state.status),
+        }),
+    );
     let app = app.clone();
     let native_session_id = native_session_id.to_owned();
     thread::spawn(move || {
@@ -104,6 +121,12 @@ pub(crate) fn maybe_schedule_reentry_summary(
 
 fn try_generate(app: &AppHandle, native_session_id: &str) -> Result<()> {
     let Some(target) = find_target(app, native_session_id) else {
+        record_diagnostic(
+            app,
+            "skipped_no_target",
+            None,
+            json!({ "nativeSessionId": native_session_id }),
+        );
         return Ok(());
     };
 
@@ -115,7 +138,13 @@ fn try_generate(app: &AppHandle, native_session_id: &str) -> Result<()> {
     // Finished while away? If the user viewed it (during the delay or before),
     // there is nothing to catch up on.
     if target_was_seen(app, &target) {
-        record_diagnostic(app, "skipped_already_seen", Some(&target), json!({}));
+        let last_viewed = current_session(app, target.session_id).and_then(|s| s.last_viewed_at);
+        record_diagnostic(
+            app,
+            "skipped_already_seen",
+            Some(&target),
+            json!({ "lastViewedAt": last_viewed }),
+        );
         return Ok(());
     }
     // Already have a summary for this rest? Skip; this is the cross-restart dedup.
