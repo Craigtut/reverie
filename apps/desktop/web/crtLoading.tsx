@@ -548,11 +548,26 @@ export function CrtBootSequence() {
           <div className={bootContentClass}>
             <CrtLoadingCanvas variant="boot" onDone={() => setDone(true)} />
           </div>
-          {/* The window's top-left ambient glow, cast OVER the boot so its flat dark
-            backdrop is softened by the same light as the rest of the app (matches
-            terminalGlowClass) instead of reading as a hard black rectangle. */}
-          <div className={bootGlowClass} aria-hidden="true" />
         </motion.div>
+      ) : null}
+      {/* The window's top-left ambient glow, cast OVER the boot so its flat dark
+          backdrop picks up the same light as the rest of the app (matches
+          terminalGlowClass). It is a SIBLING of the boot overlay, never nested
+          inside it: the overlay is a Framer motion element whose transform
+          establishes a containing block, which traps this position:fixed glow to
+          the (padding-inset) stage and clips it into a hard-edged rectangle. As a
+          sibling its only ancestor is the untransformed stage, so `fixed` resolves
+          to the viewport and the glow spans the whole window like terminalGlowClass. */}
+      {playing && !done ? (
+        <motion.div
+          key="crt-boot-glow"
+          className={bootGlowClass}
+          aria-hidden="true"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: BOOT_FADE_MS / 1000, ease: 'easeOut' }}
+        />
       ) : null}
     </AnimatePresence>
   );
@@ -574,6 +589,10 @@ const bootOverlayClass = css({
 const bootGlowClass = css({
   position: 'fixed',
   inset: 0,
+  // Above the boot overlay (zIndex 40) so the light is cast over the power-on,
+  // not under it; still inside the stage's stacking context so the sidebar stays
+  // crisp on top.
+  zIndex: 41,
   pointerEvents: 'none',
   // Same falloff as the app's terminalGlowClass, anchored to the window's
   // top-left so the boot picks up the ambient light instead of flat black.
