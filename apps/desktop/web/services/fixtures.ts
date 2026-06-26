@@ -1089,6 +1089,20 @@ function makePopulatedFixtureSnapshot(
         // Most recent to come to rest, so it leads the "Ready for you" group.
         latestActivity: activity('native-general-done', 'done', '2026-06-02T11:00:00.000Z'),
         stateTimeline: { restingSince: '2026-06-02T11:00:00.000Z' },
+        // Informational re-entry summary (no pending decision): opening this
+        // session shows the calmer, news-first variant of the catch-up notice.
+        reentrySummary: {
+          fields: {
+            currentGoal: 'Draft the weekly status summary from this week’s commits',
+            whereWeLeftOff: ['Collected commits across three repos', 'Grouped them by project'],
+            whatChanged: 'Draft is ready for review across all three projects',
+            pendingDecision: null,
+          },
+          generatedForRestingSince: '2026-06-02T11:00:00.000Z',
+          cli: 'claude_code',
+          dismissed: false,
+          schemaVersion: 1,
+        },
       }),
     ],
   };
