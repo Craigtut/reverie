@@ -375,63 +375,63 @@ export function Sidebar({
         </Typography>
       </button>
 
+      {/* Home sits with the search box in the fixed header, not in the scroll
+          list below it: it is the workspace-wide entry point, so it should stay
+          pinned while the project list scrolls. */}
+      <div className={homeRowWrapperClass}>
+        <button
+          type="button"
+          className={homeRowClass({ active: surfaceMode === 'dashboard' })}
+          data-testid="home-nav-button"
+          data-active={surfaceMode === 'dashboard' ? 'true' : 'false'}
+          onClick={onGoToDashboard}
+        >
+          <span
+            className={liveStatusIconClass}
+            {...liveIconAttrs(workspaceRollup.active > 0, workspaceRollup.attention)}
+            aria-hidden="true"
+          >
+            <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
+          </span>
+          <Typography as="span" variant="smallBody" tone="inherit" className={homeRowLabelClass}>
+            Home
+          </Typography>
+          {workspaceRollup.attention > 0 || workspaceRollup.finished > 0 ? (
+            <span className={homeRowMetaClass}>
+              {workspaceRollup.attention > 0 ? (
+                <Typography
+                  as="span"
+                  variant="caption"
+                  tone="warn"
+                  className={rowAttentionBadgeClass}
+                  data-testid="home-nav-attention-count"
+                  title={`${workspaceRollup.attention} need${
+                    workspaceRollup.attention === 1 ? 's' : ''
+                  } you`}
+                >
+                  {workspaceRollup.attention}
+                </Typography>
+              ) : null}
+              {workspaceRollup.finished > 0 ? (
+                <Typography
+                  as="span"
+                  variant="caption"
+                  tone="muted"
+                  className={rowReadyBadgeClass}
+                  data-testid="home-nav-ready-count"
+                  title={`${workspaceRollup.finished} ready for you`}
+                >
+                  {workspaceRollup.finished}
+                </Typography>
+              ) : null}
+            </span>
+          ) : null}
+        </button>
+      </div>
+
       <div className={navViewportClass}>
         <nav className={navClass} data-testid="workspace-nav" ref={navScrollRef}>
           <NavDndProvider shell={shell}>
-            <button
-              type="button"
-              className={homeRowClass({ active: surfaceMode === 'dashboard' })}
-              data-testid="home-nav-button"
-              data-active={surfaceMode === 'dashboard' ? 'true' : 'false'}
-              onClick={onGoToDashboard}
-            >
-              <span
-                className={liveStatusIconClass}
-                {...liveIconAttrs(workspaceRollup.active > 0, workspaceRollup.attention)}
-                aria-hidden="true"
-              >
-                <House size={15} weight={surfaceMode === 'dashboard' ? 'fill' : 'regular'} />
-              </span>
-              <Typography
-                as="span"
-                variant="smallBody"
-                tone="inherit"
-                className={homeRowLabelClass}
-              >
-                Home
-              </Typography>
-              {workspaceRollup.attention > 0 || workspaceRollup.finished > 0 ? (
-                <span className={homeRowMetaClass}>
-                  {workspaceRollup.attention > 0 ? (
-                    <Typography
-                      as="span"
-                      variant="caption"
-                      tone="warn"
-                      className={rowAttentionBadgeClass}
-                      data-testid="home-nav-attention-count"
-                      title={`${workspaceRollup.attention} need${
-                        workspaceRollup.attention === 1 ? 's' : ''
-                      } you`}
-                    >
-                      {workspaceRollup.attention}
-                    </Typography>
-                  ) : null}
-                  {workspaceRollup.finished > 0 ? (
-                    <Typography
-                      as="span"
-                      variant="caption"
-                      tone="muted"
-                      className={rowReadyBadgeClass}
-                      data-testid="home-nav-ready-count"
-                      title={`${workspaceRollup.finished} ready for you`}
-                    >
-                      {workspaceRollup.finished}
-                    </Typography>
-                  ) : null}
-                </span>
-              ) : null}
-            </button>
-
             <ProjectGroup
               title={shell.workspace.generalLabel}
               count={generalRollup.total}
@@ -727,6 +727,19 @@ const navClass = css({
   '&::-webkit-scrollbar': { width: 0, height: 0 },
 });
 
+// Wraps the Home row in the fixed header (above the scroll viewport). The
+// horizontal padding matches the nav list's inset so Home stays in the same
+// position it held when it scrolled with the list; the bottom padding keeps the
+// breathing room before the scrolling content begins. A faint bottom hairline
+// closes off this fixed header the same way the settings footer's top hairline
+// closes off the footer.
+const homeRowWrapperClass = css({
+  padding: '0 8px 8px',
+  borderBottom: '1px solid var(--line-faint)',
+  position: 'relative',
+  zIndex: 2,
+});
+
 function homeRowClass({ active }: { active: boolean }) {
   return css({
     display: 'flex',
@@ -734,7 +747,6 @@ function homeRowClass({ active }: { active: boolean }) {
     gap: '10px',
     width: '100%',
     padding: '7px 10px',
-    marginBottom: '8px',
     borderRadius: '8px',
     border: '1px solid',
     borderColor: active ? 'var(--line-strong)' : 'transparent',
