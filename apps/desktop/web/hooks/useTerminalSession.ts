@@ -18,6 +18,7 @@ import {
   readTerminalRows,
   recordRenderMetrics,
   recordTerminalDiagnostics,
+  pasteTerminalText,
   resizeTerminal,
   savePastedImage,
   setTerminalFrontendActive,
@@ -26,6 +27,7 @@ import {
   writeTerminalInput,
 } from '../services/terminalApi';
 import {
+  deriveActiveTerminalClaim,
   getUserHome,
   errorMessage,
   formatDroppedPaths,
@@ -62,6 +64,7 @@ import {
 import { DEFAULT_TERMINAL_FONT_SIZE } from '../terminal/terminalMetrics';
 import { useNavigationStore, useShellStore, useTerminalStore, useUiStore } from '../store';
 import { TERMINAL_THEME } from '../themes/terminalTheme';
+import { CRT_GLASS_PRESET } from '../terminalCrt';
 import { openExternalUrl } from '../services/openApi';
 import {
   createTerminalController,
@@ -427,6 +430,10 @@ export function useTerminalSession(params: {
       // persisted font-size effect (below) re-derives the cell once the shell
       // snapshot loads and on every change; the resize observer fits the grid.
       surface: defaultTerminalSurface(),
+      // Seed the CRT effect from the persisted setting so a workspace with it on
+      // mounts warped instead of flashing flat then warping (the effect below
+      // keeps it in sync on every change).
+      crt: (useShellStore.getState().shell.workspace.crtEnabled ?? false) ? CRT_GLASS_PRESET : null,
       onScrollbackRowCount: count => useTerminalStore.getState().setScrollbackRowCount(count),
       onLiveFollow: live => {
         lastLiveFollowRef.current = live;
@@ -583,6 +590,12 @@ export function useTerminalSession(params: {
   // Reactive scroll metrics for the overlay scrollbar (the controller publishes
   // them, deduped, on every paint).
   const terminalScroll = useTerminalStore(s => s.terminalScroll);
+  // The displayed session's terminal binding (its live PTY id + input-armed
+  // state), tracked reactively so the active-terminal claim effect below re-runs
+  // when this session launches, arms, or exits.
+  const selectedBinding = useTerminalStore(s =>
+    selectedSessionId ? s.sessionTerminalBindings[selectedSessionId] : undefined,
+  );
 
   // Keep the controller pointed at the live DOM elements (they mount/unmount as
   // the terminal surface shows/hides), and bind/unbind the pointer island to the
@@ -609,8 +622,8 @@ export function useTerminalSession(params: {
 
   // Keep the terminal colors matched to the active shell theme. On mount and on
   // every light/dark switch: repaint the live canvas with the theme's default
-  // fg/bg (B), and push the same colors to the backend so Ghostty's reported
-  // defaults + any CLI that queries OSC 10/11 agree with the shell (D).
+  // fg/bg, and push the same colors to the backend so Ghostty's reported
+  // defaults and any CLI that queries terminal colors agree with the shell.
   const theme = useUiStore(s => s.theme);
   useEffect(() => {
     const colors = TERMINAL_THEME[theme] ?? TERMINAL_THEME.dark;
@@ -639,6 +652,15 @@ export function useTerminalSession(params: {
     return () => query.removeEventListener('change', onChange);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- controller + refs are stable
   }, [terminalFontSize]);
+
+  // Apply the opt-in CRT post-process to the live renderer whenever the persisted
+  // setting changes. The controller toggles it in place (and repaints) so it
+  // takes effect on the open terminal without a remount.
+  const crtEnabled = useShellStore(s => s.shell.workspace.crtEnabled) ?? false;
+  useEffect(() => {
+    controller.setCrt(crtEnabled ? CRT_GLASS_PRESET : null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- controller is stable
+  }, [crtEnabled]);
 
   // Switching the displayed session drops any active selection/hover. Without
   // this, a selection made in session A would pin session B's viewport
@@ -677,6 +699,48 @@ export function useTerminalSession(params: {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creationMode, selectedSessionId, surfaceMode]);
+
+  // Single source of truth for the terminal "paint + input" claim. activeTerminalId
+  // is a singleton (one canvas, one controller): it must always point at the
+  // displayed session's terminal and at nothing when no session is displayed.
+  // Deriving it from the displayed session here, instead of leaving each
+  // navigation/launch/teardown path to maintain it by hand, is what guarantees the
+  // claim is RELEASED when you leave a live session for a dashboard. Without this,
+  // the session you walked away from kept holding the claim, so its frame stream
+  // ingested as the active paint target against an unmounted canvas: a perpetual
+  // history-row fetch storm (see terminal-diagnostics) that also left the view
+  // black on return. activateSession/launchSession still set the same value a beat
+  // earlier for an instant switch; this effect is the authority that adds the
+  // missing release and repairs any drift between the claim and what is displayed.
+  const claimSyncedTerminalIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const claim = deriveActiveTerminalClaim({
+      surfaceMode,
+      creationMode,
+      selectedSessionId,
+      binding: selectedBinding,
+    });
+    const store = useTerminalStore.getState();
+    if (store.activeTerminalId !== claim.terminalId) {
+      store.setActiveTerminalId(claim.terminalId);
+    }
+    if (store.terminalInputArmed !== claim.inputArmed) {
+      store.setTerminalInputArmed(claim.inputArmed);
+    }
+    // Refresh the backend's foreground-terminal priority only when the claimed
+    // terminal itself changes, not on every input-armed toggle.
+    if (claimSyncedTerminalIdRef.current !== claim.terminalId) {
+      claimSyncedTerminalIdRef.current = claim.terminalId;
+      syncTerminalFrontendActivity(claim.terminalId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- syncTerminalFrontendActivity is a stable closure over refs
+  }, [
+    surfaceMode,
+    creationMode,
+    selectedSessionId,
+    selectedBinding?.terminalId,
+    selectedBinding?.inputArmed,
+  ]);
 
   // Resize the surface to the viewport and tell the backend to match. Bound to
   // the viewport through a callback ref (`attachViewport`) instead of an effect
@@ -747,7 +811,8 @@ export function useTerminalSession(params: {
     const pending = pendingBackendResizeRef.current;
     pendingBackendResizeRef.current = null;
     if (!pending) return;
-    void resizeTerminal(pending.terminalId, pending.cols, pending.rows).catch(error => {
+    const anchor = controller.getResizeAnchor();
+    void resizeTerminal(pending.terminalId, pending.cols, pending.rows, anchor).catch(error => {
       writeLog(`Terminal resize failed: ${errorMessage(error)}`);
     });
   }
@@ -1251,7 +1316,10 @@ export function useTerminalSession(params: {
     return true;
   }
 
-  async function launchSession(session: ShellSession, options: { manageBusy?: boolean } = {}) {
+  async function launchSession(
+    session: ShellSession,
+    options: { manageBusy?: boolean; initialPrompt?: string } = {},
+  ) {
     const store = useTerminalStore.getState();
     const existing = store.sessionTerminalBindings[session.id];
     if (existing) {
@@ -1290,6 +1358,10 @@ export function useTerminalSession(params: {
         terminalId,
         cols: surface.cols,
         rows: surface.rows,
+        // Dispatch delivers the spoken/typed task here: the backend passes it to
+        // the CLI as a launch arg where supported, else types it into the PTY
+        // once running. Omitted for normal launches.
+        ...(options.initialPrompt ? { initialPrompt: options.initialPrompt } : {}),
       };
       store.setSessionTerminalBindings(current => ({
         ...current,
@@ -1375,6 +1447,33 @@ export function useTerminalSession(params: {
         await writeTerminalInput(terminalId, input);
       } catch (error) {
         writeLog(`Terminal input failed: ${errorMessage(error)}`);
+      }
+    };
+    let next = previous.then(send, send);
+    next = next.finally(() => {
+      if (queues.get(terminalId) === next) {
+        queues.delete(terminalId);
+      }
+    });
+    queues.set(terminalId, next);
+    await next;
+  }
+
+  async function sendTerminalPaste(text: string) {
+    const terminalId = useTerminalStore.getState().activeTerminalId;
+    if (!terminalId || !inputReady() || text.length === 0) return;
+    const selectedSessionId = useNavigationStore.getState().selectedSessionId;
+    const selectedBinding = selectedSessionId
+      ? useTerminalStore.getState().sessionTerminalBindings[selectedSessionId]
+      : undefined;
+    if (!selectedBinding || selectedBinding.terminalId !== terminalId) return;
+    const queues = terminalInputQueuesRef.current;
+    const previous = queues.get(terminalId) ?? Promise.resolve();
+    const send = async () => {
+      try {
+        await pasteTerminalText(terminalId, text);
+      } catch (error) {
+        writeLog(`Terminal paste failed: ${errorMessage(error)}`);
       }
     };
     let next = previous.then(send, send);
@@ -1525,34 +1624,25 @@ export function useTerminalSession(params: {
     commitTerminalTextInput(value);
   }
 
-  // Send pasted text to the terminal, wrapping in bracketed-paste markers when
-  // the app requested that mode. Shared by the paste event + the menu action.
+  // Send pasted text to the terminal. The backend owns sanitization and
+  // bracketed-paste wrapping because it has the live libghostty modes.
   async function pasteTextToTerminal(text: string) {
     if (!inputReady() || !text) return;
     resumeLiveForUserInput();
-    const input = controller.getLastFrameModes()?.bracketedPaste
-      ? `\x1b[200~${text}\x1b[201~`
-      : text;
-    await sendTerminalInput(input);
+    await sendTerminalPaste(text);
   }
 
   // Insert text (a dropped file's quoted path) into a specific session's
   // terminal, which need not be the active one (drag-to-tab routes to another
-  // session). Returns whether it reached an armed terminal. Bracketed-paste
-  // wrapping is applied only for the active session, whose live frame modes we
-  // know; for a background session we send the path text as-is.
+  // session). Returns whether it reached an armed terminal. The backend applies
+  // the live paste mode for both foreground and background terminals.
   async function insertTextIntoSession(sessionId: string, text: string): Promise<boolean> {
     if (!text) return false;
     const store = useTerminalStore.getState();
     const binding = store.sessionTerminalBindings[sessionId];
     if (!binding?.inputArmed) return false;
-    const isActive = binding.terminalId === store.activeTerminalId;
-    const payload =
-      isActive && controller.getLastFrameModes()?.bracketedPaste
-        ? `\x1b[200~${text}\x1b[201~`
-        : text;
     try {
-      await writeTerminalInput(binding.terminalId, payload);
+      await pasteTerminalText(binding.terminalId, text);
       return true;
     } catch (error) {
       writeLog(`Drop insert failed: ${errorMessage(error)}`);
@@ -1883,7 +1973,7 @@ export function useTerminalSession(params: {
   }
 
   // Newly-created sessions launch as soon as the terminal surface mounts.
-  function autostartSession(session: ShellSession) {
+  function autostartSession(session: ShellSession, options: { initialPrompt?: string } = {}) {
     let attempts = 0;
     const tryLaunch = () => {
       if (!canvasRef.current || !surfaceViewportRef.current) {
@@ -1896,7 +1986,7 @@ export function useTerminalSession(params: {
         return;
       }
       controller.paintCurrent(useNavigationStore.getState().selectedSessionId);
-      void launchSession(session).catch(error =>
+      void launchSession(session, { initialPrompt: options.initialPrompt }).catch(error =>
         writeLog(`Autostart session failed: ${errorMessage(error)}`),
       );
     };

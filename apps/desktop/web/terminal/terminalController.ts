@@ -1,4 +1,5 @@
 import { createTerminalGpuRenderer } from '../terminal-gpu-renderer';
+import type { CrtParams } from '../terminalCrt';
 import {
   SCROLL_FOLLOW_EPSILON_PX,
   cloneTerminalRow,
@@ -12,8 +13,8 @@ import type {
   TerminalCursor,
   TerminalFrame,
   TerminalModes,
-  TerminalOverlay,
   TerminalPaintCursorSample,
+  TerminalOverlay,
   TerminalPaintReason,
   TerminalPaintSample,
   TerminalRenderer,
@@ -66,21 +67,26 @@ import {
 // canvas edge. Cells with an explicit background, glyphs, the cursor, and the
 // selection still paint on the canvas; only the default fill defers to CSS. The
 // theme color is still handed to the renderer (for inverse/cursor glyphs) and to
-// Ghostty via OSC 10/11, so any CLI that queries its background sees the surface.
-const LIVE_TAIL_ALLOWED_TOP_GAP_ROWS = 2;
+// Ghostty's embedder defaults, so any CLI that queries its background sees the
+// surface.
 const TERMINAL_BACKGROUND_OPACITY = 0;
+// Overscan rows when the CRT effect is on. A couple of rows (vs ~a full screen)
+// keeps the painted canvas at ~the viewport so the screen-space barrel warp
+// stays anchored to the viewport instead of sliding with a tall scrolled canvas.
+const CRT_OVERSCAN_ROWS = 2;
+const LIVE_TAIL_ALLOWED_TOP_GAP_ROWS = 2;
 // Backend resize redraws can arrive as sparse full or partial frames for several
 // animation frames, especially in the canvas fallback under resize churn. Keep
 // the guard long enough to bridge that redraw window without letting a transient
 // sparse frame clear stable rows.
 const RESIZE_REFLOW_BLANK_FRAME_GUARD_MS = 1_500;
+
 type CursorCoordinateSpace = 'buffer' | 'frame';
 
 interface SessionCursorFallback {
   space: CursorCoordinateSpace;
   cursor: TerminalCursor;
 }
-
 
 export interface TerminalDomRefs {
   canvas: HTMLCanvasElement | null;
@@ -118,6 +124,16 @@ export interface TerminalControllerOptions {
     surface: TerminalSurface,
     displayRows: number,
   ) => TerminalRenderer | Promise<TerminalRenderer>;
+  // Initial CRT post-process params (null/omitted = flat). Live changes go
+  // through the controller's setCrt; this just avoids a flat→warp flash when the
+  // setting is already on at mount.
+  crt?: CrtParams | null;
+  // Fixed scroll inset (px) override. Production omits this and uses the themed
+  // chrome inset (terminalInsetPx), which reserves room under the floating tab
+  // band and above the bottom fade. Tests pin a known inset so the scroll/paint
+  // geometry is asserted in the same non-degenerate regime production runs in
+  // (real viewport height is far larger than the inset).
+  insetPx?: { top: number; bottom: number };
 }
 
 export interface TerminalHistoryRowsRequest {
@@ -164,8 +180,8 @@ export type TerminalControllerTraceEvent =
       frameDirty?: TerminalFrame['dirty'];
       frameRows: number;
       rowsPainted: number;
-      cursor?: TerminalPaintCursorSample;
       cellsPainted: number;
+      cursor?: TerminalPaintCursorSample;
     }
   | {
       kind: 'history_rows_request';
@@ -242,6 +258,14 @@ export function createTerminalController(options: TerminalControllerOptions) {
   // The active theme's terminal colors. Seeded to dark (the app boots dark); the
   // hook pushes the live theme via setThemeColors on mount and on every switch.
   let themeColors: TerminalThemeColors = TERMINAL_THEME.dark;
+  // Active CRT post-process params (null = flat). Read by the renderer factory on
+  // every (re)mount and reported to the interaction layer for pointer unwarp.
+  let crtParams: CrtParams | null = options.crt ?? null;
+  // Resolve the scroll inset for a surface: a fixed test override when provided,
+  // otherwise the themed chrome inset. Single source so every paint/scroll/anchor
+  // call site agrees within a frame.
+  const insetOverride = options.insetPx ?? null;
+  const insetFor = (forSurface: TerminalSurface) => insetOverride ?? terminalInsetPx(forSurface);
   const createRenderer =
     options.createRenderer ??
     ((canvas, surface, displayRows) =>
@@ -252,6 +276,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
         backgroundOpacity: TERMINAL_BACKGROUND_OPACITY,
         background: themeColors.background,
         foreground: themeColors.foreground,
+        crt: crtParams,
       }));
 
   let els: TerminalDomRefs = { canvas: null, viewport: null, spacer: null };
@@ -268,8 +293,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
   let needsFullPaint = true;
   let lastStartRow: number | null = null;
   let lastDisplayRows: number | null = null;
-  let lastPaintedCursorAbsoluteRow: number | null = null;
   let lastOverlayRows = new Set<number>();
+  let lastPaintedCursorAbsoluteRow: number | null = null;
   let scheduledPaint: number | null = null;
   let scheduledPostRemountPaint: number | null = null;
   let lastBufferCacheMissTraceKey = '';
@@ -313,8 +338,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
   const sessionGenerations: Record<string, number> = {};
   const sessionViews: Record<string, SessionTerminalView> = {};
   const latestFrames: Record<string, TerminalFrame> = {};
-  const sessionCursorFallbacks: Record<string, SessionCursorFallback> = {};
   const sessionBuffers: Record<string, TerminalBufferState> = {};
+  const sessionCursorFallbacks: Record<string, SessionCursorFallback> = {};
   const resizeReflowPendingSessions: Record<string, boolean> = {};
   const resizeReflowGuardTimers: Record<string, number> = {};
 
@@ -323,6 +348,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (TERMINAL_TRACE_FRESH_PROBE !== null) timed.freshProbe = TERMINAL_TRACE_FRESH_PROBE;
     onTrace?.(timed);
   }
+
   function rememberSessionCursor(
     sessionId: string,
     space: CursorCoordinateSpace,
@@ -629,7 +655,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   function updateSpacer(totalRows: number, forSurface: TerminalSurface) {
     const spacer = els.spacer;
     if (!spacer) return;
-    const inset = terminalInsetPx(forSurface);
+    const inset = insetFor(forSurface);
     const contentHeight = Math.max(totalRows, forSurface.rows) * forSurface.cellHeight;
     spacer.style.height = `${contentHeight + inset.top + inset.bottom}px`;
     spacer.style.width = `${forSurface.cols * forSurface.cellWidth}px`;
@@ -642,7 +668,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   ): TerminalScrollMetrics {
     const viewport = els.viewport;
     const cellHeight = forSurface.cellHeight;
-    const inset = terminalInsetPx(forSurface);
+    const inset = insetFor(forSurface);
     const totalRows = Math.max(buffer.totalRows, forSurface.rows);
     const viewPx = Math.max(cellHeight, viewport?.clientHeight ?? forSurface.rows * cellHeight);
     const totalPx = Math.max(
@@ -699,14 +725,23 @@ export function createTerminalController(options: TerminalControllerOptions) {
       viewport?.clientHeight ?? forSurface.rows * forSurface.cellHeight,
     );
     const scrollTop = viewport?.scrollTop ?? 0;
-    const inset = terminalInsetPx(forSurface);
+    const inset = insetFor(forSurface);
     // Overscan ~one viewport above and below the visible area (not a fixed handful
     // of rows), so a fast scroll paints into already-warm rows instead of flashing
     // placeholders before the next frame catches up. The painted window is the
     // visible rows plus an overscan screen on each side (~3 screens total), which
     // the GPU renderer handles comfortably and which keeps scroll-back smooth.
+    //
+    // The CRT post-process is a SCREEN-space warp, so the painted canvas must be
+    // ~the viewport (not 3 screens) or the barrel bulge centers on the tall
+    // canvas and slides as you scroll. With CRT on we drop to a couple of
+    // overscan rows so the canvas tracks the viewport and the warp stays
+    // anchored; scroll re-windows + repaints each frame instead of riding a tall
+    // CSS-scrolled canvas.
     const visibleRowsForWindow = Math.ceil(viewportHeight / forSurface.cellHeight);
-    const overscanRows = Math.max(OVERSCAN_ROWS, visibleRowsForWindow);
+    const overscanRows = crtParams
+      ? CRT_OVERSCAN_ROWS
+      : Math.max(OVERSCAN_ROWS, visibleRowsForWindow);
     const targetDisplayRows = Math.max(
       forSurface.rows,
       visibleRowsForWindow + overscanRows * 2,
@@ -958,7 +993,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   }
 
   function positionCanvasForStartRow(startRow: number, forSurface: TerminalSurface) {
-    const inset = terminalInsetPx(forSurface);
+    const inset = insetFor(forSurface);
     if (els.canvas) {
       els.canvas.style.top = `${startRow * forSurface.cellHeight + inset.top}px`;
       els.canvas.style.transform = 'none';
@@ -1128,6 +1163,16 @@ export function createTerminalController(options: TerminalControllerOptions) {
     dirtyAbsoluteRows?: ReadonlySet<number>,
   ) {
     if (!frame) return;
+    // A renderer requires a mounted canvas. When the terminal surface is
+    // unmounted (the displayed session switched to a non-terminal view like a
+    // dashboard, so AppLayout dropped <TerminalSurface>), there is nothing to
+    // paint into and no visible window to prefetch history for. Skip rather than
+    // compute a degenerate window (a null viewport reads scrollTop 0, pinning the
+    // window to row 0) whose every miss would fire a history-row fetch for an
+    // off-screen session: the perpetual buffer_cache_miss storm seen in the
+    // diagnostics. The per-session buffer is still kept current by ingestFrames;
+    // the next paint after the surface remounts repaints from it.
+    if (!els.canvas) return;
     if (activeBuffer && frame === lastComposite) {
       bufferPaintWindow(activeBuffer, forSurface, reason, dirtyAbsoluteRows);
       return;
@@ -1138,7 +1183,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       viewport?.clientHeight ?? forSurface.rows * forSurface.cellHeight,
     );
     const scrollTop = viewport?.scrollTop ?? 0;
-    const inset = terminalInsetPx(forSurface);
+    const inset = insetFor(forSurface);
 
     let paintWindow = computePaintWindow({
       frame,
@@ -1253,7 +1298,6 @@ export function createTerminalController(options: TerminalControllerOptions) {
       rendererStats,
     });
     trace({
-      cursor,
       kind: 'paint',
       backend: renderer.capabilities.backend,
       reason,
@@ -1265,6 +1309,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       frameRows: frame.rows.length,
       rowsPainted: rendererStats?.rowsPainted ?? fallbackRows?.length ?? 0,
       cellsPainted: rendererStats?.cellsPainted ?? fallbackCells,
+      cursor,
     });
   }
 
@@ -1546,10 +1591,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
     lastFrame = view.lastFrame;
     lastComposite = view.compositeFrame;
     liveFollow = view.liveFollow;
+    rememberActiveViewCursor(view, buffer);
     recomputeLinks();
     onScrollbackRowCount(view.rowCount);
     let autoFollow = shouldAutoFollow();
-    rememberActiveViewCursor(view, buffer);
     if (autoFollow) autoScrolling = true;
     updateSpacer(buffer?.totalRows ?? view.compositeFrame.rows.length, forSurface);
     if (!autoFollow && buffer && options.restoreScrollForSession) {
@@ -1601,10 +1646,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
     lastFrame = view.lastFrame;
     lastComposite = view.compositeFrame;
     liveFollow = view.liveFollow;
+    rememberActiveViewCursor(view, buffer);
     onScrollbackRowCount(view.rowCount);
     onLiveFollow(view.liveFollow);
     const autoFollow = shouldAutoFollow();
-    rememberActiveViewCursor(view, buffer);
     if (autoFollow) autoScrolling = true;
     updateSpacer(buffer.totalRows, forSurface);
     const alignedToTail = alignLiveViewportToTail();
@@ -1635,7 +1680,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
 
     const viewport = els.viewport;
     if (!viewport) return false;
-    const inset = terminalInsetPx(forSurface);
+    const inset = insetFor(forSurface);
     const viewportStart = Math.max(
       0,
       Math.min(
@@ -1652,10 +1697,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
   function clear(forSurface: TerminalSurface = surface) {
     disposeRenderer('clear');
     activeBuffer = null;
+    if (activeSessionId) delete sessionCursorFallbacks[activeSessionId];
     clearAllResizeReflowPending();
     needsFullPaint = true;
     lastStartRow = null;
-    if (activeSessionId) delete sessionCursorFallbacks[activeSessionId];
     lastDisplayRows = null;
     clearInteractionState();
     const view = emptyTerminalView(forSurface);
@@ -1670,10 +1715,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
   function resetScrollback() {
     activeBuffer = null;
     lastComposite = null;
+    if (activeSessionId) delete sessionCursorFallbacks[activeSessionId];
     clearAllResizeReflowPending();
     needsFullPaint = true;
     lastStartRow = null;
-    if (activeSessionId) delete sessionCursorFallbacks[activeSessionId];
     lastDisplayRows = null;
     clearInteractionState();
     setLiveFollow(true);
@@ -2013,7 +2058,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
   }
 
   function scrollBufferedToRow(row: number): boolean {
-    const inset = terminalInsetPx(surface);
+    const inset = insetFor(surface);
     return scrollBufferedToTop(row * surface.cellHeight + inset.top);
   }
 
@@ -2069,7 +2114,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     if (!sessionId || liveFollow) return;
     const viewport = els.viewport;
     if (!activeBuffer || !viewport) return;
-    const inset = terminalInsetPx(surface);
+    const inset = insetFor(surface);
     const topPosition = Math.max(
       0,
       Math.floor((viewport.scrollTop - inset.top) / surface.cellHeight),
@@ -2113,7 +2158,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
       // (rows evicted past the backend's floor clamp to the oldest available), then
       // clamp to the tail so a stale anchor now past a shorter tail lands at the
       // bottom rather than beyond it.
-      const inset = terminalInsetPx(forSurface);
+      const inset = insetFor(forSurface);
       const targetTop = Math.max(0, anchorId - buffer.oldestId) * forSurface.cellHeight + inset.top;
       viewport.scrollTop = Math.max(0, Math.min(maxTop, targetTop));
       return false;
@@ -2248,6 +2293,22 @@ export function createTerminalController(options: TerminalControllerOptions) {
         paintWindow(lastComposite, surface, 'frame');
       }
     },
+    // Toggle or retune the CRT post-process. Toggling on/off recreates the
+    // renderer (the painted window resizes between ~viewport for CRT and ~3
+    // screens for flat, so the warp anchors to the viewport), then full-repaints.
+    // A param-only change while active retunes the live renderer in place.
+    setCrt(params: CrtParams | null) {
+      const toggled = (crtParams != null) !== (params != null);
+      crtParams = params;
+      if (!els.canvas) return;
+      if (toggled) {
+        disposeRenderer('crt_toggle');
+        needsFullPaint = true;
+        paintWindow(lastComposite, surface, 'frame');
+      } else if (renderer?.setCrt) {
+        renderer.setCrt(params);
+      }
+    },
     requireRenderer(): TerminalRenderer {
       const active = renderer ?? mountRenderer();
       if (!active) throw new Error('Terminal renderer is not mounted yet');
@@ -2264,8 +2325,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete sessionFollowIntents[sessionId];
       delete sessionViews[sessionId];
       delete sessionGenerations[sessionId];
-      if (activeSessionId === sessionId) liveGeneration = 0;
       delete sessionCursorFallbacks[sessionId];
+      if (activeSessionId === sessionId) liveGeneration = 0;
       const view = viewWithLiveFollow(emptyTerminalView(surface), sessionId);
       sessionViews[sessionId] = view;
       sessionBuffers[sessionId] = createTerminalBuffer(surface);
@@ -2290,8 +2351,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
       delete sessionFollowIntents[sessionId];
       delete sessionScrollAnchors[sessionId];
       delete sessionGenerations[sessionId];
-      clearSessionResizeReflowPending(sessionId);
       delete sessionCursorFallbacks[sessionId];
+      clearSessionResizeReflowPending(sessionId);
       if (activeSessionId === sessionId) {
         activeSessionId = null;
         liveGeneration = 0;
@@ -2334,11 +2395,29 @@ export function createTerminalController(options: TerminalControllerOptions) {
     getStartRow(): number {
       return lastStartRow ?? 0;
     },
+    // Active CRT barrel curvature (0 when off) so the interaction layer can
+    // unwarp the pointer to match what the warped canvas displays.
+    getCrtCurvature(): number {
+      return crtParams?.curvature ?? 0;
+    },
     // The backend's stable-id floor (rows evicted so far). The hook adds this to a
     // buffer position to address a history fetch by stable id, and the band reply
     // is converted back through it on merge; see decisions.md D8.
     getOldestId(): number {
       return activeBuffer?.oldestId ?? 0;
+    },
+    getResizeAnchor(): { id: number; col: number } | null {
+      if (liveFollow || !activeBuffer || !els.viewport) return null;
+      if (activeBuffer.modes?.alternateScreen) return null;
+      const inset = insetFor(surface);
+      const topPosition = Math.max(
+        0,
+        Math.floor((els.viewport.scrollTop - inset.top) / surface.cellHeight),
+      );
+      return {
+        id: activeBuffer.oldestId + topPosition,
+        col: 0,
+      };
     },
     getComposite(): TerminalFrame | null {
       if (activeBuffer) {

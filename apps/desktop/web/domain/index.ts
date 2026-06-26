@@ -12,6 +12,8 @@ export * from './activity';
 export * from './palette';
 export * from './shortcuts';
 export * from './terminalInput';
+export * from './terminalClaim';
 export * from './shellPath';
 export * from './connection';
 export * from './speech';
+export * from './dispatch';

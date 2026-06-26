@@ -138,6 +138,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -169,6 +170,103 @@ describe('createTerminalController', () => {
     expect(spacer.style.width).toBe('640px');
   });
 
+  it('reports the top visible stable row as a resize anchor while scrolled back', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1210, scrollTop: 130 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 120,
+      viewportRows: surface.rows,
+      viewportOffset: 116,
+      oldestId: 50,
+      rowsById: rowRange(116, 120),
+      cachedRanges: [{ start: 116, end: 120 }],
+      atBottom: false,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 116,
+      liveFollow: false,
+    };
+
+    controller.applyView(view, surface, buffer);
+    viewport.scrollTop = 130;
+
+    expect(controller.getResizeAnchor()).toEqual({ id: 62, col: 0 });
+  });
+
+  it('does not report a resize anchor while following live or in alternate screen', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 1210, scrollTop: 130 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const followingBuffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 120,
+      viewportRows: surface.rows,
+      viewportOffset: 116,
+      oldestId: 50,
+      rowsById: rowRange(116, 120),
+      cachedRanges: [{ start: 116, end: 120 }],
+      atBottom: true,
+    };
+    controller.applyView(
+      {
+        lastFrame: null,
+        compositeFrame: frameFromBufferSnapshot(followingBuffer),
+        scrollbackRows: [],
+        rowCount: 116,
+        liveFollow: true,
+      },
+      surface,
+      followingBuffer,
+    );
+    expect(controller.getResizeAnchor()).toBeNull();
+
+    const alternateBuffer: TerminalBufferState = {
+      ...followingBuffer,
+      modes: { alternateScreen: true },
+      atBottom: false,
+    };
+    controller.applyView(
+      {
+        lastFrame: null,
+        compositeFrame: frameFromBufferSnapshot(alternateBuffer),
+        scrollbackRows: [],
+        rowCount: 116,
+        liveFollow: false,
+      },
+      surface,
+      alternateBuffer,
+    );
+    viewport.scrollTop = 130;
+    expect(controller.getResizeAnchor()).toBeNull();
+  });
+
   it('pins live follow to the tail before painting a buffered view', () => {
     const rafCallbacks: FrameRequestCallback[] = [];
     vi.stubGlobal(
@@ -182,6 +280,7 @@ describe('createTerminalController', () => {
     const onLiveFollow = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow,
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -230,6 +329,7 @@ describe('createTerminalController', () => {
     const onLiveFollow = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow,
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -265,6 +365,7 @@ describe('createTerminalController', () => {
   it('does not report an empty seeded launch view as renderable content', () => {
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -280,6 +381,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -300,6 +402,7 @@ describe('createTerminalController', () => {
     const visibleSurface = { ...surface, rows: 6 };
     const controller = createTerminalController({
       surface: visibleSurface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -339,6 +442,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -365,6 +469,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -410,6 +515,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -458,6 +564,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -504,6 +611,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -543,6 +651,7 @@ describe('createTerminalController', () => {
     const onLiveFollow = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow,
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -656,6 +765,7 @@ describe('createTerminalController', () => {
     const onPaintSample = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onPaintSample,
@@ -712,6 +822,7 @@ describe('createTerminalController', () => {
     });
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -773,6 +884,7 @@ describe('createTerminalController', () => {
     });
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -837,6 +949,7 @@ describe('createTerminalController', () => {
     const createRenderer = vi.fn(() => rendererPromise);
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -879,6 +992,7 @@ describe('createTerminalController', () => {
     });
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: vi.fn(() => rendererPromise),
@@ -915,6 +1029,7 @@ describe('createTerminalController', () => {
     const createRenderer = vi.fn(() => rendererPromise);
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -962,6 +1077,7 @@ describe('createTerminalController', () => {
     );
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -1006,6 +1122,7 @@ describe('createTerminalController', () => {
     });
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: vi.fn(() => rendererPromise),
@@ -1054,6 +1171,7 @@ describe('createTerminalController', () => {
     );
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -1088,6 +1206,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -1126,6 +1245,7 @@ describe('createTerminalController', () => {
     const dispose = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1161,6 +1281,7 @@ describe('createTerminalController', () => {
     });
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -1196,6 +1317,7 @@ describe('createTerminalController', () => {
     });
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -1216,6 +1338,7 @@ describe('createTerminalController', () => {
   it('focuses the terminal text input before falling back to the canvas', () => {
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -1242,6 +1365,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -1409,6 +1533,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1453,6 +1578,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1505,6 +1631,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1556,6 +1683,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1607,6 +1735,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1670,6 +1799,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1721,10 +1851,7 @@ describe('createTerminalController', () => {
         position: { row: 1, col: 6 },
       }),
     );
-    expect(painted.rows.map(row => row.index).sort((left, right) => left - right)).toEqual([
-      1,
-      2,
-    ]);
+    expect(painted.rows.map(row => row.index).sort((left, right) => left - right)).toEqual([1, 2]);
   });
 
   it('retains a focused alternate-screen cursor after a hidden cursor frame', () => {
@@ -1733,6 +1860,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1780,12 +1908,353 @@ describe('createTerminalController', () => {
     expect(painted.rows.map(row => row.index)).toContain(2);
   });
 
+  it('paints a clamped one-past-tail cursor when only the cursor changes', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'top'), row(1, '>'), row(2, ''), row(3, 'bottom')]),
+        cursor: { visible: false, row: 0, col: 0, position: { row: 0, col: 0 } },
+        scrollback: {
+          totalRows: 20,
+          viewportOffset: 16,
+          viewportRows: surface.rows,
+          atBottom: true,
+        },
+      },
+      true,
+    );
+    paintFrame.mockClear();
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([]),
+        dirty: 'partial',
+        cursor: {
+          visible: true,
+          row: surface.rows,
+          col: surface.cols,
+          position: { row: surface.rows, col: surface.cols },
+        },
+        scrollback: {
+          totalRows: 20,
+          viewportOffset: 16,
+          viewportRows: surface.rows,
+          atBottom: true,
+        },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.dirty).toBe('partial');
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 11,
+        col: surface.cols - 1,
+        position: { row: 11, col: surface.cols - 1 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(11);
+  });
+
+  it('keeps a Codex-like live-tail hardware cursor inside the painted buffer window', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const onMissingLiveRows = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 60, scrollTop: 20 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'top'), row(1, '>'), row(2, ''), row(3, 'bottom')]),
+        cursor: { visible: true, row: 2, col: 2, position: { row: 2, col: 2 } },
+        scrollback: {
+          totalRows: 5,
+          viewportOffset: 1,
+          viewportRows: surface.rows,
+          atBottom: true,
+        },
+      },
+      true,
+    );
+
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
+    const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 3,
+        col: 2,
+        position: { row: 3, col: 2 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(3);
+  });
+
+  it('keeps a one-past-tail Codex cursor visible in a buffered live window', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 40, scrollHeight: 210, scrollTop: 170 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    controller.ingestFrame(
+      'session-1',
+      {
+        ...frame([row(0, 'top'), row(1, '>'), row(2, ''), row(3, 'bottom')]),
+        cursor: {
+          visible: true,
+          row: surface.rows,
+          col: surface.cols,
+          position: { row: surface.rows, col: surface.cols },
+        },
+        scrollback: {
+          totalRows: 20,
+          viewportOffset: 16,
+          viewportRows: surface.rows,
+          atBottom: true,
+        },
+      },
+      true,
+    );
+
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 11,
+        col: surface.cols - 1,
+        position: { row: 11, col: surface.cols - 1 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(11);
+  });
+
+  it('paints a resumed Codex cursor even when live-tail row coverage is missing', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const onMissingLiveRows = vi.fn(() => true);
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = {
+      clientHeight: 40,
+      scrollHeight: 20_100,
+      scrollTop: 20_060,
+    } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 2_009,
+      viewportRows: surface.rows,
+      viewportOffset: 2_005,
+      rowsById: new Map([[0, row(0, 'old')]]),
+      cachedRanges: [{ start: 0, end: 1 }],
+      cursor: { visible: true, row: 2_008, col: 2, position: { row: 2_008, col: 2 } },
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 2_005,
+      liveFollow: true,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalledWith(
+      expect.objectContaining({
+        startRow: 1_997,
+        rowCount: 12,
+        totalRows: 2_009,
+      }),
+    );
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 11,
+        col: 2,
+        position: { row: 11, col: 2 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(11);
+  });
+
+  it('does not fetch history rows for an active session whose surface is unmounted', () => {
+    // The off-screen storm: a live session is left for a dashboard, so its
+    // <TerminalSurface> (and canvas) unmounts, but its frame stream keeps arriving
+    // and ingesting as active. With no canvas there is nothing to paint and no
+    // visible window, so it must NOT keep firing history-row fetches (which, with a
+    // null viewport pinning the window to row 0, can never resolve). This is the
+    // same applyView that fires onMissingLiveRows when a canvas is attached (the
+    // test above), so the guard, not the buffer shape, is what makes it inert here.
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const onMissingLiveRows = vi.fn(() => true);
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+    });
+    // Deliberately NO controller.attach(): the terminal surface is unmounted, so
+    // els.canvas / els.viewport are null.
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 2_009,
+      viewportRows: surface.rows,
+      viewportOffset: 2_005,
+      rowsById: new Map([[0, row(0, 'old')]]),
+      cachedRanges: [{ start: 0, end: 1 }],
+      cursor: { visible: true, row: 2_008, col: 2, position: { row: 2_008, col: 2 } },
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 2_005,
+      liveFollow: true,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).not.toHaveBeenCalled();
+  });
+
+  it('keeps a blank hardware cursor row in the live-tail fallback window', () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+
+    const paintFrame = vi.fn();
+    const onMissingLiveRows = vi.fn(() => true);
+    const controller = createTerminalController({
+      surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
+      onScrollbackRowCount: vi.fn(),
+      onLiveFollow: vi.fn(),
+      onMissingLiveRows,
+      createRenderer: (_canvas, _surface, displayRows) => ({
+        ...fakeRenderer(displayRows),
+        paintFrame,
+      }),
+    });
+    const canvas = { style: {} } as HTMLCanvasElement;
+    const viewport = { clientHeight: 60, scrollHeight: 210, scrollTop: 0 } as HTMLDivElement;
+    const spacer = { style: {} } as HTMLDivElement;
+    controller.attach({ canvas, viewport, spacer });
+
+    const buffer: TerminalBufferState = {
+      ...createTerminalBuffer(surface),
+      totalRows: 20,
+      viewportRows: surface.rows,
+      viewportOffset: 16,
+      rowsById: new Map([
+        [16, row(16, '16')],
+        [17, row(17, '')],
+        [18, row(18, '18')],
+        [19, row(19, '19')],
+      ]),
+      cachedRanges: [
+        { start: 16, end: 17 },
+        { start: 18, end: 20 },
+      ],
+      cursor: { visible: true, row: 17, col: 2, position: { row: 17, col: 2 } },
+      atBottom: true,
+    };
+    const view: SessionTerminalView = {
+      lastFrame: null,
+      compositeFrame: frameFromBufferSnapshot(buffer),
+      scrollbackRows: [],
+      rowCount: 16,
+      liveFollow: true,
+    };
+
+    controller.applyView(view, surface, buffer);
+
+    expect(onMissingLiveRows).toHaveBeenCalled();
+    const painted = paintFrame.mock.calls.at(-1)?.[0] as TerminalFrame;
+    expect(painted.cursor).toEqual(
+      expect.objectContaining({
+        visible: true,
+        row: 1,
+        col: 2,
+        position: { row: 1, col: 2 },
+      }),
+    );
+    expect(painted.rows.map(row => row.index)).toContain(1);
+  });
+
   it('paints a full live-buffer window for non-retained GPU partial updates', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => {
@@ -1832,6 +2301,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => {
@@ -1879,6 +2349,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1919,6 +2390,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -1955,6 +2427,7 @@ describe('createTerminalController', () => {
     const onScrollbackRowCount = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount,
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2001,6 +2474,7 @@ describe('createTerminalController', () => {
     const onMissingLiveRows = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -2085,6 +2559,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2126,6 +2601,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2182,6 +2658,7 @@ describe('createTerminalController', () => {
     const onLiveFollow = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow,
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -2231,6 +2708,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2270,6 +2748,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2315,6 +2794,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2359,6 +2839,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2400,6 +2881,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -2443,6 +2925,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2499,6 +2982,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2553,6 +3037,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2605,6 +3090,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2661,6 +3147,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2706,6 +3193,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2755,6 +3243,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
@@ -2820,6 +3309,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
@@ -2877,6 +3367,7 @@ describe('createTerminalController', () => {
     const onLiveFollow = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow,
       createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
@@ -2923,6 +3414,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => ({
@@ -2975,6 +3467,7 @@ describe('createTerminalController', () => {
     }));
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -3025,6 +3518,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
@@ -3082,6 +3576,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, nextSurface: TerminalSurface, displayRows) => ({
@@ -3137,6 +3632,7 @@ describe('createTerminalController', () => {
     const onLiveFollow = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow,
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -3173,6 +3669,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -3213,6 +3710,7 @@ describe('createTerminalController', () => {
     const onLiveFollow = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow,
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -3251,6 +3749,7 @@ describe('createTerminalController', () => {
     const onMissingLiveRows = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3295,6 +3794,7 @@ describe('createTerminalController', () => {
     const onMissingLiveRows = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3339,6 +3839,7 @@ describe('createTerminalController', () => {
     const onMissingLiveRows = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3384,6 +3885,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3428,6 +3930,7 @@ describe('createTerminalController', () => {
     const paintFrame = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3477,6 +3980,7 @@ describe('createTerminalController', () => {
     }));
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3531,6 +4035,7 @@ describe('createTerminalController', () => {
     );
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3598,6 +4103,7 @@ describe('createTerminalController', () => {
     });
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3693,6 +4199,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -3722,6 +4229,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -3768,6 +4276,7 @@ describe('createTerminalController', () => {
     );
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3845,6 +4354,7 @@ describe('createTerminalController', () => {
     );
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -3933,6 +4443,7 @@ describe('createTerminalController', () => {
     );
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -4001,6 +4512,7 @@ describe('createTerminalController', () => {
     }));
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -4061,6 +4573,7 @@ describe('createTerminalController', () => {
     const onMissingLiveRows = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -4090,6 +4603,7 @@ describe('createTerminalController', () => {
     const onMissingLiveRows = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -4130,6 +4644,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -4168,6 +4683,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -4253,6 +4769,7 @@ describe('createTerminalController', () => {
     }));
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onMissingLiveRows,
@@ -4293,6 +4810,7 @@ describe('createTerminalController', () => {
     const createRenderer = vi.fn((_canvas, _surface, displayRows) => fakeRenderer(displayRows));
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -4339,6 +4857,7 @@ describe('createTerminalController', () => {
     const createRenderer = vi.fn((_canvas, _surface, displayRows) => fakeRenderer(displayRows));
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onTrace: event => traces.push(event),
@@ -4400,6 +4919,7 @@ describe('createTerminalController', () => {
     }));
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer,
@@ -4496,6 +5016,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -4531,6 +5052,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -4568,6 +5090,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -4607,6 +5130,7 @@ describe('createTerminalController', () => {
 
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
@@ -4671,6 +5195,7 @@ describe('createTerminalController', () => {
     const onScrollMetrics = vi.fn();
     const controller = createTerminalController({
       surface,
+      insetPx: { top: surface.cellHeight, bottom: 0 },
       onScrollbackRowCount: vi.fn(),
       onLiveFollow: vi.fn(),
       onScrollMetrics,
