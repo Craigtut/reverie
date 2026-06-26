@@ -51,6 +51,9 @@ enum Command {
     },
     /// Abort a capture: drop the audio, no transcript.
     CancelCapture { id: CaptureId },
+    /// Choose the microphone input device by name (`None` = system default).
+    /// Applies to the next capture.
+    SetInputDevice(Option<String>),
     /// Stop the worker (on engine drop / app shutdown).
     Shutdown,
 }
@@ -117,6 +120,12 @@ impl SpeechEngine {
     pub fn mic_permission(&self) -> MicPermission {
         mic_permission()
     }
+
+    /// Choose the microphone input device (`None` = system default). Applies to
+    /// the next capture.
+    pub fn set_input_device(&self, name: Option<String>) {
+        self.handle.set_input_device(name);
+    }
 }
 
 impl SpeechHandle {
@@ -162,6 +171,11 @@ impl SpeechHandle {
     /// Abort a capture: drop the audio, return no transcript.
     pub fn cancel_capture(&self, id: CaptureId) {
         let _ = self.commands.send(Command::CancelCapture { id });
+    }
+
+    /// Choose the microphone input device (`None` = system default).
+    pub fn set_input_device(&self, name: Option<String>) {
+        let _ = self.commands.send(Command::SetInputDevice(name));
     }
 }
 
@@ -244,6 +258,7 @@ fn run_worker(rx: Receiver<Command>, state: Arc<Mutex<EngineState>>, events: Eve
                 let _ = reply.send(session.stop_capture(id));
             }
             Command::CancelCapture { id } => session.cancel_capture(id),
+            Command::SetInputDevice(name) => session.set_input_device(name),
             Command::Shutdown => break,
         }
     }
@@ -256,6 +271,10 @@ struct Session {
     events: EventSink,
     #[cfg(feature = "capture")]
     active: Option<ActiveCapture>,
+    /// Chosen microphone input device name (`None` = system default), applied to
+    /// the next capture.
+    #[cfg(feature = "capture")]
+    device: Option<String>,
     // The Parakeet/ANE handle (fluidaudio). `!Send`, so it stays on this worker
     // thread. `None` until provisioning succeeds. Only read from `transcribe`,
     // which exists only with `capture`; an asr-only build (e.g. the smoke-test
@@ -278,8 +297,22 @@ impl Session {
             events,
             #[cfg(feature = "capture")]
             active: None,
+            #[cfg(feature = "capture")]
+            device: None,
             #[cfg(feature = "asr")]
             asr: None,
+        }
+    }
+
+    /// Choose the input device used for the next capture.
+    fn set_input_device(&mut self, name: Option<String>) {
+        #[cfg(feature = "capture")]
+        {
+            self.device = name;
+        }
+        #[cfg(not(feature = "capture"))]
+        {
+            let _ = name;
         }
     }
 
@@ -344,7 +377,7 @@ impl Session {
         {
             // Supersede any prior capture.
             self.active = None;
-            match crate::capture::Capture::start() {
+            match crate::capture::Capture::start(self.device.as_deref()) {
                 Ok(capture) => {
                     self.active = Some(ActiveCapture {
                         id,

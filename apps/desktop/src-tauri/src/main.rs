@@ -641,6 +641,15 @@ fn main() {
                     });
                 let speech_engine = reverie_speech::SpeechEngine::new(speech_events);
                 speech_engine.provision();
+                // Apply the persisted input-device choice so voice capture uses
+                // the user's selected microphone after a restart.
+                if let Some(device) = app
+                    .try_state::<WorkspaceService>()
+                    .and_then(|service| service.snapshot().ok())
+                    .and_then(|snapshot| snapshot.workspace.voice_input_device)
+                {
+                    speech_engine.set_input_device(Some(device));
+                }
                 app.manage(speech_engine);
             }
 
@@ -710,6 +719,7 @@ fn main() {
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,
             commands::set_crt_enabled,
+            commands::set_claude_fullscreen_enabled,
             commands::set_dispatch_settings,
             commands::classify_dispatch,
             speech_commands::speech_engine_status,
@@ -718,6 +728,8 @@ fn main() {
             speech_commands::speech_start_capture,
             speech_commands::speech_stop_capture,
             speech_commands::speech_cancel_capture,
+            speech_commands::list_audio_input_devices,
+            speech_commands::set_voice_input_device,
             commands::set_sidebar_width,
             commands::set_workspace_nav_state,
             commands::hook_server_port,
@@ -746,6 +758,8 @@ fn main() {
             commands::record_terminal_diagnostics,
             commands::webview_heartbeat,
             commands::open_url,
+            commands::open_input_monitoring_settings,
+            commands::request_dispatch_input_monitoring,
             commands::system_home_dir,
             commands::read_clipboard_image,
             commands::save_pasted_image,

@@ -32,10 +32,14 @@ impl Capture {
     /// Open the default input device and start streaming. Returns an error if no
     /// device is available or the OS denies microphone access (the TCC prompt
     /// fires on first attempt); the worker surfaces that to the UI.
-    pub(crate) fn start() -> Result<Self, String> {
+    pub(crate) fn start(device_name: Option<&str>) -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_input_device()
+        // Use the user-chosen input device when named (and still present), else
+        // the system default. Falling back keeps capture working if a previously
+        // selected device was unplugged.
+        let device = device_name
+            .and_then(|name| find_input_device(&host, name))
+            .or_else(|| host.default_input_device())
             .ok_or_else(|| "no microphone input device found".to_owned())?;
         let supported = device
             .default_input_config()
@@ -165,6 +169,22 @@ fn push_downmixed<S: Copy>(
     }
     if filled > 0 {
         producer.push_slice(&scratch[..filled]);
+    }
+}
+
+/// Find an input device by its reported name.
+fn find_input_device(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+    host.input_devices()
+        .ok()?
+        .find(|device| device.name().map(|n| n == name).unwrap_or(false))
+}
+
+/// The names of the available microphone input devices, for the device picker.
+pub(crate) fn list_input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(devices) => devices.filter_map(|device| device.name().ok()).collect(),
+        Err(_) => Vec::new(),
     }
 }
 

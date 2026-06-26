@@ -267,6 +267,16 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE workspace ADD COLUMN dispatch_default_voice INTEGER NOT NULL DEFAULT 1;
      ALTER TABLE workspace ADD COLUMN dispatch_window_x INTEGER;
      ALTER TABLE workspace ADD COLUMN dispatch_window_y INTEGER;",
+    // v25 -> v26: chosen microphone input device for voice capture. NULL uses
+    // the system default; otherwise a device name the speech engine resolves
+    // (falling back to default if it is gone).
+    "ALTER TABLE workspace ADD COLUMN voice_input_device TEXT;",
+    // v26 -> v27: per-CLI launch setting for Claude Code's fullscreen
+    // (alternate-screen) renderer. Defaults to 0 (off) so existing workspaces
+    // upgrade with Reverie forcing Claude's classic inline renderer, which keeps
+    // the conversation in Reverie's own scrollback. When on, Claude launches in
+    // fullscreen instead. Read at session launch; Claude-only.
+    "ALTER TABLE workspace ADD COLUMN claude_fullscreen_enabled INTEGER NOT NULL DEFAULT 0;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -393,9 +403,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                      keep_awake_enabled, keep_display_awake, sidebar_width,
                      crt_enabled, voice_enabled, voice_language,
                      voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
-                     dispatch_window_x, dispatch_window_y)
+                     dispatch_window_x, dispatch_window_y, voice_input_device,
+                     claude_fullscreen_enabled)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     seed.id.to_string(),
                     seed.name,
@@ -417,6 +428,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     bool_to_int(seed.dispatch_default_voice),
                     seed.dispatch_window_x.map(i64::from),
                     seed.dispatch_window_y.map(i64::from),
+                    seed.voice_input_device,
+                    bool_to_int(seed.claude_fullscreen_enabled),
                 ],
             )
             .map_err(backend)?;
@@ -434,9 +447,10 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                  keep_awake_enabled, keep_display_awake, sidebar_width,
                  crt_enabled, voice_enabled, voice_language,
                  voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
-                 dispatch_window_x, dispatch_window_y)
+                 dispatch_window_x, dispatch_window_y, voice_input_device,
+                 claude_fullscreen_enabled)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
              ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 general_label = excluded.general_label,
@@ -456,7 +470,9 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 dispatch_shortcut = excluded.dispatch_shortcut,
                 dispatch_default_voice = excluded.dispatch_default_voice,
                 dispatch_window_x = excluded.dispatch_window_x,
-                dispatch_window_y = excluded.dispatch_window_y",
+                dispatch_window_y = excluded.dispatch_window_y,
+                voice_input_device = excluded.voice_input_device,
+                claude_fullscreen_enabled = excluded.claude_fullscreen_enabled",
             params![
                 workspace.id.to_string(),
                 workspace.name,
@@ -478,6 +494,8 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 bool_to_int(workspace.dispatch_default_voice),
                 workspace.dispatch_window_x.map(i64::from),
                 workspace.dispatch_window_y.map(i64::from),
+                workspace.voice_input_device,
+                bool_to_int(workspace.claude_fullscreen_enabled),
             ],
         )
         .map_err(backend)?;
@@ -1003,7 +1021,8 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 keep_awake_enabled, keep_display_awake, sidebar_width,
                 crt_enabled, voice_enabled, voice_language,
                 voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
-                dispatch_window_x, dispatch_window_y
+                dispatch_window_x, dispatch_window_y, voice_input_device,
+                claude_fullscreen_enabled
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -1032,6 +1051,8 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 dispatch_window_y: row
                     .get::<_, Option<i64>>(19)?
                     .map(|value| value as i32),
+                voice_input_device: row.get::<_, Option<String>>(20)?,
+                claude_fullscreen_enabled: int_to_bool(row.get::<_, i64>(21)?),
             })
         },
     )

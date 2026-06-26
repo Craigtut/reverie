@@ -16,6 +16,10 @@ export interface SpeechCapture {
   stop: () => Promise<TranscriptResult | null>;
   // Abort: drop the audio, no transcript.
   cancel: () => Promise<void>;
+  // Whether a capture id is currently held (the synchronous source of truth,
+  // ahead of the `capturing` render state). Use this to decide stop-vs-start so
+  // a lagging render can't misroute the toggle.
+  isActive: () => boolean;
 }
 
 // Imperative microphone-capture handle that future voice surfaces (a dispatch
@@ -69,6 +73,8 @@ export function useSpeechCapture(): SpeechCapture {
     if (id) await speechCancelCapture(id);
   }, []);
 
+  const isActive = useCallback(() => captureIdRef.current !== null, []);
+
   // Drop a live capture if the consumer unmounts mid-recording.
   useEffect(() => {
     return () => {
@@ -77,5 +83,5 @@ export function useSpeechCapture(): SpeechCapture {
     };
   }, []);
 
-  return { capturing, level, start, stop, cancel };
+  return { capturing, level, start, stop, cancel, isActive };
 }

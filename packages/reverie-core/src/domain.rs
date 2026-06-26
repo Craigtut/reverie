@@ -113,6 +113,20 @@ pub struct Workspace {
     pub dispatch_window_x: Option<i32>,
     #[serde(default)]
     pub dispatch_window_y: Option<i32>,
+    /// Chosen microphone input device name for voice capture; `None` (the
+    /// default) uses the system default input. The speech engine resolves it by
+    /// name and falls back to the default if it is gone. macOS / Apple Silicon.
+    #[serde(default)]
+    pub voice_input_device: Option<String>,
+    /// Whether the Claude Code CLI runs in its fullscreen (alternate-screen)
+    /// renderer inside Reverie's embedded terminal. Off by default: Reverie
+    /// forces Claude's classic inline renderer so the conversation stays in
+    /// Reverie's own scrollback, which the fullscreen takeover would otherwise
+    /// fight. When on, Reverie launches Claude in fullscreen instead. The launch
+    /// sets the matching Claude env var either way, so the choice overrides
+    /// Claude's own saved renderer setting. Claude-only; read at launch.
+    #[serde(default)]
+    pub claude_fullscreen_enabled: bool,
 }
 
 impl Workspace {
@@ -138,6 +152,8 @@ impl Workspace {
             dispatch_default_voice: default_dispatch_default_voice(),
             dispatch_window_x: None,
             dispatch_window_y: None,
+            voice_input_device: None,
+            claude_fullscreen_enabled: false,
         }
     }
 }

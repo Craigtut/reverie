@@ -7,6 +7,7 @@ import {
   useAutoUpdate,
   useCommandPalette,
   useCreationForm,
+  useDispatchLaunch,
   useGitStatus,
   useNavPersistence,
   useSpeechEngine,
@@ -55,6 +56,8 @@ export function WorkspaceShell() {
   });
   const nav = useShellNavigation({ model, terminal });
   const creation = useCreationForm({ model, terminal });
+  // Main-window receiver for the dispatch popup's confirmed launches.
+  useDispatchLaunch(creation.dispatchIntoWorkspace);
   const mutations = useWorkspaceMutations({
     model,
     terminal,

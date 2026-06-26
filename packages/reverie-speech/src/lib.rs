@@ -22,6 +22,19 @@ mod engine;
 
 pub use engine::{EventSink, SignalSink, SpeechEngine, SpeechEvent, SpeechHandle};
 
+/// The available microphone input device names, for the device picker. Empty in
+/// a build without the `capture` feature.
+pub fn list_input_devices() -> Vec<String> {
+    #[cfg(feature = "capture")]
+    {
+        capture::list_input_devices()
+    }
+    #[cfg(not(feature = "capture"))]
+    {
+        Vec::new()
+    }
+}
+
 // Re-export the shared wire types so consumers can depend on `reverie-speech`
 // alone without also naming `reverie-core` for the speech contracts.
 pub use reverie_core::{CaptureId, CaptureSignal, EngineState, MicPermission, TranscriptResult};

@@ -146,6 +146,8 @@ impl WorkspaceService {
             dispatch_default_voice: true,
             dispatch_window_x: None,
             dispatch_window_y: None,
+            voice_input_device: None,
+            claude_fullscreen_enabled: false,
         };
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
@@ -555,6 +557,26 @@ impl WorkspaceService {
     pub fn set_crt_enabled(&self, enabled: bool) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
         workspace.crt_enabled = enabled;
+        self.repo.save_workspace(&workspace)?;
+        self.snapshot()
+    }
+
+    /// Persist whether the Claude Code CLI launches in its fullscreen
+    /// (alternate-screen) renderer. `build_agent_launch` reads this back and
+    /// sets the matching Claude env var on the spawn, so the change applies the
+    /// next time a Claude session starts. Claude-only; other CLIs ignore it.
+    pub fn set_claude_fullscreen_enabled(&self, enabled: bool) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.claude_fullscreen_enabled = enabled;
+        self.repo.save_workspace(&workspace)?;
+        self.snapshot()
+    }
+
+    /// Persist the chosen microphone input device for voice capture (`None` =
+    /// system default). The desktop app also pushes it to the live speech engine.
+    pub fn set_voice_input_device(&self, device: Option<String>) -> Result<WorkspaceSnapshot> {
+        let mut workspace = self.repo.load_snapshot()?.workspace;
+        workspace.voice_input_device = device.filter(|name| !name.trim().is_empty());
         self.repo.save_workspace(&workspace)?;
         self.snapshot()
     }
@@ -1479,6 +1501,20 @@ impl WorkspaceService {
             adapter.as_ref(),
             injected_native_id.clone(),
         )?;
+        // Claude Code's fullscreen renderer drives the terminal's alternate
+        // screen buffer (the way `vim` does), which fights Reverie's own
+        // scrollback/search/viewport model. Force the classic inline renderer by
+        // default; honor the per-CLI setting when the user opts into fullscreen.
+        // Either env var overrides Claude's own saved renderer setting, so
+        // Reverie's choice is deterministic. Claude-only.
+        if agent_kind == AgentKind::ClaudeCode {
+            let (key, value) = if snapshot.workspace.claude_fullscreen_enabled {
+                ("CLAUDE_CODE_NO_FLICKER", "1")
+            } else {
+                ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")
+            };
+            spec.command.env.insert(key.to_owned(), value.to_owned());
+        }
         // Deliver the dispatch initial prompt on a brand-new launch only. CLIs
         // that take a trailing positional prompt get it appended (it submits on
         // startup); the rest receive it as deferred PTY input the runtime types

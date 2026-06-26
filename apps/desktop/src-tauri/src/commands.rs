@@ -204,6 +204,12 @@ pub(crate) struct SetCrtEnabledRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct SetClaudeFullscreenEnabledRequest {
+    claude_fullscreen_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SetDispatchSettingsRequest {
     dispatch_shortcut: String,
     dispatch_default_voice: bool,
@@ -1185,6 +1191,16 @@ pub(crate) fn set_crt_enabled(
 }
 
 #[tauri::command]
+pub(crate) fn set_claude_fullscreen_enabled(
+    service: State<'_, WorkspaceService>,
+    request: SetClaudeFullscreenEnabledRequest,
+) -> Result<WorkspaceSnapshot, String> {
+    service
+        .set_claude_fullscreen_enabled(request.claude_fullscreen_enabled)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn set_dispatch_settings(
     app: AppHandle,
     service: State<'_, WorkspaceService>,
@@ -1840,6 +1856,32 @@ pub(crate) fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|err| err.to_string())
+}
+
+/// Open the macOS Input Monitoring privacy pane, where the user grants the
+/// permission a modifier-tap dispatch shortcut needs.
+#[tauri::command]
+pub(crate) fn open_input_monitoring_settings(app: AppHandle) -> Result<(), String> {
+    app.opener()
+        .open_url(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+            None::<&str>,
+        )
+        .map_err(|err| err.to_string())
+}
+
+/// Trigger the macOS Input Monitoring permission prompt and report whether it is
+/// currently granted. Used by the dispatch settings "grant" affordance.
+#[tauri::command]
+pub(crate) fn request_dispatch_input_monitoring() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::dispatch_tap::request_listen_access()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 /// The current user's real OS home directory, reported to the web layer at

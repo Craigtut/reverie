@@ -1,36 +1,53 @@
+import { useEffect, useState } from 'react';
+
 import { css } from '../../styled-system/css';
-import { useSpeechEngineStore } from '../../store';
-import { speechProvision } from '../../services/speechApi';
-import { Switch } from '../primitives/Switch';
+import { useShellStore, useSpeechEngineStore } from '../../store';
+import {
+  listAudioInputDevices,
+  setVoiceInputDevice,
+  speechProvision,
+} from '../../services/speechApi';
 import { Typography } from '../primitives/Typography';
 
-// The "Voice input" settings block: the opt-in/affordance toggles plus the live
-// status of the on-device speech engine (provisioning / ready / unavailable) and
-// microphone permission. This is the foundation's own settings surface; the
-// dispatch shortcut and the in-terminal voice button are separate features that
-// build on the same engine. Self-contained: persisted settings come in via
-// props (drilled from the workspace like the other toggles); engine + mic state
-// are read from the speech store, which the app keeps live.
-export function VoiceSection({
-  voiceEnabled,
-  voiceLanguage,
-  voicePushToTalk,
-  onSetVoiceSettings,
-}: {
-  voiceEnabled: boolean;
-  voiceLanguage: string;
-  voicePushToTalk: boolean;
-  onSetVoiceSettings: (next: {
-    voiceEnabled: boolean;
-    voiceLanguage: string;
-    voicePushToTalk: boolean;
-  }) => void;
-}) {
+// The "Voice input" settings block: a read-only status readout for the on-device
+// speech engine (provisioning / ready / unavailable) plus the microphone
+// permission state. There are no toggles: voice input is on-device and
+// privacy-safe, so it needs no enable switch, and the interaction model lives
+// with the surfaces that use it (dispatch, a future voice button), not here. The
+// status is useful mainly during the one-time model download. Self-contained:
+// engine + mic state come from the speech store, which the app keeps live.
+export function VoiceSection() {
   const engine = useSpeechEngineStore(s => s.engine);
   const micPermission = useSpeechEngineStore(s => s.micPermission);
+  const shell = useShellStore(s => s.shell);
+  const setShell = useShellStore(s => s.setShell);
 
   const status = engineStatusCopy(engine);
   const canRetry = engine.kind === 'error' || engine.kind === 'unavailable';
+
+  const selectedDevice = shell.workspace.voiceInputDevice ?? '';
+  const [devices, setDevices] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void listAudioInputDevices()
+      .then(list => {
+        if (!cancelled) setDevices(list);
+      })
+      .catch(() => {
+        /* enumeration unavailable (e.g. harness): leave the default option */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onSelectDevice = (value: string) => {
+    void setVoiceInputDevice(value || null)
+      .then(setShell)
+      .catch(() => {
+        /* surfaced by the command; keep the prior selection */
+      });
+  };
 
   return (
     <section className={groupClass} aria-labelledby="settings-voice-label">
@@ -60,50 +77,28 @@ export function VoiceSection({
         ) : null}
       </div>
 
-      <ul className={listClass}>
-        <li className={rowClass}>
-          <div className={rowTextClass}>
-            <Typography as="span" variant="smallBody" tone="default">
-              Enable voice input
-            </Typography>
-            <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
-              Show the voice controls. Transcription runs entirely on your Mac (Apple Neural
-              Engine); audio never leaves the device. Microphone access:{' '}
-              {micPermissionCopy(micPermission)}.
-            </Typography>
-          </div>
-          <Switch
-            checked={voiceEnabled}
-            onChange={next =>
-              onSetVoiceSettings({ voiceEnabled: next, voiceLanguage, voicePushToTalk })
-            }
-            ariaLabel="Enable voice input"
-            testId="settings-voice-toggle"
-          />
-        </li>
+      <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
+        Transcription runs entirely on your Mac (Apple Neural Engine); audio never leaves the
+        device. Microphone access: {micPermissionCopy(micPermission)}.
+      </Typography>
 
-        {voiceEnabled ? (
-          <li className={rowClass}>
-            <div className={rowTextClass}>
-              <Typography as="span" variant="smallBody" tone="default">
-                Press and hold to talk
-              </Typography>
-              <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
-                Hold the voice control while speaking and release to transcribe. Off makes it a
-                click-to-start, click-to-stop toggle instead.
-              </Typography>
-            </div>
-            <Switch
-              checked={voicePushToTalk}
-              onChange={next =>
-                onSetVoiceSettings({ voiceEnabled, voiceLanguage, voicePushToTalk: next })
-              }
-              ariaLabel="Press and hold to talk"
-              testId="settings-voice-ptt-toggle"
-            />
-          </li>
-        ) : null}
-      </ul>
+      <label className={deviceRowClass}>
+        <Typography as="span" variant="caption" tone="muted">
+          Microphone
+        </Typography>
+        <select
+          className={selectClass}
+          value={selectedDevice}
+          onChange={event => onSelectDevice(event.target.value)}
+        >
+          <option value="">System default</option>
+          {devices.map(device => (
+            <option key={device} value={device}>
+              {device}
+            </option>
+          ))}
+        </select>
+      </label>
     </section>
   );
 }
@@ -171,23 +166,22 @@ const retryClass = css({
   _hover: { background: 'var(--colors-surface-raised)' },
 });
 
-const listClass = css({
+const deviceRowClass = css({
   display: 'flex',
-  flexDirection: 'column',
-  gap: '4px',
-});
-
-const rowClass = css({
-  display: 'flex',
-  alignItems: 'flex-start',
+  alignItems: 'center',
   justifyContent: 'space-between',
-  gap: '16px',
-  paddingY: '10px',
+  gap: '12px',
 });
 
-const rowTextClass = css({
-  display: 'flex',
-  flexDirection: 'column',
-  gap: '4px',
-  maxWidth: '34rem',
+const selectClass = css({
+  flexShrink: 0,
+  maxWidth: '60%',
+  padding: '4px 8px',
+  borderRadius: '7px',
+  border: '1px solid var(--colors-border-subtle)',
+  background: 'var(--colors-surface-raised)',
+  color: 'var(--text)',
+  fontFamily: 'inherit',
+  fontSize: '12px',
+  cursor: 'pointer',
 });

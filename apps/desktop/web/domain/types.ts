@@ -202,6 +202,9 @@ export interface ShellWorkspace {
   // Voice control style: press-and-hold (push-to-talk) vs a click toggle.
   // True (push-to-talk) by default.
   voicePushToTalk?: boolean;
+  // Chosen microphone input device name for voice capture; absent/null uses the
+  // system default input.
+  voiceInputDevice?: string | null;
   // Global-shortcut accelerator (Tauri syntax) that opens the dispatch popup.
   // Absent (pre-migration) falls back to the default Cmd+Shift+Space.
   dispatchShortcut?: string;
@@ -211,6 +214,12 @@ export interface ShellWorkspace {
   // Saved dispatch-window position (physical px, top-left). Absent centers it.
   dispatchWindowX?: number | null;
   dispatchWindowY?: number | null;
+  // Per-CLI launch setting: whether Claude Code runs in its fullscreen
+  // (alternate-screen) renderer inside Reverie's terminal. Off by default
+  // (absent/pre-migration means off): Reverie forces Claude's classic inline
+  // renderer so the conversation stays in Reverie's own scrollback. Read at
+  // launch; takes effect the next time a Claude session starts.
+  claudeFullscreenEnabled?: boolean;
 }
 
 // The navigation we persist so a reload or relaunch reopens the last view

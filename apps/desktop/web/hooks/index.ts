@@ -24,6 +24,7 @@ export { useShellNavigation } from './useShellNavigation';
 export type { ShellNavigation } from './useShellNavigation';
 export { useCreationForm } from './useCreationForm';
 export type { CreationForm } from './useCreationForm';
+export { useDispatchLaunch } from './useDispatchLaunch';
 export { useWorkspaceMutations } from './useWorkspaceMutations';
 export type { WorkspaceMutations } from './useWorkspaceMutations';
 export { useFileDrop } from './useFileDrop';

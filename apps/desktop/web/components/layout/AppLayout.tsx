@@ -136,6 +136,7 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
     setCrtEnabled,
+    setClaudeFullscreenEnabled,
     setDispatchSettings,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
@@ -358,6 +359,8 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
               onSetTerminalFontSize={next => void setWorkspaceTerminalFontSize(next)}
               crtEnabled={shell.workspace.crtEnabled ?? false}
               onSetCrtEnabled={next => void setCrtEnabled(next)}
+              claudeFullscreenEnabled={shell.workspace.claudeFullscreenEnabled ?? false}
+              onSetClaudeFullscreenEnabled={next => void setClaudeFullscreenEnabled(next)}
               dispatchShortcut={shell.workspace.dispatchShortcut ?? 'CommandOrControl+Shift+Space'}
               dispatchDefaultVoice={shell.workspace.dispatchDefaultVoice ?? true}
               dispatchWindowX={shell.workspace.dispatchWindowX ?? null}

@@ -14,6 +14,7 @@ import { Typography } from '../primitives/Typography';
 import { AboutSection } from './AboutSection';
 import { AgentsSection } from './AgentsSection';
 import { VoiceSection } from './VoiceSection';
+import { DispatchSection } from './DispatchSection';
 import { ArchivedProjectsSection } from './ArchivedProjectsSection';
 import { ConnectionPolicySection } from './ConnectionPolicySection';
 import { ShortcutsPanel } from './ShortcutsPanel';
@@ -39,10 +40,13 @@ export function SettingsSurface({
   onSetTerminalFontSize,
   crtEnabled,
   onSetCrtEnabled,
-  voiceEnabled,
-  voiceLanguage,
-  voicePushToTalk,
-  onSetVoiceSettings,
+  claudeFullscreenEnabled,
+  onSetClaudeFullscreenEnabled,
+  dispatchShortcut,
+  dispatchDefaultVoice,
+  dispatchWindowX,
+  dispatchWindowY,
+  onSetDispatchSettings,
   onDeleteProject,
 }: {
   // The persisted workspace theme; the handler flips the live UI and persists.
@@ -74,15 +78,23 @@ export function SettingsSurface({
   // this; the terminal hook applies/removes the post-process on open terminals.
   crtEnabled: boolean;
   onSetCrtEnabled: (value: boolean) => void;
-  // The persisted on-device voice-input settings. The Voice section reflects and
-  // writes these; the engine + mic state it shows come from the live speech store.
-  voiceEnabled: boolean;
-  voiceLanguage: string;
-  voicePushToTalk: boolean;
-  onSetVoiceSettings: (next: {
-    voiceEnabled: boolean;
-    voiceLanguage: string;
-    voicePushToTalk: boolean;
+  // The persisted per-CLI "Claude fullscreen" launch setting and its handler.
+  // Surfaced as a subsetting under Claude Code on the Agents tab; reflects and
+  // writes the workspace value, which the backend reads when launching Claude.
+  claudeFullscreenEnabled: boolean;
+  onSetClaudeFullscreenEnabled: (value: boolean) => void;
+  // The persisted dispatch settings: the global-shortcut accelerator, whether
+  // the popup opens in voice mode, and the saved window position. The Dispatch
+  // section reflects and writes these; the popup reads them back.
+  dispatchShortcut: string;
+  dispatchDefaultVoice: boolean;
+  dispatchWindowX: number | null;
+  dispatchWindowY: number | null;
+  onSetDispatchSettings: (next: {
+    dispatchShortcut: string;
+    dispatchDefaultVoice: boolean;
+    dispatchWindowX: number | null;
+    dispatchWindowY: number | null;
   }) => void;
   // Permanently purge an archived project and its data (no restore: re-adding
   // the folder reconnects). Wired to the workspace mutation in AppLayout.
@@ -363,11 +375,14 @@ export function SettingsSurface({
               </ul>
             </section>
 
-            <VoiceSection
-              voiceEnabled={voiceEnabled}
-              voiceLanguage={voiceLanguage}
-              voicePushToTalk={voicePushToTalk}
-              onSetVoiceSettings={onSetVoiceSettings}
+            <VoiceSection />
+
+            <DispatchSection
+              dispatchShortcut={dispatchShortcut}
+              dispatchDefaultVoice={dispatchDefaultVoice}
+              dispatchWindowX={dispatchWindowX}
+              dispatchWindowY={dispatchWindowY}
+              onSetDispatchSettings={onSetDispatchSettings}
             />
 
             <SoftwareUpdateSection />
@@ -477,6 +492,8 @@ export function SettingsSurface({
               detections={detections}
               pending={enablement.pending}
               error={enablement.error}
+              claudeFullscreenEnabled={claudeFullscreenEnabled}
+              onSetClaudeFullscreenEnabled={onSetClaudeFullscreenEnabled}
               bridgeStatus={bridge.status}
               bridgeBusy={
                 bridge.busyCli

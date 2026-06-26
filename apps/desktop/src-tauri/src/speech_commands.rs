@@ -13,7 +13,9 @@
 
 use std::sync::Arc;
 
-use reverie_core::{CaptureId, EngineState, MicPermission, TranscriptResult};
+use reverie_core::{
+    CaptureId, EngineState, MicPermission, TranscriptResult, WorkspaceService, WorkspaceSnapshot,
+};
 use reverie_speech::{CaptureSignal, SignalSink, SpeechEngine};
 use serde::Serialize;
 use tauri::State;
@@ -46,6 +48,27 @@ pub(crate) fn speech_provision(engine: State<'_, SpeechEngine>) -> EngineState {
 #[tauri::command]
 pub(crate) fn speech_mic_permission_status(engine: State<'_, SpeechEngine>) -> MicPermission {
     engine.mic_permission()
+}
+
+/// The available microphone input device names, for the device picker.
+#[tauri::command]
+pub(crate) fn list_audio_input_devices() -> Vec<String> {
+    reverie_speech::list_input_devices()
+}
+
+/// Choose the microphone input device for voice capture (`null`/empty = system
+/// default): persist it and push it to the live engine for the next capture.
+#[tauri::command]
+pub(crate) fn set_voice_input_device(
+    service: State<'_, WorkspaceService>,
+    engine: State<'_, SpeechEngine>,
+    device: Option<String>,
+) -> Result<WorkspaceSnapshot, String> {
+    let snapshot = service
+        .set_voice_input_device(device)
+        .map_err(|err| err.to_string())?;
+    engine.set_input_device(snapshot.workspace.voice_input_device.clone());
+    Ok(snapshot)
 }
 
 /// Begin a capture. `on_signal` receives the live RMS level (and, later, partial

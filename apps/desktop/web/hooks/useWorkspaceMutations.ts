@@ -131,21 +131,40 @@ export function useWorkspaceMutations({
     }
   }
 
-  // Persist the on-device voice-input settings (enable flag, language hint,
-  // push-to-talk vs toggle). The desktop app reads these back; the speech model
-  // still provisions eagerly on first launch regardless of the enable flag.
-  async function setVoiceSettings(next: {
-    voiceEnabled: boolean;
-    voiceLanguage: string;
-    voicePushToTalk: boolean;
+  // Persist the per-CLI "Claude fullscreen" launch setting. The backend reads it
+  // back when building a Claude launch and sets the matching env var on the
+  // spawn, so the change applies the next time a Claude session starts (the CLI
+  // reads its renderer mode at process start). No live restart here.
+  async function setClaudeFullscreenEnabled(enabled: boolean) {
+    if ((shell.workspace.claudeFullscreenEnabled ?? false) === enabled) return;
+    try {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_claude_fullscreen_enabled', {
+        request: { claudeFullscreenEnabled: enabled },
+      });
+      setShell(snapshot);
+      appendLog(
+        enabled
+          ? 'Claude fullscreen on; applies the next time a Claude session starts.'
+          : 'Claude fullscreen off; Claude stays inline in Reverie.',
+      );
+    } catch (error) {
+      appendLog(`Update Claude fullscreen failed: ${errorMessage(error)}`);
+    }
+  }
+
+  async function setDispatchSettings(next: {
+    dispatchShortcut: string;
+    dispatchDefaultVoice: boolean;
+    dispatchWindowX: number | null;
+    dispatchWindowY: number | null;
   }) {
     try {
-      const snapshot = await invoke<WorkspaceShellSnapshot>('set_voice_settings', {
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_dispatch_settings', {
         request: next,
       });
       setShell(snapshot);
     } catch (error) {
-      appendLog(`Update voice settings failed: ${errorMessage(error)}`);
+      appendLog(`Update dispatch settings failed: ${errorMessage(error)}`);
     }
   }
 
@@ -719,7 +738,8 @@ export function useWorkspaceMutations({
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
     setCrtEnabled,
-    setVoiceSettings,
+    setClaudeFullscreenEnabled,
+    setDispatchSettings,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,
     setWorkspaceSidebarWidth,
