@@ -10,16 +10,30 @@ import type { CellSessionState } from '../../domain';
 // parent (e.g. the creation composer lifts it to 22px via `> span:first-child`).
 // The inner SVG always fills that box.
 //
-// `state` (optional) modulates the mark's presence so the nav reads at a glance:
-// any live or attention-worthy session keeps its full brand color, an idle
-// session recedes the most, and a fresh (not-yet-launched) session sits at a
-// quiet baseline. Consumers that don't pass `state` render at full presence.
+// `state` (optional) modulates the mark in the nav so a live session stands out:
+// only an `active` (working) session shows its full brand color (Claude clay,
+// Cortex lime, Codex white); every at-rest state stays the muted icon gray it
+// inherits from the row, and the opacity tier below dims it (idle recedes most,
+// fresh sits at a quiet baseline, finished stays present). Consumers that pass no
+// `state` (the tab bar, dashboard, composer) render at full brand color.
 export function AgentGlyph({ kind, state }: { kind: string; state?: CellSessionState }) {
   const brand = BRAND[kind] ?? CORTEX_PLACEHOLDER;
   const opacity = state ? GLYPH_PRESENCE[state] : 1;
+  // Assert the brand color only when the glyph should be colored: a working
+  // session, or any consumer that passes no state. Otherwise leave the svg
+  // uncolored so it inherits the row's muted gray. When colored, the color is set
+  // inline on the <svg> itself so it wins over ancestor "& svg { color }" rules
+  // (e.g. the nav row's icon color) that would otherwise capture the mark via
+  // `fill="currentColor"` and gray it out.
+  const colored = !state || state === 'active';
   return (
-    <span className={glyphClass} style={{ color: brand.color, opacity }} aria-hidden="true">
-      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <span className={glyphClass} style={{ opacity }} aria-hidden="true">
+      <svg
+        viewBox="0 0 24 24"
+        style={colored ? { color: brand.color } : undefined}
+        xmlns="http://www.w3.org/2000/svg"
+        aria-hidden="true"
+      >
         {brand.mark}
       </svg>
     </span>
