@@ -10,6 +10,19 @@ import { CliInstallActions } from '../onboarding';
 import { Switch } from '../primitives/Switch';
 import { Typography } from '../primitives/Typography';
 
+// One on/off subsetting shown beneath a CLI's row in the Agents list. Each is a
+// self-contained toggle bound to a workspace setting and its write handler, so a
+// CLI owns its own launch/behavior options. This is the seam for the "subsettings
+// under each CLI" pattern: give a CLI more controls by adding entries for its
+// AgentKind in `subSettingsByKind` below.
+interface CliSubSetting {
+  id: string;
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}
+
 // The "Agents" settings block: one row per supported CLI showing whether it
 // is detected on this machine and, when it is, a switch to turn it on or
 // off. A switched-off CLI is never offered as a session agent elsewhere in
@@ -21,6 +34,8 @@ export function AgentsSection({
   detections,
   pending,
   error,
+  claudeFullscreenEnabled,
+  onSetClaudeFullscreenEnabled,
   bridgeStatus,
   bridgeBusy,
   onToggle,
@@ -29,11 +44,28 @@ export function AgentsSection({
   detections: AgentCliDetection[];
   pending: AgentKind | null;
   error: string | null;
+  claudeFullscreenEnabled: boolean;
+  onSetClaudeFullscreenEnabled: (value: boolean) => void;
   bridgeStatus: BridgeStatusReport | null;
   bridgeBusy: AgentKind | null;
   onToggle: (kind: AgentKind, enabled: boolean) => void;
   onRetryInstall: (kind: AgentKind) => void;
 }) {
+  // Per-CLI subsettings, rendered under each detected + enabled CLI's row. Keyed
+  // by AgentKind so each CLI owns its own toggles; today only Claude Code has one
+  // (its fullscreen renderer). Add a CLI's controls by giving it entries here.
+  const subSettingsByKind: Partial<Record<AgentKind, CliSubSetting[]>> = {
+    claude_code: [
+      {
+        id: 'claude-fullscreen',
+        label: 'Fullscreen rendering',
+        description:
+          "Let Claude take over the terminal with its own fullscreen renderer. Off keeps Claude inline in Reverie's scrollback. Takes effect the next time a Claude session starts.",
+        checked: claudeFullscreenEnabled,
+        onChange: onSetClaudeFullscreenEnabled,
+      },
+    ],
+  };
   return (
     <section className={sectionClass} aria-labelledby="settings-agents-label">
       <Typography
@@ -64,6 +96,7 @@ export function AgentsSection({
             key={detection.kind}
             detection={detection}
             busy={pending === detection.kind}
+            subSettings={subSettingsByKind[detection.kind] ?? []}
             bridgeEntry={bridgeEntryFor(detection.kind, bridgeStatus)}
             bridgeBusy={bridgeBusy === detection.kind}
             onToggle={onToggle}
@@ -88,6 +121,7 @@ function bridgeEntryFor(
 function AgentRow({
   detection,
   busy,
+  subSettings,
   bridgeEntry,
   bridgeBusy,
   onToggle,
@@ -95,6 +129,7 @@ function AgentRow({
 }: {
   detection: AgentCliDetection;
   busy: boolean;
+  subSettings: CliSubSetting[];
   bridgeEntry: BridgeInstallationStatus | null;
   bridgeBusy: boolean;
   onToggle: (kind: AgentKind, enabled: boolean) => void;
@@ -218,6 +253,34 @@ function AgentRow({
           </Typography>
         )
       ) : null}
+
+      {showReverieTools && subSettings.length > 0 ? (
+        <ul className={subSettingsListClass} data-testid={`agent-cli-subsettings-${kind}`}>
+          {subSettings.map(setting => (
+            <li key={setting.id} className={subSettingRowClass}>
+              <div className={subSettingTextClass}>
+                <Typography
+                  as="span"
+                  variant="smallBody"
+                  tone="default"
+                  style={{ letterSpacing: '-0.005em' }}
+                >
+                  {setting.label}
+                </Typography>
+                <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
+                  {setting.description}
+                </Typography>
+              </div>
+              <Switch
+                checked={setting.checked}
+                onChange={setting.onChange}
+                ariaLabel={`${displayName}: ${setting.label}`}
+                testId={`agent-cli-subsetting-${setting.id}`}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </li>
   );
 }
@@ -285,3 +348,25 @@ const statusClass = css({
 // Holds the switch column on not-detected rows so detected and not-detected
 // rows stay aligned (the switch itself lives in the shared Switch primitive).
 const switchPlaceholderClass = css({ width: '38px', height: '22px', flexShrink: 0 });
+
+// A CLI's subsettings, nested under its row. A faint left rule and indent signal
+// the toggles belong to the CLI above without adding a whole separate section.
+const subSettingsListClass = css({
+  listStyle: 'none',
+  margin: '6px 0 2px',
+  padding: '0 0 0 14px',
+  display: 'grid',
+  borderLeft: '2px solid var(--line-faint)',
+});
+const subSettingRowClass = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '16px',
+  padding: '8px 0',
+});
+const subSettingTextClass = css({
+  flex: 1,
+  minWidth: 0,
+  display: 'grid',
+  gap: '3px',
+});
