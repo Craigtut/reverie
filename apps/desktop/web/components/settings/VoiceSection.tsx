@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { css } from '../../styled-system/css';
 import { useShellStore, useSpeechEngineStore } from '../../store';
+import { provisioningLabel } from '../../domain';
 import {
   listAudioInputDevices,
   setVoiceInputDevice,
@@ -23,7 +24,11 @@ export function VoiceSection() {
   const setShell = useShellStore(s => s.setShell);
 
   const status = engineStatusCopy(engine);
-  const canRetry = engine.kind === 'error' || engine.kind === 'unavailable';
+  // Retry only helps a failed download/compile. Hardware-unavailable can't be
+  // retried away, so no button there.
+  const canRetry = engine.kind === 'error';
+  const provisioning = engine.kind === 'provisioning';
+  const ready = engine.kind === 'ready';
 
   const selectedDevice = shell.workspace.voiceInputDevice ?? '';
   const [devices, setDevices] = useState<string[]>([]);
@@ -77,28 +82,36 @@ export function VoiceSection() {
         ) : null}
       </div>
 
+      {/* One-time setup: an indeterminate bar (no byte progress is available),
+          with the stage named in the status line above. Shell-level motion. */}
+      {provisioning ? <div className={provisionBarClass} aria-hidden /> : null}
+
       <Typography as="span" variant="caption" tone="faint" style={{ lineHeight: 1.5 }}>
         Transcription runs entirely on your Mac (Apple Neural Engine); audio never leaves the
         device. Microphone access: {micPermissionCopy(micPermission)}.
       </Typography>
 
-      <label className={deviceRowClass}>
-        <Typography as="span" variant="caption" tone="muted">
-          Microphone
-        </Typography>
-        <select
-          className={selectClass}
-          value={selectedDevice}
-          onChange={event => onSelectDevice(event.target.value)}
-        >
-          <option value="">System default</option>
-          {devices.map(device => (
-            <option key={device} value={device}>
-              {device}
-            </option>
-          ))}
-        </select>
-      </label>
+      {/* The mic picker only matters once speech is ready; while it downloads or
+          is unavailable it reads as broken, so hide it until then. */}
+      {ready ? (
+        <label className={deviceRowClass}>
+          <Typography as="span" variant="caption" tone="muted">
+            Microphone
+          </Typography>
+          <select
+            className={selectClass}
+            value={selectedDevice}
+            onChange={event => onSelectDevice(event.target.value)}
+          >
+            <option value="">System default</option>
+            {devices.map(device => (
+              <option key={device} value={device}>
+                {device}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
     </section>
   );
 }
@@ -112,7 +125,10 @@ function engineStatusCopy(engine: ReturnType<typeof useSpeechEngineStore.getStat
       return { label: 'On-device speech is ready.', tone: 'ready' };
     case 'provisioning':
       return {
-        label: 'Preparing on-device speech (one-time setup, this can take a moment).',
+        label:
+          engine.phase === 'optimizing'
+            ? `${provisioningLabel(engine.phase)} (almost ready).`
+            : `${provisioningLabel(engine.phase)} (one-time, ~460 MB download).`,
         tone: 'busy',
       };
     case 'error':
@@ -143,6 +159,18 @@ const statusRowClass = css({
   display: 'flex',
   alignItems: 'center',
   gap: '8px',
+});
+
+// An indeterminate one-time-setup bar: a calm sheen sweeping a faint track. No
+// byte progress is available from the engine, so this signals motion, not a
+// percentage. Reuses the dispatch routing sheen keyframe (main.css).
+const provisionBarClass = css({
+  height: '3px',
+  borderRadius: '999px',
+  background:
+    'linear-gradient(90deg, var(--colors-border-subtle) 0%, var(--colors-status-warning, #d6a338) 50%, var(--colors-border-subtle) 100%)',
+  backgroundSize: '200% 100%',
+  animation: 'dispatchRouting 1.4s linear infinite',
 });
 
 const dotClass = css({
