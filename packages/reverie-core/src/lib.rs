@@ -86,7 +86,9 @@ pub use session_log::{
     CompositeLogSource, LogReadMode, SessionLogControl, SessionLogFold, SessionLogSource,
     SessionLogWatcher, start_session_log_watcher,
 };
-pub use speech::{CaptureId, CaptureSignal, EngineState, MicPermission, TranscriptResult};
+pub use speech::{
+    CaptureId, CaptureSignal, EngineState, MicPermission, ProvisionPhase, TranscriptResult,
+};
 pub use terminal::{
     TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors, TerminalCursor,
     TerminalCursorStyle, TerminalDirtyState, TerminalFrame, TerminalId, TerminalPosition,

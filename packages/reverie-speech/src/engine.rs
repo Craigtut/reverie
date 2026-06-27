@@ -10,7 +10,14 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use reverie_core::{CaptureId, CaptureSignal, EngineState, MicPermission, TranscriptResult};
+use reverie_core::{
+    CaptureId, CaptureSignal, EngineState, MicPermission, ProvisionPhase, TranscriptResult,
+};
+
+/// A cloneable, thread-safe state setter shared by the worker and the
+/// provisioning monitor: writes the shared state cell and emits the lifecycle
+/// event in one step. Built once in [`run_worker`].
+type SetState = Arc<dyn Fn(EngineState) + Send + Sync>;
 
 /// Sink the engine calls to surface lifecycle transitions and non-fatal errors
 /// to the host. The desktop layer adapts these to `app.emit`.
@@ -199,7 +206,9 @@ fn initial_state() -> EngineState {
     let apple_silicon = cfg!(all(target_os = "macos", target_arch = "aarch64"));
     let has_native = cfg!(any(feature = "capture", feature = "asr"));
     if apple_silicon && has_native {
-        EngineState::Provisioning
+        EngineState::Provisioning {
+            phase: ProvisionPhase::Downloading,
+        }
     } else if !apple_silicon {
         EngineState::Unavailable {
             reason: "on-device speech requires an Apple Silicon Mac".to_owned(),
@@ -224,13 +233,13 @@ fn mic_permission() -> MicPermission {
 /// (out). While a capture is live it polls so it can drain the mic ring and emit
 /// the level meter; otherwise it blocks on the next command.
 fn run_worker(rx: Receiver<Command>, state: Arc<Mutex<EngineState>>, events: EventSink) {
-    let set_state = {
+    let set_state: SetState = {
         let state = Arc::clone(&state);
         let events = Arc::clone(&events);
-        move |next: EngineState| {
+        Arc::new(move |next: EngineState| {
             *state.lock().expect("speech state poisoned") = next.clone();
             events(SpeechEvent::State(next));
-        }
+        })
     };
     let mut session = Session::new(events);
 
@@ -344,15 +353,40 @@ impl Session {
     /// `Ready` so the mic + meter are testable (stop returns an empty transcript).
     /// With neither, `Unavailable`. Idempotent: re-provisioning when already
     /// Ready just re-confirms.
-    fn provision(&mut self, set_state: &impl Fn(EngineState)) {
+    ///
+    /// `init_asr_engine` blocks this thread for the whole download + compile, so
+    /// while it runs a short-lived monitor thread watches the model folder and
+    /// flips the phase to `Optimizing` once the dominant file lands. That gives
+    /// the UI an honest "downloading -> optimizing" progression with no progress
+    /// callback (the dependency exposes none through its FFI).
+    fn provision(&mut self, set_state: &SetState) {
         #[cfg(feature = "asr")]
         {
             if self.asr.is_some() {
                 set_state(EngineState::Ready);
                 return;
             }
-            set_state(EngineState::Provisioning);
-            match init_asr_engine() {
+            // Start at the right phase: a warm (cached) launch is already past the
+            // download, so jump straight to Optimizing and skip the monitor.
+            let initial_phase = if model_download_complete() {
+                ProvisionPhase::Optimizing
+            } else {
+                ProvisionPhase::Downloading
+            };
+            set_state(EngineState::Provisioning {
+                phase: initial_phase,
+            });
+            let monitor = match initial_phase {
+                ProvisionPhase::Downloading => Some(ProvisionMonitor::spawn(Arc::clone(set_state))),
+                ProvisionPhase::Optimizing => None,
+            };
+            let result = init_asr_engine();
+            // Stop + join the monitor before the terminal state so a late phase
+            // emit can never land after Ready/Error.
+            if let Some(monitor) = monitor {
+                monitor.stop();
+            }
+            match result {
                 Ok(engine) => {
                     self.asr = Some(engine);
                     set_state(EngineState::Ready);
@@ -486,4 +520,96 @@ fn init_asr_engine() -> Result<fluidaudio_rs::FluidAudio, String> {
     }
     audio.init_asr().map_err(|err| err.to_string())?;
     Ok(audio)
+}
+
+/// Minimum size for the encoder weight to count as "downloaded". The real file
+/// is ~425MB and lands atomically (the dependency downloads to a temp file then
+/// moves it into place), so any threshold well under that distinguishes a
+/// completed file from an absent one. 300MiB leaves headroom for a re-quantized
+/// build without ever matching a partial.
+#[cfg(feature = "asr")]
+const ENCODER_MIN_BYTES: u64 = 300 * 1024 * 1024;
+
+/// The FluidAudio shared model cache (`~/Library/Application Support/FluidAudio/
+/// Models`). The path is owned by the dependency (not Reverie), so we only read
+/// it to observe download progress; we never write here.
+#[cfg(feature = "asr")]
+fn asr_models_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(std::path::PathBuf::from(home).join("Library/Application Support/FluidAudio/Models"))
+}
+
+/// Whether the dominant model file (the encoder weight, ~92% of the download) is
+/// fully on disk. Used as the one observable "download finished, compile remains"
+/// boundary, since the dependency exposes no byte-level progress. Scans every
+/// `parakeet-*` model folder so a model-version bump degrades to "stays
+/// Downloading until Ready" rather than misreporting.
+#[cfg(feature = "asr")]
+fn model_download_complete() -> bool {
+    let Some(dir) = asr_models_dir() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let encoder = entry
+            .path()
+            .join("Encoder.mlmodelc")
+            .join("weights")
+            .join("weight.bin");
+        if std::fs::metadata(&encoder)
+            .map(|meta| meta.len() >= ENCODER_MIN_BYTES)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// A short-lived thread that watches the model folder during a cold provision and
+/// flips the phase to `Optimizing` once the download finishes. It only ever moves
+/// the phase forward (Downloading -> Optimizing); the worker thread owns the
+/// terminal Ready/Error transition after [`ProvisionMonitor::stop`] joins it.
+#[cfg(feature = "asr")]
+struct ProvisionMonitor {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "asr")]
+impl ProvisionMonitor {
+    fn spawn(set_state: SetState) -> Self {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = {
+            let stop = Arc::clone(&stop);
+            std::thread::Builder::new()
+                .name("reverie-speech-provision".to_owned())
+                .spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    while !stop.load(Ordering::Relaxed) {
+                        if model_download_complete() {
+                            set_state(EngineState::Provisioning {
+                                phase: ProvisionPhase::Optimizing,
+                            });
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                    }
+                })
+                .ok()
+        };
+        Self { stop, handle }
+    }
+
+    /// Signal the monitor to stop and wait for it, so no phase emit can race the
+    /// terminal state the caller is about to set.
+    fn stop(mut self) {
+        self.stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
