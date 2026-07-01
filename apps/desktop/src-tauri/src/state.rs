@@ -1,8 +1,9 @@
 //! Managed Tauri state shared across the command handlers and activity bridges.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use reverie_core::WorkspaceService;
 use reverie_core::domain::SessionId;
@@ -93,4 +94,42 @@ impl ShutdownState {
     pub(crate) fn is_started(&self) -> bool {
         self.started.load(Ordering::SeqCst)
     }
+}
+
+/// Native-side liveness marker for the main WKWebView. The frontend records a
+/// cheap heartbeat while it is alive; focus/resume handlers use the timestamp to
+/// detect a web content process that exists from AppKit's point of view but no
+/// longer runs JavaScript.
+#[derive(Default)]
+pub(crate) struct WebviewHealth {
+    last_heartbeat_ms: AtomicI64,
+    last_reload_ms: AtomicI64,
+}
+
+impl WebviewHealth {
+    pub(crate) fn mark_heartbeat(&self) {
+        self.last_heartbeat_ms
+            .store(unix_time_millis(), Ordering::SeqCst);
+    }
+
+    pub(crate) fn last_heartbeat_ms(&self) -> i64 {
+        self.last_heartbeat_ms.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn claim_reload(&self, now_ms: i64, cooldown_ms: i64) -> bool {
+        let last = self.last_reload_ms.load(Ordering::SeqCst);
+        if last > 0 && now_ms.saturating_sub(last) < cooldown_ms {
+            return false;
+        }
+        self.last_reload_ms
+            .compare_exchange(last, now_ms, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+}
+
+pub(crate) fn unix_time_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
 }
