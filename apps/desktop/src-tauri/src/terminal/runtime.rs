@@ -16,7 +16,7 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::terminal::ghostty::GhosttyTerminalState;
+use crate::terminal::ghostty::{GhosttyTerminalState, TerminalResizeAnchor};
 use crate::terminal::wire::{encode_frame, encode_row_band};
 use reverie_core::WorkspaceService;
 use reverie_core::session_log::SessionLogControl;
@@ -32,9 +32,8 @@ const SYNC_OUTPUT_FRAME_TIMEOUT: Duration = Duration::from_millis(1000);
 /// long once, then SIGKILL any stragglers.
 const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
-/// The terminal's default foreground/background. libghostty-vt has no color
-/// config, so Reverie sources these from the active shell theme and feeds them
-/// into each terminal as OSC 10/11 (see `GhosttyTerminalState::set_default_colors`).
+/// The terminal's default foreground/background. Reverie sources these from the
+/// active shell theme and mirrors them into libghostty's embedder color defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TerminalThemeColors {
     pub foreground: TerminalColor,
@@ -80,6 +79,11 @@ enum TerminalRuntimeCommand {
     Resize {
         cols: u16,
         rows: u16,
+        anchor: Option<TerminalResizeAnchor>,
+    },
+    PasteText {
+        text: String,
+        reply: Sender<Result<(), String>>,
     },
     // Serve a contiguous history band straight from libghostty's live buffer
     // (decisions.md D6/D7). Scrolling is frontend-driven, so the backend never
@@ -327,14 +331,42 @@ impl TerminalSessionRuntime {
         Ok(())
     }
 
-    pub fn resize_terminal(&self, terminal_id: TerminalId, cols: u16, rows: u16) -> Result<()> {
+    pub fn paste_text(&self, terminal_id: TerminalId, text: String) -> Result<()> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let (reply_tx, reply_rx) = unbounded();
+        self.command_sender_for(terminal_id)?
+            .send(TerminalRuntimeCommand::PasteText {
+                text,
+                reply: reply_tx,
+            })
+            .context("failed to queue terminal paste command")?;
+        let result = reply_rx
+            .recv()
+            .context("terminal worker dropped the paste reply")?;
+        result.map_err(anyhow::Error::msg)?;
+        let _ = self.update_record(terminal_id, |record| {
+            record.last_active_at = Instant::now();
+        });
+        Ok(())
+    }
+
+    pub fn resize_terminal(
+        &self,
+        terminal_id: TerminalId,
+        cols: u16,
+        rows: u16,
+        anchor: Option<TerminalResizeAnchor>,
+    ) -> Result<()> {
         if cols == 0 || rows == 0 {
             bail!("terminal resize requires non-zero cols and rows");
         }
 
         self.controller_for(terminal_id)?.resize(cols, rows)?;
         self.command_sender_for(terminal_id)?
-            .send(TerminalRuntimeCommand::Resize { cols, rows })
+            .send(TerminalRuntimeCommand::Resize { cols, rows, anchor })
             .context("failed to queue terminal resize command")?;
         self.update_record(terminal_id, |record| {
             record.cols = cols;
@@ -475,6 +507,10 @@ impl TerminalSessionRuntime {
 
     fn run_stream_worker(&self, app: AppHandle, request: TerminalStreamRequest) -> Result<()> {
         let spec = request.spawn_spec;
+        // Initial prompt for CLIs that cannot take it as a launch arg (delivered
+        // by typing into the PTY shortly after start). Captured before `spec` is
+        // borrowed for the spawn below.
+        let initial_input = spec.initial_input.clone();
         let mut frame_channel = request.frame_channel;
         let launch_started_ms = unix_time_millis();
         let mut terminal = GhosttyTerminalState::new(spec.cols, spec.rows)?;
@@ -485,7 +521,7 @@ impl TerminalSessionRuntime {
         // PTY output arrives, so default-colored cells + the base background
         // match the shell instead of Ghostty's hardwired white-on-black.
         let theme = self.default_colors();
-        terminal.set_default_colors(theme.foreground, theme.background);
+        terminal.set_default_colors(theme.foreground, theme.background)?;
         let process = PtyProcess::spawn(request.terminal_id, &spec)
             .context("failed to spawn terminal session PTY process")?;
         crate::terminal::orphans::record_spawn(
@@ -527,6 +563,11 @@ impl TerminalSessionRuntime {
         self.mark_running(request.terminal_id)?;
         if self.is_current_terminal_for_session(request.session_id, request.terminal_id) {
             persist_shell_session_running(&app, request.session_id);
+        }
+        // Deliver a deferred initial prompt (dispatch into a CLI that does not
+        // accept a positional prompt) by typing it once the session is running.
+        if let Some(text) = initial_input {
+            schedule_initial_input(self.clone(), request.terminal_id, text);
         }
         // Launch-time native-session capture: poll the adapter's on-disk state
         // for a few seconds so the session binds its native ref (and its live
@@ -625,6 +666,7 @@ impl TerminalSessionRuntime {
                 request.terminal_id,
                 &command_rx,
                 &mut terminal,
+                Some(&controller),
                 &mut viewport_state,
                 &mut generation,
             )?;
@@ -647,6 +689,7 @@ impl TerminalSessionRuntime {
                         request.terminal_id,
                         command,
                         &mut terminal,
+                        Some(&controller),
                         &mut viewport_state,
                         &mut generation,
                     )?;
@@ -1043,13 +1086,21 @@ fn apply_terminal_commands(
     terminal_id: TerminalId,
     receiver: &Receiver<TerminalRuntimeCommand>,
     terminal: &mut GhosttyTerminalState<'_, '_>,
+    controller: Option<&PtyController>,
     viewport_state: &mut TerminalViewportState,
     generation: &mut u32,
 ) -> Result<AppliedCommands> {
     let mut applied = AppliedCommands::default();
 
     while let Ok(command) = receiver.try_recv() {
-        let next = apply_terminal_command(terminal_id, command, terminal, viewport_state, generation)?;
+        let next = apply_terminal_command(
+            terminal_id,
+            command,
+            terminal,
+            controller,
+            viewport_state,
+            generation,
+        )?;
         applied.needs_frame |= next.needs_frame;
     }
 
@@ -1060,19 +1111,30 @@ fn apply_terminal_command(
     terminal_id: TerminalId,
     command: TerminalRuntimeCommand,
     terminal: &mut GhosttyTerminalState<'_, '_>,
+    controller: Option<&PtyController>,
     viewport_state: &mut TerminalViewportState,
     generation: &mut u32,
 ) -> Result<AppliedCommands> {
     let mut applied = AppliedCommands::default();
     match command {
-        TerminalRuntimeCommand::Resize { cols, rows } => {
-            terminal.resize(cols, rows)?;
+        TerminalRuntimeCommand::Resize { cols, rows, anchor } => {
+            terminal.resize_with_anchor(cols, rows, anchor)?;
             // Reflow renumbers rows, so bump the generation immediately; the
             // forced Full frame that follows carries the new generation, and
             // a history-range request drained after this resize is served at
             // (and tagged with) the post-resize generation.
             *generation = generation.saturating_add(1);
             applied.needs_frame = true;
+        }
+        TerminalRuntimeCommand::PasteText { text, reply } => {
+            let result = terminal
+                .encode_paste(&text)
+                .and_then(|encoded| {
+                    let controller = controller.context("terminal paste command has no PTY")?;
+                    controller.write_input(&encoded)
+                })
+                .map_err(|error| error.to_string());
+            let _ = reply.send(result);
         }
         TerminalRuntimeCommand::ReadRows {
             start_id,
@@ -1124,7 +1186,7 @@ fn apply_terminal_command(
             foreground,
             background,
         } => {
-            terminal.set_default_colors(foreground, background);
+            terminal.set_default_colors(foreground, background)?;
             applied.needs_frame = true;
         }
         TerminalRuntimeCommand::SetFrontendActive(active) => {
@@ -1358,6 +1420,25 @@ const HOOK_CAPTURE_GRACE: Duration = Duration::from_secs(6);
 /// `meta.json`), so it is not listed and scans immediately.
 fn has_token_bound_hook(kind: AgentKind) -> bool {
     matches!(kind, AgentKind::ClaudeCode | AgentKind::CodexCli)
+}
+
+/// How long to wait after a session starts before typing a deferred initial
+/// prompt into its PTY. A heuristic: long enough for a TUI to boot and present
+/// its input, short enough not to feel laggy. Only used for the fallback path
+/// (CLIs that cannot take the prompt as a launch arg, e.g. Cortex).
+const INITIAL_INPUT_DELAY: Duration = Duration::from_millis(1_800);
+
+/// Type a deferred initial prompt into a freshly started session, off-thread.
+/// Best-effort: if the terminal is gone or superseded by the time it fires, the
+/// write simply no-ops. Sends the text followed by a carriage return so the CLI
+/// submits it.
+fn schedule_initial_input(runtime: TerminalSessionRuntime, terminal_id: TerminalId, text: String) {
+    thread::spawn(move || {
+        thread::sleep(INITIAL_INPUT_DELAY);
+        let mut bytes = text.into_bytes();
+        bytes.push(b'\r');
+        let _ = runtime.write_input(terminal_id, &bytes);
+    });
 }
 
 /// Poll adapter-driven native-session discovery for a short window after launch
@@ -1719,6 +1800,7 @@ mod tests {
                 cols: 100,
                 rows: 24,
                 title: Some("Test terminal".to_owned()),
+                initial_input: None,
             },
             target_frames: Some(1),
             agent_kind: None,
@@ -1772,7 +1854,9 @@ mod tests {
         let terminal_id = TerminalId::new_v4();
 
         let input_error = runtime.write_input(terminal_id, b"hello").unwrap_err();
-        let resize_error = runtime.resize_terminal(terminal_id, 120, 32).unwrap_err();
+        let resize_error = runtime
+            .resize_terminal(terminal_id, 120, 32, None)
+            .unwrap_err();
         let read_rows_error = runtime
             .read_terminal_rows(terminal_id, 0, 10, 1)
             .unwrap_err();
@@ -1807,7 +1891,9 @@ mod tests {
         let runtime = TerminalSessionRuntime::default();
         let terminal_id = TerminalId::new_v4();
 
-        let error = runtime.resize_terminal(terminal_id, 0, 32).unwrap_err();
+        let error = runtime
+            .resize_terminal(terminal_id, 0, 32, None)
+            .unwrap_err();
 
         assert!(error.to_string().contains("non-zero cols and rows"));
     }
@@ -1842,6 +1928,7 @@ mod tests {
             TerminalId::new_v4(),
             &receiver,
             &mut terminal,
+            None,
             &mut viewport_state,
             &mut generation,
         )
@@ -1896,6 +1983,7 @@ mod tests {
             TerminalId::new_v4(),
             &receiver,
             &mut terminal,
+            None,
             &mut viewport_state,
             &mut generation,
         )
@@ -1948,6 +2036,7 @@ mod tests {
             TerminalId::new_v4(),
             &receiver,
             &mut terminal,
+            None,
             &mut viewport_state,
             &mut generation,
         )
@@ -1982,15 +2071,24 @@ mod tests {
         let _ = terminal.frame().unwrap();
 
         sender
-            .send(TerminalRuntimeCommand::Resize { cols: 20, rows: 5 })
+            .send(TerminalRuntimeCommand::Resize {
+                cols: 20,
+                rows: 5,
+                anchor: None,
+            })
             .unwrap();
         sender
-            .send(TerminalRuntimeCommand::Resize { cols: 24, rows: 6 })
+            .send(TerminalRuntimeCommand::Resize {
+                cols: 24,
+                rows: 6,
+                anchor: None,
+            })
             .unwrap();
         let applied = apply_terminal_commands(
             TerminalId::new_v4(),
             &receiver,
             &mut terminal,
+            None,
             &mut viewport_state,
             &mut generation,
         )
@@ -2028,6 +2126,7 @@ mod tests {
                 TerminalId::new_v4(),
                 &receiver,
                 &mut terminal,
+                None,
                 &mut viewport_state,
                 &mut generation,
             )
@@ -2048,6 +2147,7 @@ mod tests {
                 TerminalId::new_v4(),
                 &receiver,
                 &mut terminal,
+                None,
                 &mut viewport_state,
                 &mut generation,
             )

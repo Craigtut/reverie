@@ -164,6 +164,9 @@ export interface TerminalRenderer {
   clear: (background?: TerminalColor) => void;
   paintFrame: (frame: TerminalFrame, overlay?: TerminalOverlay) => void;
   rowsToPaint: (frame: TerminalFrame) => TerminalRow[];
+  // Toggle/retune the CRT post-process on a live renderer. Only the WebGL2
+  // backend implements it; null disables the effect.
+  setCrt?: (params: import('./terminalCrt').CrtParams | null) => void;
   takeStats?: () => TerminalRendererStats;
   dispose?: () => void;
 }

@@ -1,9 +1,15 @@
 use anyhow::Result;
+use std::cell::Cell;
+use std::rc::Rc;
 
+use libghostty_vt::error::Error as GhosttyError;
+use libghostty_vt::paste;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
-use libghostty_vt::screen::{CellWide, Screen};
+use libghostty_vt::screen::{CellWide, Screen, TrackedGridRef};
 use libghostty_vt::style::{RgbColor, Style, Underline as GhosttyUnderline};
-use libghostty_vt::terminal::{Mode, ScrollViewport};
+use libghostty_vt::terminal::{
+    ColorScheme, CursorStyle, Mode, Point, PointCoordinate, PointSpace, ScrollViewport,
+};
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 use reverie_core::terminal::{
     TerminalCell, TerminalCellStyle, TerminalColor, TerminalColors, TerminalCursor,
@@ -29,6 +35,13 @@ const MAX_READ_ROWS: usize = 4_096;
 /// backend serves rows only from this live buffer and persists nothing.
 pub const SCROLLBACK_LIMIT_BYTES: usize = 100 * 1024 * 1024;
 
+/// A frontend-owned viewport anchor resolved by libghostty during resize.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalResizeAnchor {
+    pub stable_id: u64,
+    pub col: u16,
+}
+
 /// Ghostty-backed terminal state for converting VT byte streams into Reverie frames.
 ///
 /// This module intentionally has no Tauri command/event knowledge and no product
@@ -37,6 +50,7 @@ pub const SCROLLBACK_LIMIT_BYTES: usize = 100 * 1024 * 1024;
 pub struct GhosttyTerminalState<'alloc, 'cb> {
     terminal: Terminal<'alloc, 'cb>,
     render_state: RenderState<'alloc>,
+    color_scheme: Rc<Cell<ColorScheme>>,
     force_next_full_frame: bool,
     last_frame: Option<TerminalFrame>,
     /// Monotonic count of rows evicted off the top of libghostty's buffer, i.e.
@@ -69,13 +83,21 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
     /// [`Self::new`] (the fixed [`SCROLLBACK_LIMIT_BYTES`] dial); tests pass a
     /// small cap to exercise eviction without producing 100 MB of output.
     pub fn new_with_scrollback_limit(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self> {
+        let color_scheme = Rc::new(Cell::new(ColorScheme::Dark));
+        let scheme_for_query = color_scheme.clone();
+        let mut terminal = Terminal::new(TerminalOptions {
+            cols,
+            rows,
+            max_scrollback,
+        })?;
+        terminal
+            .on_color_scheme(move |_terminal| Some(scheme_for_query.get()))?
+            .set_default_cursor_style(Some(CursorStyle::Block))?
+            .set_default_cursor_blink(Some(false))?;
         Ok(Self {
-            terminal: Terminal::new(TerminalOptions {
-                cols,
-                rows,
-                max_scrollback,
-            })?,
+            terminal,
             render_state: RenderState::new()?,
+            color_scheme,
             force_next_full_frame: true,
             last_frame: None,
             lines_evicted: 0,
@@ -135,25 +157,56 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         }
     }
 
-    /// Seed the terminal's default foreground/background by feeding Ghostty OSC 10
-    /// (foreground) and OSC 11 (background). libghostty-vt has no color config on
-    /// `TerminalOptions`, so without this the render state reports its hardwired
-    /// white-on-black default; after this, `colors()` reflects the active theme.
+    /// Seed the terminal's default foreground/background using libghostty's
+    /// embedder color APIs. This replaces the old synthetic OSC 10/11 input path.
     ///
     /// NOTE: this is NOT the paint path. The frontend Canvas renderer is the
     /// authoritative source for the painted default colors: it draws from the
     /// shell theme and ignores `frame.colors`, because the theme is tied to the
     /// shell's CSS and must re-theme live, exited, and cached sessions instantly
     /// on a light/dark toggle (a VT-side default can't re-theme an exited session
-    /// without replaying it). So this call is currently a forward-looking mirror
-    /// that keeps the VT model honest. It becomes load-bearing only if/when
-    /// libghostty-vt can answer OSC 10/11 color *queries* (letting a CLI auto-pick
-    /// a matching theme); 0.1.1 cannot, so nothing consumes these values yet.
+    /// without replaying it). This call keeps the VT model honest, gives color
+    /// queries the active defaults, and reports the matching light/dark scheme.
     /// Forces a full frame so the change repaints everywhere.
-    pub fn set_default_colors(&mut self, foreground: TerminalColor, background: TerminalColor) {
-        self.write(&osc_set_color(10, foreground));
-        self.write(&osc_set_color(11, background));
+    pub fn set_default_colors(
+        &mut self,
+        foreground: TerminalColor,
+        background: TerminalColor,
+    ) -> Result<()> {
+        self.terminal
+            .set_default_fg_color(Some(to_rgb_color(foreground)))?
+            .set_default_bg_color(Some(to_rgb_color(background)))?
+            .set_default_cursor_color(Some(to_rgb_color(foreground)))?;
+        self.color_scheme
+            .set(color_scheme_for_background(background));
         self.force_next_full_frame = true;
+        Ok(())
+    }
+
+    /// Encode paste text through libghostty's sanitizer using the live terminal
+    /// bracketed-paste mode. Normal typed input deliberately bypasses this.
+    pub fn encode_paste(&self, text: &str) -> Result<Vec<u8>> {
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let bracketed = self.terminal.mode(Mode::BRACKETED_PASTE)?;
+        let mut data = text.as_bytes().to_vec();
+        let mut encoded = vec![0_u8; data.len().saturating_add(32).max(32)];
+
+        loop {
+            match paste::encode(&mut data, bracketed, &mut encoded) {
+                Ok(len) => {
+                    encoded.truncate(len);
+                    return Ok(encoded);
+                }
+                Err(GhosttyError::OutOfSpace { required }) => {
+                    let next_len = required.max(encoded.len().saturating_mul(2)).max(32);
+                    encoded.resize(next_len, 0);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     pub fn on_pty_write(
@@ -165,7 +218,31 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
+        self.resize_with_anchor(cols, rows, None)
+    }
+
+    pub fn resize_with_anchor(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        anchor: Option<TerminalResizeAnchor>,
+    ) -> Result<()> {
+        let tracked_anchor = match anchor {
+            Some(anchor) => match self.track_resize_anchor(anchor) {
+                Ok(tracked_anchor) => Some(tracked_anchor),
+                Err(error) => {
+                    eprintln!(
+                        "[reverie-terminal] resize anchor unavailable \
+                         (stable_id={}, col={}): {error}",
+                        anchor.stable_id, anchor.col
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         self.terminal
             .resize(cols, rows, DEFAULT_CELL_WIDTH_PX, DEFAULT_CELL_HEIGHT_PX)?;
         self.force_next_full_frame = true;
@@ -178,7 +255,29 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         // pre-resize value: the next observe then sees growth (no phantom drop)
         // instead of miscounting the reflow shrink as eviction.
         self.last_observed_total = self.total_rows().unwrap_or(0);
+        if let Some(tracked_anchor) = tracked_anchor {
+            if let Some(point) = tracked_anchor.point(PointSpace::Screen)? {
+                self.scroll_to_row_start(point.y as usize)?;
+            }
+        }
         Ok(())
+    }
+
+    fn track_resize_anchor(&self, anchor: TerminalResizeAnchor) -> Result<TrackedGridRef> {
+        let total_rows = self.total_rows()?;
+        let Some(max_row) = total_rows.checked_sub(1) else {
+            anyhow::bail!("cannot anchor an empty terminal buffer");
+        };
+        let row = anchor
+            .stable_id
+            .saturating_sub(self.lines_evicted)
+            .min(max_row as u64);
+        let y = u32::try_from(row)?;
+        let cols = self.terminal.cols()?;
+        let x = anchor.col.min(cols.saturating_sub(1));
+        self.terminal
+            .track_grid_ref(Point::Screen(PointCoordinate { x, y }))
+            .map_err(Into::into)
     }
 
     /// Whether the viewport currently shows the active area (the tail). Used by
@@ -537,17 +636,11 @@ fn extract_frame<'alloc, 'cb>(
     })
 }
 
-/// Build an `OSC <code>;rgb:rr/gg/bb` (BEL-terminated) sequence. Code 10 sets
-/// the default foreground, code 11 the default background.
-fn osc_set_color(code: u8, color: TerminalColor) -> Vec<u8> {
-    format!(
-        "\x1b]{code};rgb:{:02x}/{:02x}/{:02x}\x07",
-        color.r, color.g, color.b
-    )
-    .into_bytes()
-}
-
 fn cell_text(cell: &libghostty_vt::render::CellIteration<'_, '_>) -> Result<String> {
+    if cell.graphemes_len()? == 0 {
+        return Ok(" ".to_string());
+    }
+
     let mut text = String::new();
     cell.graphemes_utf8(&mut text)?;
     Ok(text)
@@ -566,6 +659,25 @@ fn map_color(color: RgbColor) -> TerminalColor {
         r: color.r,
         g: color.g,
         b: color.b,
+    }
+}
+
+fn to_rgb_color(color: TerminalColor) -> RgbColor {
+    RgbColor {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+    }
+}
+
+fn color_scheme_for_background(background: TerminalColor) -> ColorScheme {
+    let luminance = 0.2126 * f64::from(background.r)
+        + 0.7152 * f64::from(background.g)
+        + 0.0722 * f64::from(background.b);
+    if luminance >= 128.0 {
+        ColorScheme::Light
+    } else {
+        ColorScheme::Dark
     }
 }
 
@@ -760,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_terminal_state_reports_injected_default_colors() {
+    fn ghostty_terminal_state_reports_default_colors() {
         let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
         // Default (no OSC) is Ghostty's hardwired white-on-black.
         let default = terminal.frame().unwrap();
@@ -778,18 +890,20 @@ mod tests {
         );
 
         // Light-theme values: cream background, near-black foreground.
-        terminal.set_default_colors(
-            TerminalColor {
-                r: 0x1b,
-                g: 0x18,
-                b: 0x14,
-            },
-            TerminalColor {
-                r: 0xf4,
-                g: 0xf1,
-                b: 0xeb,
-            },
-        );
+        terminal
+            .set_default_colors(
+                TerminalColor {
+                    r: 0x1b,
+                    g: 0x18,
+                    b: 0x14,
+                },
+                TerminalColor {
+                    r: 0xf4,
+                    g: 0xf1,
+                    b: 0xeb,
+                },
+            )
+            .unwrap();
         let themed = terminal.frame().unwrap();
         assert_eq!(
             themed.colors.background,
@@ -808,6 +922,51 @@ mod tests {
             }
         );
         assert_eq!(themed.dirty, TerminalDirtyState::Full);
+    }
+
+    #[test]
+    fn ghostty_terminal_state_encodes_plain_paste_safely() {
+        let terminal = GhosttyTerminalState::new(20, 4).unwrap();
+        let encoded = terminal.encode_paste("a\nb\x1b[201~c").unwrap();
+
+        assert_eq!(String::from_utf8(encoded).unwrap(), "a\rb [201~c");
+    }
+
+    #[test]
+    fn ghostty_terminal_state_encodes_bracketed_paste_safely() {
+        let mut terminal = GhosttyTerminalState::new(20, 4).unwrap();
+        terminal.write(b"\x1b[?2004h");
+        let encoded = terminal.encode_paste("hello\nworld").unwrap();
+
+        assert!(encoded.starts_with(b"\x1b[200~"));
+        assert!(encoded.ends_with(b"\x1b[201~"));
+        assert!(String::from_utf8(encoded).unwrap().contains("hello\nworld"));
+    }
+
+    #[test]
+    fn ghostty_terminal_state_anchors_resize_to_tracked_row() {
+        let mut terminal = GhosttyTerminalState::new(12, 4).unwrap();
+        for index in 0..12 {
+            terminal.write(format!("line {index:02}\r\n").as_bytes());
+        }
+        terminal.scroll_bottom();
+        let tail = terminal.frame().unwrap();
+        assert!(tail.scrollback.viewport_offset > 2);
+
+        terminal
+            .resize_with_anchor(
+                12,
+                5,
+                Some(TerminalResizeAnchor {
+                    stable_id: 2,
+                    col: 0,
+                }),
+            )
+            .unwrap();
+        let anchored = terminal.frame().unwrap();
+
+        assert_eq!(anchored.scrollback.viewport_offset, 2);
+        assert_eq!(anchored.dirty, TerminalDirtyState::Full);
     }
 
     #[test]

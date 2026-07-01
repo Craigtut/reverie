@@ -102,6 +102,7 @@ function createPort(canvas: HTMLCanvasElement, modes: TerminalModes | undefined)
       getSurface: () => surface,
       getStartRow: () => 0,
       getRowCount: () => surface.rows,
+      getCrtCurvature: () => 0,
       getComposite: () => frame(),
       getLastFrameModes: () => modes,
       getSelection: () => selection,

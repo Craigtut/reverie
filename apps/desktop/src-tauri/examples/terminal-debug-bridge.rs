@@ -552,7 +552,7 @@ fn terminal_worker(
         while let Ok(command) = command_rx.try_recv() {
             match command {
                 WorkerCommand::Resize { cols, rows } => {
-                    terminal.resize(cols, rows)?;
+                    terminal.resize_with_anchor(cols, rows, None)?;
                     generation = generation.saturating_add(1);
                     pending_frame = true;
                 }
@@ -765,6 +765,7 @@ fn terminal_spawn_spec(body: &BridgeStartBody) -> Result<TerminalSpawnSpec> {
         cols,
         rows,
         title: Some("Browser terminal debug bridge".to_owned()),
+        initial_input: None,
     })
 }
 

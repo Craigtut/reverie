@@ -1,10 +1,9 @@
 import type { ThemeMode } from './tokens';
 
-// The terminal's default foreground/background per theme. libghostty-vt has no
-// color config and reports a hardwired white-on-black default, so Reverie owns
-// these: the Canvas renderer paints them as the default cell colors (B) and the
-// backend feeds them into Ghostty as OSC 10/11 so the VT model + any CLI that
-// queries its colors agree (D).
+// The terminal's default foreground/background per theme. Reverie owns these:
+// the Canvas renderer paints them as the default cell colors, and the backend
+// mirrors them into libghostty's embedder defaults so the VT model and any CLI
+// that queries its colors agree.
 //
 // Values track the shell's `--bg` / `--text` tokens in themes/appShell.ts so the
 // terminal reads as a solid panel of the same surface, not a black box. Keep

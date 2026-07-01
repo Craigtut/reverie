@@ -23,19 +23,23 @@ export const MAX_RENDERED_SCROLLBACK_ROWS = 2_000;
 export const MAX_SCROLLBACK_SPACER_HEIGHT_PX = 64_000;
 export const SCROLL_FOLLOW_EPSILON_PX = 4;
 
-// Blank scroll inset (in rows) injected above/below the terminal content. Like a
-// web page's top padding: when scrolled to the very top there is breathing room
-// above the first line, and the content never butts against the chrome. The
-// inset is virtual scroll space (it grows the spacer + offsets the canvas); it
-// does NOT change the measured grid, so cols/rows are unaffected.
-export const TERMINAL_TOP_INSET_ROWS = 1;
-export const TERMINAL_BOTTOM_INSET_ROWS = 0;
+// Blank scroll inset (in CSS px) injected above/below the terminal content. The
+// terminal viewport runs edge to edge: up behind the floating tab band at the
+// top and down to the window's bottom edge. These insets reserve room inside
+// that full-height viewport so the live grid sits in the visible band between
+// the chrome, the first/last rows clear the floating tabs and the bottom fade,
+// and scrolled-back history dips under the top gradient instead of butting the
+// edge. Pixels, not rows: the chrome is a fixed height, not cell-aligned.
+//
+// The inset does double duty. It is virtual scroll space (it grows the spacer +
+// offsets the canvas) AND a grid-height reserve: terminalSurfaceForBounds
+// subtracts it from the height so `rows` fits the visible band and a full-screen
+// TUI is never clipped under the chrome. It never changes `cols`.
+export const TERMINAL_TOP_INSET_PX = 64;
+export const TERMINAL_BOTTOM_INSET_PX = 64;
 
-export function terminalInsetPx(surface: TerminalSurface) {
-  return {
-    top: TERMINAL_TOP_INSET_ROWS * surface.cellHeight,
-    bottom: TERMINAL_BOTTOM_INSET_ROWS * surface.cellHeight,
-  };
+export function terminalInsetPx(_surface: TerminalSurface) {
+  return { top: TERMINAL_TOP_INSET_PX, bottom: TERMINAL_BOTTOM_INSET_PX };
 }
 
 // Cap the live terminal grid width so it keeps a calm, readable measure and a
@@ -144,10 +148,17 @@ export function terminalSurfaceForBounds(
   // Clamp the grid to a max readable width; the viewport (scroll/hover target)
   // stays full width and the grid is centered within it.
   const gridWidth = Math.min(width, MAX_CONTENT_WIDTH_PX);
+  // Subtract the chrome insets from the height so the live grid fits the visible
+  // band between the floating tab band and the bottom fade. Without this the grid
+  // would fill the full viewport and a full-screen TUI's top/bottom rows would
+  // sit behind the chrome. The leftover slack (< the insets) is the scroll
+  // padding the inset also draws as.
+  const inset = terminalInsetPx(fallback);
+  const gridHeight = height - inset.top - inset.bottom;
   return {
     ...fallback,
     cols: Math.max(40, Math.floor(gridWidth / fallback.cellWidth)),
-    rows: Math.max(12, Math.floor(height / fallback.cellHeight)),
+    rows: Math.max(12, Math.floor(gridHeight / fallback.cellHeight)),
   };
 }
 

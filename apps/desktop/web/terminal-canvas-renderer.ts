@@ -90,6 +90,9 @@ export interface TerminalCanvasOptions {
   background?: string;
   cursor?: string;
   backgroundOpacity?: number;
+  // CRT post-process params, or null/undefined for the flat (default) terminal.
+  // Only the WebGL2 renderer honors this; the Canvas 2D fallback ignores it.
+  crt?: import('./terminalCrt').CrtParams | null;
 }
 
 export function createTerminalCanvasRenderer(

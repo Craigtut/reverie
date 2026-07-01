@@ -1,5 +1,5 @@
 import type { TerminalSurface } from '../../terminalScrollback';
-import { clamp } from './geometry';
+import { applyCrtWarp, clamp } from './geometry';
 
 export interface TerminalMouseCell {
   row: number;
@@ -21,13 +21,21 @@ export function terminalMouseCellFromClientPoint(
   clientY: number,
   canvas: HTMLCanvasElement,
   surface: TerminalSurface,
+  crtCurvature = 0,
 ): TerminalMouseCell | null {
   if (surface.cols <= 0 || surface.rows <= 0) return null;
   const rect = canvas.getBoundingClientRect();
-  const localX = clientX - rect.left;
-  const localY = clientY - rect.top;
   const width = surface.cols * surface.cellWidth;
   const height = surface.rows * surface.cellHeight;
+  // Unwarp the pointer through the CRT lens before the bounds check + cell
+  // division so a click lands on the cell the user visually sees.
+  const { x: localX, y: localY } = applyCrtWarp(
+    clientX - rect.left,
+    clientY - rect.top,
+    width,
+    height,
+    crtCurvature,
+  );
   if (localX < 0 || localY < 0 || localX >= width || localY >= height) return null;
   return {
     row: clamp(Math.floor(localY / surface.cellHeight), 0, surface.rows - 1),

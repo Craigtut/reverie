@@ -1,6 +1,6 @@
 import type { TerminalFrame, TerminalModes } from '../../terminalTypes';
 import type { TerminalSurface } from '../../terminalScrollback';
-import { pointToCell } from './geometry';
+import { applyCrtWarp, pointToCell } from './geometry';
 import {
   encodeSgrMouseEvent,
   terminalMouseButtonFromDom,
@@ -29,6 +29,9 @@ export interface TerminalInteractionPort {
   getSurface(): TerminalSurface;
   getStartRow(): number;
   getRowCount(): number;
+  // Active CRT barrel curvature, or 0 when the effect is off. Used to unwarp the
+  // pointer so hit-testing matches what the warped canvas displays.
+  getCrtCurvature(): number;
   getComposite(): TerminalFrame | null;
   getLastFrameModes(): TerminalModes | undefined;
   getSelection(): SelectionRange | null;
@@ -103,13 +106,14 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     const rowCount = port.getRowCount();
-    return pointToCell(
+    const { x, y } = applyCrtWarp(
       event.clientX - rect.left,
       event.clientY - rect.top,
-      port.getSurface(),
-      port.getStartRow(),
-      rowCount,
+      rect.width,
+      rect.height,
+      port.getCrtCurvature(),
     );
+    return pointToCell(x, y, port.getSurface(), port.getStartRow(), rowCount);
   }
 
   // Local selection is suppressed while an app has mouse tracking on (vim, htop)
@@ -130,6 +134,7 @@ export function createTerminalInteraction(options: TerminalInteractionOptions) {
       event.clientY,
       canvas,
       port.getSurface(),
+      port.getCrtCurvature(),
     );
   }
 

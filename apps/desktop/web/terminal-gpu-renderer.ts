@@ -23,6 +23,12 @@ import {
   strokeBoxArc,
 } from './terminal/boxDrawing';
 import { terminalCellAtColumn, terminalCellWidth } from './terminal/cellGeometry';
+import {
+  type CrtParams,
+  type CrtPass,
+  type PremultipliedColor,
+  createCrtPass,
+} from './terminalCrt';
 
 const DEFAULT_FONT_FAMILY = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
 const DEFAULT_FONT_SIZE = 14;
@@ -236,6 +242,15 @@ export function createTerminalWebGl2Renderer(
   // where the alpha channel is ignored at composite, behaves exactly as before.
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
+  // CRT post-process. When active, the terminal's dirty-row painting is
+  // redirected into a retained content FBO and a full-screen warp pass
+  // composites it to the screen each paint. The FBO also takes over the
+  // retention role that preserveDrawingBuffer plays in the flat path. While CRT
+  // is on the canvas is treated as opaque (alpha 1) so the warp, vignette and
+  // scanlines cover the whole surface rather than only the glyph pixels.
+  let crtParams: CrtParams | null = options.crt ?? null;
+  let crtPass: CrtPass | null = crtParams ? createCrtPass(gl, canvas.width, canvas.height) : null;
+
   const rectProgram = createProgram(gl, RECT_VERTEX_SHADER, RECT_FRAGMENT_SHADER);
   const glyphProgram = createProgram(gl, GLYPH_VERTEX_SHADER, GLYPH_FRAGMENT_SHADER);
   const rectBuffer = gl.createBuffer();
@@ -256,9 +271,10 @@ export function createTerminalWebGl2Renderer(
   const rectVertexArray = createRectVertexArray();
   const glyphVertexArray = createGlyphVertexArray();
   bindDrawingBuffer();
-  setClearColor(defaultBackgroundFill);
+  setClearColor(currentBackgroundFill());
   gl.clear(gl.COLOR_BUFFER_BIT);
   flushDrawingBuffer();
+  presentCrt();
   let stats = emptyRendererStats('webgl2');
 
   const atlas = createGlyphAtlas(
@@ -308,11 +324,12 @@ export function createTerminalWebGl2Renderer(
     if (disposed) return;
     stats.clears += 1;
     const color = colorToRgba(colorToCss(background, options.background ?? DEFAULT_BACKGROUND));
-    color.a = backgroundAlpha;
+    color.a = currentBackgroundAlpha();
     bindDrawingBuffer();
     setClearColor(color);
     gl.clear(gl.COLOR_BUFFER_BIT);
     flushDrawingBuffer();
+    presentCrt();
   }
 
   function paintFrame(frame: TerminalFrame, overlay?: TerminalOverlay) {
@@ -341,8 +358,8 @@ export function createTerminalWebGl2Renderer(
         // partly opaque. At alpha 0 the CSS panel behind the canvas is the
         // background, so a transparent underlay rect would be wasted work; the
         // dirty row is still cleared to transparent by clearTranslucentRows.
-        if (backgroundAlpha > 0) {
-          rowRect(row.index, defaultBackgroundFill, underlayRects);
+        if (currentBackgroundAlpha() > 0) {
+          rowRect(row.index, currentBackgroundFill(), underlayRects);
         }
         for (const cell of row.cells) {
           paintCell(cell, row.index, underlayRects, glyphBatches, foregroundRects);
@@ -362,6 +379,7 @@ export function createTerminalWebGl2Renderer(
       drawGlyphBatches(cursorGlyphBatches);
       drawRects(overlayRects);
       flushDrawingBuffer();
+      presentCrt();
       return;
     }
 
@@ -376,6 +394,7 @@ export function createTerminalWebGl2Renderer(
     drawGlyphBatches(cursorGlyphBatches);
     drawRects(overlayRects);
     flushDrawingBuffer();
+    presentCrt();
   }
 
   function clearBatches(batches: readonly (VertexBatch | undefined)[]) {
@@ -461,15 +480,66 @@ export function createTerminalWebGl2Renderer(
   }
 
   function bindDrawingBuffer() {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, crtPass ? crtPass.contentFramebuffer() : null);
   }
 
   function flushDrawingBuffer() {
     gl.flush();
   }
 
+  // The CRT path keeps the canvas's configured background alpha: at alpha 0 the
+  // default background is transparent and defers to the CSS panel behind the
+  // canvas (so the warped content blends with the shell and there is no
+  // WebGL-vs-CSS color seam). The warp, vignette and aberration apply to the
+  // painted content; the empty background stays the shell's panel.
+  function currentBackgroundAlpha() {
+    return backgroundAlpha;
+  }
+
+  function currentBackgroundFill(): Rgba {
+    return { ...defaultBackground, a: currentBackgroundAlpha() };
+  }
+
+  // Composite the content FBO to the screen. Static (no grain/flicker) for the
+  // always-on glass, so the time input is disabled with -1. The bezel/out-of-
+  // bounds fill matches the configured background alpha, so a translucent
+  // terminal stays translucent under the warp.
+  function presentCrt() {
+    if (!crtPass || !crtParams) return;
+    const animated = crtParams.grain > 0 || crtParams.flicker > 0;
+    const time = animated ? performance.now() / 1000 : -1;
+    const bezel: PremultipliedColor = {
+      r: defaultBackground.r,
+      g: defaultBackground.g,
+      b: defaultBackground.b,
+      a: backgroundAlpha,
+    };
+    crtPass.render(crtParams, time, bezel);
+  }
+
+  // Toggle or retune the CRT effect on a live renderer. Enabling allocates the
+  // content FBO but cannot self-repaint (the renderer holds no frame model), so
+  // the controller repaints after a toggle. A param change while already active
+  // re-composites immediately from the retained content for instant feedback.
+  function setCrt(next: CrtParams | null) {
+    if (!next) {
+      if (crtPass) {
+        crtPass.dispose();
+        crtPass = null;
+      }
+      crtParams = null;
+      return;
+    }
+    const wasActive = crtPass != null;
+    crtParams = next;
+    if (!crtPass) {
+      crtPass = createCrtPass(gl, canvas.width, canvas.height);
+    }
+    if (wasActive) presentCrt();
+  }
+
   function clearTranslucentRows(paintRows: readonly TerminalRow[]) {
-    if (backgroundAlpha >= 1 || paintRows.length === 0) return;
+    if (currentBackgroundAlpha() >= 1 || paintRows.length === 0) return;
     gl.clearColor(0, 0, 0, 0);
 
     const rowHeightPx = cellHeight * dpr;
@@ -739,6 +809,7 @@ export function createTerminalWebGl2Renderer(
     clear,
     paintFrame,
     rowsToPaint,
+    setCrt,
     takeStats() {
       const out = stats;
       stats = emptyRendererStats('webgl2');
@@ -747,6 +818,8 @@ export function createTerminalWebGl2Renderer(
     dispose() {
       if (disposed) return;
       disposed = true;
+      crtPass?.dispose();
+      crtPass = null;
       gl.deleteVertexArray(rectVertexArray);
       gl.deleteVertexArray(glyphVertexArray);
       gl.deleteBuffer(rectBuffer);

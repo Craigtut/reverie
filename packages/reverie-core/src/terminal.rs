@@ -11,6 +11,14 @@ pub struct TerminalSpawnSpec {
     pub cols: u16,
     pub rows: u16,
     pub title: Option<String>,
+    /// Text to deliver into the PTY shortly after the process starts, for an
+    /// initial prompt that could not be passed as a launch argument (e.g. a CLI
+    /// that does not accept a positional prompt). The runtime types it in once
+    /// the session is running. `None` for the common case where the prompt rode
+    /// in as a launch arg or there is no initial prompt. Defaults on deserialize
+    /// so the dev-harness spawn-spec path need not send it.
+    #[serde(default)]
+    pub initial_input: Option<String>,
 }
 
 impl TerminalSpawnSpec {
@@ -20,6 +28,7 @@ impl TerminalSpawnSpec {
             cols: 120,
             rows: 32,
             title: None,
+            initial_input: None,
         }
     }
 }

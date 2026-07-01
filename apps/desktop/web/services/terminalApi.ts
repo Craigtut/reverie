@@ -34,6 +34,10 @@ export function writeTerminalInput(terminalId: string, input: string) {
   return invoke('write_terminal_input', { terminalId, input });
 }
 
+export function pasteTerminalText(terminalId: string, text: string) {
+  return invoke('paste_terminal_text', { terminalId, text });
+}
+
 // Read an image off the OS clipboard, persist it as a temp PNG, and return its
 // absolute path (or null when the clipboard holds no usable image). The primary
 // clipboard-image paste path: it catches screenshots/TIFF the WebView clipboard
@@ -48,8 +52,19 @@ export function savePastedImage(bytes: number[]) {
   return invoke<string>('save_pasted_image', { bytes });
 }
 
-export function resizeTerminal(terminalId: string, cols: number, rows: number) {
-  return invoke('resize_terminal', { terminalId, cols, rows });
+export function resizeTerminal(
+  terminalId: string,
+  cols: number,
+  rows: number,
+  anchor?: { id: number; col: number } | null,
+) {
+  return invoke('resize_terminal', {
+    terminalId,
+    cols,
+    rows,
+    anchorId: anchor?.id,
+    anchorCol: anchor?.col,
+  });
 }
 
 // Serve a contiguous band of history rows for scroll-back prefetch (decisions.md
@@ -72,11 +87,9 @@ export function setTerminalFrontendActive(terminalId: string, active: boolean) {
 }
 
 // Push the active shell theme's default terminal colors (#rrggbb) into the
-// backend, which seeds Ghostty's render-state defaults via OSC 10/11 (applied at
-// spawn + history replay, broadcast to live terminals). This keeps the VT model
-// honest; it is NOT the paint path (the Canvas renderer paints from the frontend
-// theme). See GhosttyTerminalState::set_default_colors for why it's not yet
-// load-bearing.
+// backend, which seeds Ghostty's embedder defaults (applied at spawn and
+// broadcast to live terminals). This keeps the VT model honest; it is not the
+// paint path, since the Canvas renderer paints from the frontend theme.
 export function setTerminalTheme(foreground: string, background: string) {
   return invoke('set_terminal_theme', { foreground, background });
 }

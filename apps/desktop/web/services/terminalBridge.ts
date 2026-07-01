@@ -8,6 +8,7 @@ const TERMINAL_BRIDGE_COMMANDS = new Set([
   'start_session',
   'terminate_session',
   'write_terminal_input',
+  'paste_terminal_text',
   'resize_terminal',
   'read_terminal_rows',
   'set_terminal_frontend_active',
@@ -127,6 +128,8 @@ export async function invokeTerminalBridge<T = unknown>(
     }
     case 'write_terminal_input':
       return bridgePost<T>('/input', { terminalId: args?.terminalId, input: args?.input ?? '' });
+    case 'paste_terminal_text':
+      return bridgePost<T>('/input', { terminalId: args?.terminalId, input: args?.text ?? '' });
     case 'resize_terminal':
       return bridgePost<T>('/resize', {
         terminalId: args?.terminalId,

@@ -1,4 +1,5 @@
 import type { TerminalSurface } from '../../terminalScrollback';
+import { crtCurve } from '../../terminalCrt';
 import type { BufferCell } from './types';
 
 // Pure hit-test math for the terminal interaction layer. No DOM, no canvas, no
@@ -15,6 +16,25 @@ export function clamp(value: number, min: number, max: number): number {
   if (value < min) return min;
   if (value > max) return max;
   return value;
+}
+
+// Map a pointer position on the warped (CRT) canvas back to the content
+// coordinate under it. The CRT post-pass samples content at crtCurve(screenUV),
+// so the cell shown at a screen point IS crtCurve(that point): running the same
+// forward warp on the pointer is the exact inverse, no iteration needed. A
+// no-op when curvature <= 0 (the flat terminal). `width`/`height` are the
+// canvas CSS size; the returned point is in the same window-local pixel space
+// as the input, so callers divide by the cell size exactly as before.
+export function applyCrtWarp(
+  localX: number,
+  localY: number,
+  width: number,
+  height: number,
+  curvature: number,
+): { x: number; y: number } {
+  if (!(curvature > 0) || width <= 0 || height <= 0) return { x: localX, y: localY };
+  const warped = crtCurve(localX / width, localY / height, curvature);
+  return { x: warped.u * width, y: warped.v * height };
 }
 
 // Map a point relative to the canvas top-left to a cell in buffer coordinates.
