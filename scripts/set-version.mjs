@@ -26,6 +26,7 @@ const TARGETS = [
   { path: 'apps/desktop/src-tauri/Cargo.toml', kind: 'cargo' },
   { path: 'packages/reverie-core/Cargo.toml', kind: 'cargo' },
   { path: 'packages/reverie-persistence/Cargo.toml', kind: 'cargo' },
+  { path: 'packages/reverie-speech/Cargo.toml', kind: 'cargo' },
   { path: 'apps/reverie-bridge/Cargo.toml', kind: 'cargo' },
 ];
 
