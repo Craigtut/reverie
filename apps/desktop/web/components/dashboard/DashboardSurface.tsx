@@ -219,12 +219,16 @@ const dashboardContentClass = css({
 
 // The quiet (idle-only) body. `marginBlock: auto` centers it in the space below
 // the header when the list is short, and collapses to 0 (so the parent simply
-// scrolls, never clipping the top) when a long idle list overflows.
+// scrolls, never clipping the top) when a long idle list overflows. The generous
+// `paddingTop` and `gap` are deliberate: when nothing needs you, the "everything's
+// quiet" heading gets real breathing room above it and a wide margin down to the
+// resting list, so the state reads calm rather than crowded.
 const calmBodyClass = css({
   marginBlock: 'auto',
   display: 'flex',
   flexDirection: 'column',
-  gap: '22px',
+  paddingTop: '72px',
+  gap: '94px',
   width: '100%',
 });
 
