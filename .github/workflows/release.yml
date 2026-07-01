@@ -25,7 +25,11 @@ concurrency:
 jobs:
   release:
     name: Release (macOS, Apple Silicon)
-    runs-on: macos-latest
+    # Pinned to macos-15 (arm64), not macos-latest: macos-latest migrated to
+    # macOS 26, whose SDK the pinned Zig 0.15.2 toolchain fails to link
+    # libghostty-vt against (a flood of undefined libSystem symbols). macos-15 is
+    # the last image this build is known to link cleanly on.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
