@@ -20,6 +20,13 @@ export interface SpeechCapture {
   // ahead of the `capturing` render state). Use this to decide stop-vs-start so
   // a lagging render can't misroute the toggle.
   isActive: () => boolean;
+  // True between calling `start` and the capture id resolving. During this
+  // window `isActive()` is still false, so callers must check this to avoid
+  // launching a second overlapping capture.
+  isStarting: () => boolean;
+  // The capture id currently held, or null. Used to match an out-of-band
+  // `speech_error` to the live capture (ignore errors for a different one).
+  currentId: () => string | null;
 }
 
 // Imperative microphone-capture handle that future voice surfaces (a dispatch
@@ -29,11 +36,17 @@ export interface SpeechCapture {
 // the Rust backend; only the level and the final text cross the boundary.
 export function useSpeechCapture(): SpeechCapture {
   const captureIdRef = useRef<string | null>(null);
+  // Set synchronously across the `start` IPC round-trip so a second `start`
+  // can't slip through the `captureIdRef`-null window and open a duplicate
+  // capture (the worker silently supersedes, leaving the frontend holding the
+  // wrong id). This is the in-flight guard.
+  const startingRef = useRef(false);
   const [capturing, setCapturing] = useState(false);
   const [level, setLevel] = useState(0);
 
   const start = useCallback(async () => {
-    if (captureIdRef.current) return;
+    if (startingRef.current || captureIdRef.current) return;
+    startingRef.current = true;
     try {
       const id = await speechStartCapture(signal => {
         if (signal.kind === 'level') setLevel(signal.rms);
@@ -44,6 +57,8 @@ export function useSpeechCapture(): SpeechCapture {
       captureIdRef.current = null;
       setCapturing(false);
       setLevel(0);
+    } finally {
+      startingRef.current = false;
     }
   }, []);
 
@@ -74,6 +89,8 @@ export function useSpeechCapture(): SpeechCapture {
   }, []);
 
   const isActive = useCallback(() => captureIdRef.current !== null, []);
+  const isStarting = useCallback(() => startingRef.current, []);
+  const currentId = useCallback(() => captureIdRef.current, []);
 
   // Drop a live capture if the consumer unmounts mid-recording.
   useEffect(() => {
@@ -83,5 +100,5 @@ export function useSpeechCapture(): SpeechCapture {
     };
   }, []);
 
-  return { capturing, level, start, stop, cancel, isActive };
+  return { capturing, level, start, stop, cancel, isActive, isStarting, currentId };
 }
