@@ -54,7 +54,7 @@ reverie-persistence = { path = "../../../packages/reverie-persistence" }
 # phases; until then this is the pure command/event scaffold (the engine reports
 # Unavailable). The crate stays Swift-free in the root workspace's `cargo test`.
 reverie-speech = { path = "../../../packages/reverie-speech", features = ["capture", "asr"] }
-rfd = "0.15"
+rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = ["macos-private-api"] }
