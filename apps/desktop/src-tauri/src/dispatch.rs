@@ -171,11 +171,16 @@ pub(crate) fn show_dispatch_window<R: Runtime>(app: &AppHandle<R>, window: &Webv
                     _ => None,
                 }
             });
+        // Restore the saved position only if it still lands on a connected
+        // display. If the user dragged the popup onto an external monitor and
+        // later unplugged it, the stored coordinates point into dead space and
+        // AppKit will not pull an explicitly-positioned window back on-screen,
+        // so we would otherwise strand the popup with no way to recover it.
         match saved {
-            Some(position) => {
+            Some(position) if position_on_visible_monitor(window, position) => {
                 let _ = window.set_position(position);
             }
-            None => {
+            _ => {
                 let _ = window.center();
             }
         }
@@ -183,4 +188,32 @@ pub(crate) fn show_dispatch_window<R: Runtime>(app: &AppHandle<R>, window: &Webv
     }
     let _ = window.set_focus();
     let _ = app.emit_to(DISPATCH_WINDOW_LABEL, "dispatch:trigger", ());
+}
+
+/// Whether a saved window top-left (physical pixels) still falls on a currently
+/// connected display. The window's drag strip lives at its top edge, so a
+/// top-left that is on a real monitor is always recoverable by dragging. When
+/// the monitor list can't be read we assume visible rather than fighting the
+/// user's chosen position; when it can, a coordinate off every monitor (a
+/// since-removed display) recenters instead.
+fn position_on_visible_monitor<R: Runtime>(
+    window: &WebviewWindow<R>,
+    position: PhysicalPosition<i32>,
+) -> bool {
+    let monitors = match window.available_monitors() {
+        Ok(monitors) if !monitors.is_empty() => monitors,
+        // Can't enumerate displays: don't override the saved position.
+        Ok(_) => return true,
+        Err(_) => return true,
+    };
+    monitors.iter().any(|monitor| {
+        let origin = monitor.position();
+        let size = monitor.size();
+        let right = origin.x + size.width as i32;
+        let bottom = origin.y + size.height as i32;
+        position.x >= origin.x
+            && position.x < right
+            && position.y >= origin.y
+            && position.y < bottom
+    })
 }
