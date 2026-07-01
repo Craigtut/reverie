@@ -1,8 +1,8 @@
 import { Sparkle, Warning, X } from '@phosphor-icons/react';
 
 import { css, cx } from '../../styled-system/css';
-import { activeReentrySummary, activityForSession } from '../../domain';
-import type { ActivityState, ShellSession } from '../../domain';
+import { activeReentrySummary, activityForSession, timelineForSession } from '../../domain';
+import type { ActivityState, SessionStateTimeline, ShellSession } from '../../domain';
 import { dismissSessionReentry as persistDismiss } from '../../services/shellApi';
 import { useShellStore } from '../../store';
 import { Typography } from '../primitives/Typography';
@@ -17,6 +17,7 @@ import { Typography } from '../primitives/Typography';
 interface ReentryHeaderProps {
   session: ShellSession;
   cortexActivity: Record<string, ActivityState>;
+  sessionTimelines: Record<string, SessionStateTimeline>;
 }
 
 // Suppressed whenever the agent is actively working or blocking on the user (a
@@ -34,10 +35,10 @@ function clean(value?: string | null): string | null {
   return trimmed ? trimmed : null;
 }
 
-export function ReentryHeader({ session, cortexActivity }: ReentryHeaderProps) {
+export function ReentryHeader({ session, cortexActivity, sessionTimelines }: ReentryHeaderProps) {
   const dismissInStore = useShellStore(s => s.dismissSessionReentry);
   const activity = activityForSession(session, cortexActivity);
-  const summary = activeReentrySummary(session);
+  const summary = activeReentrySummary(session, timelineForSession(session, sessionTimelines));
 
   if (!summary || isBusy(activity)) return null;
 

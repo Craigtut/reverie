@@ -112,6 +112,7 @@ export function DashboardStateRails({
             shell={shell}
             bindings={bindings}
             cortexActivity={cortexActivity}
+            sessionTimelines={sessionTimelines}
             renamingSessionId={renamingSessionId}
             onOpenSession={onOpenSession}
             onContextMenuSession={openSessionMenu}

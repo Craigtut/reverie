@@ -114,10 +114,20 @@ function hasUnseenCompletion(
 // turn advances `restingSince` and supersedes the summary; this returns null then
 // (the record is kept for resume, but no longer shown). Shared by the re-entry
 // header and the dashboard card so both gate identically. See ReentrySummary.
-export function activeReentrySummary(session: ShellSession): ReentrySummary | null {
+export function activeReentrySummary(
+  session: ShellSession,
+  timeline?: SessionStateTimeline | null,
+): ReentrySummary | null {
   const summary = session.reentrySummary;
   if (!summary || summary.dismissed) return null;
-  const restingSince = session.stateTimeline?.restingSince ?? null;
+  // Gate on the freshest known rest. The live-merged timeline (via
+  // timelineForSession) advances restingSince the moment a newer turn comes to
+  // rest, so the summary supersedes itself immediately even when no snapshot
+  // refetch has landed yet (a session the user watched finish another turn emits
+  // no session_record_changed, leaving the persisted stateTimeline stale). Fall
+  // back to the persisted snapshot only when no timeline arg is supplied.
+  const resolved = timeline === undefined ? session.stateTimeline : timeline;
+  const restingSince = resolved?.restingSince ?? null;
   if (!summary.generatedForRestingSince || summary.generatedForRestingSince !== restingSince)
     return null;
   return summary;

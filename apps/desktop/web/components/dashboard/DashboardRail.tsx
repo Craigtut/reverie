@@ -7,6 +7,7 @@ import type {
   ActivityState,
   DashboardStatus,
   SessionState,
+  SessionStateTimeline,
   SessionTerminalBinding,
   ShellSession,
   WorkspaceShellSnapshot,
@@ -32,6 +33,7 @@ export function DashboardRail({
   shell,
   bindings,
   cortexActivity,
+  sessionTimelines,
   renamingSessionId,
   onOpenSession,
   onContextMenuSession,
@@ -49,6 +51,7 @@ export function DashboardRail({
   shell: WorkspaceShellSnapshot;
   bindings: Record<string, SessionTerminalBinding>;
   cortexActivity: Record<string, ActivityState>;
+  sessionTimelines: Record<string, SessionStateTimeline>;
   renamingSessionId: string | null;
   onOpenSession: (session: ShellSession) => void;
   onContextMenuSession: (event: MouseEvent<HTMLElement>, session: ShellSession) => void;
@@ -138,6 +141,7 @@ export function DashboardRail({
                 shell={shell}
                 isBound={Boolean(bindings[session.id])}
                 activity={activityForSession(session, cortexActivity)}
+                sessionTimelines={sessionTimelines}
                 tone={tone}
                 prominent={variant === 'prominent'}
                 renaming={renamingSessionId === session.id}

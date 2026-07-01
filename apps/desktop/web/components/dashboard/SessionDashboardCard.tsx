@@ -11,10 +11,12 @@ import {
   plainLanguageStatus,
   reentryNeedsLine,
   sessionContext,
+  timelineForSession,
 } from '../../domain';
 import type {
   ActivityState,
   DashboardStatus,
+  SessionStateTimeline,
   ShellSession,
   WorkspaceShellSnapshot,
 } from '../../domain';
@@ -39,6 +41,7 @@ export function SessionDashboardCard({
   shell,
   isBound,
   activity,
+  sessionTimelines,
   tone,
   prominent = false,
   renaming,
@@ -51,6 +54,7 @@ export function SessionDashboardCard({
   shell: WorkspaceShellSnapshot;
   isBound: boolean;
   activity: ActivityState | null;
+  sessionTimelines: Record<string, SessionStateTimeline>;
   tone: DashboardStatus;
   // The "act now" tiers (errored / blocked) render heavier: wider columns, more
   // padding, and the home for the inline approve/deny actions.
@@ -72,7 +76,7 @@ export function SessionDashboardCard({
   // next, from the re-entry summary we already generated when it came to rest. It
   // is the one line the rail and cell can't say. Only on the finished tier:
   // working owns its own live caption, idle is already caught up, fresh has none.
-  const reentrySummary = activeReentrySummary(session);
+  const reentrySummary = activeReentrySummary(session, timelineForSession(session, sessionTimelines));
   const reentryLine =
     reentrySummary && deriveSessionState(session, isBound, activity) === 'finished'
       ? reentryNeedsLine(reentrySummary)

@@ -423,7 +423,11 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
               ) : null}
 
               {selectedSession && !creationMode ? (
-                <ReentryHeader session={selectedSession} cortexActivity={cortexActivity} />
+                <ReentryHeader
+                  session={selectedSession}
+                  cortexActivity={cortexActivity}
+                  sessionTimelines={sessionTimelines}
+                />
               ) : null}
 
               {creationMode ? (
