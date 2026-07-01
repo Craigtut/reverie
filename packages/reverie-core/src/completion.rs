@@ -147,6 +147,11 @@ fn complete_with_claude(executable: &Path, request: &CompletionRequest) -> Resul
     let mut args = vec![
         "-p".to_owned(),
         "--no-session-persistence".to_owned(),
+        // Skip the user's MCP servers entirely for this throwaway call: with no
+        // `--mcp-config`, `--strict-mcp-config` loads none. Booting configured
+        // MCP servers (and their subprocesses) is a large, pointless chunk of
+        // the cold-start for a tiny classification/title job.
+        "--strict-mcp-config".to_owned(),
         "--tools".to_owned(),
         String::new(),
         "--permission-mode".to_owned(),
