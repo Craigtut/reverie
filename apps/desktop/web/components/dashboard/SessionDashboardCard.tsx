@@ -76,7 +76,10 @@ export function SessionDashboardCard({
   // next, from the re-entry summary we already generated when it came to rest. It
   // is the one line the rail and cell can't say. Only on the finished tier:
   // working owns its own live caption, idle is already caught up, fresh has none.
-  const reentrySummary = activeReentrySummary(session, timelineForSession(session, sessionTimelines));
+  const reentrySummary = activeReentrySummary(
+    session,
+    timelineForSession(session, sessionTimelines),
+  );
   const reentryLine =
     reentrySummary && deriveSessionState(session, isBound, activity) === 'finished'
       ? reentryNeedsLine(reentrySummary)
