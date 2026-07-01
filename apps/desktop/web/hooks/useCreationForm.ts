@@ -1,13 +1,20 @@
 import { useEffect, useState } from 'react';
 
 import { invoke } from '../services/runtime';
-import { agentLabel, defaultCwdForFocus, errorMessage, folderNameFromPath } from '../domain';
+import {
+  agentLabel,
+  defaultCwdForFocus,
+  errorMessage,
+  folderNameFromPath,
+  primaryGeneralFocus,
+} from '../domain';
 import type {
   AgentKind,
   CreateFocusRequest,
   CreateProjectRequest,
   CreateSessionRecordRequest,
   CreationMode,
+  DispatchLaunchPayload,
   ProjectFolderSelection,
   ShellFocus,
   WorkspaceShellSnapshot,
@@ -233,11 +240,12 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     agentKind: AgentKind,
     shellSnapshot: WorkspaceShellSnapshot,
     dangerousModeOverride: boolean | null,
+    options: { initialPrompt?: string; title?: string } = {},
   ) {
     // No manual naming: default the title to the chosen CLI's display name. It
     // must be non-empty (the backend rejects blank titles) and the agent's live
-    // terminal title overwrites it later.
-    const title = agentLabel(agentKind);
+    // terminal title overwrites it later. Dispatch may pass a classified title.
+    const title = options.title?.trim() || agentLabel(agentKind);
     // The cwd is never user-chosen: a project session runs in its project
     // folder; a General session sends '' and the backend provisions (and
     // trusts) a fresh scratch workspace for it.
@@ -260,7 +268,7 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     setCreationMode(null);
     setSurfaceMode('terminal');
     appendLog(`Created session: ${created?.title ?? title}. Preparing terminal handoff.`);
-    if (created) terminal.autostartSession(created);
+    if (created) terminal.autostartSession(created, { initialPrompt: options.initialPrompt });
   }
 
   // Topic composer: create the focus (carrying its topic-wide auto-approve) and
@@ -322,6 +330,66 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     }
   }
 
+  // Dispatch handoff: the popup window emits a confirmed routing + prompt; the
+  // main window resolves it to a focus (General, an existing topic, or a new
+  // topic under a project), creates the session there, selects it, and launches
+  // it with the prompt. Reads the live snapshot from the store rather than the
+  // render-time `shell` closure, since this runs from an event listener.
+  async function dispatchIntoWorkspace(payload: DispatchLaunchPayload) {
+    if (!canUseAppServices) return;
+    const { routing, agentKind, prompt } = payload;
+    setBusy(true);
+    try {
+      let snapshot = useShellStore.getState().shell;
+      let focus: ShellFocus | null = null;
+
+      if (
+        routing.scope === 'project' &&
+        routing.projectId &&
+        !routing.isNewTopic &&
+        routing.topicId
+      ) {
+        focus = snapshot.focuses.find(item => item.id === routing.topicId) ?? null;
+      }
+      if (!focus && routing.scope === 'project' && routing.projectId) {
+        // New topic (or an unresolved existing one) under the project.
+        const request: CreateFocusRequest = {
+          projectId: routing.projectId,
+          title: routing.newTopicTitle?.trim() || routing.sessionTitle || 'New topic',
+          description: 'Created by dispatch.',
+          defaultDangerousMode: null,
+        };
+        const before = new Set(snapshot.focuses.map(item => item.id));
+        snapshot = await invoke<WorkspaceShellSnapshot>('create_focus', { request });
+        focus =
+          snapshot.focuses.find(item => !before.has(item.id)) ??
+          snapshot.focuses[snapshot.focuses.length - 1] ??
+          null;
+        setShell(snapshot);
+      }
+      // General scope (or any unresolved project route) lands in the General lane.
+      if (!focus) {
+        focus = primaryGeneralFocus(snapshot);
+      }
+      if (!focus) {
+        appendLog('Dispatch failed: could not resolve a destination.');
+        return;
+      }
+
+      setSelectedProjectId(focus.projectId ?? null);
+      setSelectedFocusId(focus.id);
+      setSelectedSessionId(null);
+      await startSessionInFocus(focus, agentKind, snapshot, null, {
+        initialPrompt: prompt,
+        title: routing.sessionTitle,
+      });
+    } catch (error) {
+      appendLog(`Dispatch failed: ${errorMessage(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return {
     newProjectName,
     setNewProjectName,
@@ -343,6 +411,7 @@ export function useCreationForm({ model, terminal }: CreationFormOptions) {
     createProjectFromComposer,
     createTopicAndStartSession,
     createSessionWithAgent,
+    dispatchIntoWorkspace,
   };
 }
 

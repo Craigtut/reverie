@@ -3,7 +3,7 @@
 html,
 body,
 #root {
-  background: transparent;
+  background: #0b0a09;
   /* Lock the document so it can never scroll or rubber-band. The shell <main> is
    * position:fixed inset:0 and owns every real scroll surface (the nav list, the
    * terminal viewport) as inner overflow:auto regions. Without this, scrolling
@@ -59,6 +59,24 @@ body,
  * The fallback matches the dark theme value for the brief pre-mount frame. */
 ::selection {
   background-color: var(--selection, rgba(231, 222, 206, 0.22));
+}
+
+/* Dispatch destination chip: a calm left-to-right sheen while the classifier
+ * resolves routing in the background. Shell-level motion only. */
+@keyframes dispatchRouting {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* Dispatch action button: a racing ring while the transcript is processed. */
+@keyframes dispatchSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* The shell is non-selectable by default (see appShell.ts), but text the user

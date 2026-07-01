@@ -328,17 +328,16 @@ fn main() {
             // The dispatch popup is a secondary window. Closing it must not quit
             // the app, and its focus changes must not drive the main window's
             // git-watch / webview-recovery logic. Dismiss-not-destroy keeps the
-            // pre-warmed bundle alive; blur hides it, Spotlight-style.
+            // pre-warmed bundle alive.
+            //
+            // We deliberately do NOT hide on blur: the popup must hold key focus
+            // for its text field, so the mic-permission dialog (and other focus
+            // blips) would otherwise hide it mid-capture and desync the flow. The
+            // overlay owns dismissal (Escape / click-outside / after dispatch).
             if window.label() != "main" {
-                match event {
-                    tauri::WindowEvent::CloseRequested { api, .. } => {
-                        api.prevent_close();
-                        let _ = window.hide();
-                    }
-                    tauri::WindowEvent::Focused(false) => {
-                        let _ = window.hide();
-                    }
-                    _ => {}
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
                 return;
             }
