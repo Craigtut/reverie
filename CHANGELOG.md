@@ -7,6 +7,59 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-30
+
+### Added
+- Dispatch, a global quick-launch popup. A system-wide shortcut opens a small,
+  always-on-top capture window over whatever you are doing. Speak or type a task and
+  Reverie classifies where it belongs (a project and topic, or General) and launches an
+  agent there.
+- On-device voice input. Speak instead of type. Speech is transcribed entirely on your
+  Mac (Apple Silicon) and no audio leaves the device. Settings shows a two-stage setup
+  as the model downloads and optimizes on first use, plus a live engine status readout.
+- Native approval cards. When an agent asks permission to run a command or make a
+  change, you can approve or deny it inline from Reverie without switching into the
+  terminal (Claude and Codex).
+- A "where we left off" catch-up. When a session finishes a turn while you are away,
+  Reverie writes a short summary once and shows it as a card above the session and as a
+  one-line note on the dashboard, so you can see what the agent did or what it needs
+  before diving back in.
+- A home workspace dashboard. Home opens to a dashboard that groups sessions by what
+  they need from you (working, needs attention, ready, idle), with count pills, session
+  cards, and a calm "everything's quiet" state when nothing is waiting.
+- Follow-up flags. Mark a resting session to come back to it and it surfaces in its own
+  follow-up group until you reply.
+- Per-CLI agent settings, including a Claude fullscreen toggle.
+- Retro CRT boot and resume loading sequences with a motion handoff into the live
+  session.
+
+### Changed
+- The terminal's scrollback, reflow, and renderer were reworked for cleaner history,
+  more accurate reflow on resize, and steadier rendering.
+- The left-nav session glyphs now fade by state and take their brand color only while
+  active, so the nav reads more calmly at a glance.
+- The quiet dashboard state has more room above the heading and below the list, so an
+  idle workspace feels quiet rather than crowded.
+- Reduced terminal and status overhead to keep idle sessions light.
+
+### Fixed
+- Agent cursors stay stable, and a stale cursor no longer flickers in after an agent
+  hides its own.
+- A session repaints correctly when you return to it, instead of staying blank until the
+  next output.
+- Changing the terminal font size while scrolled back keeps the same history rows in
+  view.
+- The re-entry catch-up now floats below the session tabs instead of behind them,
+  generates for Claude and Cortex sessions rather than only Codex, and clears itself the
+  moment a newer turn finishes so it can no longer linger with stale text.
+- Voice capture is reliably cancelled when you dismiss the popup before recording starts,
+  so the microphone never keeps listening in the background.
+- The dispatch popup always opens on a connected display, so unplugging an external
+  monitor can no longer strand it off-screen.
+- The Home row stays pinned above the scrolling nav list.
+- The ambient boot glow anchors to the window instead of clipping to the stage.
+- The resume bloom's compact composition and pulse ring are restored.
+
 ## [0.5.1] - 2026-06-17
 
 ### Added
