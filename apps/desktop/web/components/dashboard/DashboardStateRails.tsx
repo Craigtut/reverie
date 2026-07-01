@@ -1,10 +1,11 @@
-import { useState, type MouseEvent } from 'react';
-import { BookmarkSimple, Warning } from '@phosphor-icons/react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
+import { BookmarkSimple, Warning, WarningOctagon } from '@phosphor-icons/react';
 
 import { activityForSession, isFollowingUp, sortGroupByRecency } from '../../domain';
 import type {
   ActivityState,
   GroupedSessions,
+  SessionState,
   SessionStateTimeline,
   SessionTerminalBinding,
   ShellSession,
@@ -13,7 +14,16 @@ import type {
 import { NavContextMenu, type NavMenuModel } from '../nav/NavContextMenu';
 import { buildSessionMenuItems } from '../nav/sessionMenu';
 import { DashboardRail } from './DashboardRail';
-import { DASHBOARD_SECTIONS } from './sections';
+import { DASHBOARD_SECTIONS, type DashboardSection } from './sections';
+
+// The header glyph for a tier: errored and blocked both warn, but read as
+// distinct severities (a hard stop vs a question), so they carry different marks.
+function iconForSection(key: SessionState): ReactNode {
+  if (key === 'errored') return <WarningOctagon size={13} weight="fill" />;
+  if (key === 'blocked') return <Warning size={13} weight="fill" />;
+  if (key === 'followup') return <BookmarkSimple size={12} weight="fill" />;
+  return undefined;
+}
 
 // The per-session actions a dashboard card's right-click menu drives. They mirror
 // the left-nav session menu so a session reads the same wherever its card lives:
@@ -40,6 +50,7 @@ export function DashboardStateRails({
   sessionTimelines,
   sessionActions,
   onOpenSession,
+  sections = DASHBOARD_SECTIONS,
 }: {
   groups: GroupedSessions;
   shell: WorkspaceShellSnapshot;
@@ -48,6 +59,9 @@ export function DashboardStateRails({
   sessionTimelines: Record<string, SessionStateTimeline>;
   sessionActions: SessionCardActions;
   onOpenSession: (session: ShellSession) => void;
+  // Which sections to render, in order. Defaults to every section; Home passes a
+  // filtered list (fresh off the home, into the nav).
+  sections?: DashboardSection[];
 }) {
   // The right-click menu model and the id of the card whose title is being edited
   // inline. Both live here, the common parent of every card in a surface, so a
@@ -78,19 +92,17 @@ export function DashboardStateRails({
 
   return (
     <>
-      {DASHBOARD_SECTIONS.map(section =>
+      {sections.map(section =>
         groups[section.key].length > 0 ? (
           <DashboardRail
             key={section.key}
+            sectionKey={section.key}
             title={section.title}
-            icon={
-              section.attention ? (
-                <Warning size={13} weight="fill" />
-              ) : section.key === 'followup' ? (
-                <BookmarkSimple size={12} weight="fill" />
-              ) : undefined
-            }
+            icon={iconForSection(section.key)}
             tone={section.tone}
+            variant={section.variant}
+            collapsible={section.collapsible}
+            defaultCollapsed={section.defaultCollapsed}
             sessions={sortGroupByRecency(
               groups[section.key],
               section.key,

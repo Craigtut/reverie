@@ -8,6 +8,10 @@ import { Typography } from '../primitives/Typography';
 // status at a glance rather than a wall of numbers. The topic view keeps its own
 // active/archived caption instead, so it does not use these.
 export function DashboardCountPills({ groups }: { groups: GroupedSessions }) {
+  // "Need attention" rolls the two act-now tiers (errored + blocked) into one
+  // tally, matching how the nav rollup counts them, so the pill reads as a single
+  // "this many need you" number.
+  const attention = groups.errored.length + groups.blocked.length;
   return (
     <div className={dashboardCountsClass}>
       <Typography
@@ -28,11 +32,11 @@ export function DashboardCountPills({ groups }: { groups: GroupedSessions }) {
         as="span"
         variant="caption"
         tone="muted"
-        data-tone={groups.attention.length > 0 ? 'attention' : 'idle'}
+        data-tone={attention > 0 ? 'attention' : 'idle'}
         data-testid="dashboard-attention-count"
       >
-        <i style={{ background: groups.attention.length > 0 ? 'var(--warn)' : 'var(--text-4)' }} />
-        {groups.attention.length} need attention
+        <i style={{ background: attention > 0 ? 'var(--warn)' : 'var(--text-4)' }} />
+        {attention} need attention
       </Typography>
       <Typography
         as="span"

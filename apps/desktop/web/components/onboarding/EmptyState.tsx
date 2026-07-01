@@ -1,15 +1,8 @@
 import { motion } from 'motion/react';
-import {
-  Coffee,
-  GearSix,
-  Plus,
-  ShieldWarning,
-  Sparkle,
-  TerminalWindow,
-} from '@phosphor-icons/react';
+import { Coffee, GearSix, Plus, ShieldWarning, Sparkle } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { DotMatrixWord } from '../brand';
+import { ReverieGlyph } from '../brand';
 import { Typography } from '../primitives/Typography';
 
 // First-run panel, shown only when the workspace has no sessions yet. It keeps
@@ -43,17 +36,18 @@ export function EmptyState({
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.28 }}
       >
-        <Typography
-          as="span"
-          variant="caption"
-          tone="faint"
-          uppercase
-          className={kickerClass}
-          style={{ letterSpacing: '0.08em' }}
-        >
-          <TerminalWindow size={14} /> Agent Orchestrator
-        </Typography>
-        <DotMatrixWord />
+        <div className={heroClass}>
+          <ReverieGlyph />
+          <Typography
+            as="span"
+            variant="caption"
+            tone="faint"
+            uppercase
+            style={{ letterSpacing: '0.22em' }}
+          >
+            Agent orchestrator
+          </Typography>
+        </div>
         <Typography
           as="p"
           variant="smallBody"
@@ -62,8 +56,7 @@ export function EmptyState({
           className={proseClass}
           style={{ lineHeight: 1.7 }}
         >
-          A home for your terminal agent sessions, kept organized and ready to resume. Start a
-          general session to begin, or add a folder to create a project to work in.
+          A home for your terminal agent sessions, kept organized and ready to resume.
         </Typography>
 
         <div className={actionsClass}>
@@ -194,10 +187,11 @@ const emptyCenterClass = css({
   '& p': { margin: 0 },
 });
 
-const kickerClass = css({
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '8px',
+const heroClass = css({
+  display: 'grid',
+  justifyItems: 'center',
+  gap: '16px',
+  marginBottom: '2px',
 });
 
 const proseClass = css({

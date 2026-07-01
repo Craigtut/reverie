@@ -67,7 +67,10 @@ export function ReentryHeader({ session, cortexActivity }: ReentryHeaderProps) {
 
   return (
     <section
-      className={cx(containerBaseClass, waiting ? containerWaitingToneClass : containerRestToneClass)}
+      className={cx(
+        containerBaseClass,
+        waiting ? containerWaitingToneClass : containerRestToneClass,
+      )}
       role="status"
       data-testid="reentry-header"
     >

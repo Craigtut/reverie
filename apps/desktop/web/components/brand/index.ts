@@ -1,1 +1,1 @@
-export { DotMatrixWord } from './DotMatrixWord';
+export { ReverieGlyph } from './ReverieGlyph';

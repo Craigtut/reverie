@@ -212,16 +212,35 @@ export function SessionTabsBar({
 }
 
 const topBandClass = css({
-  // Lifted above the frame glow (which sits at zIndex 1 in the canvas-stage
-  // context): the tabs + top actions stay crisp on top of the glow.
-  position: 'relative',
-  zIndex: 2,
+  // Floats over the terminal: the terminal viewport runs edge to edge (full
+  // stage height) and its content scrolls UNDER this band, fading into the top
+  // gradient. Anchored to the top of the stage (the positioned terminal-stage
+  // ancestor). Lifted above the frame glow (zIndex 1), the fade gradients
+  // (zIndex 3), and the jump-to-latest button (zIndex 4) so the tabs + top
+  // actions stay crisp on top of everything.
+  position: 'absolute',
+  // Offset down by the shell padding so the pills clear the window drag strip
+  // (the top band that drives window dragging) and stay clickable, while the
+  // terminal canvas bleeds to the very top edge behind them.
+  top: 'var(--reverie-shell-pad)',
+  left: 0,
+  right: 0,
+  zIndex: 5,
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
   gap: '16px',
-  padding: '4px 4px 12px',
-  flexShrink: 0,
+  // The terminal stage bleeds to the right window edge, so keep the controls
+  // inset from it; the left keeps its small gutter (the stage's left edge is
+  // already inset by the sidebar gap).
+  paddingTop: '4px',
+  paddingBottom: '12px',
+  paddingLeft: '4px',
+  paddingRight: 'var(--reverie-shell-pad)',
+  pointerEvents: 'none',
+  // Re-enable pointer events on the actual controls; the band's dead gutters stay
+  // click-through so a click in a gap lands on (and focuses) the terminal beneath.
+  '& > *': { pointerEvents: 'auto' },
 });
 
 // The slot the pill floats in. Always takes the band's free width (the band minus

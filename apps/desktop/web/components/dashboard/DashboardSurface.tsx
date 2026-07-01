@@ -14,6 +14,7 @@ import { EmptyState } from '../onboarding';
 import { Typography } from '../primitives/Typography';
 import { DashboardCountPills } from './DashboardCountPills';
 import { DashboardStateRails, type SessionCardActions } from './DashboardStateRails';
+import { DASHBOARD_SECTIONS } from './sections';
 
 // The default surface (Home): every non-archived session across the workspace,
 // grouped by state. Archived sessions are excluded here and live in each focus's
@@ -52,6 +53,32 @@ export function DashboardSurface({
   // onto Home, since archiving a project hides its sessions by ancestry.
   const active = activeWorkspaceSessions(shell);
   const groups = groupSessionsByState(active, sessionTerminalBindings, cortexActivity);
+  // The home is an attention router: it shows only the tiers that earn a place
+  // here. `fresh` is off the home entirely (it lives in the nav), so we render the
+  // home-visible sections and judge "all caught up" by whether any of them has
+  // content. A workspace of only never-launched sessions therefore reads calm,
+  // not as a wall of fresh tiles.
+  const homeSections = DASHBOARD_SECTIONS.filter(section => section.home);
+  const hasHomeContent = homeSections.some(section => groups[section.key].length > 0);
+
+  // When idle is the only tier with anything in it, nothing needs you and nothing
+  // is running: a collapsed idle chip pinned to the top-left reads as a broken,
+  // empty page rather than the calm state it actually is. So in that case we drop
+  // into a quiet layout: the content centers in the body and the idle list opens
+  // in place, so your resting work is right there to pick up. Idle stays collapsed
+  // only when it has higher tiers above it to defer to.
+  const nonEmptyHomeSections = homeSections.filter(section => groups[section.key].length > 0);
+  const calmIdleOnly = nonEmptyHomeSections.length === 1 && nonEmptyHomeSections[0].key === 'idle';
+  const renderedSections = calmIdleOnly
+    ? homeSections.map(section =>
+        // In the quiet layout the idle rail is the whole screen, so render it as a
+        // plain, always-open list (no collapse control to fold the page back to
+        // empty).
+        section.key === 'idle'
+          ? { ...section, collapsible: false, defaultCollapsed: false }
+          : section,
+      )
+    : homeSections;
 
   if (shell.sessions.length === 0) {
     return (
@@ -67,7 +94,7 @@ export function DashboardSurface({
     );
   }
 
-  if (active.length === 0) {
+  if (!hasHomeContent) {
     return (
       <div className={caughtUpClass} data-testid="dashboard-caught-up">
         <motion.div
@@ -126,15 +153,39 @@ export function DashboardSurface({
           <DashboardCountPills groups={groups} />
         </header>
 
-        <DashboardStateRails
-          groups={groups}
-          shell={shell}
-          bindings={sessionTerminalBindings}
-          cortexActivity={cortexActivity}
-          sessionTimelines={sessionTimelines}
-          sessionActions={sessionActions}
-          onOpenSession={onOpenSession}
-        />
+        {calmIdleOnly ? (
+          <div className={calmBodyClass} data-testid="dashboard-quiet">
+            <div className={calmHeadingClass}>
+              <Typography as="h2" variant="subtitle" tone="default" align="center">
+                Everything's quiet
+              </Typography>
+              <Typography as="p" variant="smallBody" tone="faint" align="center">
+                Nothing needs you right now. Pick up a resting session below whenever you're ready.
+              </Typography>
+            </div>
+            <DashboardStateRails
+              groups={groups}
+              shell={shell}
+              bindings={sessionTerminalBindings}
+              cortexActivity={cortexActivity}
+              sessionTimelines={sessionTimelines}
+              sessionActions={sessionActions}
+              onOpenSession={onOpenSession}
+              sections={renderedSections}
+            />
+          </div>
+        ) : (
+          <DashboardStateRails
+            groups={groups}
+            shell={shell}
+            bindings={sessionTerminalBindings}
+            cortexActivity={cortexActivity}
+            sessionTimelines={sessionTimelines}
+            sessionActions={sessionActions}
+            onOpenSession={onOpenSession}
+            sections={homeSections}
+          />
+        )}
       </motion.div>
     </div>
   );
@@ -164,6 +215,27 @@ const dashboardContentClass = css({
   display: 'flex',
   flexDirection: 'column',
   gap: '28px',
+});
+
+// The quiet (idle-only) body. `marginBlock: auto` centers it in the space below
+// the header when the list is short, and collapses to 0 (so the parent simply
+// scrolls, never clipping the top) when a long idle list overflows.
+const calmBodyClass = css({
+  marginBlock: 'auto',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '22px',
+  width: '100%',
+});
+
+const calmHeadingClass = css({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '6px',
+  maxWidth: '460px',
+  marginInline: 'auto',
+  textAlign: 'center',
+  '& p': { margin: 0 },
 });
 
 const dashboardHeaderClass = css({
