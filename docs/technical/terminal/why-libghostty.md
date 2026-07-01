@@ -30,7 +30,7 @@ This split is the renderer-independence guardrail in practice: the core reports 
 
 The Rust path is a third-party binding (origin `uzaaft/libghostty-rs`), shipped as two crates:
 
-- `libghostty-vt` (safe Rust API) plus `libghostty-vt-sys` (raw FFI), pinned at version `0.1.1`.
+- `libghostty-vt` (safe Rust API) plus `libghostty-vt-sys` (raw FFI), pinned at version `0.2.0`.
 - Building it requires Zig `0.15.x` on PATH, pinned deliberately because a newer default Zig mis-links (see CLAUDE.md and [`../packaging-and-distribution.md`](../packaging-and-distribution.md)). The `-sys` crate fetches a pinned Ghostty source revision; `GHOSTTY_SOURCE_DIR` can point it at a local checkout.
 - The safe wrapper is render-state driven (it hands us the visible cells and rows to draw), and its objects are **not `Send`/`Sync`**. That is why each session's terminal state lives on a single dedicated owner thread, fed by message passing from the PTY reader (see [`backend.md`](backend.md), the per-session owner).
 - The API is pre-1.0 and tracks a pinned Ghostty commit, so breaking changes are expected. We stay on the official release rather than pin a post-release Ghostty commit, a fork-like path we have ruled out (see [`decisions.md`](decisions.md) D8).

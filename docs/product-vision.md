@@ -4,7 +4,7 @@
 
 ## One sentence
 
-Reverie is a local-first **agentic workspace** — a home for running, organizing, and resuming many terminal-based AI agent sessions in parallel, for anyone, not just software engineers.
+Reverie is a local-first **agentic workspace**: a home for running, organizing, and resuming many terminal-based AI agent sessions in parallel, for anyone, not just software engineers.
 
 ## The problem we are reacting to
 
@@ -12,13 +12,13 @@ A growing class of tools wraps agentic coding CLIs in a desktop or web shell. Th
 
 - They are **narrowly focused on software engineering**.
 - They usually **require git**, and frequently default to **git worktrees** as the unit of work.
-- Their information architecture is built from developer concepts — repos, branches, PRs, issues, worktrees.
+- Their information architecture is built from developer concepts: repos, branches, PRs, issues, worktrees.
 
 That framing makes sense for engineers and excludes everyone else. But terminal agents are no longer a developer-only tool. Designers, product managers, writers, researchers, and operators increasingly run agent CLIs against folders of assets, notes, and documents. They deserve a first-class home too.
 
 ## What Reverie is
 
-Reverie is a **generic agentic workspace environment**. Its durable value is the user's organized, resumable map of agent work — not any single terminal component, and not any one kind of work.
+Reverie is a **generic agentic workspace environment**. Its durable value is the user's organized, resumable map of agent work, not any single terminal component, and not any one kind of work.
 
 The central promise:
 
@@ -28,9 +28,9 @@ The central promise:
 
 Reverie is deliberately persona-plural. Engineers are *a* primary persona, not *the* persona.
 
-- **Engineers** — Claude Code / Codex / Cortex across codebases.
-- **Product designers & PMs** — agent sessions against design folders, specs, and notes.
-- **Writers, researchers, operators** — agentic work against documents, assets, and general folders.
+- **Engineers**: Claude Code / Codex / Cortex across codebases.
+- **Product designers & PMs**: agent sessions against design folders, specs, and notes.
+- **Writers, researchers, operators**: agentic work against documents, assets, and general folders.
 
 The shared trait is "person running multiple agent CLIs for real work who wants a calmer way to keep those sessions organized and resumable."
 
@@ -47,10 +47,10 @@ Workspace
 
 > Note: the UI calls this entity a **Topic**. The internal data model still calls it a **Focus** (`focusId`, `ShellFocus`), so a reader cross-referencing these docs against the code is connecting the same concept under two names.
 
-- **Workspace** — the top of the hierarchy. It exists in the model but is intentionally underexpressed in the UI today; users mostly live in projects and topics.
-- **Project** — essentially just a folder on your computer. There is also a **General** lane for work that isn't tied to a specific folder: each General session runs in its own fresh, temporary scratch workspace that Reverie creates and cleans up. **Projects never require git.**
-- **Topic** — a set of things you want to work on: a logical grouping or area. Examples: *security updates*, *branding*, *product design*, *UX design*, *login*, *sign-up*. It's a masthead for related sessions, intentionally looser than a "task" or "ticket."
-- **Session** — an actual CLI session with a supported agentic harness. Each session gives you a terminal running that harness, and the session is stored as metadata attached to its tab so you can leave and resume it later with full context.
+- **Workspace**: the top of the hierarchy. It exists in the model but is intentionally underexpressed in the UI today; users mostly live in projects and topics.
+- **Project**: essentially just a folder on your computer. There is also a **General** lane for work that isn't tied to a specific folder: each General session runs in its own fresh, temporary scratch workspace that Reverie creates and cleans up. **Projects never require git.**
+- **Topic**: a set of things you want to work on: a logical grouping or area. Examples: *security updates*, *branding*, *product design*, *UX design*, *login*, *sign-up*. It's a masthead for related sessions, intentionally looser than a "task" or "ticket."
+- **Session**: an actual CLI session with a supported agentic harness. Each session gives you a terminal running that harness, and the session is stored as metadata attached to its tab so you can leave and resume it later with full context.
 
 ## Supported agent harnesses (v1)
 
@@ -64,7 +64,7 @@ Users install the CLIs themselves; Reverie detects what's available and enables 
 
 ## Why "run many agents in parallel" is the point
 
-The unit of value is parallelism plus continuity. A user might have a security audit running under one topic, branding exploration under another, and a writing session in a general workspace — all as live or resumable tabs. Reverie keeps every one of those sessions stored, organized, and ready to continue, so the cost of stepping away from agent work approaches zero.
+The unit of value is parallelism plus continuity. A user might have a security audit running under one topic, branding exploration under another, and a writing session in a general workspace, all as live or resumable tabs. Reverie keeps every one of those sessions stored, organized, and ready to continue, so the cost of stepping away from agent work approaches zero.
 
 ## Product principles
 
@@ -73,7 +73,7 @@ The unit of value is parallelism plus continuity. A user might have a security a
 3. **Projects are helpful, not mandatory.** First run must not force a project.
 4. **Session continuity over feature sprawl.** The product is a resumable map of agent work, not an IDE.
 5. **A fast, native-quality terminal is core product value**, not a nice-to-have. See [`technical/terminal/`](technical/terminal/README.md).
-6. **Local-first trust.** v1 stores state locally; no accounts, no cloud sync.
+6. **Local-first trust.** The desktop app works fully with local state and no account. Optional remote access for the mobile companion uses a thin account-backed control plane, but session content and workspace state stay on the desktop.
 7. **Dangerous / YOLO mode is explicit.** Off by default, opt-in, overridable per session.
 8. **Calm by default.** The interface should feel quiet and focused; the work is the agent output, not our chrome. See [`design-vision.md`](design-vision.md).
 
@@ -82,7 +82,7 @@ The unit of value is parallelism plus continuity. A user might have a security a
 - Not an IDE and not a thin wrapper around a single terminal component.
 - Not git-, worktree-, or repo-gated.
 - Not an issue tracker, PR tool, or developer-only information architecture.
-- No accounts, cloud sync, or team features yet.
+- No required accounts, cloud sync, or team features in the desktop core. The mobile companion may require an account for device introduction, signaling, push, TURN credentials, and subscription state.
 
 ## How this evolves
 

@@ -23,14 +23,14 @@ The central promise: **come back later and pick up exactly where your agent work
 
 ## Product principles
 
-1. **Fast, native-quality terminal experience is core product value** — Reverie exists partly because competing tools make the terminal feel slow, brittle, or unpleasant. V1 must make terminal performance and fidelity a first-class requirement, not a nice-to-have.
-2. **Session continuity over feature sprawl** — the product value is persistent organization and restoration without becoming an overloaded IDE.
-3. **No git requirement** — folders can be projects, but git is optional.
-4. **Projects are helpful, not mandatory** — first run must not force a project.
-5. **Generic language first** — avoid overindexing on issues, branches, worktrees, pull requests, or other developer-only concepts.
-6. **Progressive disclosure** — developer-specific features can appear later as opt-in affordances.
-7. **Local-first trust** — v1 stores state locally and does not require accounts or cloud services.
-8. **Dangerous mode is explicit** — off by default, opt-in during onboarding/settings, overridable per session.
+1. **Fast, native-quality terminal experience is core product value**: Reverie exists partly because competing tools make the terminal feel slow, brittle, or unpleasant. V1 must make terminal performance and fidelity a first-class requirement, not a nice-to-have.
+2. **Session continuity over feature sprawl**: the product value is persistent organization and restoration without becoming an overloaded IDE.
+3. **No git requirement**: folders can be projects, but git is optional.
+4. **Projects are helpful, not mandatory**: first run must not force a project.
+5. **Generic language first**: avoid overindexing on issues, branches, worktrees, pull requests, or other developer-only concepts.
+6. **Progressive disclosure**: developer-specific features can appear later as opt-in affordances.
+7. **Local-first trust**: the desktop core stores state locally and does not require an account or cloud service. Optional mobile remote access may use a thin account-backed control plane for device introduction, signaling, push, TURN credentials, and subscription state, but it does not sync or store session content in the cloud.
+8. **Dangerous mode is explicit**: off by default, opt-in during onboarding/settings, overridable per session.
 
 ## Core information architecture
 
@@ -233,13 +233,14 @@ Needs dedicated adapter research for:
 - Project templates.
 - Session notes or summaries.
 - MCP/skills management.
+- Optional mobile remote access, gated behind sign-in for users who want it.
 - Cloud sync for settings/session state.
-- Team/account features.
+- Team/account features beyond the mobile remote-access control plane.
 
 ## Explicit non-goals for v1
 
-- No accounts.
-- No cloud sync.
+- No required account for the desktop core experience.
+- No cloud sync of workspace state or session content.
 - No GitHub/Linear issue integration.
 - No mandatory worktrees.
 - No mandatory git repositories.

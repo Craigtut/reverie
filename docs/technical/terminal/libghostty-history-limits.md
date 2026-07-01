@@ -45,7 +45,7 @@ Total-row and scrollback-row counts (for a scrollbar) are available but are also
 
 We handle the two differently (see [`decisions.md`](decisions.md) D8 and [`scrollback-coverage-design.md`](scrollback-coverage-design.md)):
 
-- **Trim:** the backend gives each row a stable id (`id = position + lines_evicted`, the WezTerm StableRowIndex pattern). Survivors keep their id, so the frontend's cache stays coherent across eviction with **no re-seed**; it only learns the oldest id advanced. `libghostty`'s only stable handle is its internal tracked pin, which is in-process only and not on the C ABI (an IPC consumer cannot hold a live pin), so we compute this id ourselves. The catch: the ABI emits no eviction count, so `lines_evicted` is exact below the cap and best-effort at it (the graceful residual in D8).
+- **Trim:** the backend gives each row a stable id (`id = position + lines_evicted`, the WezTerm StableRowIndex pattern). Survivors keep their id, so the frontend's cache stays coherent across eviction with **no re-seed**; it only learns the oldest id advanced. `libghostty-vt` 0.2 tracked refs are useful inside the backend worker for bounded operations such as resize anchoring, but an IPC consumer cannot hold one, so the frontend still needs stable row ids. The catch: the API emits no eviction count, so `lines_evicted` is exact below the cap and best-effort at it (the graceful residual in D8).
 - **Reflow:** rewrap genuinely changes the rows, so the id space stays monotonic but what each id resolves to changes. Here we **re-seed**: the wire protocol carries a generation marker (see [`wire-protocol.md`](wire-protocol.md)); on resize, bump the generation, re-seed from a fresh snapshot, re-issue range requests against the new geometry, and re-anchor the viewport. Row-only resizes do not reflow but still shift the active-area/scrollback split, so the safe rule is re-seed on any resize.
 
 ## Memory cost, and what it means for dozens of sessions
@@ -63,7 +63,7 @@ This is what makes D3 (dozens, no hard cap, shed under pressure) affordable, and
 - **Graphemes are out-of-line.** A cell with combining marks stores only its first codepoint inline; the rest live in a per-page pool and are read separately. One cell is not one character.
 - **Soft-wrap is a row flag, not a character.** To rebuild logical lines (for copy, search, or a title), follow the wrap flags; they are also what reflow rewraps.
 - **Dirty tracking is two-layer and caller-managed.** The render-state API tracks a global dirty flag and per-row dirty bits independently, and only sets them; the caller must reset both after drawing. Easy to over-draw or drop updates if mishandled.
-- **Pages are pooled and recycled, so page pointers are not stable.** Each page carries a monotonic serial to detect reuse, and the core tracks pins it rewrites on every mutation, but neither the serial nor the pins are exposed on the C ABI (they are in-process). That is why we compute our own stable row id rather than relying on the library (see [`decisions.md`](decisions.md) D8). Do not hold raw references across terminal mutations.
+- **Pages are pooled and recycled, so page pointers are not stable.** Do not hold raw references across terminal mutations. `libghostty-vt` 0.2 tracked refs are owned handles that can survive mutations inside the terminal worker, but they still cannot cross the frontend IPC boundary. That is why we compute our own stable row id for the wire/cache contract (see [`decisions.md`](decisions.md) D8).
 
 ## Implications for our design (the short version)
 

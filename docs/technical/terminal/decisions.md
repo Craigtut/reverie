@@ -95,16 +95,16 @@ A log of pivotal, hard-to-reverse terminal decisions: the choice, why, the alter
 **Context.** D6/D7 keep `libghostty` the sole source of truth and have the frontend mirror rows near the viewport. But `libghostty`'s row positions are buffer-relative: when the byte cap is hit and the oldest rows are evicted, every position shifts. A mirror keyed by position therefore desyncs the instant the backend trims, which for Reverie's long agent sessions is normal, not an edge.
 
 - **Option A (chosen): a stable, monotonic per-line id, computed in our backend.** Each row gets `id = buffer_position + lines_evicted`; the backend reports the retained range `[oldest_id, newest_id]`; trim advances `oldest_id` and survivors keep their id (no re-seed); the frontend keys its cache and viewport anchor by id. This is the WezTerm `StableRowIndex` pattern, the canonical answer for a renderer decoupled from the buffer.
-- **Option B: hold `libghostty`'s tracked pins across the boundary.** This is what Ghostty's own renderer uses, but it is in-process only (a live pointer into the core's heap); an IPC consumer cannot hold one. The pin/serial machinery is not on the released C ABI, and the forming upstream surface is unreleased and would require pinning a post-release Ghostty commit, i.e. a fork.
+- **Option B: hold `libghostty`'s tracked refs across the boundary.** This is what Ghostty's own renderer uses, but it is in-process only (a live pointer into the core's heap); an IPC consumer cannot hold one. As of `libghostty-vt` 0.2, the backend can create tracked refs inside the terminal worker and use them for bounded operations such as resize anchoring. That does not replace the frontend's stable row ids because the frontend cannot own those refs across IPC.
 - **Option C: keep position keying, re-seed on every trim.** Re-seed churn for an actively-trimming session, and it still cannot keep a scrolled-back view anchored.
 
 **Decision.** Compute a StableRowIndex in the backend (we own the terminal, like WezTerm). Below the cap `lines_evicted == 0`, so `id == position` and the machinery is inert. Trim advances `oldest_id` without a re-seed; only reflow/clear/alt re-seed (a generation bump). We stay on the official `libghostty-vt` release and do not fork.
 
 **Why.** It is the only model that keeps a decoupled frontend coherent across trim *and* append, it makes the coverage fix (provenance, the Ink bug) fall out keyed by id, and it confines the one thing the released library cannot give us to a graceful corner.
 
-**Consequence (the one residual).** Keeping `lines_evicted` exact needs an eviction count the released ABI does not emit, so at the cap while actively flooding *and* scrolled back, the anchor can drift (content stays correct, it self-re-anchors). Never wrong content, never a livelock. It is exact for free, with no architecture change, once `libghostty` ships an eviction/pin signal in a release.
+**Consequence (the one residual).** Keeping `lines_evicted` exact still needs an eviction count the released API does not emit, so at the cap while actively flooding *and* scrolled back, the anchor can drift (content stays correct, it self-re-anchors). Never wrong content, never a livelock. `libghostty-vt` 0.2 tracked refs may be able to improve this internally, but the stable-id wire shape stays the same either way.
 
-**Revisit when** `libghostty-vt` publishes a release exposing tracked pins, a page serial, or an eviction/line counter: adopt it to make `lines_evicted` exact and retire the residual.
+**Revisit when** `libghostty-vt` exposes an eviction/line counter, or when a tracked-ref spike proves an exact oldest-row floor without adding hot-path cost.
 
 ## D9: Reflowing a TUI's hard-wrapped scroll-back across a resize is an accepted limitation, not a bug
 
@@ -114,6 +114,6 @@ A log of pivotal, hard-to-reverse terminal decisions: the choice, why, the alter
 
 **Decision.** Do not attempt to make a TUI's scrolled-back history reflow cleanly. The live tail is correct (the CLI re-renders it), line-oriented CLIs reflow correctly, and only a TUI's scrolled-back history reflows imperfectly. Treat this as a documented known limitation.
 
-**What we explicitly separated.** Position (the scroll anchor) and content (reflow quality) are different problems. Position is fixable: libghostty preserves the viewport pin across reflow and our released binding exposes it (`scroll_viewport` + `scrollbar`), so a future re-anchor needs no fork (refines D8). It is deferred because it fixes only the position jump, not the content jumble that is the actual complaint, and Ghostty's app does not bother to anchor the scrolled-back position either.
+**What we explicitly separated.** Position (the scroll anchor) and content (reflow quality) are different problems. Position is fixed for the primary-screen scrolled-back case: the frontend sends the top visible stable row with resize, and the backend uses a `libghostty-vt` 0.2 tracked grid ref to resolve that row after reflow. This fixes the scroll jump. It does not and cannot fix the content jumble.
 
-**Revisit if** we want to remove the position jump on resize (cheap, exact, helps every CLI; see the findings doc), or if a product need justifies a frozen/letterboxed historical layer to make TUI history look clean (heavy; contradicts D5/D7).
+**Revisit if** a product need justifies a frozen/letterboxed historical layer to make TUI history look clean. That is heavy and contradicts D5/D7, so it remains out of scope.
