@@ -17,7 +17,7 @@ jobs:
     name: Frontend (lint, typecheck, build, tests)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -43,7 +43,7 @@ jobs:
     # The root workspace (reverie-core, persistence, bridge) is pure Rust and
     # does NOT link libghostty-vt, so it needs no Zig toolchain.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -66,7 +66,7 @@ jobs:
     # pinned Zig 0.15.2 fails to link libghostty-vt against.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
