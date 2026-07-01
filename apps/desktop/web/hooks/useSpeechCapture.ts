@@ -41,16 +41,29 @@ export function useSpeechCapture(): SpeechCapture {
   // capture (the worker silently supersedes, leaving the frontend holding the
   // wrong id). This is the in-flight guard.
   const startingRef = useRef(false);
+  // Set when `cancel` runs during the `start` round-trip (before a capture id
+  // exists to cancel). `start` honors it on resolve by cancelling the freshly
+  // opened capture instead of committing it, so a dismiss/Escape that lands in
+  // the starting window can't leave the mic live.
+  const pendingCancelRef = useRef(false);
   const [capturing, setCapturing] = useState(false);
   const [level, setLevel] = useState(0);
 
   const start = useCallback(async () => {
     if (startingRef.current || captureIdRef.current) return;
     startingRef.current = true;
+    pendingCancelRef.current = false;
     try {
       const id = await speechStartCapture(signal => {
         if (signal.kind === 'level') setLevel(signal.rms);
       });
+      if (pendingCancelRef.current) {
+        // A cancel arrived while we were opening the mic; drop this capture.
+        pendingCancelRef.current = false;
+        setLevel(0);
+        await speechCancelCapture(id);
+        return;
+      }
       captureIdRef.current = id;
       setCapturing(true);
     } catch {
@@ -85,18 +98,26 @@ export function useSpeechCapture(): SpeechCapture {
     captureIdRef.current = null;
     setCapturing(false);
     setLevel(0);
-    if (id) await speechCancelCapture(id);
+    if (id) {
+      await speechCancelCapture(id);
+    } else if (startingRef.current) {
+      // No id yet: mark the in-flight start so it cancels on resolve.
+      pendingCancelRef.current = true;
+    }
   }, []);
 
   const isActive = useCallback(() => captureIdRef.current !== null, []);
   const isStarting = useCallback(() => startingRef.current, []);
   const currentId = useCallback(() => captureIdRef.current, []);
 
-  // Drop a live capture if the consumer unmounts mid-recording.
+  // Drop a live capture if the consumer unmounts mid-recording. If a start is
+  // still in flight, flag it so the resolving `start` cancels the capture it
+  // opens rather than leaking the mic past unmount.
   useEffect(() => {
     return () => {
       const id = captureIdRef.current;
       if (id) void speechCancelCapture(id);
+      else if (startingRef.current) pendingCancelRef.current = true;
     };
   }, []);
 
