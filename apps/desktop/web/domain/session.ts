@@ -167,6 +167,15 @@ export function agentInstallGuides(only?: AgentKind[]): AgentInstallGuide[] {
   return order.filter(kind => !allow || allow.has(kind)).map(kind => AGENT_INSTALL_GUIDES[kind]);
 }
 
+// Whether a session's CLI can answer a tool-permission request from a native
+// card (the "answer from card" tier), versus only signposting it for the user to
+// answer in the TUI. Mirrors each adapter's ApprovalCapability in reverie-core
+// (agents.rs): Claude, Codex, and Cortex all answer from the card today. Flip an
+// entry here if a future CLI integrates at the signpost-only tier.
+export function supportsInlineApproval(agentKind: string): boolean {
+  return agentKind === 'claude_code' || agentKind === 'codex_cli' || agentKind === 'cortex_code';
+}
+
 export function agentTabLabel(session: ShellSession) {
   // The display name everywhere a session is shown (sidebar, tabs, dashboard
   // cards, launch overlay). Precedence: the user's pinned custom name, then the

@@ -208,17 +208,36 @@ describe('classifyForDashboard', () => {
 });
 
 describe('deriveSessionState', () => {
-  it('routes awaiting-permission and unrecoverable errors to attention', () => {
+  it('routes an awaiting-permission ask to blocked and an unrecoverable error to errored', () => {
     expect(
       deriveSessionState(makeSession(), false, makeActivity({ status: 'awaiting_permission' })),
-    ).toBe('attention');
+    ).toBe('blocked');
     expect(
       deriveSessionState(
         makeSession(),
         true,
         makeActivity({ status: 'error', lastError: nonRecoverableError() }),
       ),
-    ).toBe('attention');
+    ).toBe('errored');
+  });
+
+  // Errored is the louder tier: a stuck agent ranks above a blocking ask, even
+  // when both signals are present at once.
+  it('lets an unrecoverable error win over a blocking ask (errored beats blocked)', () => {
+    expect(
+      deriveSessionState(
+        makeSession(),
+        true,
+        makeActivity({ status: 'awaiting_permission', lastError: nonRecoverableError() }),
+      ),
+    ).toBe('errored');
+    expect(
+      deriveSessionState(
+        makeSession(),
+        true,
+        makeActivity({ status: 'working', lastError: nonRecoverableError() }),
+      ),
+    ).toBe('errored');
   });
 
   it('routes only a working signal to active', () => {
@@ -228,16 +247,16 @@ describe('deriveSessionState', () => {
   });
 
   // A mid-turn question / plan approval the agent raised is a blocking ask, not
-  // the at-rest awaiting_input: it must read as attention and win over working,
+  // the at-rest awaiting_input: it must read as blocked and win over working,
   // even for the session you are currently viewing (an AskUserQuestion pause
   // should never sit on screen looking like a busy green agent).
-  it('routes a raised question (awaiting_response) to attention, beating working', () => {
+  it('routes a raised question (awaiting_response) to blocked, beating working', () => {
     expect(
       deriveSessionState(makeSession(), true, makeActivity({ status: 'awaiting_response' })),
-    ).toBe('attention');
+    ).toBe('blocked');
     expect(
       deriveSessionState(makeSession(), true, makeActivity({ status: 'awaiting_response' }), true),
-    ).toBe('attention');
+    ).toBe('blocked');
   });
 
   // A turn that came to rest is `idle` only once it has been seen: the session
@@ -320,9 +339,9 @@ describe('deriveSessionState', () => {
   });
 
   describe('without activity (record fallback)', () => {
-    it('routes restore_failed to attention', () => {
+    it('routes restore_failed to errored', () => {
       expect(deriveSessionState(makeSession({ status: 'restore_failed' }), false, null)).toBe(
-        'attention',
+        'errored',
       );
     });
 
@@ -419,7 +438,8 @@ describe('deriveSessionState (follow-up)', () => {
 
 describe('dashboardToneForState', () => {
   it('maps states to card tones', () => {
-    expect(dashboardToneForState('attention')).toBe('attention');
+    expect(dashboardToneForState('errored')).toBe('attention');
+    expect(dashboardToneForState('blocked')).toBe('attention');
     expect(dashboardToneForState('active')).toBe('live');
     expect(dashboardToneForState('finished')).toBe('recent'); // no status hue; distinguished by the cell
     expect(dashboardToneForState('followup')).toBe('recent'); // a quiet user marker, not a status hue
@@ -460,7 +480,7 @@ describe('groupSessionsByState', () => {
     const groups = groupSessionsByState([running, fresh, resumable, failed], bindings, {});
     expect(groups.idle.map(s => s.id)).toEqual(['a', 'c']);
     expect(groups.fresh.map(s => s.id)).toEqual(['b']);
-    expect(groups.attention.map(s => s.id)).toEqual(['d']);
+    expect(groups.errored.map(s => s.id)).toEqual(['d']);
     expect(groups.active).toHaveLength(0);
   });
 
@@ -759,7 +779,7 @@ describe('enteredCurrentStateAt', () => {
     expect(enteredCurrentStateAt('active', session, tl, null)).toBe(
       Date.parse('2026-06-06T11:00:00.000Z'),
     );
-    expect(enteredCurrentStateAt('attention', session, tl, null)).toBe(
+    expect(enteredCurrentStateAt('blocked', session, tl, null)).toBe(
       Date.parse('2026-06-06T13:00:00.000Z'),
     );
   });

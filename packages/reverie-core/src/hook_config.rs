@@ -122,6 +122,25 @@ struct ClaudeHookEntry<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     url: &'a str,
+    /// Per-hook timeout in seconds. Omitted for most events (Claude's defaults
+    /// apply); set for PermissionRequest so the hook waits while the user answers
+    /// the native approval card. See [`claude_hook_timeout`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout: Option<u64>,
+}
+
+/// Per-event hook timeout override, in seconds. PermissionRequest holds its HTTP
+/// connection open while the user answers the native approval card, so it gets a
+/// long ceiling, set comfortably above the hook server's own decision wait
+/// (`APPROVAL_DECISION_TIMEOUT`, 600s). That ordering matters: Claude must wait
+/// for our reply, be it a decision or the no-decision 204 we send when the wait
+/// times out, rather than abandoning the hook first and prompting in its TUI.
+/// Every other event replies immediately and keeps Claude's defaults.
+fn claude_hook_timeout(event: &str) -> Option<u64> {
+    match event {
+        "PermissionRequest" => Some(900),
+        _ => None,
+    }
 }
 
 fn build_claude_settings(hook_url: &str) -> ClaudeSettings<'_> {
@@ -139,6 +158,7 @@ fn build_claude_settings(hook_url: &str) -> ClaudeSettings<'_> {
                 hooks: vec![ClaudeHookEntry {
                     kind: "http",
                     url: hook_url,
+                    timeout: claude_hook_timeout(event),
                 }],
             }],
         );
@@ -227,6 +247,20 @@ mod tests {
                 assert!(
                     group.get("matcher").is_none(),
                     "{event} must not carry a matcher (would suppress resume/lifecycle)"
+                );
+            }
+
+            // PermissionRequest holds open for the approval card, so it carries a
+            // long timeout; every other event keeps Claude's defaults (no field).
+            if *event == "PermissionRequest" {
+                assert_eq!(
+                    entries[0]["timeout"], 900,
+                    "PermissionRequest should hold open for the approval card"
+                );
+            } else {
+                assert!(
+                    entries[0].get("timeout").is_none(),
+                    "{event} should not override Claude's default timeout"
                 );
             }
         }

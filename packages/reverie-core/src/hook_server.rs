@@ -27,6 +27,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -39,6 +40,7 @@ use crate::activity::{
     ExitReason, FinalExit, PermissionRequest, TurnStatus,
 };
 use crate::activity_source::{ActivitySourceKind, ActivityUpdate, Fidelity, SessionKey};
+use crate::approval::{ApprovalDecision, ApprovalRegistry};
 use crate::domain::SessionId;
 // Producer hook payloads carry their own timestamps in practice; the shared
 // helper supplies a dependency-free ISO 8601 fallback for the rare omission.
@@ -72,6 +74,11 @@ impl HookSource {
 pub struct HookServerControl {
     pub port: u16,
     auth: Arc<Mutex<HashMap<(HookSource, String), SessionId>>>,
+    /// Shared rendezvous for native tool-permission approvals. The worker thread
+    /// parks a blocked `PermissionRequest` hook here; the Tauri `resolve_permission`
+    /// command reaches the same registry (through this managed control) to hand
+    /// the user's decision back to that hook. See [`crate::approval`].
+    pub approvals: Arc<ApprovalRegistry>,
 }
 
 impl HookServerControl {
@@ -176,10 +183,12 @@ pub fn start_hook_server_with(
     let sequences: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     let auth: Arc<Mutex<HashMap<(HookSource, String), SessionId>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let approvals = Arc::new(ApprovalRegistry::new());
 
     let worker_server = Arc::clone(&server);
     let worker_sequences = Arc::clone(&sequences);
     let worker_auth = Arc::clone(&auth);
+    let worker_approvals = Arc::clone(&approvals);
     let worker_push = push_source.clone();
     let worker = thread::Builder::new()
         .name("reverie-hook-http-server".to_owned())
@@ -188,6 +197,7 @@ pub fn start_hook_server_with(
                 worker_server,
                 worker_sequences,
                 worker_auth,
+                worker_approvals,
                 tx,
                 worker_push,
             )
@@ -196,7 +206,11 @@ pub fn start_hook_server_with(
 
     Ok(HookServerHandle {
         events: rx,
-        control: HookServerControl { port, auth },
+        control: HookServerControl {
+            port,
+            auth,
+            approvals,
+        },
         server,
         worker: Some(worker),
     })
@@ -207,10 +221,24 @@ pub fn start_hook_server_with(
 /// hostile and is rejected rather than buffered.
 const MAX_HOOK_BODY_BYTES: usize = 64 * 1024;
 
+/// How long the hook server holds a `PermissionRequest` open waiting for the user
+/// to answer the native card before giving up and letting the CLI fall back to
+/// its own in-TUI prompt. Generous enough to walk back to the machine, bounded so
+/// a forgotten card cannot park a waiter thread forever.
+///
+/// Deliberately set just under Codex's 600s command-hook ceiling (baked into the
+/// hook trust hash in [`crate::codex_hooks`]) and well under Claude's 900s
+/// PermissionRequest timeout, so the server always sends an explicit reply, a
+/// decision or a no-decision 204 at this deadline, before either CLI abandons the
+/// hook on its own. That keeps the fallback a clean "no decision -> show the TUI
+/// prompt" rather than a hard hook timeout.
+const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(570);
+
 fn run_request_loop(
     server: Arc<Server>,
     sequences: Arc<Mutex<HashMap<String, u64>>>,
     auth: Arc<Mutex<HashMap<(HookSource, String), SessionId>>>,
+    approvals: Arc<ApprovalRegistry>,
     tx: Sender<ActivityUpdate>,
     push_source: Option<Arc<dyn HookPushSource>>,
 ) {
@@ -270,10 +298,16 @@ fn run_request_loop(
             }
         };
 
-        // Record activity translation for either source first; the response
-        // body only matters for UserPromptSubmit, but other hook events
-        // still drive the activity stream.
-        if let Some(update) = translate(source, reverie_session_id, &payload, &sequences) {
+        // Record activity translation for either source first; the response body
+        // only matters for UserPromptSubmit (a pending-message nudge) and
+        // PermissionRequest (the approval decision), but every hook event still
+        // drives the activity stream.
+        let translated = translate(source, reverie_session_id, &payload, &sequences);
+        // A PermissionRequest produces an AwaitingPermission state carrying the id
+        // the user's decision is keyed against; grab it before the update is moved
+        // into the channel.
+        let pending_permission = translated.as_ref().and_then(permission_request_id);
+        if let Some(update) = translated {
             let _ = tx.send(update);
         }
 
@@ -305,8 +339,100 @@ fn run_request_loop(
                 }
             }
         }
+
+        // A tool-permission ask can be answered from a native card instead of the
+        // CLI's own TUI prompt. Hold this hook's HTTP connection open on its own
+        // thread (so the single-threaded accept loop keeps serving every other
+        // session) until the user decides or the wait times out. The reply carries
+        // the decision in the shape the source CLI honors; a timeout replies with
+        // no decision (204), so the CLI shows its own prompt. Deny-safe either way.
+        if let Some(perm_id) = pending_permission {
+            let approvals = Arc::clone(&approvals);
+            let key = (reverie_session_id, perm_id);
+            let spawned = thread::Builder::new()
+                .name("reverie-hook-approval-wait".to_owned())
+                .spawn(move || {
+                    let response = match approvals.wait(key, APPROVAL_DECISION_TIMEOUT) {
+                        Some(decision) => permission_decision_response(source, decision),
+                        None => simple_response(204, ""),
+                    };
+                    let _ = request.respond(response);
+                });
+            // If we somehow cannot spawn the waiter, fall back to an immediate
+            // no-decision reply rather than dropping the connection silently.
+            if let Err(_err) = spawned {
+                // The request was moved into the failed closure and dropped; the
+                // socket closes with no response, which the CLI treats as "no
+                // decision" and prompts in its TUI. (Spawn failure is pathological.)
+            }
+            continue;
+        }
+
         let _ = request.respond(simple_response(204, ""));
     }
+}
+
+/// The permission id an update carries, if it is an AwaitingPermission state.
+/// Only a `PermissionRequest` hook builds that state, so this is the single
+/// signal that an inbound hook should be held open for a decision.
+fn permission_request_id(update: &ActivityUpdate) -> Option<String> {
+    match update {
+        ActivityUpdate::State { state, .. } => {
+            state.awaiting_permission.as_ref().map(|req| req.id.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The HTTP body that tells the source CLI to allow or deny, in the shape each
+/// honors. Returned 200 + JSON so the CLI parses it as a hook decision. A shape a
+/// CLI does not recognize is simply ignored (it falls back to its own prompt), so
+/// schema drift degrades to "answer in the TUI" rather than breaking.
+fn permission_decision_response(
+    source: HookSource,
+    decision: ApprovalDecision,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = match source {
+        HookSource::ClaudeCode => claude_permission_decision_body(decision),
+        HookSource::CodexCli => codex_permission_decision_body(decision),
+    };
+    Response::from_string(body.to_string())
+        .with_status_code(StatusCode(200))
+        .with_header(
+            tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                .expect("static header"),
+        )
+}
+
+/// Claude Code's `PermissionRequest` hook decision body. Claude reads the HTTP
+/// response directly, so this is its exact `hookSpecificOutput` shape.
+fn claude_permission_decision_body(decision: ApprovalDecision) -> Value {
+    let behavior = match decision {
+        ApprovalDecision::Allow => "allow",
+        ApprovalDecision::Deny => "deny",
+    };
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": { "behavior": behavior }
+        }
+    })
+}
+
+/// Codex CLI's `PermissionRequest` hook decision body. The Codex hook is a
+/// command hook, so this body is relayed verbatim to the hook command's stdout by
+/// the `reverie-bridge-codex-hook` forwarder, and Codex reads it from there.
+fn codex_permission_decision_body(decision: ApprovalDecision) -> Value {
+    let behavior = match decision {
+        ApprovalDecision::Allow => "allow",
+        ApprovalDecision::Deny => "deny",
+    };
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": { "behavior": behavior }
+        }
+    })
 }
 
 /// Build the JSON body Reverie sends back for a `UserPromptSubmit` hook.
@@ -496,14 +622,36 @@ fn translate_claude(
     }
 
     let state = match envelope.hook_event_name.as_str() {
-        "PermissionRequest" => build_state_awaiting_permission(
-            &session_id,
-            timestamp,
-            sequence,
-            cwd,
-            envelope.tool_name.as_deref().unwrap_or("tool"),
-            envelope.tool_input.as_ref(),
-        ),
+        "PermissionRequest" => {
+            let tool = envelope.tool_name.as_deref().unwrap_or("tool");
+            // An asking tool (AskUserQuestion / ExitPlanMode) routes its prompt
+            // through PermissionRequest too, but it is a question / plan for the
+            // user to ANSWER in the session, not an allow/deny tool gate. It must
+            // be AwaitingResponse, not AwaitingPermission: that keeps the native
+            // card a "needs your answer" signpost instead of meaningless
+            // Approve/Deny buttons, and (because the hold-open keys off the
+            // permission payload) stops the hook server from parking the
+            // connection for a decision two buttons can't express, which would
+            // also delay the CLI's own picker. Mirrors the PreToolUse arm below.
+            if is_asking_tool(tool) {
+                build_simple_state(
+                    &session_id,
+                    timestamp,
+                    sequence,
+                    cwd,
+                    ActivityStatus::AwaitingResponse,
+                )
+            } else {
+                build_state_awaiting_permission(
+                    &session_id,
+                    timestamp,
+                    sequence,
+                    cwd,
+                    tool,
+                    envelope.tool_input.as_ref(),
+                )
+            }
+        }
         // A tool is starting. A genuine work tool surfaces as the active tool so
         // the dashboard can show "Run shell: npm test" instead of a bare
         // "Working". An *asking* tool (AskUserQuestion / ExitPlanMode) instead
@@ -951,8 +1099,22 @@ mod tests {
         handle
     }
 
+    /// Spin until `key` is parked in the registry (the waiter thread has
+    /// registered), so a test can resolve it without racing the spawn. Panics if
+    /// it never appears within a short budget.
+    fn await_pending(handle: &HookServerHandle, key: &crate::approval::ApprovalKey) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !handle.control.approvals.is_pending(key) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "approval waiter never registered for {key:?}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     #[test]
-    fn claude_permission_request_translates_to_awaiting_permission() {
+    fn claude_permission_request_translates_and_answers_from_the_card() {
         let handle = started_with_token(HookSource::ClaudeCode);
         let body = serde_json::json!({
             "hook_event_name": "PermissionRequest",
@@ -964,10 +1126,13 @@ mod tests {
         })
         .to_string();
 
-        let response = post_hook(handle.port(), &claude_path(), &body);
-        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+        // The hook now blocks for a decision, so post on a background thread.
+        let port = handle.port();
+        let path = claude_path();
+        let poster = std::thread::spawn(move || post_hook(port, &path, &body));
 
-        match wait_for_update(&handle) {
+        // The activity update still flows immediately, carrying the permission id.
+        let perm_id = match wait_for_update(&handle) {
             ActivityUpdate::State {
                 source,
                 key,
@@ -983,9 +1148,92 @@ mod tests {
                 let perm = state.awaiting_permission.expect("permission set");
                 assert_eq!(perm.tool_name, "Bash");
                 assert_eq!(perm.display_summary, "Run shell: rm -rf foo/");
+                perm.id
+            }
+            other => panic!("expected State, got {other:?}"),
+        };
+
+        // Approve from the card: the held hook responds 200 with the allow body.
+        let key = (test_reverie_session_id(), perm_id);
+        await_pending(&handle, &key);
+        assert!(handle.control.approvals.resolve(&key, ApprovalDecision::Allow));
+
+        let response = poster.join().expect("poster thread");
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(
+            response.contains("\"behavior\":\"allow\""),
+            "response: {response}"
+        );
+    }
+
+    #[test]
+    fn claude_permission_request_for_an_asking_tool_is_a_question_not_an_approval() {
+        let handle = started_with_token(HookSource::ClaudeCode);
+        let body = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "claude-sess-ask",
+            "cwd": "/repo",
+            "timestamp": "2026-05-28T12:34:56.000Z",
+            "tool_name": "AskUserQuestion",
+            "tool_input": { "questions": [] }
+        })
+        .to_string();
+
+        // An asking tool is answered in the session, not via Approve/Deny, so the
+        // hook is NOT held open: the reply comes back immediately with no decision,
+        // and there is no awaitingPermission payload to render buttons against.
+        let response = post_hook(handle.port(), &claude_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+
+        match wait_for_update(&handle) {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::AwaitingResponse);
+                assert!(
+                    state.awaiting_permission.is_none(),
+                    "an asking tool must not surface an approvable permission"
+                );
             }
             other => panic!("expected State, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn permission_request_without_a_decision_times_out_to_no_decision() {
+        // Use a registry path with a tiny window by resolving deny and asserting
+        // the deny body; the timeout path itself is covered in approval.rs.
+        let handle = started_with_token(HookSource::CodexCli);
+        let body = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "codex-sess-1",
+            "cwd": "/repo",
+            "timestamp": "2026-05-28T12:34:56.000Z",
+            "tool_name": "Bash",
+            "tool_input": { "command": "ls" }
+        })
+        .to_string();
+
+        let port = handle.port();
+        let path = codex_path();
+        let poster = std::thread::spawn(move || post_hook(port, &path, &body));
+
+        let perm_id = match wait_for_update(&handle) {
+            ActivityUpdate::State { state, .. } => {
+                assert_eq!(state.status, ActivityStatus::AwaitingPermission);
+                state.awaiting_permission.expect("permission set").id
+            }
+            other => panic!("expected State, got {other:?}"),
+        };
+
+        let key = (test_reverie_session_id(), perm_id);
+        await_pending(&handle, &key);
+        assert!(handle.control.approvals.resolve(&key, ApprovalDecision::Deny));
+
+        let response = poster.join().expect("poster thread");
+        assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
+        assert!(
+            response.contains("\"behavior\":\"deny\""),
+            "response: {response}"
+        );
     }
 
     #[test]

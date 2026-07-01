@@ -7,6 +7,7 @@ import { useUiStore } from '../../store';
 import type { ActivityPermissionRequest, SessionTerminalBinding, ShellSession } from '../../domain';
 import type { TerminalSession } from '../../hooks';
 import { Typography } from '../primitives/Typography';
+import { ApprovalActions } from './ApprovalActions';
 import { SessionIdleLaunchCard, SessionResumeOverlay } from './SessionLaunchOverlay';
 import { TerminalContextMenu } from './TerminalContextMenu';
 import { TerminalScrollbar } from './TerminalScrollbar';
@@ -197,16 +198,13 @@ export function TerminalSurface({
                 {permissionRequest.displaySummary}
               </Typography>
             </div>
-            <Typography
-              as="span"
-              variant="tiny"
-              tone="warn"
-              uppercase
-              className={permissionBannerHintClass}
-              style={{ letterSpacing: '0.08em' }}
-            >
-              Respond in the terminal
-            </Typography>
+            <div className={permissionBannerHintClass}>
+              <ApprovalActions
+                sessionId={session.id}
+                permission={permissionRequest}
+                agentKind={session.agentKind}
+              />
+            </div>
           </div>
         ) : null}
         <div
