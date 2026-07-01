@@ -408,6 +408,12 @@ export function useTerminalSession(params: {
     terminalId: string;
     cols: number;
     rows: number;
+    // An anchor captured at schedule time. A font-size change must capture the
+    // scroll anchor before its new cellHeight lands (see applyTerminalFontSize);
+    // when absent the flush computes the anchor live, which is correct for plain
+    // viewport resizes where the cell metrics do not change. Wrapped so a
+    // deliberately-null captured anchor stays distinct from "not captured".
+    capturedAnchor?: { anchor: { id: number; col: number } | null };
   } | null>(null);
   const backendResizeTimerRef = useRef(0);
   const terminalDiagnosticEventsRef = useRef<unknown[]>([]);
@@ -796,13 +802,22 @@ export function useTerminalSession(params: {
       return;
     }
 
+    // Capture the scroll anchor against the OUTGOING cell metrics. setSurface
+    // swaps in the new cellHeight while the viewport's scrollTop is still the old
+    // pixel offset, so computing the anchor after (as the debounced flush does by
+    // default) would divide old pixels by the new cell and resettle the reflow on
+    // the wrong history row for a scrolled-back session. Plain viewport resizes
+    // keep cellHeight, so they still let the flush compute the anchor live.
+    const anchorBeforeResize = controller.getResizeAnchor();
     controller.setSurface(next);
     useTerminalStore.getState().setTerminalSurface(next);
     controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
 
     const terminalId = useTerminalStore.getState().activeTerminalId;
     if (terminalId) {
-      scheduleBackendTerminalResize(terminalId, next.cols, next.rows);
+      scheduleBackendTerminalResize(terminalId, next.cols, next.rows, {
+        anchor: anchorBeforeResize,
+      });
     }
   }
 
@@ -811,14 +826,21 @@ export function useTerminalSession(params: {
     const pending = pendingBackendResizeRef.current;
     pendingBackendResizeRef.current = null;
     if (!pending) return;
-    const anchor = controller.getResizeAnchor();
+    const anchor = pending.capturedAnchor
+      ? pending.capturedAnchor.anchor
+      : controller.getResizeAnchor();
     void resizeTerminal(pending.terminalId, pending.cols, pending.rows, anchor).catch(error => {
       writeLog(`Terminal resize failed: ${errorMessage(error)}`);
     });
   }
 
-  function scheduleBackendTerminalResize(terminalId: string, cols: number, rows: number) {
-    pendingBackendResizeRef.current = { terminalId, cols, rows };
+  function scheduleBackendTerminalResize(
+    terminalId: string,
+    cols: number,
+    rows: number,
+    capturedAnchor?: { anchor: { id: number; col: number } | null },
+  ) {
+    pendingBackendResizeRef.current = { terminalId, cols, rows, capturedAnchor };
     if (backendResizeTimerRef.current !== 0) return;
     backendResizeTimerRef.current = window.setTimeout(
       flushPendingBackendResize,
