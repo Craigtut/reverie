@@ -7,6 +7,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-02
+
+### Fixed
+- Resuming a Claude session after its project folder was renamed, moved, and relinked.
+  Reverie now brings the saved conversation along to the folder's new location, so the
+  session resumes instead of stalling and dropping back to the launch button. When a
+  session genuinely cannot be resumed (its saved conversation is not on this machine),
+  Reverie now explains why instead of failing quietly.
+
 ## [0.6.0] - 2026-06-30
 
 ### Added
