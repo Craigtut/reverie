@@ -101,6 +101,21 @@ pub struct AgentLaunch {
     /// [`WorkspaceService::attach_native_session_id`] after a successful spawn so
     /// the pairing is recorded deterministically, without a filesystem guess.
     pub injected_native_id: Option<String>,
+    /// For a Claude resume, the (post-reconcile) cwd and native session id, so the
+    /// launcher can make sure Claude's transcript is filed under this cwd's slug
+    /// directory before spawning `claude --resume`. See
+    /// [`crate::agents::ensure_claude_transcript_under_cwd`]. `None` for new
+    /// launches, non-Claude adapters, and resumes without a native id.
+    pub claude_resume: Option<ClaudeResume>,
+}
+
+/// A Claude resume target: the working directory the resume will run in and the
+/// native Claude session id being resumed. Used to heal a relocated project's
+/// stranded transcript before launch (Claude keys `--resume` off the cwd).
+#[derive(Clone, Debug)]
+pub struct ClaudeResume {
+    pub cwd: PathBuf,
+    pub session_id: String,
 }
 
 impl WorkspaceService {
@@ -1528,11 +1543,30 @@ impl WorkspaceService {
                 }
             }
         }
+        // For a Claude resume, hand the launcher the cwd and native id so it can
+        // heal a transcript stranded under an old path slug (renamed/moved and
+        // relinked project) before spawning `claude --resume`. The cwd here is the
+        // post-reconcile path, matching where the resume will actually run.
+        let claude_resume = if agent_kind == AgentKind::ClaudeCode
+            && crate::agents::session_should_resume(session)
+        {
+            session
+                .native_session_ref
+                .as_ref()
+                .and_then(|reference| reference.session_id.clone())
+                .map(|native_id| ClaudeResume {
+                    cwd: session.cwd.clone(),
+                    session_id: native_id,
+                })
+        } else {
+            None
+        };
         Ok(AgentLaunch {
             spec,
             agent_kind,
             folder_name,
             injected_native_id,
+            claude_resume,
         })
     }
 

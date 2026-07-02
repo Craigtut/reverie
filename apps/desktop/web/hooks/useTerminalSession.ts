@@ -62,7 +62,13 @@ import {
   terminalSurfaceForFontSize,
 } from '../terminalScrollback';
 import { DEFAULT_TERMINAL_FONT_SIZE } from '../terminal/terminalMetrics';
-import { useNavigationStore, useShellStore, useTerminalStore, useUiStore } from '../store';
+import {
+  useNavigationStore,
+  useOverlayStore,
+  useShellStore,
+  useTerminalStore,
+  useUiStore,
+} from '../store';
 import { TERMINAL_THEME } from '../themes/terminalTheme';
 import { CRT_GLASS_PRESET } from '../terminalCrt';
 import { openExternalUrl } from '../services/openApi';
@@ -1414,6 +1420,12 @@ export function useTerminalSession(params: {
       store.clearSessionTerminalContentReady(session.id);
       syncTerminalFrontendActivity(nextActiveTerminalId);
       writeLog(`Runtime session launch failed: ${errorMessage(error)}`);
+      // Surface the failure visibly. A resume that can't find its transcript (a
+      // relocated project, a conversation from another machine) otherwise just
+      // drops back to the launch button with no explanation of why.
+      useOverlayStore
+        .getState()
+        .pushToast({ message: `Couldn't start ${session.title}: ${errorMessage(error)}` });
       throw error;
     } finally {
       if (options.manageBusy !== false) setBusy(false);

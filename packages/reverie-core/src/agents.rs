@@ -970,6 +970,162 @@ pub fn find_claude_transcript_by_native_id(
     None
 }
 
+/// The maximum slug length Claude keeps verbatim before switching to a
+/// truncated-prefix-plus-hash directory name (claude 2.1.x: `prt = 200`). Past
+/// this we decline to compute the directory name rather than reproduce Claude's
+/// hash.
+const CLAUDE_PROJECT_SLUG_MAX_LEN: usize = 200;
+
+/// Reproduce Claude Code's project-directory slug for a working directory:
+/// `cwd.replace(/[^a-zA-Z0-9]/g, "-")` (verified against claude 2.1.x, which
+/// builds the dir as `~/.claude/projects/<slug>`). Claude files every session
+/// transcript at `<slug>/<id>.jsonl` and resolves `--resume` by that slug, so a
+/// resumed session's transcript has to live under the slug of the cwd the resume
+/// runs in.
+///
+/// Returns `None` when we cannot match Claude with confidence: a non-ASCII path
+/// (Claude slugs per UTF-16 code unit, which diverges from Rust's scalar values
+/// for non-BMP characters) or a slug longer than [`CLAUDE_PROJECT_SLUG_MAX_LEN`]
+/// (Claude appends a path hash we do not reproduce). Both are vanishingly rare
+/// for a real project folder; the caller treats `None` as "leave Claude's files
+/// alone".
+fn claude_project_slug(cwd: &Path) -> Option<String> {
+    let raw = cwd.to_str()?;
+    if !raw.is_ascii() {
+        return None;
+    }
+    let slug: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    if slug.len() > CLAUDE_PROJECT_SLUG_MAX_LEN {
+        return None;
+    }
+    Some(slug)
+}
+
+/// Locate `<session-id>.jsonl` under any `~/.claude/projects/*` directory,
+/// ignoring the cwd recorded inside it. The session id is globally unique, so the
+/// first match is authoritative. This differs from
+/// [`find_claude_transcript_by_native_id`], which soft-validates the internal
+/// cwd: here we specifically want the transcript whose recorded cwd is the *old*
+/// (pre-relocation) path, so validating it against the new cwd would wrongly
+/// reject the very file we are trying to bring forward.
+fn find_claude_transcript_file_anywhere(claude_home: &Path, session_id: &str) -> Option<PathBuf> {
+    let projects_dir = claude_home.join("projects");
+    let filename = format!("{session_id}.jsonl");
+    for entry in fs::read_dir(&projects_dir).ok()?.flatten() {
+        let candidate = entry.path().join(&filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Outcome of [`ensure_claude_transcript_under_cwd`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeTranscriptMigration {
+    /// The transcript already lives under the cwd's slug directory; a resume from
+    /// that cwd will find it. The common, no-relocation case.
+    AlreadyPresent,
+    /// The transcript was copied into the cwd's slug directory from where it was
+    /// stranded (its pre-relocation slug directory). `from`/`to` are the source
+    /// and destination transcript paths.
+    Migrated { from: PathBuf, to: PathBuf },
+    /// No transcript for this id exists anywhere under `~/.claude/projects`. The
+    /// conversation cannot be resumed on this machine (it was created on a
+    /// different machine, or its transcript was deleted).
+    NotFound,
+    /// The cwd's slug directory could not be computed safely (a non-ASCII or
+    /// over-long path), so Claude's files were left untouched and resume proceeds
+    /// as-is.
+    Skipped,
+}
+
+/// Ensure a Claude session's transcript is filed under the *current* cwd's slug
+/// directory so `claude --resume <id>`, run in that cwd, can find it.
+///
+/// Claude keys transcript storage and `--resume` lookup off the working
+/// directory: `~/.claude/projects/<slug(cwd)>/<id>.jsonl`. When a project folder
+/// is renamed or moved and Reverie relinks it, the session's cwd changes but the
+/// transcript stays under the *old* cwd's slug, so a resume from the new folder
+/// finds nothing and silently fails (the session drops back to its Resume
+/// button). This heals that by copying the transcript, and its per-session
+/// sidecar directory, into the new cwd's slug directory.
+///
+/// It is a cheap no-op (a single `stat`) once the transcript is in place, so it
+/// is safe to call before every resume. The copy is non-destructive: the
+/// original (now orphaned) transcript is left where it was.
+pub fn ensure_claude_transcript_under_cwd(
+    claude_home: &Path,
+    cwd: &Path,
+    session_id: &str,
+) -> Result<ClaudeTranscriptMigration> {
+    let Some(slug) = claude_project_slug(cwd) else {
+        return Ok(ClaudeTranscriptMigration::Skipped);
+    };
+    let dest_dir = claude_home.join("projects").join(&slug);
+    let dest = dest_dir.join(format!("{session_id}.jsonl"));
+    if dest.is_file() {
+        return Ok(ClaudeTranscriptMigration::AlreadyPresent);
+    }
+    let Some(source) = find_claude_transcript_file_anywhere(claude_home, session_id) else {
+        return Ok(ClaudeTranscriptMigration::NotFound);
+    };
+    if source == dest {
+        return Ok(ClaudeTranscriptMigration::AlreadyPresent);
+    }
+    fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("create Claude project dir {}", dest_dir.display()))?;
+    fs::copy(&source, &dest).with_context(|| {
+        format!(
+            "copy Claude transcript {} -> {}",
+            source.display(),
+            dest.display()
+        )
+    })?;
+    // Claude keeps per-session state (subagents, workflows, tool-results) in a
+    // sibling directory named exactly the session id. Bring it along so a resumed
+    // session is not missing that state. Best-effort: the transcript itself is
+    // what `--resume` requires, so a sidecar copy failure does not fail the heal.
+    if let Some(source_sidecar) = source.parent().map(|parent| parent.join(session_id)) {
+        if source_sidecar.is_dir() {
+            let dest_sidecar = dest_dir.join(session_id);
+            if let Err(err) = copy_dir_recursive(&source_sidecar, &dest_sidecar) {
+                eprintln!(
+                    "[reverie] copied Claude transcript but not its sidecar {}: {err:#}",
+                    source_sidecar.display()
+                );
+            }
+        }
+    }
+    Ok(ClaudeTranscriptMigration::Migrated {
+        from: source,
+        to: dest,
+    })
+}
+
+/// Recursively copy a directory tree (std has no built-in). Small helper for the
+/// Claude transcript sidecar; skips symlinks and other special files, which are
+/// not expected inside a transcript sidecar.
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to).with_context(|| format!("create {}", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else if file_type.is_file() {
+            fs::copy(&src, &dst)
+                .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Read a re-entry window from a Claude transcript, distilled into the
 /// CLI-agnostic [`ReentryContext`]. Claude records are flat JSONL lines typed
 /// `user` / `assistant`, whose `message.content` is either a string or an array
@@ -1289,6 +1445,132 @@ mod tests {
             })
             .unwrap();
         assert!(discovered.is_none());
+    }
+
+    #[test]
+    fn claude_project_slug_matches_claude_encoding() {
+        // `cwd.replace(/[^a-zA-Z0-9]/g, "-")`: every non-alphanumeric char (incl.
+        // `/`, `.`, space, `_`, and an existing `-`) maps to `-`.
+        assert_eq!(
+            claude_project_slug(Path::new("/Users/dev/Code/proj")).as_deref(),
+            Some("-Users-dev-Code-proj")
+        );
+        assert_eq!(
+            claude_project_slug(Path::new("/Users/dev/Music Assistant")).as_deref(),
+            Some("-Users-dev-Music-Assistant")
+        );
+        assert_eq!(
+            claude_project_slug(Path::new("/a/.b_c-d.e")).as_deref(),
+            Some("-a--b-c-d-e")
+        );
+        // Non-ASCII declines: we would diverge from Claude's UTF-16 slugging.
+        assert_eq!(claude_project_slug(Path::new("/Users/dev/caf\u{e9}")), None);
+        // Over-long declines rather than guess Claude's hashed directory name.
+        let long = format!("/{}", "a".repeat(CLAUDE_PROJECT_SLUG_MAX_LEN));
+        assert_eq!(claude_project_slug(Path::new(&long)), None);
+    }
+
+    #[test]
+    fn ensure_claude_transcript_migrates_stranded_transcript() {
+        use std::io::Write;
+        let home = tempfile::TempDir::new().unwrap();
+        // The session lived under the OLD path's slug (project since renamed).
+        let old = home
+            .path()
+            .join("projects")
+            .join("-Users-dev-Code-old-name");
+        fs::create_dir_all(&old).unwrap();
+        let mut f = fs::File::create(old.join("sess-777.jsonl")).unwrap();
+        writeln!(
+            f,
+            r#"{{"sessionId":"sess-777","cwd":"/Users/dev/Code/old-name"}}"#
+        )
+        .unwrap();
+        drop(f);
+        // A per-session sidecar dir with state that should travel with it.
+        let sidecar = old.join("sess-777").join("tool-results");
+        fs::create_dir_all(&sidecar).unwrap();
+        fs::write(sidecar.join("r1.json"), b"{}").unwrap();
+
+        // Resume now runs in the NEW path.
+        let new_cwd = Path::new("/Users/dev/Code/new-name");
+        let outcome = ensure_claude_transcript_under_cwd(home.path(), new_cwd, "sess-777").unwrap();
+
+        let dest_dir = home
+            .path()
+            .join("projects")
+            .join("-Users-dev-Code-new-name");
+        let dest = dest_dir.join("sess-777.jsonl");
+        assert_eq!(
+            outcome,
+            ClaudeTranscriptMigration::Migrated {
+                from: old.join("sess-777.jsonl"),
+                to: dest.clone(),
+            }
+        );
+        assert!(dest.is_file(), "transcript is now under the new cwd slug");
+        assert!(
+            dest_dir
+                .join("sess-777")
+                .join("tool-results")
+                .join("r1.json")
+                .is_file(),
+            "sidecar state travelled with the transcript"
+        );
+        // The original is left in place (non-destructive copy).
+        assert!(old.join("sess-777.jsonl").is_file());
+
+        // Idempotent: a second call is a cheap no-op now that it is in place.
+        let again = ensure_claude_transcript_under_cwd(home.path(), new_cwd, "sess-777").unwrap();
+        assert_eq!(again, ClaudeTranscriptMigration::AlreadyPresent);
+    }
+
+    #[test]
+    fn ensure_claude_transcript_reports_not_found_when_absent() {
+        let home = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(home.path().join("projects")).unwrap();
+        let outcome = ensure_claude_transcript_under_cwd(
+            home.path(),
+            Path::new("/Users/dev/Code/ghost"),
+            "sess-missing",
+        )
+        .unwrap();
+        assert_eq!(outcome, ClaudeTranscriptMigration::NotFound);
+    }
+
+    #[test]
+    fn ensure_claude_transcript_already_present_is_a_noop() {
+        use std::io::Write;
+        let home = tempfile::TempDir::new().unwrap();
+        let dir = home.path().join("projects").join("-Users-dev-Code-here");
+        fs::create_dir_all(&dir).unwrap();
+        let mut f = fs::File::create(dir.join("sess-1.jsonl")).unwrap();
+        writeln!(
+            f,
+            r#"{{"sessionId":"sess-1","cwd":"/Users/dev/Code/here"}}"#
+        )
+        .unwrap();
+        drop(f);
+        let outcome = ensure_claude_transcript_under_cwd(
+            home.path(),
+            Path::new("/Users/dev/Code/here"),
+            "sess-1",
+        )
+        .unwrap();
+        assert_eq!(outcome, ClaudeTranscriptMigration::AlreadyPresent);
+    }
+
+    #[test]
+    fn ensure_claude_transcript_skips_non_ascii_cwd() {
+        let home = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(home.path().join("projects")).unwrap();
+        let outcome = ensure_claude_transcript_under_cwd(
+            home.path(),
+            Path::new("/Users/dev/caf\u{e9}"),
+            "sess-x",
+        )
+        .unwrap();
+        assert_eq!(outcome, ClaudeTranscriptMigration::Skipped);
     }
 
     #[test]

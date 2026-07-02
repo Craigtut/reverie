@@ -1735,7 +1735,7 @@ fn cortex_home_dir() -> Option<PathBuf> {
 // This is discovery only; Reverie still never *sets* `CLAUDE_CONFIG_DIR` on a
 // spawn (that would redirect the credential home), which `assert_safe_cli_env`
 // enforces. When the var is unset, both sides fall back to `~/.claude`.
-fn claude_home_dir() -> Option<PathBuf> {
+pub(crate) fn claude_home_dir() -> Option<PathBuf> {
     env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))

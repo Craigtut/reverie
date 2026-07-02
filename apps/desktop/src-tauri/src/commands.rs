@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use reverie_core::agents::{AgentAdapter, ClaudeCodeAdapter, built_in_adapters};
+use reverie_core::agents::{
+    AgentAdapter, ClaudeCodeAdapter, ClaudeTranscriptMigration, built_in_adapters,
+    ensure_claude_transcript_under_cwd,
+};
 use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId, ThemeMode};
 use reverie_core::approval::ApprovalDecision;
 use reverie_core::hook_config::{hook_url, write_claude_settings};
@@ -1516,6 +1519,15 @@ pub(crate) fn start_session(
                     request.initial_prompt,
                 )
                 .map_err(|err| err.to_string())?;
+            // Heal a relocated Claude session's transcript before resume. Claude
+            // files transcripts under a slug of the cwd, so a renamed/moved and
+            // relinked project strands the transcript under the old path's slug
+            // and `claude --resume` finds nothing, quietly dropping the session
+            // back to its Resume button. This makes the transcript resolvable, or
+            // surfaces a clear reason when it genuinely cannot be found.
+            if let Some(resume) = &launch.claude_resume {
+                ensure_claude_transcript_for_resume(&resume.cwd, &resume.session_id)?;
+            }
             (
                 launch.spec,
                 Some(launch.agent_kind),
@@ -1599,6 +1611,46 @@ pub(crate) fn start_session(
     }
 
     Ok(terminal_id)
+}
+
+/// Make sure a resumed Claude session's transcript sits under its current cwd's
+/// slug directory before `claude --resume` runs. Claude keys resume off the cwd,
+/// so a project folder that was renamed or moved and then relinked strands the
+/// transcript under the old path's slug and the resume silently fails, dropping
+/// the session back to its Resume button with no explanation.
+///
+/// Returns a user-facing error when the transcript genuinely cannot be found, so
+/// the click surfaces *why* the resume can't happen instead of failing quietly.
+/// A filesystem error while healing is logged, not fatal: the spawn still
+/// proceeds (Claude may resolve the transcript on its own).
+fn ensure_claude_transcript_for_resume(cwd: &Path, native_session_id: &str) -> Result<(), String> {
+    let Some(claude_home) = crate::terminal::runtime::claude_home_dir() else {
+        // No resolvable Claude home (no HOME set): nothing to check here; let the
+        // spawn proceed and fail on its own if it must.
+        return Ok(());
+    };
+    match ensure_claude_transcript_under_cwd(&claude_home, cwd, native_session_id) {
+        Ok(ClaudeTranscriptMigration::Migrated { from, to }) => {
+            eprintln!(
+                "[reverie] relinked Claude transcript for resume: {} -> {}",
+                from.display(),
+                to.display()
+            );
+            Ok(())
+        }
+        Ok(ClaudeTranscriptMigration::NotFound) => Err(format!(
+            "Can't resume this Claude session: its saved conversation (transcript \
+             {native_session_id}) isn't on this machine, so there's nothing to \
+             resume. Start a new session to continue here."
+        )),
+        Ok(ClaudeTranscriptMigration::AlreadyPresent | ClaudeTranscriptMigration::Skipped) => {
+            Ok(())
+        }
+        Err(err) => {
+            eprintln!("[reverie] failed to relink Claude transcript for resume: {err:#}");
+            Ok(())
+        }
+    }
 }
 
 #[tauri::command]
