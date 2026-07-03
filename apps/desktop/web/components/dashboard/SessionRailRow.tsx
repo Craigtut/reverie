@@ -6,6 +6,7 @@ import {
   agentTabLabel,
   isFollowingUp,
   plainLanguageStatus,
+  relativeTimeFromSeconds,
   sessionContext,
   statusDotColor,
 } from '../../domain';
@@ -31,6 +32,7 @@ export function SessionRailRow({
   activity,
   tone,
   showStatus,
+  lastActiveAt,
   renaming,
   onOpen,
   onContextMenu,
@@ -45,6 +47,9 @@ export function SessionRailRow({
   // Whether to show the live "now doing X" line. On for the working strip; off
   // for idle, where the status would only echo the rail ("Waiting for you").
   showStatus: boolean;
+  // When the agent was last active, as epoch ms. When set, the row shows a
+  // far-right "x ago" sticker so an at-rest session carries how stale it is.
+  lastActiveAt?: number | null;
   renaming: boolean;
   onOpen: () => void;
   onContextMenu: (event: MouseEvent<HTMLElement>) => void;
@@ -54,6 +59,8 @@ export function SessionRailRow({
   const { project, topic } = sessionContext(session, shell);
   const followingUp = isFollowingUp(session, activity);
   const statusText = showStatus ? plainLanguageStatus(session, isBound, activity) : null;
+  const lastActiveLabel =
+    typeof lastActiveAt === 'number' ? relativeTimeFromSeconds(lastActiveAt / 1000) : null;
 
   return (
     <div
@@ -109,6 +116,17 @@ export function SessionRailRow({
           className={rowMarkClass}
           aria-label="Following up"
         />
+      ) : null}
+      {lastActiveLabel ? (
+        <Typography
+          as="span"
+          variant="caption"
+          tone="ghost"
+          className={rowAgeClass}
+          title={`Last active ${lastActiveLabel}`}
+        >
+          {lastActiveLabel}
+        </Typography>
       ) : null}
     </div>
   );
@@ -178,4 +196,18 @@ const rowStatusClass = css({
 const rowMarkClass = css({
   flexShrink: 0,
   color: 'var(--text-3)',
+});
+
+// A quiet far-right sticker: how long since the agent was last active, so an
+// at-rest row carries how stale it is at a glance. Monochrome by design; the
+// pill chrome (border + surface tint) keeps it legible over the row's hover
+// tint, and tabular figures stop the width from jittering as the label ticks.
+const rowAgeClass = css({
+  flexShrink: 0,
+  whiteSpace: 'nowrap',
+  fontVariantNumeric: 'tabular-nums',
+  padding: '1px 7px',
+  borderRadius: '999px',
+  border: '1px solid var(--line)',
+  background: 'color-mix(in srgb, var(--surface-1) 70%, transparent)',
 });

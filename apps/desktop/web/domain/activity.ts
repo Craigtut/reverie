@@ -448,6 +448,22 @@ export function enteredCurrentStateAt(
   }
 }
 
+// When a session's agent was last active, as epoch ms (or null when unknown).
+// "Active" means the agent did work: its last turn coming to rest. This drives
+// the "how long ago" age sticker on idle rows, so it deliberately ignores
+// lastViewedAt (looking at a session is not the agent doing something) and
+// createdAt (age, not activity). It reuses the `finished` rest logic so a `done`
+// session restamped at app-quit still reports its genuine rest marker rather than
+// the quit moment; the exit stamp is only a last resort for a session that never
+// recorded a rest.
+export function lastActiveAtMs(
+  timeline: SessionStateTimeline | null,
+  activity: ActivityState | null,
+): number | null {
+  const tl = timeline ?? {};
+  return restedAtMs(activity, tl.restingSince) ?? parseMs(tl.restingSince) ?? parseMs(tl.exitedAt);
+}
+
 // Order one status group's sessions by transition recency (most recent first).
 // Sessions with no known transition time sort last, preserving their manual
 // drag order (`sortOrder`) as the tiebreak so a deliberate arrangement and a

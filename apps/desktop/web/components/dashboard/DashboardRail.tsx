@@ -2,7 +2,7 @@ import { useState, type MouseEvent, type ReactNode } from 'react';
 import { CaretRight } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
-import { activityForSession } from '../../domain';
+import { activityForSession, lastActiveAtMs, timelineForSession } from '../../domain';
 import type {
   ActivityState,
   DashboardStatus,
@@ -113,22 +113,32 @@ export function DashboardRail({
       {showBody ? (
         isRows ? (
           <div className={dashboardRowsClass}>
-            {sessions.map(session => (
-              <SessionRailRow
-                key={session.id}
-                session={session}
-                shell={shell}
-                isBound={Boolean(bindings[session.id])}
-                activity={activityForSession(session, cortexActivity)}
-                tone={tone}
-                showStatus={variant === 'strip'}
-                renaming={renamingSessionId === session.id}
-                onOpen={() => onOpenSession(session)}
-                onContextMenu={event => onContextMenuSession(event, session)}
-                onCommitRename={value => onCommitRename(session, value)}
-                onCancelRename={onCancelRename}
-              />
-            ))}
+            {sessions.map(session => {
+              const activity = activityForSession(session, cortexActivity);
+              // Only at-rest idle rows carry the "last active" age; a working
+              // strip is active now, and fresh sessions have no activity to age.
+              const lastActiveAt =
+                sectionKey === 'idle'
+                  ? lastActiveAtMs(timelineForSession(session, sessionTimelines), activity)
+                  : null;
+              return (
+                <SessionRailRow
+                  key={session.id}
+                  session={session}
+                  shell={shell}
+                  isBound={Boolean(bindings[session.id])}
+                  activity={activity}
+                  tone={tone}
+                  showStatus={variant === 'strip'}
+                  lastActiveAt={lastActiveAt}
+                  renaming={renamingSessionId === session.id}
+                  onOpen={() => onOpenSession(session)}
+                  onContextMenu={event => onContextMenuSession(event, session)}
+                  onCommitRename={value => onCommitRename(session, value)}
+                  onCancelRename={onCancelRename}
+                />
+              );
+            })}
           </div>
         ) : (
           <div
