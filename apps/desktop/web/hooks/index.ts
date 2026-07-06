@@ -17,6 +17,7 @@ export { useAgentClis } from './useAgentClis';
 export { useTerminalSession } from './useTerminalSession';
 export type { TerminalSession } from './useTerminalSession';
 export { useWebviewHeartbeat } from './useWebviewHeartbeat';
+export { usePowerStatus } from './usePowerStatus';
 export { useWorkspaceModel } from './useWorkspaceModel';
 export type { WorkspaceModel } from './useWorkspaceModel';
 export { useNavPersistence } from './useNavPersistence';

@@ -10,6 +10,7 @@ import {
   useDispatchLaunch,
   useGitStatus,
   useNavPersistence,
+  usePowerStatus,
   useSpeechEngine,
   useSessionActivity,
   useSessionViewed,
@@ -68,6 +69,7 @@ export function WorkspaceShell() {
   useCommandPalette();
   useAppQuit(writeLog);
   useWebviewHeartbeat();
+  usePowerStatus();
   useAutoUpdate();
   useSessionActivity(writeLog, model.loadWorkspaceShell);
   useGitStatus();

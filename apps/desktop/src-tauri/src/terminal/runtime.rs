@@ -26,7 +26,6 @@ const PTY_READ_QUEUE_CAPACITY: usize = 256;
 const PTY_DRAIN_MAX_BYTES: usize = 64 * 1024;
 const PTY_DRAIN_MAX_CHUNKS: usize = 64;
 const TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(16);
-const BACKGROUND_TERMINAL_FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const SYNC_OUTPUT_FRAME_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Shared grace period for batch shutdown: SIGTERM every session, wait this
 /// long once, then SIGKILL any stragglers.
@@ -124,9 +123,9 @@ enum DeferredPtyReadEvent {
 }
 
 // Worker-side view state. The backend no longer tracks follow-tail: scrolling is
-// frontend-driven (decisions.md D6), so the worker always emits the active tail
-// and the frontend decides whether the tail is on screen. Only the frame cadence
-// (foreground vs. background) lives here now.
+// frontend-driven (decisions.md D6), so the worker always keeps the VT pinned to
+// the active tail. It emits frames only while the terminal is foreground;
+// inactive sessions keep parsing PTY output and send a fresh full seed on return.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalViewportState {
     frontend_active: bool,
@@ -722,11 +721,18 @@ impl TerminalSessionRuntime {
                     }
                     // Always keep the pin on the active tail before the next live
                     // extract: scrolling is frontend-driven (D6), so the live
-                    // stream emits the tail unconditionally and the frontend
-                    // decides whether the tail is on screen. A `read_rows` serve
-                    // restores the pin too, so this stays correct after a serve.
+                    // stream emits the tail while foreground and seeds on
+                    // reactivation; the frontend decides whether the tail is on
+                    // screen. A `read_rows` serve restores the pin too, so this
+                    // stays correct after a serve.
                     terminal.scroll_bottom();
                     pending_frame = true;
+                    self.update_progress(
+                        request.terminal_id,
+                        frames_emitted,
+                        bytes_rendered,
+                        last_output_at,
+                    )?;
                     if let Some(deferred_event) = deferred_event {
                         match deferred_event {
                             DeferredPtyReadEvent::Exited { child_success } => {
@@ -749,7 +755,7 @@ impl TerminalSessionRuntime {
             emit_frame_if_ready!();
         };
 
-        if pending_frame {
+        if pending_frame && viewport_state.frontend_active {
             let emit_ms = send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
             total_emit_ms += emit_ms;
             max_emit_ms = max_emit_ms.max(emit_ms);
@@ -1191,6 +1197,10 @@ fn apply_terminal_command(
         }
         TerminalRuntimeCommand::SetFrontendActive(active) => {
             viewport_state.frontend_active = active;
+            if active {
+                terminal.force_next_full_frame();
+                applied.needs_frame = true;
+            }
         }
     }
     Ok(applied)
@@ -1222,11 +1232,11 @@ fn wait_for_terminal_worker_event(
     }
 }
 
-fn terminal_frame_interval(state: &TerminalViewportState) -> Duration {
+fn terminal_frame_interval(state: &TerminalViewportState) -> Option<Duration> {
     if state.frontend_active {
-        TERMINAL_FRAME_INTERVAL
+        Some(TERMINAL_FRAME_INTERVAL)
     } else {
-        BACKGROUND_TERMINAL_FRAME_INTERVAL
+        None
     }
 }
 
@@ -1237,7 +1247,8 @@ fn terminal_frame_due(
     now: Instant,
 ) -> bool {
     pending_frame
-        && now.saturating_duration_since(last_frame_emit) >= terminal_frame_interval(state)
+        && terminal_frame_interval(state)
+            .is_some_and(|interval| now.saturating_duration_since(last_frame_emit) >= interval)
 }
 
 fn terminal_frame_wait_timeout(
@@ -1250,9 +1261,8 @@ fn terminal_frame_wait_timeout(
     if !pending_frame {
         return None;
     }
-    let frame_due_at = last_frame_emit
-        .checked_add(terminal_frame_interval(state))
-        .unwrap_or(now);
+    let interval = terminal_frame_interval(state)?;
+    let frame_due_at = last_frame_emit.checked_add(interval).unwrap_or(now);
     let deadline = if let Some(started_at) = sync_output_started_at {
         let sync_due_at = started_at
             .checked_add(SYNC_OUTPUT_FRAME_TIMEOUT)
@@ -2105,7 +2115,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_commands_lower_frame_cadence_when_frontend_backgrounds_terminal() {
+    fn terminal_commands_suppress_frame_cadence_when_frontend_backgrounds_terminal() {
         let (sender, receiver) = unbounded();
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
@@ -2115,7 +2125,7 @@ mod tests {
 
         assert_eq!(
             terminal_frame_interval(&viewport_state),
-            TERMINAL_FRAME_INTERVAL
+            Some(TERMINAL_FRAME_INTERVAL)
         );
 
         sender
@@ -2134,16 +2144,13 @@ mod tests {
             .needs_frame
         );
         assert!(!viewport_state.frontend_active);
-        assert_eq!(
-            terminal_frame_interval(&viewport_state),
-            BACKGROUND_TERMINAL_FRAME_INTERVAL
-        );
+        assert_eq!(terminal_frame_interval(&viewport_state), None);
 
         sender
             .send(TerminalRuntimeCommand::SetFrontendActive(true))
             .unwrap();
         assert!(
-            !apply_terminal_commands(
+            apply_terminal_commands(
                 TerminalId::new_v4(),
                 &receiver,
                 &mut terminal,
@@ -2157,7 +2164,7 @@ mod tests {
         assert!(viewport_state.frontend_active);
         assert_eq!(
             terminal_frame_interval(&viewport_state),
-            TERMINAL_FRAME_INTERVAL
+            Some(TERMINAL_FRAME_INTERVAL)
         );
     }
 
@@ -2197,19 +2204,12 @@ mod tests {
     }
 
     #[test]
-    fn terminal_frame_due_throttles_background_sessions_under_output_pressure() {
+    fn terminal_frame_due_suppresses_background_sessions_under_output_pressure() {
         let active_frames = simulated_pending_frame_emits(true, 500, 4);
         let background_frames = simulated_pending_frame_emits(false, 500, 4);
 
         assert!(active_frames >= 30, "active frames: {active_frames}");
-        assert!(
-            background_frames <= 5,
-            "background frames: {background_frames}"
-        );
-        assert!(
-            active_frames >= background_frames * 5,
-            "active={active_frames} background={background_frames}"
-        );
+        assert_eq!(background_frames, 0);
     }
 
     #[test]
@@ -2272,9 +2272,7 @@ mod tests {
             frontend_active: true,
         };
 
-        assert!(
-            terminal_frame_wait_timeout(false, start, &viewport_state, None, start).is_none()
-        );
+        assert!(terminal_frame_wait_timeout(false, start, &viewport_state, None, start).is_none());
         assert_eq!(
             terminal_frame_wait_timeout(
                 true,

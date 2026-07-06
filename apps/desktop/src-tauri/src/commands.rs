@@ -2,6 +2,7 @@
 //! the request/response DTOs they deserialize, and the helpers scoped to them.
 //! Handlers are thin wrappers over `WorkspaceService` and the terminal runtime.
 
+use std::collections::HashSet;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -13,8 +14,8 @@ use reverie_core::agents::{
     AgentAdapter, ClaudeCodeAdapter, ClaudeTranscriptMigration, built_in_adapters,
     ensure_claude_transcript_under_cwd,
 };
-use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId, ThemeMode};
 use reverie_core::approval::ApprovalDecision;
+use reverie_core::domain::{AgentKind, FocusId, ProjectId, SessionId, ThemeMode};
 use reverie_core::hook_config::{hook_url, write_claude_settings};
 use reverie_core::hook_server::{HookServerControl, HookSource};
 use reverie_core::terminal::{TerminalFrame, TerminalId};
@@ -1282,11 +1283,14 @@ pub(crate) fn set_workspace_nav_state(
 #[tauri::command]
 pub(crate) fn archive_focus(
     service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
     focus_id: FocusId,
 ) -> Result<WorkspaceSnapshot, String> {
-    service
+    let snapshot = service
         .archive_focus(focus_id)
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    terminate_focus_sessions(service.inner(), runtime.inner(), focus_id);
+    Ok(snapshot)
 }
 
 /// Restore an archived topic (flip its own `archived` bit back). Its sessions
@@ -1326,11 +1330,61 @@ pub(crate) fn delete_focus(
 #[tauri::command]
 pub(crate) fn archive_project(
     service: State<'_, WorkspaceService>,
+    runtime: State<'_, TerminalSessionRuntime>,
     project_id: ProjectId,
 ) -> Result<WorkspaceSnapshot, String> {
-    service
+    let snapshot = service
         .archive_project(project_id)
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    terminate_project_sessions(service.inner(), runtime.inner(), project_id);
+    Ok(snapshot)
+}
+
+fn terminate_focus_sessions(
+    service: &WorkspaceService,
+    runtime: &TerminalSessionRuntime,
+    focus_id: FocusId,
+) {
+    let Ok(snapshot) = service.snapshot() else {
+        return;
+    };
+    let session_ids = snapshot
+        .sessions
+        .iter()
+        .filter(|session| session.focus_id == focus_id)
+        .map(|session| session.id);
+    terminate_sessions(runtime, session_ids);
+}
+
+fn terminate_project_sessions(
+    service: &WorkspaceService,
+    runtime: &TerminalSessionRuntime,
+    project_id: ProjectId,
+) {
+    let Ok(snapshot) = service.snapshot() else {
+        return;
+    };
+    let focus_ids = snapshot
+        .focuses
+        .iter()
+        .filter(|focus| focus.project_id == Some(project_id))
+        .map(|focus| focus.id)
+        .collect::<HashSet<_>>();
+    let session_ids = snapshot
+        .sessions
+        .iter()
+        .filter(|session| focus_ids.contains(&session.focus_id))
+        .map(|session| session.id);
+    terminate_sessions(runtime, session_ids);
+}
+
+fn terminate_sessions(
+    runtime: &TerminalSessionRuntime,
+    session_ids: impl Iterator<Item = SessionId>,
+) {
+    for session_id in session_ids.collect::<HashSet<_>>() {
+        runtime.terminate_for_session(session_id);
+    }
 }
 
 /// Repoint a project at a folder the user chose. This is the manual "Locate
@@ -1894,6 +1948,11 @@ pub(crate) fn record_terminal_diagnostics(
 #[tauri::command]
 pub(crate) fn webview_heartbeat(health: State<'_, WebviewHealth>) {
     health.mark_heartbeat();
+}
+
+#[tauri::command]
+pub(crate) fn power_status() -> crate::power::PowerStatus {
+    crate::power::current_power_status()
 }
 
 /// Open a URL in the user's default browser. Outward-facing, so the scheme is

@@ -22,6 +22,7 @@ mod dispatch_tap;
 mod git_watch;
 mod keep_awake;
 mod path_env;
+mod power;
 mod reentry_summary;
 mod shutdown_marker;
 mod speech_commands;
@@ -34,7 +35,7 @@ use std::{env, fs::OpenOptions, io::Write};
 use reverie_core::WorkspaceService;
 use reverie_core::activity_reconciler::ActivityReconciler;
 use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
-use reverie_core::session_log::start_session_log_watcher;
+use reverie_core::session_log::{SessionLogControl, start_session_log_watcher};
 use reverie_core::{CodexLogSource, CompositeLogSource, CortexStateSource};
 use reverie_persistence::SqliteWorkspaceRepository;
 use tauri::{Emitter, Listener, Manager, Url};
@@ -50,7 +51,7 @@ use crate::terminal::runtime::{TerminalRuntimeStatus, TerminalSessionRuntime};
 
 const WINDOW_CORNER_RADIUS: f64 = 28.0;
 const WEBVIEW_HEALTH_CHECK_DELAY_MS: u64 = 1_500;
-const WEBVIEW_HEARTBEAT_STALE_MS: i64 = 5_000;
+const WEBVIEW_HEARTBEAT_STALE_MS: i64 = 10_000;
 const WEBVIEW_RELOAD_COOLDOWN_MS: i64 = 30_000;
 
 /// Bring the macOS keep-awake assertion in line with the current setting and
@@ -358,6 +359,9 @@ fn main() {
                 if let Some(watch) = window.app_handle().try_state::<GitWatch>() {
                     watch.set_active(*focused);
                 }
+                if let Some(control) = window.app_handle().try_state::<SessionLogControl>() {
+                    control.set_foreground(*focused);
+                }
                 if *focused {
                     schedule_webview_recovery_check(
                         window.app_handle().clone(),
@@ -584,10 +588,10 @@ fn main() {
                 }
             }
 
-            // Start the idle-session reaper. It keeps every session alive until
-            // macOS itself reports memory pressure, then sheds only the coldest
-            // off-screen, non-working, long-idle sessions. Best-effort: if it
-            // cannot start, sessions simply stay alive.
+            // Start the idle-session reaper. It always parks archived sessions,
+            // parks long-idle off-screen sessions on a bounded grace period, and
+            // shortens that grace under memory pressure or battery power.
+            // Best-effort: if it cannot start, sessions simply stay alive.
             crate::terminal::reaper::spawn_reaper(
                 app.state::<TerminalSessionRuntime>().inner().clone(),
                 app.state::<WorkspaceService>().inner().clone(),
@@ -756,6 +760,7 @@ fn main() {
             commands::record_render_metrics,
             commands::record_terminal_diagnostics,
             commands::webview_heartbeat,
+            commands::power_status,
             commands::open_url,
             commands::open_input_monitoring_settings,
             commands::request_dispatch_input_monitoring,

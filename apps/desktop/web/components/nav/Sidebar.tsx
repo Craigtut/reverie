@@ -55,6 +55,7 @@ import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { NavDndProvider } from './NavDndProvider';
 import { SortableRow } from './SortableRow';
 import { SessionDropZone } from './SessionDropZone';
+import { requestGitStatus } from '../../services/gitApi';
 import {
   PROJECTS_CONTAINER,
   projectSortId,
@@ -140,6 +141,7 @@ export function Sidebar({
   const folderDrop = useSidebarFolderDrop({ onDropFolders: onAddProjectsFromFolders });
   // The nav list scroller, reflected by the auto-hiding OverlayScrollbar beside it.
   const navScrollRef = useRef<HTMLElement | null>(null);
+  const gitIntentRefreshAt = useRef(new Map<string, number>());
   const selectedSessionId = useNavigationStore(s => s.selectedSessionId);
   const selectedProjectId = useNavigationStore(s => s.selectedProjectId);
   const repoStatus = useGitStatusStore(s => s.repoStatus);
@@ -165,6 +167,14 @@ export function Sidebar({
   function openMenu(event: MouseEvent<HTMLElement>, items: NavMenuItem[]) {
     event.preventDefault();
     setMenu({ x: event.clientX, y: event.clientY, items });
+  }
+
+  function refreshProjectGitOnIntent(projectId: string) {
+    const now = performance.now();
+    const last = gitIntentRefreshAt.current.get(projectId) ?? 0;
+    if (now - last < 10_000) return;
+    gitIntentRefreshAt.current.set(projectId, now);
+    void requestGitStatus(projectId).catch(() => {});
   }
 
   // Session menu: built from the shared builder so a right-click on a session
@@ -521,7 +531,11 @@ export function Sidebar({
                       }
                       renaming={renamingId === project.id}
                       onToggle={() => toggleProjectCollapsed(project.id)}
-                      onOpen={() => onOpenProject(project.id)}
+                      onOpen={() => {
+                        refreshProjectGitOnIntent(project.id);
+                        onOpenProject(project.id);
+                      }}
+                      onIntent={() => refreshProjectGitOnIntent(project.id)}
                       onAdd={(event: MouseEvent<HTMLElement>) => {
                         event.stopPropagation();
                         onOpenCreation('focus', project.id);

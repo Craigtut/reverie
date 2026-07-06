@@ -22,6 +22,14 @@ export function recordWebviewHeartbeat() {
   return invoke('webview_heartbeat');
 }
 
+export interface PowerStatus {
+  onBattery: boolean;
+}
+
+export function fetchPowerStatus() {
+  return invoke<PowerStatus>('power_status');
+}
+
 export function listAgentClis() {
   return invoke<AgentCliDetection[]>('list_agent_clis');
 }

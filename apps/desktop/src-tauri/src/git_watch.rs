@@ -17,17 +17,21 @@ use std::process::Command;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reverie_core::{
     RepoStatus, SessionStatus, WorkspaceService, WorkspaceSnapshot, compute_repo_status,
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
-/// How often the watched set is recomputed while the app is focused. Git context
-/// does not need to be real-time; a few seconds keeps it fresh without burning a
-/// core while agents churn the working tree.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often visible/open project rows are recomputed while Reverie is focused.
+/// This preserves the foreground UX: the user sees fresh repo context on the
+/// rows and dashboards they are actually looking at.
+const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often collapsed projects with running sessions are recomputed. They still
+/// matter because an agent may be changing files, but the user is not looking at
+/// their repo strip, so a slower cadence saves repeated work in large repos.
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The event the WebView listens on for per-project git updates.
 const GIT_STATUS_EVENT: &str = "git_status_changed";
@@ -102,21 +106,73 @@ pub fn start(app: &AppHandle) {
 }
 
 fn run(app: AppHandle, rx: Receiver<()>) {
+    let mut last_foreground_poll = due_before(FOREGROUND_POLL_INTERVAL);
+    let mut last_background_poll = due_before(BACKGROUND_POLL_INTERVAL);
     loop {
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
+        if !app.state::<GitWatch>().active.load(Ordering::SeqCst) {
+            match rx.recv() {
+                Ok(()) => {}
+                Err(_) => break,
+            }
+            continue;
         }
+        let timeout = next_poll_wait(&app, last_foreground_poll, last_background_poll);
+        let force = match rx.recv_timeout(timeout) {
+            Ok(()) => true,
+            Err(RecvTimeoutError::Timeout) => false,
+            Err(RecvTimeoutError::Disconnected) => break,
+        };
         let watch = app.state::<GitWatch>();
         if !watch.active.load(Ordering::SeqCst) {
             continue;
         }
-        poll_once(&app, &watch);
+        let now = Instant::now();
+        let foreground_due = force
+            || (watch.has_declared_projects()
+                && now.saturating_duration_since(last_foreground_poll) >= FOREGROUND_POLL_INTERVAL);
+        let background_due = force
+            || now.saturating_duration_since(last_background_poll) >= BACKGROUND_POLL_INTERVAL;
+        if !foreground_due && !background_due {
+            continue;
+        }
+        poll_once(&app, &watch, foreground_due, background_due);
+        if foreground_due {
+            last_foreground_poll = now;
+        }
+        if background_due {
+            last_background_poll = now;
+        }
     }
 }
 
-/// Recompute every watched project once and emit the ones whose status changed.
-fn poll_once(app: &AppHandle, watch: &GitWatch) {
+fn due_before(interval: Duration) -> Instant {
+    Instant::now()
+        .checked_sub(interval)
+        .unwrap_or_else(Instant::now)
+}
+
+fn next_poll_wait(
+    app: &AppHandle,
+    last_foreground_poll: Instant,
+    last_background_poll: Instant,
+) -> Duration {
+    if !app.state::<GitWatch>().active.load(Ordering::SeqCst) {
+        return BACKGROUND_POLL_INTERVAL;
+    }
+    let now = Instant::now();
+    let watch = app.state::<GitWatch>();
+    let foreground_wait = if watch.has_declared_projects() {
+        FOREGROUND_POLL_INTERVAL.saturating_sub(now.saturating_duration_since(last_foreground_poll))
+    } else {
+        BACKGROUND_POLL_INTERVAL
+    };
+    let background_wait = BACKGROUND_POLL_INTERVAL
+        .saturating_sub(now.saturating_duration_since(last_background_poll));
+    foreground_wait.min(background_wait)
+}
+
+/// Recompute watched projects and emit the ones whose status changed.
+fn poll_once(app: &AppHandle, watch: &GitWatch, foreground_due: bool, background_due: bool) {
     let Some(service) = app.try_state::<WorkspaceService>() else {
         return;
     };
@@ -136,7 +192,16 @@ fn poll_once(app: &AppHandle, watch: &GitWatch) {
         .map(|project| (project.id.to_string(), project.path.clone()))
         .collect();
 
-    for project_id in watched_projects(watch, &snapshot) {
+    let watched = watched_projects(watch, &snapshot);
+    let mut project_ids = HashSet::new();
+    if foreground_due {
+        project_ids.extend(watched.foreground);
+    }
+    if background_due {
+        project_ids.extend(watched.background);
+    }
+
+    for project_id in project_ids {
         let Some(path) = paths.get(&project_id) else {
             continue;
         };
@@ -161,6 +226,12 @@ fn emit_if_changed(
         cache.insert(project_id.clone(), status.clone());
     }
     let _ = app.emit(GIT_STATUS_EVENT, GitStatusEvent { project_id, status });
+}
+
+impl GitWatch {
+    fn has_declared_projects(&self) -> bool {
+        !self.declared.lock().unwrap().is_empty()
+    }
 }
 
 /// Push a snapshot-refetch to the WebView when any project's folder state changed
@@ -193,11 +264,19 @@ fn emit_folder_changes(app: &AppHandle, watch: &GitWatch, snapshot: &WorkspaceSn
     }
 }
 
-/// The set of projects worth polling: those the UI declared visible, plus any
-/// project with a running session (its agent may be changing files even while the
-/// project is collapsed in the nav).
-fn watched_projects(watch: &GitWatch, snapshot: &WorkspaceSnapshot) -> HashSet<String> {
-    let mut watched = watch.declared.lock().unwrap().clone();
+struct WatchedProjects {
+    /// Projects the UI declared visible/open: expanded project rows, the open
+    /// project dashboard, or a project the user is actively inspecting.
+    foreground: HashSet<String>,
+    /// Projects with running sessions that are not currently visible. Agents may
+    /// be editing them, but the user is not looking at the repo strip.
+    background: HashSet<String>,
+}
+
+/// Projects worth polling, split by how much the user can see right now.
+fn watched_projects(watch: &GitWatch, snapshot: &WorkspaceSnapshot) -> WatchedProjects {
+    let foreground = watch.declared.lock().unwrap().clone();
+    let mut background = HashSet::new();
 
     let focus_project: HashMap<_, _> = snapshot
         .focuses
@@ -207,11 +286,17 @@ fn watched_projects(watch: &GitWatch, snapshot: &WorkspaceSnapshot) -> HashSet<S
     for session in &snapshot.sessions {
         if session.status == SessionStatus::Running {
             if let Some(project_id) = focus_project.get(&session.focus_id) {
-                watched.insert(project_id.to_string());
+                let project_id = project_id.to_string();
+                if !foreground.contains(&project_id) {
+                    background.insert(project_id);
+                }
             }
         }
     }
-    watched
+    WatchedProjects {
+        foreground,
+        background,
+    }
 }
 
 /// The WebView declares which projects it currently wants watched (expanded in

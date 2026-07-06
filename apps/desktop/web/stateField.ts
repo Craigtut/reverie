@@ -72,6 +72,7 @@ const TRANSITIONS: Partial<Record<`${CellState}>${CellState}`, TransitionDef>> =
 const FINISHED_SETTLE_MS = 1500;
 const TILE = 256; // offscreen GL render size in device px; downscaled per cell
 const GRID = 5; // 5x5 dot lattice
+const BATTERY_ANIMATION_INTERVAL_MS = 1000 / 15;
 
 export interface StateCellHandle {
   update(state: CellState): void;
@@ -253,7 +254,9 @@ let glUnavailable = false;
 
 const cells = new Map<symbol, Cell>();
 let rafId = 0;
+let frameTimerId = 0;
 let running = false;
+let batteryMode = false;
 const reduceMotion =
   typeof window !== 'undefined' &&
   window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
@@ -467,25 +470,49 @@ function frame() {
     }
   }
   if (stillAnimating && !document.hidden) {
-    rafId = requestAnimationFrame(frame);
+    scheduleFrame(nextFrameDelay(now));
   } else {
     running = false;
     rafId = 0;
+    frameTimerId = 0;
   }
+}
+
+function nextFrameDelay(frameStartedAt: number) {
+  if (!batteryMode) return 0;
+  return Math.max(0, BATTERY_ANIMATION_INTERVAL_MS - (performance.now() - frameStartedAt));
+}
+
+function scheduleFrame(delayMs: number) {
+  if (delayMs <= 0) {
+    rafId = requestAnimationFrame(frame);
+    return;
+  }
+  frameTimerId = window.setTimeout(() => {
+    frameTimerId = 0;
+    if (!running || document.hidden) return;
+    rafId = requestAnimationFrame(frame);
+  }, delayMs);
+}
+
+function cancelLoopFrame() {
+  if (rafId) cancelAnimationFrame(rafId);
+  if (frameTimerId) window.clearTimeout(frameTimerId);
+  rafId = 0;
+  frameTimerId = 0;
 }
 
 function startLoop() {
   if (running || reduceMotion || document.hidden) return;
   running = true;
-  rafId = requestAnimationFrame(frame);
+  scheduleFrame(0);
 }
 
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
-      if (rafId) cancelAnimationFrame(rafId);
+      cancelLoopFrame();
       running = false;
-      rafId = 0;
     } else {
       // Repaint stills (positions/time may have drifted) and resume if needed.
       const now = performance.now();
@@ -546,6 +573,17 @@ export function registerStateCell(
       cells.delete(key);
     },
   };
+}
+
+export function setStateFieldBatteryMode(onBattery: boolean) {
+  if (batteryMode === onBattery) return;
+  batteryMode = onBattery;
+  if (running) {
+    cancelLoopFrame();
+    scheduleFrame(0);
+  } else {
+    startLoop();
+  }
 }
 
 // Re-resolve status colors from the live CSS variables (call on theme change)

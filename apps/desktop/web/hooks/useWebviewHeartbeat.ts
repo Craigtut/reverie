@@ -3,7 +3,7 @@ import { useEffect } from 'react';
 import { appRuntimeMode } from '../services/runtime';
 import { recordWebviewHeartbeat } from '../services/shellApi';
 
-const HEARTBEAT_INTERVAL_MS = 1000;
+const HEARTBEAT_INTERVAL_MS = 3000;
 
 // Native liveness signal for the main WKWebView. Rust watches this timestamp on
 // app focus/resume; if the window comes back but JavaScript does not, it reloads
@@ -14,9 +14,12 @@ export function useWebviewHeartbeat() {
 
     let stopped = false;
     let inFlight = false;
+    let interval: number | null = null;
+
+    const isVisible = () => document.visibilityState !== 'hidden';
 
     const beat = () => {
-      if (stopped || inFlight) return;
+      if (stopped || inFlight || !isVisible()) return;
       inFlight = true;
       void recordWebviewHeartbeat()
         .catch(() => {
@@ -26,23 +29,38 @@ export function useWebviewHeartbeat() {
           inFlight = false;
         });
     };
-    const beatWhenVisible = () => {
-      if (document.visibilityState === 'hidden') return;
-      beat();
+
+    const stop = () => {
+      if (interval === null) return;
+      window.clearInterval(interval);
+      interval = null;
     };
 
-    beat();
-    const interval = window.setInterval(beat, HEARTBEAT_INTERVAL_MS);
-    window.addEventListener('focus', beat);
-    window.addEventListener('pageshow', beat);
-    document.addEventListener('visibilitychange', beatWhenVisible);
+    const start = () => {
+      if (stopped || interval !== null || !isVisible()) return;
+      beat();
+      interval = window.setInterval(beat, HEARTBEAT_INTERVAL_MS);
+    };
+
+    const handleVisibilityChange = () => {
+      if (isVisible()) {
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    start();
+    window.addEventListener('focus', start);
+    window.addEventListener('pageshow', start);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       stopped = true;
-      window.clearInterval(interval);
-      window.removeEventListener('focus', beat);
-      window.removeEventListener('pageshow', beat);
-      document.removeEventListener('visibilitychange', beatWhenVisible);
+      stop();
+      window.removeEventListener('focus', start);
+      window.removeEventListener('pageshow', start);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
 }

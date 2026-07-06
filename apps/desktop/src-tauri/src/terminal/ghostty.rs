@@ -339,6 +339,10 @@ impl<'alloc, 'cb> GhosttyTerminalState<'alloc, 'cb> {
         Ok(self.diff_frame(frame, force_full_frame))
     }
 
+    pub fn force_next_full_frame(&mut self) {
+        self.force_next_full_frame = true;
+    }
+
     /// Serve a contiguous band of history rows for the frontend's scroll-back
     /// prefetch (decisions.md D6/D7). Returns up to `count` rows starting at
     /// absolute row `start_row`, each indexed 0-based within the band.

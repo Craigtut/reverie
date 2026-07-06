@@ -125,6 +125,7 @@ impl SessionLogSource for CompositeLogSource {
 enum WatchCommand {
     Register(PathBuf),
     Unregister(PathBuf),
+    SetForeground(bool),
 }
 
 /// Cheaply-cloned control surface: register/unregister the active files to watch.
@@ -143,6 +144,10 @@ impl SessionLogControl {
     pub fn unregister(&self, path: PathBuf) {
         let _ = self.commands.send(WatchCommand::Unregister(path));
     }
+
+    pub fn set_foreground(&self, foreground: bool) {
+        let _ = self.commands.send(WatchCommand::SetForeground(foreground));
+    }
 }
 
 /// Handle to a running watcher. Drain `events`; clone `control` to register
@@ -160,7 +165,10 @@ const DEBOUNCE_MS: u64 = 120;
 /// against what it last folded, as a safety net for change notifications the OS
 /// dropped (see [`poll_changed_tails`]). Short enough that a missed transition
 /// surfaces promptly, long enough to be effectively free for a handful of files.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const FOREGROUND_EVENT_WAIT: Duration = Duration::from_millis(250);
+const BACKGROUND_EVENT_WAIT: Duration = Duration::from_secs(1);
 
 /// Start a watcher for `source`. It watches nothing until files are registered
 /// via the returned control, so an idle app pays nothing and a busy one watches
@@ -209,6 +217,7 @@ fn run_watch_loop(
     // registered file is unregistered.
     let mut watched_dirs: HashMap<PathBuf, usize> = HashMap::new();
     let mut last_poll = Instant::now();
+    let mut foreground = true;
 
     loop {
         // Drain any pending register/unregister commands first so a newly
@@ -228,13 +237,24 @@ fn run_watch_loop(
                 Ok(WatchCommand::Unregister(path)) => {
                     unregister_file(&mut debouncer, &mut tails, &mut watched_dirs, &path);
                 }
+                Ok(WatchCommand::SetForeground(next)) => {
+                    foreground = next;
+                    if foreground {
+                        last_poll = due_before(FOREGROUND_POLL_INTERVAL);
+                    }
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 // Control dropped on the shell side -> shut the worker down.
                 Err(mpsc::TryRecvError::Disconnected) => return,
             }
         }
 
-        match debounce_rx.recv_timeout(Duration::from_millis(250)) {
+        let event_wait = if foreground {
+            FOREGROUND_EVENT_WAIT
+        } else {
+            BACKGROUND_EVENT_WAIT
+        };
+        match debounce_rx.recv_timeout(event_wait) {
             Ok(Ok(events)) => {
                 let mut touched: Vec<PathBuf> = Vec::new();
                 for batched in events {
@@ -260,15 +280,26 @@ fn run_watch_loop(
         }
 
         // Safety-net poll: reconcile any file whose length drifted from what we
-        // last folded but for which no change event arrived. The recv_timeout
-        // above bounds the loop, so this runs about once per `POLL_INTERVAL`.
-        if last_poll.elapsed() >= POLL_INTERVAL {
+        // last folded but for which no change event arrived. The window focus
+        // state controls the cadence; real file events still wake immediately.
+        let poll_interval = if foreground {
+            FOREGROUND_POLL_INTERVAL
+        } else {
+            BACKGROUND_POLL_INTERVAL
+        };
+        if last_poll.elapsed() >= poll_interval {
             poll_changed_tails(&mut tails, &events_tx);
             last_poll = Instant::now();
         }
     }
 
     drop(debouncer);
+}
+
+fn due_before(interval: Duration) -> Instant {
+    Instant::now()
+        .checked_sub(interval)
+        .unwrap_or_else(Instant::now)
 }
 
 /// Resolve a registered file path to the (directory, full-path) pair the watcher

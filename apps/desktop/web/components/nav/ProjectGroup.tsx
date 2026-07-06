@@ -49,6 +49,7 @@ export function ProjectGroup({
   renaming = false,
   onToggle,
   onOpen,
+  onIntent,
   onAdd,
   onStartRename,
   onCommitRename,
@@ -83,6 +84,7 @@ export function ProjectGroup({
   renaming?: boolean;
   onToggle: () => void;
   onOpen?: () => void;
+  onIntent?: () => void;
   onAdd?: (event: MouseEvent<HTMLElement>) => void;
   onStartRename?: () => void;
   onCommitRename?: (value: string) => void;
@@ -105,6 +107,8 @@ export function ProjectGroup({
         data-active={active ? 'true' : 'false'}
         data-row-shell="true"
         onContextMenu={onContextMenu}
+        onPointerEnter={onIntent}
+        onFocusCapture={onIntent}
       >
         {active ? <span className={rowAccentClass} aria-hidden="true" /> : null}
         <button
