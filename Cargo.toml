@@ -25,7 +25,7 @@ notify-debouncer-full = "0.6"
 gix = "0.84"
 tempfile = "3"
 tiny_http = "0.12"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 toml = "0.8"
 toml_edit = "0.22"
 sha2 = "0.10"
