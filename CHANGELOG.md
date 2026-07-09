@@ -7,6 +7,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-09
+
+### Added
+- Idle sessions on the dashboard now show how long ago they were last active, as a
+  small age label on the row.
+
+### Changed
+- Reverie uses less power in the background. When your Mac is on battery, idle
+  background sessions are parked sooner, the ambient dot field animates at a lower
+  frame rate, and background work such as the folder-change watcher and the webview
+  heartbeat slows down or pauses while Reverie is not in the foreground.
+
 ## [0.6.1] - 2026-07-02
 
 ### Fixed
