@@ -1,5 +1,6 @@
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
 import type { GroupedSessions } from '../../domain';
+import { liveHaloClass } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 
 // The header count pills shared by Home and the project dashboard: a calm tally
@@ -22,7 +23,7 @@ export function DashboardCountPills({ groups }: { groups: GroupedSessions }) {
         data-testid="dashboard-live-count"
       >
         <i
-          className={liveDotClass}
+          className={cx(liveDotClass, liveHaloClass)}
           data-live={groups.active.length > 0 ? 'true' : undefined}
           style={{ background: groups.active.length > 0 ? 'var(--good)' : 'var(--text-4)' }}
         />
@@ -102,7 +103,8 @@ const dashboardCountsClass = css({
 // The "working" pill's dot breathes the same slow green halo as the nav's
 // liveness marks while any agent is working, so the surface echoes what the rail
 // is already saying. The other pills' dots stay still: their counts are tallies,
-// not signs of life.
+// not signs of life. The breath itself comes from liveHaloClass, composed at the
+// call site; this hook is only here to keep the dot a named thing.
 const liveDotClass = css({
-  '&[data-live="true"]': { animation: 'reverie-live-ring 4s ease-in-out infinite' },
+  flexShrink: 0,
 });

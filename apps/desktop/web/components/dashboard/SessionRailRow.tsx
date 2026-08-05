@@ -1,7 +1,8 @@
 import type { MouseEvent } from 'react';
 import { BookmarkSimple } from '@phosphor-icons/react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
+import { liveHaloClass } from '../glyphs';
 import {
   agentTabLabel,
   isFollowingUp,
@@ -82,7 +83,7 @@ export function SessionRailRow({
       }}
     >
       <i
-        className={rowDotClass}
+        className={cx(rowDotClass, liveHaloClass)}
         data-live={tone === 'live' ? 'true' : undefined}
         style={{ background: statusDotColor(tone) }}
       />
@@ -138,6 +139,14 @@ const rowClass = css({
   gap: '10px',
   minWidth: 0,
   height: '34px',
+  // Scope this row's layout and style invalidation to itself, so one session
+  // changing status or title cannot make WebKit re-check the whole rail. Only
+  // `layout style`, never `paint`: paint containment would clip the live halo
+  // that overhangs the 6px status dot. Layout containment also makes the row a
+  // containing block for positioned descendants, which is safe here because the
+  // only position:fixed element in this tree is NavContextMenu, and that renders
+  // as a sibling of the rail rather than inside a row.
+  contain: 'layout style',
   padding: '0 12px',
   borderRadius: '9px',
   border: '1px solid transparent',
@@ -152,13 +161,14 @@ const rowClass = css({
   },
 });
 
+// The breathing halo itself lives in liveHaloClass (composited transform +
+// opacity on a ::after ring); this class is just the solid dot under it.
 const rowDotClass = css({
   flexShrink: 0,
   width: '6px',
   height: '6px',
   borderRadius: '50%',
   display: 'inline-block',
-  '&[data-live="true"]': { animation: 'reverie-live-ring 4s ease-in-out infinite' },
 });
 
 const rowGlyphClass = css({

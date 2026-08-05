@@ -1,8 +1,9 @@
 import type { MouseEvent, ReactNode } from 'react';
 import { CaretRight, Plus } from '@phosphor-icons/react';
 
-import { css } from '../../styled-system/css';
+import { css, cx } from '../../styled-system/css';
 import type { SessionRollup, ShellFocus } from '../../domain';
+import { liveHaloClass } from '../glyphs';
 import { Typography } from '../primitives/Typography';
 import { InlineRename } from './InlineRename';
 import {
@@ -89,7 +90,7 @@ export function FocusRow({
         {renaming ? (
           <div className={rowPrimaryClass}>
             <span
-              className={focusDotBaseClass}
+              className={cx(focusDotBaseClass, liveHaloClass)}
               data-live={dotState === 'live' ? 'true' : undefined}
               style={focusDotStyle(dotState)}
               aria-hidden="true"
@@ -111,7 +112,7 @@ export function FocusRow({
             data-focus-title={focus.title}
           >
             <span
-              className={focusDotBaseClass}
+              className={cx(focusDotBaseClass, liveHaloClass)}
               data-live={dotState === 'live' ? 'true' : undefined}
               style={focusDotStyle(dotState)}
               aria-hidden="true"
@@ -185,17 +186,17 @@ const focusGroupClass = css({
 });
 
 // The rollup dot. Color and resting ring ride an inline style over this static
-// base; when live, the data-live rule swaps the ring for the slow breathing halo
-// (its keyframe's box-shadow overrides the inline one while it plays, then the
-// inline value resumes if work stops). Attention wins the dot over a concurrent
-// worker, matching the project folder and Home house.
+// base. When live, the breath comes from liveHaloClass's ::after ring instead of
+// this element's own box-shadow, so the live state deliberately carries NO
+// inline ring: the halo owns that whole band and a second static ring under it
+// would read as a permanently thickened dot. Attention wins the dot over a
+// concurrent worker, matching the project folder and Home house.
 const focusDotBaseClass = css({
   width: '6px',
   height: '6px',
   borderRadius: '50%',
   flexShrink: 0,
   transition: 'background 160ms ease, box-shadow 160ms ease',
-  '&[data-live="true"]': { animation: 'reverie-live-ring 4s ease-in-out infinite' },
 });
 
 function focusDotStyle(state: LiveMarkState): { background: string; boxShadow: string } {
@@ -203,12 +204,9 @@ function focusDotStyle(state: LiveMarkState): { background: string; boxShadow: s
     return { background: 'var(--warn)', boxShadow: '0 0 0 3px rgba(229,162,78,0.13)' };
   }
   if (state === 'live') {
-    // Solid green; the breathing halo comes from the data-live class rule, so
-    // this resting ring is just its low point (shown if motion is reduced).
-    return {
-      background: 'var(--good)',
-      boxShadow: '0 0 0 2px color-mix(in srgb, var(--good) 9%, transparent)',
-    };
+    // Solid green, no ring: liveHaloClass's ::after owns the ring band while
+    // live, including the static low point it settles to under reduced motion.
+    return { background: 'var(--good)', boxShadow: 'none' };
   }
   return { background: 'var(--dot-ambient)', boxShadow: 'none' };
 }

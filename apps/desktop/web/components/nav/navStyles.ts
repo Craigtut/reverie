@@ -26,6 +26,12 @@ export const rowShellClass = css({
   gap: '1px',
   width: '100%',
   minHeight: '30px',
+  // Keep a row's layout and style invalidation inside the row, so one topic
+  // flipping state does not make WebKit re-check every other row in the rail.
+  // Deliberately not `paint`: paint containment would clip the live halo that
+  // overhangs the 6px rollup dot, and it would re-anchor NavContextMenu's
+  // position:fixed if the menu ever moved inside a row.
+  contain: 'layout style',
   paddingLeft: '6px',
   borderRadius: '9px',
   color: 'var(--text-2)',
@@ -231,6 +237,13 @@ export const liveStatusIconClass = css({
   '&[data-tone="attention"] svg': { color: 'var(--warn)' },
   '&[data-live="true"] svg': {
     color: 'var(--good)',
+    // The glow is STATIC and the breath is opacity-only. Animating the
+    // drop-shadow's blur radius (the previous shape of this) re-rasterized the
+    // filter every frame and dirtied the whole nav row, so the row's label was
+    // re-shaped by Core Text 60 times a second. Holding the blur still lets
+    // WebKit rasterize the glow once and then just fade the layer.
+    filter: 'drop-shadow(0 0 3px color-mix(in srgb, var(--good) 60%, transparent))',
+    willChange: 'opacity',
     animation: 'reverie-live-breathe 4s ease-in-out infinite',
   },
 });

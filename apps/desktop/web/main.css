@@ -9,8 +9,8 @@ body,
    * terminal viewport) as inner overflow:auto regions. Without this, scrolling
    * over a non-scrolling part of the chrome (the sidebar titlebar, search, or
    * footer) had no scroll target, so macOS WKWebView ran its native elastic
-   * overscroll on the root: that bounce translates the fixed <main>, making the
-   * rounded app frame shrink and clip top/bottom against the transparent window.
+   * overscroll on the root: that bounce translates the fixed <main>, pulling the
+   * shell away from the window edges and opening a gap at the top or bottom.
    * height:100% + overflow:hidden removes the root scroller; overscroll-behavior
    * disables the elastic bounce. Inner overflow:auto regions still scroll. */
   height: 100%;
@@ -181,30 +181,42 @@ textarea {
  * unhurried green pulse plays at every level of the nav rollup — the topic dot,
  * the project folder, the Home house — and is echoed on the Home "working"
  * pill, so one breath means the same thing everywhere: something is alive
- * beneath this. The icon variant breathes opacity + a soft drop-shadow glow; the
- * dot variant (below) swells a green halo ring. Both stay GPU-composited. */
+ * beneath this.
+ *
+ * BOTH variants animate ONLY opacity and transform, which are the two properties
+ * WebKit can run entirely on the compositor. This is load-bearing, not a style
+ * preference: an earlier version breathed `filter: drop-shadow()` and swelled a
+ * `box-shadow` spread, and neither can be composited. Every frame they marked
+ * their layer dirty, and because these marks sit inside the nav rows and the
+ * dashboard rail, the layer WebKit repainted was full of text. Profiling the
+ * shipped 0.6.2 app showed the renderer burning ~20% of a core while idle and
+ * unfocused, roughly half of it inside Core Text re-shaping the same row labels
+ * 60 times a second. Keep the glow static and animate the wrapper. */
 @keyframes reverie-live-breathe {
   0%,
   100% {
-    opacity: 0.78;
-    filter: drop-shadow(0 0 0 transparent);
+    opacity: 0.62;
   }
   50% {
     opacity: 1;
-    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--good) 60%, transparent));
   }
 }
 
 /* The dot variant of the live breath: a soft green halo that swells and settles
  * around a small status dot (the topic rollup dot, the Home "working" pill). The
- * dot keeps its solid --good fill; only the ring breathes. */
+ * dot keeps its solid --good fill; only the ring breathes. The ring is a
+ * ::after pseudo-element sized to the swell's peak (14px around a 6px dot) that
+ * scales down to the trough (10px = 0.714) rather than redrawing a shadow
+ * spread, so the whole breath is one composited layer transform. */
 @keyframes reverie-live-ring {
   0%,
   100% {
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--good) 9%, transparent);
+    opacity: 0.41;
+    transform: translate(-50%, -50%) scale(0.714);
   }
   50% {
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 22%, transparent);
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 
@@ -213,21 +225,23 @@ textarea {
     0%,
     100% {
       opacity: 1;
-      filter: none;
     }
   }
   @keyframes reverie-live-ring {
     0%,
     100% {
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 15%, transparent);
+      opacity: 0.68;
+      transform: translate(-50%, -50%) scale(0.857);
     }
   }
 }
 
 /* Freeze the ambient live breath on a backgrounded window too, matching the
- * glyph pause above. A data-live mark animates either itself (a dot) or its svg
- * child (an icon), so pause both. */
+ * glyph pause above. A data-live mark animates either its ::after halo (a dot)
+ * or its svg child (an icon), so pause both. The bare element is still listed
+ * because the icon variant carries its animation on the element itself. */
 [data-app-focused="false"] [data-live="true"],
+[data-app-focused="false"] [data-live="true"]::after,
 [data-app-focused="false"] [data-live="true"] svg {
   animation-play-state: paused;
 }
