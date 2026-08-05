@@ -61,11 +61,10 @@ jobs:
 
   desktop:
     name: Desktop crate (macOS)
-    # Reverie targets macOS (Apple Silicon) only; macos-26 is arm64. Pinned to a
-    # specific image rather than macos-latest so the SDK the build links against
-    # never moves without us noticing: that SDK version decides which macOS
-    # design language the app gets (see the release workflow).
-    runs-on: macos-26
+    # Reverie targets macOS (Apple Silicon) only; macos-15 is arm64. Kept in step
+    # with the release workflow, which cannot move to macos-26 because Zig 0.15.2
+    # fails to link libghostty-vt there; see the comment in release.yml.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

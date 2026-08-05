@@ -25,19 +25,20 @@ concurrency:
 jobs:
   release:
     name: Release (macOS, Apple Silicon)
-    # Pinned to macos-26 (arm64), not macos-latest, so the SDK this links against
-    # never moves silently. The SDK version matters beyond compilation: macOS
-    # reads it from LC_BUILD_VERSION to decide which design language the app
-    # gets. Built against the macOS 15 SDK, Reverie rendered legacy 16pt window
-    # corners on Tahoe while every system window around it used 26pt.
+    # Pinned to macos-15 (arm64). macos-26 was tried and does not work: on that
+    # image Zig 0.15.2 cannot link its own build runner against libSystem, so
+    # libghostty-vt fails to build with a flood of undefined symbols (_abort,
+    # _free, __availability_version_check). It is not macOS 26 itself: a clean
+    # libghostty-vt build with the same Zig against SDK 26.2 links fine locally,
+    # and the non-release CI job builds on macos-26. It is specific to the runner
+    # image, and a fresh Zig cache does not help. Moving here likely needs Zig
+    # 0.16, which upstream libghostty-rs now requires anyway.
     #
-    # This was previously pinned to macos-15 because Zig 0.15.2 could not link
-    # libghostty-vt against the macOS 26 SDK (a flood of undefined libSystem
-    # symbols). That is fixed: a clean libghostty-vt-sys build with Zig 0.15.2
-    # against SDK 26.2 now links cleanly, so the pin is no longer needed.
-    # Note the deployment target is unaffected and stays at macOS 11 (Rust's
-    # default for aarch64-apple-darwin); a newer SDK does not raise the minimum.
-    runs-on: macos-26
+    # The SDK version still matters even though we build on macos-15: macOS reads
+    # it from LC_BUILD_VERSION to pick the design language, and the macOS 15 SDK
+    # gives Reverie legacy 16pt window corners on Tahoe while every system window
+    # beside it uses 26pt. The build step below declares the newer SDK instead.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -105,6 +106,22 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Declare the macOS 26 SDK in LC_BUILD_VERSION without compiling
+          # against it. macOS reads that field (not the headers you compiled
+          # with) to decide which design language an app gets: linked against
+          # this runner's macOS 15 SDK, Reverie draws legacy 16pt window corners
+          # on Tahoe while every system window beside it uses 26pt. Verified by
+          # building the same source twice and changing only this field.
+          #
+          # This is only safe because Reverie reaches AppKit exclusively through
+          # runtime objc2 message sends, never a compile-time SDK symbol, so no
+          # macOS 26 headers are needed. If that ever stops being true, this has
+          # to become a real SDK 26 build instead.
+          #
+          # The deployment target is unchanged: minos stays 11.0, so this does
+          # not raise the minimum supported macOS. Scoped to the target triple so
+          # host build scripts and proc macros link normally.
+          CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-platform_version,macos,11.0,26.0
           # macOS code signing + notarization.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
