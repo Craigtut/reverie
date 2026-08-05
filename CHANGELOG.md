@@ -7,6 +7,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-07-27
+
+### Fixed
+- Reverie's window corners now match the rounding macOS 26 uses for its own
+  windows. Release builds were compiled against an older macOS SDK, which made
+  macOS fall back to the older, squarer corners even though the window itself was
+  already set up correctly.
+
 ## [0.6.3] - 2026-07-27
 
 ### Changed
