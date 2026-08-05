@@ -7,6 +7,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-27
+
+### Changed
+- Reverie's window is a standard macOS window now. Its corners match the rounding of
+  other windows on your Mac, and it can be resized by dragging any edge or corner,
+  which previously barely worked.
+
+### Fixed
+- Reverie uses far less CPU while idle. The small liveness marks in the sidebar and on
+  the dashboard were forcing their rows to redraw sixty times a second, even with
+  Reverie in the background and no agents running.
+- Dragging the window to resize it no longer flashes white before the contents catch
+  up. The window's backdrop now follows your light or dark theme.
+
 ## [0.6.2] - 2026-07-09
 
 ### Added
