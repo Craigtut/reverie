@@ -67,15 +67,21 @@ export const appShellClass = css({
   gap: '18px',
   padding: 'var(--reverie-shell-pad)',
   overflow: 'hidden',
-  borderRadius: '28px',
+  // No radius of our own: the window is natively decorated and opaque, so AppKit
+  // clips the frame to the system corner radius. Rounding here as well would cut
+  // a second, tighter arc inside macOS's and leave the window's own background
+  // showing in the gap. Reverie used to run borderless + transparent purely to
+  // paint a 28px radius itself; that cost a full-window blend on every frame and
+  // gave up the native resize edges.
   color: 'var(--text)',
   // An opaque base color always sits under the gradient so the shell can never go
   // see-through. The `background` shorthand resets background-color to transparent,
   // which the opaque gradient image hides; but switching to the terminal view then
   // animates background-color from transparent to var(--bg) over the 0.45s
   // transition while the gradient image flips off at once, opening a window where
-  // the transparent native frame shows through (a flash to the desktop). Splitting
-  // color (opaque, constant) from image (the gradient) keeps the base solid through
+  // the bare window background shows through as a flash. (When the window was
+  // transparent that flash went all the way to the desktop.) Splitting color
+  // (opaque, constant) from image (the gradient) keeps the base solid through
   // every transition and theme flip.
   backgroundColor: 'var(--bg)',
   backgroundImage:
@@ -134,7 +140,6 @@ export const appShellClass = css({
     // shell padding shrink at this breakpoint.
     '--reverie-shell-pad': '14px',
     gridTemplateColumns: 'var(--reverie-sidebar-width, 260px) minmax(0, 1fr)',
-    borderRadius: '28px',
   },
   mdDown: {
     position: 'relative',

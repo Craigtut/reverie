@@ -3,8 +3,8 @@ import type { DispatchLaunchPayload, DispatchRouting, WorkspaceShellSnapshot } f
 
 // Service surface for the dispatch popup. Window control (hide/show/position)
 // goes straight to the Tauri window module (lazy-imported, no-op in the browser
-// harness, mirroring services/windowControls.ts). Classification and settings
-// are backend commands; the launch handoff rides the shared event bus.
+// harness, the same guard updateApi.ts uses). Classification and settings are
+// backend commands; the launch handoff rides the shared event bus.
 
 function isTauriRuntime(): boolean {
   const globals = window as Window & {

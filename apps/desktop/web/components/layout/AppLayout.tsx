@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 
 import { errorMessage, primaryGeneralFocus } from '../../domain';
+import { setWindowChromeTheme } from '../../services/windowChrome';
 import { refreshStateFieldColors } from '../../stateField';
 import type {
   CreationForm,
@@ -87,9 +88,12 @@ export function AppLayout({ model, nav, creation, mutations, terminal }: AppLayo
   const agentCliDetections = useShellStore(s => s.agentCliDetections);
 
   // Re-resolve the state cells' colors from the themed shell whenever the theme
-  // flips, so their dots track light/dark like the rest of the UI.
+  // flips, so their dots track light/dark like the rest of the UI. The native
+  // window frame is outside the webview and cannot follow via CSS, so it gets
+  // told separately; see services/windowChrome.ts for what that covers.
   useEffect(() => {
     refreshStateFieldColors();
+    void setWindowChromeTheme(theme);
   }, [theme]);
 
   const {
@@ -568,8 +572,8 @@ const stageContentClass = css({
 
 // On the terminal stage, bleed past the shell padding so the terminal reaches the
 // window's top, right, and bottom edges (the left keeps its gap from the floating
-// sidebar); the window's rounded-corner mask + the shell's overflow:hidden clip
-// it. Applied as an inline style (not a Panda selector) so it travels with the
+// sidebar); the native window frame + the shell's overflow:hidden clip it.
+// Applied as an inline style (not a Panda selector) so it travels with the
 // component and can never desync from a CSS regeneration during hot reload.
 const STAGE_BLEED_STYLE = {
   marginTop: 'calc(-1 * var(--reverie-shell-pad))',
@@ -606,7 +610,7 @@ const terminalDropHostClass = css({
 // 3) so the light is cast over the gradients, yet BELOW the lifted tabs (zIndex
 // 5) and the sidebar (zIndex 3, in the parent context) so the chrome stays crisp.
 // position:fixed anchors it to the frame, not the terminal panel, so it is never
-// clipped to the panel; the native window mask rounds the corner.
+// clipped to the panel; the native window frame rounds the corner.
 // pointer-events:none keeps the terminal fully interactive. Intentionally very
 // subtle (tune via --glow); this replaces the old backdrop radial-gradient.
 const terminalGlowClass = css({

@@ -28,6 +28,8 @@ mod shutdown_marker;
 mod speech_commands;
 mod state;
 mod terminal;
+#[cfg(target_os = "macos")]
+mod window_chrome;
 
 #[cfg(debug_assertions)]
 use std::{env, fs::OpenOptions, io::Write};
@@ -49,7 +51,6 @@ use crate::state::{
 };
 use crate::terminal::runtime::{TerminalRuntimeStatus, TerminalSessionRuntime};
 
-const WINDOW_CORNER_RADIUS: f64 = 28.0;
 const WEBVIEW_HEALTH_CHECK_DELAY_MS: u64 = 1_500;
 const WEBVIEW_HEARTBEAT_STALE_MS: i64 = 10_000;
 const WEBVIEW_RELOAD_COOLDOWN_MS: i64 = 30_000;
@@ -168,51 +169,29 @@ fn schedule_webview_recovery_check(app: tauri::AppHandle, reason: &'static str) 
         .ok();
 }
 
-#[cfg(target_os = "macos")]
-fn apply_macos_window_corners(window: &tauri::WebviewWindow, radius: f64) {
-    use objc::runtime::{Object, YES};
-    use objc::{class, msg_send, sel, sel_impl};
-
-    let ns_window_ptr = match window.ns_window() {
-        Ok(ptr) => ptr,
-        Err(_) => return,
+/// Re-apply the native window chrome for the shell's current theme.
+///
+/// The React shell owns the theme, so it calls this on mount and on every flip.
+/// See `window_chrome` for what "chrome" covers and why none of it can be done
+/// from CSS: the window frame belongs to AppKit, not to the webview.
+///
+/// The webview gets the same base color as the window. During a fast live resize
+/// AppKit stretches the window ahead of the webview's repaint, and without this
+/// the newly exposed strip flashes the WKWebView's default white.
+#[tauri::command]
+fn set_window_chrome_theme(window: tauri::WebviewWindow, dark: bool) {
+    #[cfg(target_os = "macos")]
+    {
+        window_chrome::apply(&window, dark);
+    }
+    let color = if dark {
+        tauri::window::Color(11, 10, 9, 255)
+    } else {
+        tauri::window::Color(244, 241, 235, 255)
     };
-    if ns_window_ptr.is_null() {
-        return;
-    }
-
-    unsafe {
-        let ns_window = ns_window_ptr as *mut Object;
-        let content_view: *mut Object = msg_send![ns_window, contentView];
-        if content_view.is_null() {
-            return;
-        }
-        let _: () = msg_send![content_view, setWantsLayer: YES];
-        let layer: *mut Object = msg_send![content_view, layer];
-        if layer.is_null() {
-            return;
-        }
-        // Keep the native window transparent for rounded corners, but give the
-        // masked content view an opaque fallback so a dead WKWebView never leaves
-        // a see-through rectangle. The layer mask below clips this fill to the
-        // same rounded shape as the app shell.
-        let background: *mut Object = msg_send![
-            class!(NSColor),
-            colorWithCalibratedRed: 0.043137254901960784f64
-            green: 0.0392156862745098f64
-            blue: 0.03529411764705882f64
-            alpha: 1.0f64
-        ];
-        if !background.is_null() {
-            let cg_color: *mut Object = msg_send![background, CGColor];
-            if !cg_color.is_null() {
-                let _: () = msg_send![layer, setBackgroundColor: cg_color];
-            }
-        }
-        let _: () = msg_send![layer, setCornerRadius: radius];
-        let _: () = msg_send![layer, setMasksToBounds: YES];
-        let _: () = msg_send![ns_window, invalidateShadow];
-    }
+    let _ = window.set_background_color(Some(color));
+    #[cfg(not(target_os = "macos"))]
+    let _ = dark;
 }
 
 /// The dev channel's badged icon, embedded so a non-bundled `cargo run` (which
@@ -353,6 +332,13 @@ fn main() {
                     let _ = app.emit("app_quit_requested", ());
                 }
             }
+            // AppKit snaps the window buttons back to the corner every time it
+            // re-lays out the titlebar, so the inset has to be re-applied here.
+            // Main window only: the dispatch popup is borderless and has none.
+            #[cfg(target_os = "macos")]
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Resized(_)) {
+                window_chrome::reapply_frame_chrome(window);
+            }
             // Suspend git status polling while the app is in the background and
             // resume (with an immediate catch-up) when it returns to focus.
             if let tauri::WindowEvent::Focused(focused) = event {
@@ -433,7 +419,9 @@ fn main() {
 
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window("main") {
-                apply_macos_window_corners(&window, WINDOW_CORNER_RADIUS);
+                // Dark is the shell's default; the React side corrects this on
+                // mount and on every theme flip via set_window_chrome_theme.
+                set_window_chrome_theme(window.clone(), true);
                 if std::env::var_os("REVERIE_TERMINAL_STRESS").is_some() {
                     let target = window
                         .url()
@@ -692,6 +680,7 @@ fn main() {
         // correlator on every Codex activity update.
         .manage(ActivityReconciler::new())
         .invoke_handler(tauri::generate_handler![
+            set_window_chrome_theme,
             commands::app_status,
             commands::updater_status,
             commands::ghostty_frame_sequence,

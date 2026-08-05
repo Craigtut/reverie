@@ -365,6 +365,11 @@ export function Sidebar({
       data-drop-id="sidebar"
     >
       <div className={titlebarClass} data-tauri-drag-region>
+        {/* Reverie's own window controls, not macOS's. The window is natively
+            decorated (for the resize edges and the system corner radius) but its
+            real traffic lights are hidden in window_chrome.rs, because AppKit
+            re-lays out the titlebar on every resize and drags them back to the
+            corner. Drawing them here is the only way to keep them in the panel. */}
         <TrafficLights />
         <ReverieMark />
       </div>

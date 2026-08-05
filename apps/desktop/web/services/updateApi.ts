@@ -1,7 +1,7 @@
 import { invoke } from './runtime';
 
-// Auto-update service. Mirrors the lazy-import guard pattern in
-// windowControls.ts: the Tauri updater/process modules are imported only inside
+// Auto-update service. Uses the lazy-import guard pattern shared with
+// dispatchApi.ts: the Tauri updater/process modules are imported only inside
 // the real desktop runtime, so the browser harness (and the dev channel) never
 // load them and never reach out to the network. The live `Update` handle from
 // `check()` carries non-serializable download/install methods, so it is kept in
