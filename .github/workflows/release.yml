@@ -25,11 +25,19 @@ concurrency:
 jobs:
   release:
     name: Release (macOS, Apple Silicon)
-    # Pinned to macos-15 (arm64), not macos-latest: macos-latest migrated to
-    # macOS 26, whose SDK the pinned Zig 0.15.2 toolchain fails to link
-    # libghostty-vt against (a flood of undefined libSystem symbols). macos-15 is
-    # the last image this build is known to link cleanly on.
-    runs-on: macos-15
+    # Pinned to macos-26 (arm64), not macos-latest, so the SDK this links against
+    # never moves silently. The SDK version matters beyond compilation: macOS
+    # reads it from LC_BUILD_VERSION to decide which design language the app
+    # gets. Built against the macOS 15 SDK, Reverie rendered legacy 16pt window
+    # corners on Tahoe while every system window around it used 26pt.
+    #
+    # This was previously pinned to macos-15 because Zig 0.15.2 could not link
+    # libghostty-vt against the macOS 26 SDK (a flood of undefined libSystem
+    # symbols). That is fixed: a clean libghostty-vt-sys build with Zig 0.15.2
+    # against SDK 26.2 now links cleanly, so the pin is no longer needed.
+    # Note the deployment target is unaffected and stays at macOS 11 (Rust's
+    # default for aarch64-apple-darwin); a newer SDK does not raise the minimum.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
