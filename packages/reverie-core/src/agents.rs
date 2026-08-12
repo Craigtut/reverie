@@ -197,19 +197,52 @@ pub trait AgentAdapter: Send + Sync {
     }
 }
 
-/// Status/spinner glyphs CLIs animate at the start of their terminal title while
-/// they work. None of these ever begin a human-meaningful label, so we strip a
-/// leading run of them. The braille block is the big one: both Claude (`⠂ ⠐ ...`)
-/// and Codex (`⠙ ⠹ ...`) drive spinners from it. `✳` is Claude's idle/ready mark.
-/// Add generic decoration here so every adapter (and future CLIs) benefits; keep
+/// Inclusive codepoint ranges of the glyphs CLIs animate at the start of their
+/// terminal title while they work. None of these ever begins a human-meaningful
+/// label, so [`clean_title`] strips a leading run of them.
+///
+/// This is deliberately family-wide rather than a list of the exact frames a CLI
+/// ships today: agent CLIs change their spinner between releases (Claude has run
+/// braille, a dingbat asterisk, and now half-filled circles), and any frame we do
+/// not know about leaks animated junk into the session label. Covering the whole
+/// block a spinner is drawn from means the next redesign needs no code change.
+/// Add generic decoration here so every adapter (and future CLI) benefits; keep
 /// only truly CLI-specific title quirks in a per-adapter `normalize_title`.
-fn is_status_decoration(c: char) -> bool {
+const STATUS_DECORATION_RANGES: &[(char, char)] = &[
+    ('\u{00B7}', '\u{00B7}'),   // · middle dot (Claude's dimmest spinner frame)
+    ('\u{2022}', '\u{2022}'),   // • bullet
+    ('\u{2190}', '\u{2199}'),   // ← ↑ → ↓ ↖ ↗ ↘ ↙ arrow spinners
+    ('\u{21BA}', '\u{21BB}'),   // ↺ ↻ rotation spinners
+    ('\u{2217}', '\u{2219}'),   // ∗ asterisk operator, ∙ bullet operator
+    ('\u{22C5}', '\u{22C5}'),   // ⋅ dot operator
+    ('\u{231A}', '\u{231B}'),   // ⌚ ⌛ watch, hourglass
+    ('\u{23F0}', '\u{23F3}'),   // ⏰ ⏱ ⏲ ⏳ clocks, timers, flowing hourglass
+    ('\u{2580}', '\u{259F}'),   // Block Elements: bar spinners (▁▂▃, ▖▘▝▗)
+    ('\u{25A0}', '\u{25FF}'),   // Geometric Shapes: ◐◑◒◓ half circles, ●○ dots, ◴◷ quadrants
+    ('\u{2605}', '\u{2606}'),   // ★ ☆ stars
+    ('\u{2722}', '\u{2727}'),   // dingbat crosses ✢ ✣ ✤ ✥ ✦ ✧
+    ('\u{2731}', '\u{2749}'),   // dingbat asterisks and sparkles: ✳ ✶ ✻ ✽ (Claude), ❄ ❈
+    ('\u{2800}', '\u{28FF}'),   // Braille Patterns: spinner frames (Claude, Codex)
+    ('\u{1F311}', '\u{1F318}'), // moon-phase spinners (new moon through waning crescent)
+    ('\u{1F550}', '\u{1F567}'), // clock-face spinners (whole and half hours)
+];
+
+/// Invisible codepoints that ride along with decoration (emoji presentation
+/// selectors, zero-width joiners). Stripped in the same leading run so a frame
+/// written as an emoji plus a variation selector leaves nothing behind.
+fn is_invisible_marker(c: char) -> bool {
     matches!(
         c,
-        '\u{2800}'
-            ..='\u{28FF}' // Braille Patterns: spinner frames (Claude, Codex)
-        | '\u{2733}' // ✳ eight-spoked asterisk (Claude idle/ready)
+        '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FE0E}' | '\u{FE0F}'
     )
+}
+
+/// Whether `c` is animated status decoration rather than part of the title text.
+fn is_status_decoration(c: char) -> bool {
+    is_invisible_marker(c)
+        || STATUS_DECORATION_RANGES
+            .iter()
+            .any(|(first, last)| c >= *first && c <= *last)
 }
 
 /// Strip a leading run of status decoration and whitespace from `raw`, then trim
@@ -1137,7 +1170,8 @@ pub fn read_claude_reentry_context(
 ) -> Result<Option<ReentryContext>> {
     use std::io::{BufRead, BufReader};
     let reader = BufReader::new(
-        fs::File::open(path).with_context(|| format!("open Claude transcript {}", path.display()))?,
+        fs::File::open(path)
+            .with_context(|| format!("open Claude transcript {}", path.display()))?,
     );
     let mut entries = Vec::new();
     for line in reader.lines() {
@@ -1154,7 +1188,10 @@ pub fn read_claude_reentry_context(
             Some("assistant") => ReentryRole::Assistant,
             _ => continue,
         };
-        let Some(content) = record.get("message").and_then(|message| message.get("content")) else {
+        let Some(content) = record
+            .get("message")
+            .and_then(|message| message.get("content"))
+        else {
             continue;
         };
         collect_claude_entries(content, role, &mut entries);
@@ -1174,7 +1211,10 @@ pub fn read_claude_reentry_context(
 fn collect_claude_entries(content: &Value, role: ReentryRole, entries: &mut Vec<ReentryEntry>) {
     match content {
         Value::String(text) => {
-            entries.push(ReentryEntry { role, text: text.clone() });
+            entries.push(ReentryEntry {
+                role,
+                text: text.clone(),
+            });
         }
         Value::Array(blocks) => {
             for block in blocks {
@@ -1869,6 +1909,59 @@ mod tests {
             Some("Running tests".to_owned())
         );
         assert_eq!(adapter.normalize_title("   ", "reverie"), None);
+    }
+
+    #[test]
+    fn claude_title_strips_half_moon_spinner_frames() {
+        let adapter = ClaudeCodeAdapter;
+        // Claude's current spinner animates a filled half-circle side to side in
+        // front of the task title. Every frame must clean to the same label, or
+        // the sidebar would flicker between four different names each second.
+        for frame in ['◐', '◓', '◑', '◒'] {
+            assert_eq!(
+                adapter.normalize_title(&format!("{frame} Research plugin integration"), "reverie"),
+                Some("Research plugin integration".to_owned()),
+                "frame {frame} leaked into the label"
+            );
+            assert_eq!(
+                adapter.normalize_title(&format!("{frame} Claude Code"), "reverie"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn status_decoration_covers_common_spinner_families_without_eating_titles() {
+        let adapter = ClaudeCodeAdapter;
+        // Whole spinner families, not just the frames a CLI ships today: block
+        // bars, quadrant circles, dingbat sparkles, moon phases, clock faces, and
+        // an emoji frame carrying a variation selector.
+        for raw in [
+            "▂ Deploy the bridge",
+            "◴ Deploy the bridge",
+            "✻ Deploy the bridge",
+            "· Deploy the bridge",
+            "↻ Deploy the bridge",
+            "🌘 Deploy the bridge",
+            "🕒 Deploy the bridge",
+            "⏳\u{FE0F} Deploy the bridge",
+            "⠋ ◐ ✳  Deploy the bridge",
+        ] {
+            assert_eq!(
+                adapter.normalize_title(raw, "reverie"),
+                Some("Deploy the bridge".to_owned()),
+                "failed to clean {raw:?}"
+            );
+        }
+
+        // Only the leading run is decoration. Text after the first real character
+        // is the title, glyphs included.
+        assert_eq!(
+            adapter.normalize_title("◐ Fix ✳ rendering · again", "reverie"),
+            Some("Fix ✳ rendering · again".to_owned())
+        );
+        // A title that is nothing but spinner frames has no label to show.
+        assert_eq!(adapter.normalize_title("◐ ⠋ ✳", "reverie"), None);
     }
 
     #[test]
