@@ -2099,7 +2099,8 @@ fn attach_claude_hooks(
 ///
 /// Codex is instrumented entirely through `-c` overrides (its highest-precedence
 /// "SessionFlags" config layer): no files written, no `CODEX_HOME` redirect, and
-/// additive to the user's own `~/.codex` config/hooks. We mint a token, register
+/// additive to the user's own `~/.codex` hooks. The per-run `notify` override is
+/// chained to any user notifier by the forwarder. We mint a token, register
 /// it with the hook server, then inject (a) the hook definitions plus their
 /// pre-computed trust state as `-c` args (so the hooks run Trusted without the
 /// blunt `--dangerously-bypass-hook-trust`), and (b) the per-session token + port
@@ -2109,8 +2110,9 @@ fn attach_claude_hooks(
 /// launches (its bytes are what Codex's hook trust hash is computed over).
 ///
 /// Best-effort: if the hook server is unmanaged or the forwarder isn't staged,
-/// the session still launches and the rollout-JSONL watcher remains the fallback
-/// signal. We never set `CODEX_HOME`, so `assert_safe_cli_env` keeps passing.
+/// the session still launches. Rollout JSONL still supplies tool/interruption
+/// detail and process exit remains the final backstop, but clean turn readiness
+/// is unavailable. We never set `CODEX_HOME`, so `assert_safe_cli_env` passes.
 fn attach_codex_hooks(
     app: &AppHandle,
     shell_session_id: SessionId,
@@ -2130,7 +2132,7 @@ fn attach_codex_hooks(
     let forwarder = crate::connection_commands::locate_helper("reverie-codex-hook");
     if !forwarder.exists() {
         eprintln!(
-            "[reverie-hooks] reverie-codex-hook not found at {}; Codex hooks disabled (rollout fallback remains)",
+            "[reverie-hooks] reverie-codex-hook not found at {}; Codex hooks and clean-ready notification disabled",
             forwarder.display()
         );
         return;
@@ -2155,6 +2157,33 @@ fn attach_codex_hooks(
         .extend(reverie_core::codex_hooks::codex_hook_config_args(
             &forwarder,
         ));
+    // A `-c notify=...` override replaces Codex's user-level notifier for this
+    // process. Preserve it out of band so our forwarder can invoke it with the
+    // original JSON argument after posting the same event to Reverie.
+    let forwarder_command = forwarder.to_string_lossy();
+    match crate::bridge_installer::codex_notify_command() {
+        Ok(Some(command))
+            if command
+                .first()
+                .is_some_and(|part| part != forwarder_command.as_ref()) =>
+        {
+            match serde_json::to_string(&command) {
+                Ok(encoded) => {
+                    spawn_spec
+                        .command
+                        .env
+                        .insert("REVERIE_CODEX_NOTIFY_CHAIN".to_owned(), encoded);
+                }
+                Err(err) => {
+                    eprintln!("[reverie-hooks] failed encoding Codex notify chain: {err}");
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!("[reverie-hooks] failed reading existing Codex notify command: {err:#}");
+        }
+    }
     // (b) The forwarder reads these from the env to address + authorize its POST.
     spawn_spec
         .command

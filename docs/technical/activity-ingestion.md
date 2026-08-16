@@ -95,7 +95,8 @@ turn-by-turn by the reconciler before persistence (see The correlator, below).
 
 [`hook_server.rs`](../../packages/reverie-core/src/hook_server.rs) binds a localhost
 HTTP server. The launch path mints a per-session token and registers it against the
-owning `SessionId`; the CLI is configured to POST lifecycle events to
+owning `SessionId`; the CLI is configured to POST lifecycle events, or run a small
+forwarder for an external notification, to
 `/hooks/<cli>/<token>`. Each payload is translated to an `ActivityUpdate::State`
 keyed `Reverie(id)` at `Definitive`. The native CLI id rides along in
 `state.session_id` and is captured into the record on first sight. This is how
@@ -157,9 +158,11 @@ single consumer of `ActivityUpdate`. It:
   updates (lifecycle hooks + rollout watcher) pass through a live
   [`ActivityReconciler`](../../packages/reverie-core/src/activity_reconciler.rs)
   before persistence: it is the single writer for that session, merging the two
-  sources turn-by-turn so the cross-source sequence fight is resolved and the
-  rollout's `turn_aborted` can backstop the `Stop` hook on Esc/error. A
-  `Definitive` hook edge wins over the `Inferred` log-tail. The single-source CLIs
+  sources turn-by-turn so the cross-source sequence fight is resolved. Codex's
+  `agent-turn-complete` notification is the definitive clean ready edge, while
+  the rollout's explicit `turn_aborted` handles interruption. `Stop` is ignored
+  because it is a continuation gate, not a terminal edge. A `Definitive` hook or
+  notification edge wins over the `Inferred` log-tail. The single-source CLIs
   (Claude hooks, Cortex snapshots) take the direct path with no reconciler, since
   they have no second source; `record_session_activity*` still drops out-of-order
   updates by sequence (for Codex, a monotonic dedup on the reconciler's own

@@ -476,8 +476,8 @@ mod tests {
     // The poll fallback must recover the true state even when no change event ever
     // arrives for an append (the dropped-FSEvents case that stranded a resumed
     // Codex session in "idle"). We fold a file once to set the offset, append the
-    // turn-end record WITHOUT notifying the watcher, then poll and assert it folds
-    // the missed bytes through to AwaitingInput.
+    // explicit abort record WITHOUT notifying the watcher, then poll and assert
+    // it folds the missed bytes through to AwaitingInput.
     #[test]
     fn poll_recovers_an_append_with_no_change_event() {
         let dir = TempDir::new().unwrap();
@@ -512,13 +512,13 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
 
-        // The turn ends, but pretend the OS dropped the notification: append and
-        // do NOT call fold_new_bytes. The poll alone must catch it.
+        // The turn is interrupted, but pretend the OS dropped the notification:
+        // append and do NOT call fold_new_bytes. The poll alone must catch it.
         {
             let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
             writeln!(
                 f,
-                r#"{{"type":"event_msg","payload":{{"type":"task_complete"}}}}"#
+                r#"{{"type":"event_msg","payload":{{"type":"turn_aborted"}}}}"#
             )
             .unwrap();
             f.flush().unwrap();

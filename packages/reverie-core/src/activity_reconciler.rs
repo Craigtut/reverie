@@ -1,25 +1,26 @@
 //! Per-session merge of Codex's two activity sources into one coherent state.
 //!
 //! Codex is the only CLI Reverie observes through **two** sources at once: the
-//! lifecycle hooks (Definitive: instant native-id capture, turn start/stop, the
-//! approval gate) and the rollout-JSONL watcher (Inferred: rich tool detail, and
-//! the `turn_aborted` edge the `Stop` hook misses on Esc/interrupt). Their
+//! lifecycle hooks and notifier (Definitive: instant native-id capture, turn
+//! start/completion, the approval gate) and the rollout-JSONL watcher (Inferred:
+//! rich tool detail and the explicit `turn_aborted` edge). Their
 //! sequence counters are independent and incomparable, so writing both straight
 //! into `latest_activity` (each guarded only by its own sequence) makes them
 //! clobber each other. This reconciler is the single writer that resolves them.
 //!
 //! The merge is a small per-session **turn state machine** keyed by the native
-//! session id (both sources carry it). Codex `turn_id`s are time-ordered
-//! UUIDv7, so a lexicographic compare tells which turn is newer. Either source
-//! may supply the start or end edge of a turn:
+//! session id (both sources carry it). Codex `turn_id`s are opaque. Current
+//! releases can mix UUID versions, so they must never be ordered lexically.
+//! Either source may supply the start or end edge of a turn:
 //!
 //! - a turn is **running** once any source reports a start for it (and not yet an
 //!   end), so a long silent turn never reads as idle (the cull-safety guarantee);
 //! - a turn **ends** only when an end edge names *that* turn, so a late
 //!   `task_complete` for turn N can't flip a newer `UserPromptSubmit` for N+1
 //!   back to idle;
-//! - the `turn_aborted` end edge from the rollout covers the Esc/interrupt case
-//!   the `Stop` hook never fires for.
+//! - an inferred edge cannot reopen the same turn after its definitive
+//!   `agent-turn-complete` notification;
+//! - the rollout's explicit `turn_aborted` edge covers Esc/interrupt.
 //!
 //! Single-source CLIs (Claude hooks, Cortex snapshots) do not go through here:
 //! they have no second source to fight, and the correlator keeps them on the
@@ -82,6 +83,9 @@ struct SessionMerge {
     current_turn: Option<String>,
     /// Whether `current_turn` has ended. Meaningless when `current_turn` is None.
     turn_ended: bool,
+    /// Fidelity of the edge that ended `current_turn`. Prevents a delayed
+    /// inferred rollout snapshot from reopening a definitively completed turn.
+    end_fidelity: Option<Fidelity>,
     /// Whether the agent is blocked on an approval for the current turn. Sticky
     /// until forward progress (a later working edge) or the turn ends.
     permission_pending: bool,
@@ -101,7 +105,7 @@ struct SessionMerge {
 }
 
 impl SessionMerge {
-    fn apply(&mut self, native_session_id: &str, _fidelity: Fidelity, incoming: &ActivityState) {
+    fn apply(&mut self, native_session_id: &str, fidelity: Fidelity, incoming: &ActivityState) {
         self.native_id = native_session_id.to_owned();
         if !incoming.cwd.is_empty() {
             self.cwd = incoming.cwd.clone();
@@ -121,12 +125,15 @@ impl SessionMerge {
             ActivityStatus::Working => {
                 self.errored = false;
                 match turn_id {
-                    // A start/continuation of the current or a newer turn.
-                    Some(id) if self.is_current_or_newer(id) => {
-                        self.start_turn(id);
+                    Some(id) => {
+                        let same_turn = self.current_turn.as_deref() == Some(id);
+                        let weaker_than_end = same_turn
+                            && self.turn_ended
+                            && self.end_fidelity.is_some_and(|ended| fidelity < ended);
+                        if !weaker_than_end {
+                            self.start_turn(id);
+                        }
                     }
-                    // A stale working edge for an older turn: ignore it.
-                    Some(_) => {}
                     // A turn-less working pulse: keep whatever turn we have live.
                     None => {
                         self.turn_ended = false;
@@ -138,26 +145,30 @@ impl SessionMerge {
             // Codex never emits `Done` for an in-flight session, but treat it as
             // a clean end defensively.
             ActivityStatus::AwaitingInput | ActivityStatus::Done => match turn_id {
-                // An end edge for the current/newer turn: the turn is over.
-                Some(id) if self.is_current_or_newer(id) => {
+                // End only the named current turn. A late end for a different
+                // turn is stale, regardless of how its opaque id sorts.
+                Some(id)
+                    if self
+                        .current_turn
+                        .as_deref()
+                        .is_none_or(|current| current == id) =>
+                {
                     self.current_turn = Some(id.to_owned());
-                    self.end_turn();
+                    self.end_turn(fidelity);
                 }
-                // A stale end for an already-superseded turn: ignore.
                 Some(_) => {}
                 // Turn-less idle (e.g. SessionStart): a baseline only. Never end
                 // a turn we already know is running on a turn-less idle.
                 None => {
                     if self.current_turn.is_none() {
-                        self.end_turn();
+                        self.end_turn(fidelity);
                     }
                 }
             },
             ActivityStatus::AwaitingPermission | ActivityStatus::AwaitingResponse => {
                 self.errored = false;
                 match turn_id {
-                    Some(id) if self.is_current_or_newer(id) => self.start_turn(id),
-                    Some(_) => {}
+                    Some(id) => self.start_turn(id),
                     None => self.turn_ended = false,
                 }
                 self.permission_pending = true;
@@ -179,13 +190,15 @@ impl SessionMerge {
     fn start_turn(&mut self, id: &str) {
         self.current_turn = Some(id.to_owned());
         self.turn_ended = false;
+        self.end_fidelity = None;
         // A working edge for the current/newer turn is forward progress, which
         // resolves any approval gate that was pending.
         self.clear_permission();
     }
 
-    fn end_turn(&mut self) {
+    fn end_turn(&mut self, fidelity: Fidelity) {
         self.turn_ended = true;
+        self.end_fidelity = Some(fidelity);
         self.clear_permission();
         self.active_tools.clear();
     }
@@ -193,15 +206,6 @@ impl SessionMerge {
     fn clear_permission(&mut self) {
         self.permission_pending = false;
         self.permission = None;
-    }
-
-    /// Whether `id` names the current turn or a newer one. turn_ids are
-    /// time-ordered UUIDv7, so a lexicographic compare is a recency compare.
-    fn is_current_or_newer(&self, id: &str) -> bool {
-        match &self.current_turn {
-            Some(current) => id >= current.as_str(),
-            None => true,
-        }
     }
 
     fn snapshot(&self) -> ActivityState {
@@ -267,7 +271,7 @@ mod tests {
         }
     }
 
-    /// turn_ids in UUIDv7 lexicographic order (older < newer).
+    /// Representative UUIDv7 turn ids used by most fixtures.
     const TURN_A: &str = "019ea000-0000-7000-8000-000000000001";
     const TURN_B: &str = "019ea001-0000-7000-8000-000000000002";
 
@@ -326,9 +330,54 @@ mod tests {
     }
 
     #[test]
-    fn rollout_abort_backstops_the_stop_hook_miss() {
-        // Hook reports the turn started but (Esc) never sends Stop; the rollout's
-        // turn_aborted (same turn) must still end it.
+    fn mixed_uuid_versions_do_not_strand_a_new_turn_as_idle() {
+        // Goal continuations can use an opaque UUIDv4 id followed by a UUIDv7
+        // id that sorts lower. Arrival plus exact-id end matching, not lexical
+        // ordering, determines the live turn.
+        let random_v4 = "f7d9725a-4714-4b10-8518-cacf4b39252e";
+        let later_v7 = "019ea001-0000-7000-8000-000000000002";
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &state(ActivityStatus::AwaitingInput, Some(random_v4)),
+        );
+        let s = r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &state(ActivityStatus::Working, Some(later_v7)),
+        );
+        assert_eq!(s.status, ActivityStatus::Working);
+        assert_eq!(s.turn.as_ref().map(|turn| turn.id.as_str()), Some(later_v7));
+    }
+
+    #[test]
+    fn inferred_tail_cannot_reopen_a_definitively_completed_turn() {
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &state(ActivityStatus::Working, Some(TURN_A)),
+        );
+        let s = r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &state(ActivityStatus::AwaitingInput, Some(TURN_A)),
+        );
+        assert_eq!(s.status, ActivityStatus::AwaitingInput);
+
+        let s = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &state(ActivityStatus::Working, Some(TURN_A)),
+        );
+        assert_eq!(s.status, ActivityStatus::AwaitingInput);
+    }
+
+    #[test]
+    fn rollout_abort_ends_the_interrupted_turn() {
+        // The clean completion notifier may not fire after Esc. The rollout's
+        // explicit turn_aborted edge for the same turn still ends it.
         let r = ActivityReconciler::new();
         r.merge(
             "native-1",

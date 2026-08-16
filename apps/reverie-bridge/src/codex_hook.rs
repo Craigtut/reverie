@@ -1,9 +1,10 @@
 //! `reverie-codex-hook`: the Codex CLI lifecycle-hook forwarder.
 //!
-//! Codex runs this as a `type="command"` hook (installed per-session via `-c`,
-//! see `reverie_core::codex_hooks`) on each lifecycle event (SessionStart,
-//! UserPromptSubmit, PermissionRequest, Stop). It reads the hook JSON from stdin
-//! and POSTs it verbatim to Reverie's localhost hook server at
+//! Codex runs this both as a `type="command"` hook (installed per-session via
+//! `-c`, see `reverie_core::codex_hooks`) and as its external `notify` command.
+//! Hook JSON arrives on stdin; `agent-turn-complete` notification JSON arrives
+//! as the first argument. The helper POSTs either form verbatim to Reverie's
+//! localhost hook server at
 //! `/hooks/codex/<token>`, where `translate_codex` turns it into an
 //! `ActivityState`.
 //!
@@ -14,9 +15,10 @@
 //! pre-seeded trust valid.
 //!
 //! Codex runs hooks SYNCHRONOUSLY INLINE in the turn, so the lifecycle events
-//! (SessionStart / UserPromptSubmit / Stop) must be fast and must never fail the
+//! (SessionStart / UserPromptSubmit) must be fast and must never fail the
 //! turn: those paths exit 0 with a tightly bounded socket budget, and a missing
-//! server or env is a silent no-op (the rollout watcher remains the fallback).
+//! server or env is a silent no-op. The rollout watcher still supplies tool and
+//! interruption detail, and process exit remains the final backstop.
 //!
 //! `PermissionRequest` is the deliberate exception. There the turn is *already*
 //! blocked on the user, so this hook is allowed to block: the server holds the
@@ -25,12 +27,12 @@
 //! stdout, which Codex parses as this hook's PermissionRequest decision (allow /
 //! deny), short-circuiting Codex's own prompt. If the server times out and
 //! replies with no body, we print nothing and Codex shows its own prompt
-//! (deny-safe). No dependencies beyond `std`.
+//! (deny-safe).
 
 use std::env;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::time::Duration;
 
 /// Localhost connect/write budget, and the read budget for the fast lifecycle
@@ -47,16 +49,28 @@ const APPROVAL_READ_TIMEOUT: Duration = Duration::from_secs(595);
 fn main() -> ExitCode {
     // Best-effort: the agent's turn must never fail because of us, so we always
     // exit 0 regardless of what happened.
-    let _ = forward();
+    if let Ok((body, is_notification)) = read_payload() {
+        let _ = forward(&body);
+        if is_notification {
+            let _ = run_chained_notifier(&body);
+        }
+    }
     ExitCode::SUCCESS
 }
 
-fn forward() -> std::io::Result<()> {
-    // Always drain stdin first so Codex's write to our pipe completes even when
-    // we have nothing to forward to.
+/// Read Codex's two invocation forms. External notifications append one JSON
+/// argument; lifecycle command hooks write their JSON to stdin.
+fn read_payload() -> std::io::Result<(Vec<u8>, bool)> {
+    if let Some(argument) = env::args_os().nth(1) {
+        return Ok((argument.to_string_lossy().into_owned().into_bytes(), true));
+    }
+
     let mut body = Vec::new();
     std::io::stdin().read_to_end(&mut body)?;
+    Ok((body, false))
+}
 
+fn forward(body: &[u8]) -> std::io::Result<()> {
     // No token/port means Reverie is not listening for this session: nothing to
     // do. (Reverie always injects both for the sessions it instruments.)
     let (Ok(port), Ok(token)) = (
@@ -69,7 +83,7 @@ fn forward() -> std::io::Result<()> {
     // A PermissionRequest is the one event we hold open for a decision to relay.
     // The event name is the only place this token appears in the hook payload, so
     // a substring check is enough and keeps us free of a JSON dependency.
-    let is_permission = contains(&body, b"PermissionRequest");
+    let is_permission = contains(body, b"PermissionRequest");
 
     let Ok(addr) = format!("127.0.0.1:{port}").parse::<SocketAddr>() else {
         return Ok(());
@@ -92,7 +106,7 @@ fn forward() -> std::io::Result<()> {
         len = body.len(),
     );
     stream.write_all(header.as_bytes())?;
-    stream.write_all(&body)?;
+    stream.write_all(body)?;
     stream.flush()?;
 
     if is_permission {
@@ -119,12 +133,36 @@ fn forward() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Invoke the notifier Codex would have run without Reverie's per-process
+/// override. The shell serializes the original argv as JSON in the environment.
+/// We execute it directly, without a shell, and append the untouched Codex JSON
+/// argument just as Codex does.
+fn run_chained_notifier(body: &[u8]) -> std::io::Result<()> {
+    let Ok(encoded) = env::var("REVERIE_CODEX_NOTIFY_CHAIN") else {
+        return Ok(());
+    };
+    let Ok(command) = serde_json::from_str::<Vec<String>>(&encoded) else {
+        return Ok(());
+    };
+    let Some(program) = command.first() else {
+        return Ok(());
+    };
+    let payload = String::from_utf8_lossy(body);
+    let _ = Command::new(program)
+        .args(&command[1..])
+        .arg(payload.as_ref())
+        .status()?;
+    Ok(())
+}
+
 /// Whether `haystack` contains the byte sequence `needle`.
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || haystack.len() < needle.len() {
         return false;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// The body of an HTTP/1.1 response: everything after the first CRLFCRLF that

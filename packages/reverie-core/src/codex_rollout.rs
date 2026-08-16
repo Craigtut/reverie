@@ -4,15 +4,17 @@
 //! `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`. The first record
 //! is `session_meta` (native id + cwd); subsequent records narrate the turn
 //! (`task_started`, `function_call` / `function_call_output`, `task_complete`,
-//! `turn_aborted`, `error`, plus reasoning/message chatter we ignore). Reverie
+//! `turn_aborted`, goal updates, `error`, plus reasoning/message chatter we
+//! ignore). Reverie
 //! folds the log into the same unified [`ActivityState`] the Cortex watcher and
 //! the Claude hook server produce, so the dashboard never learns it came from a
 //! file rather than a hook.
 //!
 //! Pure parsing + discovery only. Filesystem watching lives in the shell. Codex
 //! has no HTTP hook type and trust-gates command hooks, so this file watcher is
-//! the baseline lifecycle source; the definitive `awaiting_permission` signal
-//! comes from the (separately wired) trusted `PermissionRequest` command hook.
+//! the baseline detail source. Definitive clean completion comes from Codex's
+//! `agent-turn-complete` notifier; definitive `awaiting_permission` comes from
+//! the trusted `PermissionRequest` command hook.
 
 use std::{
     collections::BTreeSet,
@@ -215,10 +217,13 @@ pub struct CodexRolloutFold {
     last_timestamp: Option<String>,
     // The turn the rollout is currently narrating (from `task_started`/end
     // records). Carried onto every emitted state so the cross-source reconciler
-    // can tell a current turn edge from a stale one (turn_ids are time-ordered
-    // UUIDv7), and so the rollout's `turn_aborted` can end the exact turn the
-    // `Stop` hook missed.
+    // can match exact turn edges without assuming the opaque ids are ordered,
+    // and so the rollout's `turn_aborted` can end the interrupted turn.
     current_turn_id: Option<String>,
+    /// Long-running goal liveness is independent from a single task record. An
+    /// ordinary `task_complete` can be followed by another automatic goal turn,
+    /// so an active goal stays working until a terminal goal update arrives.
+    goal_active: bool,
     sequence: u64,
     // Best-effort approval signal: Codex records the approval-triggering moment
     // as a `function_call` carrying `with_escalated_permissions: true`. While
@@ -240,6 +245,7 @@ impl CodexRolloutFold {
             last_error: None,
             last_timestamp: None,
             current_turn_id: None,
+            goal_active: false,
             sequence: 0,
             pending_escalation: None,
         }
@@ -322,11 +328,21 @@ impl CodexRolloutFold {
                     }
                 }
             }
-            // The turn ended (cleanly or interrupted): idle, waiting on the user.
-            // Keep `current_turn_id` set to the turn that ended (preferring the
-            // record's own turn_id) so the reconciler ends exactly that turn,
-            // which is how `turn_aborted` backstops a missed `Stop` hook.
-            (_, "task_complete") | (_, "turn_aborted") => {
+            // `task_complete` is not our clean ready edge. Codex can complete a
+            // task and then automatically begin another goal turn. Keep the
+            // session working until the external `agent-turn-complete`
+            // notification or an explicit terminal goal update arrives.
+            (_, "task_complete") => {
+                self.status = ActivityStatus::Working;
+                if let Some(id) = turn_id_from(&record.payload) {
+                    self.current_turn_id = Some(id);
+                }
+                self.active.clear();
+                self.pending_escalation = None;
+            }
+            // An interrupted turn may not emit the clean completion notifier.
+            // `turn_aborted` is itself an explicit terminal edge.
+            (_, "turn_aborted") => {
                 self.status = ActivityStatus::AwaitingInput;
                 if let Some(id) = turn_id_from(&record.payload) {
                     self.current_turn_id = Some(id);
@@ -339,13 +355,19 @@ impl CodexRolloutFold {
             // resumed goal can sit behind the last `task_complete` and read idle.
             (_, "thread_goal_updated") => match goal_status_from(&record.payload).as_deref() {
                 Some("active") => {
+                    self.goal_active = true;
                     self.status = ActivityStatus::Working;
                     if let Some(id) = turn_id_from(&record.payload) {
                         self.current_turn_id = Some(id);
                     }
                     self.last_error = None;
                 }
-                Some("complete") | Some("usageLimited") => {
+                Some("complete")
+                | Some("usageLimited")
+                | Some("budgetLimited")
+                | Some("paused")
+                | Some("blocked") => {
+                    self.goal_active = false;
                     self.status = ActivityStatus::AwaitingInput;
                     if let Some(id) = turn_id_from(&record.payload) {
                         self.current_turn_id = Some(id);
@@ -386,14 +408,16 @@ impl CodexRolloutFold {
         // user's approval, which the dashboard surfaces as a first-class state.
         let status = if self.pending_escalation.is_some() {
             ActivityStatus::AwaitingPermission
+        } else if self.goal_active && self.status != ActivityStatus::Error {
+            ActivityStatus::Working
         } else {
             self.status
         };
-        // Stamp the narrated turn so the reconciler can order this edge against
-        // the hook's. Its `status` reflects whether the turn is still running.
+        // Stamp the narrated turn so the reconciler can match this edge against
+        // the hook's exact turn id. Its `status` reflects whether it is running.
         let turn = self.current_turn_id.as_ref().map(|id| ActivityTurn {
             id: id.clone(),
-            status: match self.status {
+            status: match status {
                 ActivityStatus::AwaitingInput | ActivityStatus::Done | ActivityStatus::Error => {
                     TurnStatus::Completed
                 }
@@ -730,8 +754,7 @@ fn extract_user_message_text(payload: &Value) -> Option<String> {
 
 fn extract_assistant_message_text(payload: &Value) -> Option<String> {
     let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-    if payload_type == "message"
-        && payload.get("role").and_then(Value::as_str) == Some("assistant")
+    if payload_type == "message" && payload.get("role").and_then(Value::as_str) == Some("assistant")
     {
         return message_text_from_value(payload.get("content")?);
     }
@@ -853,11 +876,10 @@ mod tests {
 
     // Empirical check of the live watcher path (not just the pure fold): start the
     // real session-log watcher, register a rollout file as the launch path does,
-    // then append `task_complete` and assert the watcher folds it through to
-    // `AwaitingInput`. This is the wiring the dashboard depends on to leave the
-    // "working" state; if it never fires, a finished Codex session stays "active".
+    // then append `turn_aborted` and assert the watcher folds the explicit
+    // interruption through to `AwaitingInput`.
     #[test]
-    fn watcher_detects_appended_task_complete() {
+    fn watcher_detects_appended_turn_aborted() {
         use crate::activity_source::ActivityUpdate;
         use crate::session_log::start_session_log_watcher;
         use std::sync::Arc;
@@ -894,13 +916,13 @@ mod tests {
             other => panic!("unexpected first update: {other:?}"),
         }
 
-        // Append the turn-end record the way Codex does, then wait for the watcher
-        // to deliver the AwaitingInput fold.
+        // Append the explicit interruption record, then wait for the watcher to
+        // deliver the AwaitingInput fold.
         {
             let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
             writeln!(
                 f,
-                r#"{{"type":"event_msg","payload":{{"type":"task_complete"}}}}"#
+                r#"{{"type":"event_msg","payload":{{"type":"turn_aborted"}}}}"#
             )
             .unwrap();
             f.flush().unwrap();
@@ -922,7 +944,7 @@ mod tests {
         }
         assert!(
             got_awaiting,
-            "watcher never delivered AwaitingInput after task_complete was appended"
+            "watcher never delivered AwaitingInput after turn_aborted was appended"
         );
     }
 
@@ -983,9 +1005,15 @@ mod tests {
             .unwrap()
             .expect("reentry context");
         assert_eq!(context.entries.len(), 3);
-        assert_eq!(context.entries[0].role, crate::reentry_context::ReentryRole::User);
+        assert_eq!(
+            context.entries[0].role,
+            crate::reentry_context::ReentryRole::User
+        );
         assert_eq!(context.entries[0].text, "Fix the failing parser test");
-        assert_eq!(context.entries[1].role, crate::reentry_context::ReentryRole::Tool);
+        assert_eq!(
+            context.entries[1].role,
+            crate::reentry_context::ReentryRole::Tool
+        );
         assert_eq!(context.entries[1].text, "Run shell: bash -lc npm test");
         assert_eq!(
             context.entries[2].role,
@@ -1027,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn folds_working_then_idle_with_tool_detail() {
+    fn task_complete_clears_tool_detail_but_waits_for_notification() {
         let dir = TempDir::new().unwrap();
         let path = write_rollout(
             dir.path(),
@@ -1050,7 +1078,8 @@ mod tests {
         );
         let working_seq = state.sequence;
 
-        // Append the tool output + task_complete -> idle, tool cleared, higher seq.
+        // Append the tool output + task_complete. The tool clears and sequence
+        // advances, but clean readiness belongs to agent-turn-complete.
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(
             file,
@@ -1064,7 +1093,7 @@ mod tests {
         .unwrap();
 
         let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::AwaitingInput);
+        assert_eq!(state.status, ActivityStatus::Working);
         assert!(state.active_tools.is_empty());
         assert!(state.sequence > working_seq);
     }
@@ -1124,6 +1153,27 @@ mod tests {
     }
 
     #[test]
+    fn active_goal_stays_working_across_an_intermediate_task_complete() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-goal-latched.jsonl",
+            &[
+                META,
+                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"goal-turn","goal":{"status":"active"}}}"#,
+                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"goal-turn"}}"#,
+            ],
+        );
+
+        let state = read_codex_rollout_state(&path).unwrap().expect("state");
+        assert_eq!(state.status, ActivityStatus::Working);
+        assert_eq!(
+            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
+            TurnStatus::Running
+        );
+    }
+
+    #[test]
     fn terminal_goal_update_returns_to_input_waiting() {
         let dir = TempDir::new().unwrap();
         let path = write_rollout(
@@ -1143,6 +1193,28 @@ mod tests {
             state.turn.as_ref().map(|turn| turn.status).expect("turn"),
             TurnStatus::Completed
         );
+    }
+
+    #[test]
+    fn every_current_terminal_goal_status_returns_to_input_waiting() {
+        for terminal in [
+            "complete",
+            "usageLimited",
+            "budgetLimited",
+            "paused",
+            "blocked",
+        ] {
+            let mut fold = CodexRolloutFold::new();
+            let input = format!(
+                "{META}\n{{\"timestamp\":\"t1\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"thread_goal_updated\",\"turnId\":\"a\",\"goal\":{{\"status\":\"active\"}}}}}}\n{{\"timestamp\":\"t2\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"thread_goal_updated\",\"turnId\":\"a\",\"goal\":{{\"status\":\"{terminal}\"}}}}}}\n"
+            );
+            let state = fold.push(&input).expect("state");
+            assert_eq!(
+                state.status,
+                ActivityStatus::AwaitingInput,
+                "terminal goal status {terminal}"
+            );
+        }
     }
 
     #[test]
@@ -1180,7 +1252,7 @@ mod tests {
         let state = fold
             .push("\n")
             .expect("newline completes the buffered record");
-        assert_eq!(state.status, ActivityStatus::AwaitingInput);
+        assert_eq!(state.status, ActivityStatus::Working);
         assert_eq!(state.sequence, seq_after_meta + 1);
     }
 

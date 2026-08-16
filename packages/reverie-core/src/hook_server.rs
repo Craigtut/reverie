@@ -1,8 +1,8 @@
 //! HTTP receiver for Claude Code and Codex CLI hook payloads.
 //!
-//! Claude and Codex both emit lifecycle hooks (PermissionRequest, Stop,
-//! PostToolUse, SessionStart, SessionEnd, …) that can be configured to POST
-//! JSON to a localhost endpoint. Reverie hosts that endpoint via this module:
+//! Claude and Codex emit lifecycle hooks, and Codex also emits an external
+//! `agent-turn-complete` notification. Small forwarders POST those JSON payloads
+//! to a localhost endpoint. Reverie hosts that endpoint via this module:
 //! a tiny synchronous HTTP/1.1 server bound to 127.0.0.1 on an OS-assigned
 //! port, routing per-CLI on the URL path and translating each payload into
 //! the unified [`ActivityState`] shape so the dashboard cares only about state
@@ -500,8 +500,11 @@ fn translate(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 struct HookEnvelope {
+    /// Lifecycle hooks use `hook_event_name`; Codex's external notifier uses
+    /// `type` with the value `agent-turn-complete`.
+    #[serde(alias = "type")]
     hook_event_name: String,
-    #[serde(default)]
+    #[serde(default, alias = "thread-id")]
     session_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
@@ -511,10 +514,10 @@ struct HookEnvelope {
     tool_name: Option<String>,
     #[serde(default)]
     tool_input: Option<Value>,
-    /// The turn this event belongs to (Codex turn-scoped hooks; a time-ordered
-    /// UUIDv7). The reconciler keys turn lifecycle off it so a stale end edge
-    /// can't idle a newer working turn. Absent on non-turn events (SessionStart).
-    #[serde(default)]
+    /// The turn this event belongs to. Codex lifecycle hooks use `turn_id`; its
+    /// notifier uses `turn-id`. The value is opaque and is not assumed to be
+    /// ordered. Absent on non-turn events such as SessionStart.
+    #[serde(default, alias = "turn-id")]
     turn_id: Option<String>,
     #[serde(default)]
     error_type: Option<String>,
@@ -750,6 +753,16 @@ fn translate_codex(
 ) -> Option<ActivityUpdate> {
     let envelope = parse_envelope(payload)?;
     let session_id = envelope.session_id.clone()?;
+
+    // Stop is a continuation gate, not a completion signal. A matching Stop
+    // hook can tell Codex to keep going with a new prompt, so it must never
+    // lower a live session to AwaitingInput. Older Reverie-launched processes
+    // may still have this hook installed, hence the server-side ignore even
+    // though new launches no longer subscribe to it.
+    if envelope.hook_event_name == "Stop" {
+        return None;
+    }
+
     let timestamp = envelope.timestamp.clone().unwrap_or_else(now_iso8601);
     let sequence = next_sequence(sequences, &session_id);
     let cwd = envelope.cwd.clone().unwrap_or_default();
@@ -779,9 +792,10 @@ fn translate_codex(
             ActivityStatus::Working,
             turn_id,
         ),
-        // Turn end (clean completion only). Esc/interrupt and turn errors never
-        // fire Stop; the rollout's turn_aborted edge backstops those.
-        "Stop" => build_codex_turn_state(
+        // Codex's external notifier is the definitive clean completion edge.
+        // It fires only once the agent turn has actually completed and carries
+        // the native thread and turn ids in its hyphenated envelope fields.
+        "agent-turn-complete" => build_codex_turn_state(
             &session_id,
             timestamp,
             sequence,
@@ -1156,7 +1170,12 @@ mod tests {
         // Approve from the card: the held hook responds 200 with the allow body.
         let key = (test_reverie_session_id(), perm_id);
         await_pending(&handle, &key);
-        assert!(handle.control.approvals.resolve(&key, ApprovalDecision::Allow));
+        assert!(
+            handle
+                .control
+                .approvals
+                .resolve(&key, ApprovalDecision::Allow)
+        );
 
         let response = poster.join().expect("poster thread");
         assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
@@ -1226,7 +1245,12 @@ mod tests {
 
         let key = (test_reverie_session_id(), perm_id);
         await_pending(&handle, &key);
-        assert!(handle.control.approvals.resolve(&key, ApprovalDecision::Deny));
+        assert!(
+            handle
+                .control
+                .approvals
+                .resolve(&key, ApprovalDecision::Deny)
+        );
 
         let response = poster.join().expect("poster thread");
         assert!(response.starts_with("HTTP/1.1 200"), "response: {response}");
@@ -1391,13 +1415,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_stop_hook_marks_session_awaiting_input() {
+    fn codex_turn_complete_notification_marks_session_awaiting_input() {
         let handle = started_with_token(HookSource::CodexCli);
         let body = serde_json::json!({
-            "hook_event_name": "Stop",
-            "session_id": "codex-sess-1",
+            "type": "agent-turn-complete",
+            "thread-id": "codex-sess-1",
+            "turn-id": "turn-v4-or-v7",
             "cwd": "/repo",
-            "timestamp": "2026-05-28T12:35:00.000Z"
+            "input-messages": ["private prompt"],
+            "last-assistant-message": "private response"
         })
         .to_string();
 
@@ -1413,9 +1439,35 @@ mod tests {
                 assert_eq!(state.session_id, "codex-sess-1");
                 assert_eq!(state.status, ActivityStatus::AwaitingInput);
                 assert_eq!(state.sequence, 1);
+                assert_eq!(
+                    state.turn.as_ref().map(|turn| turn.id.as_str()),
+                    Some("turn-v4-or-v7")
+                );
             }
             other => panic!("expected State, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codex_stop_hook_emits_no_state_change() {
+        let handle = started_with_token(HookSource::CodexCli);
+        let body = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "codex-sess-1",
+            "turn_id": "turn-1",
+            "cwd": "/repo"
+        })
+        .to_string();
+
+        let response = post_hook(handle.port(), &codex_path(), &body);
+        assert!(response.starts_with("HTTP/1.1 204"), "response: {response}");
+        assert!(
+            handle
+                .events
+                .recv_timeout(Duration::from_millis(400))
+                .is_err(),
+            "Stop must not produce a Codex activity update"
+        );
     }
 
     #[test]

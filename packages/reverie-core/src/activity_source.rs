@@ -54,8 +54,9 @@ pub enum SessionKey {
 }
 
 /// How complete and real-time a source's signal is. Drives multi-source merge
-/// precedence: a definitive hook outranks an inferred log-tail for the same
-/// session. `Ord` is derived from declaration order, so higher variants win.
+/// precedence: a definitive hook or notification outranks an inferred log-tail
+/// for the same session. `Ord` is derived from declaration order, so higher
+/// variants win.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Fidelity {
     /// Best-effort, derived from a coarse signal (e.g. parsing terminal output).
@@ -63,8 +64,8 @@ pub enum Fidelity {
     /// Inferred by folding a transcript whose records are not first-class state
     /// transitions (e.g. the Codex rollout log).
     Inferred,
-    /// A first-class lifecycle signal from the CLI itself: a hook, or an
-    /// authoritative snapshot the CLI rewrites on every transition.
+    /// A first-class lifecycle signal from the CLI itself: a hook,
+    /// notification, or authoritative snapshot rewritten on every transition.
     Definitive,
 }
 

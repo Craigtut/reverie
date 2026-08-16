@@ -304,11 +304,15 @@ the incremental tail keeps it O(new bytes), ×N sessions on one thread).
   fire. `PreToolUse`/`PostToolUse` now carry tool detail so the card reads
   "Run shell: …" rather than a bare "Working".
 
-### Phase 2: Codex CLI (landed, except the definitive approval hook)
+### Phase 2: Codex CLI (landed)
 
 - `codex_rollout` (core) folds the append-only rollout JSONL into `ActivityState`
   (`session_meta`→id+cwd, `task_started`→working, `function_call`→working+tool,
-  `*_output`→clear, `task_complete`/`turn_aborted`→idle, `error`→error). The
+  `*_output`→clear, `turn_aborted`→idle, `error`→error). `task_complete` clears
+  turn detail but remains working until the definitive notification because a
+  goal can automatically begin another turn. Active goal status is latched until
+  a terminal goal status (`complete`, `paused`, `blocked`, `usageLimited`, or
+  `budgetLimited`). The
   `sequence` is the folded-record count, so each re-read after the file grows is
   strictly newer. `discover_latest_codex_rollout_for_cwd` reads the first
   `session_meta` (cwd-validated, launch-window bounded) so `codex resume <id>`
@@ -321,14 +325,16 @@ the incremental tail keeps it O(new bytes), ×N sessions on one thread).
   with no matching output yet means the user is being prompted. This is
   best-effort (can't always distinguish "approving" from "running long"); the
   definitive signal is still the command hook below.
-- **Approval (definitive): NOT yet built, needs live validation.** A trusted
-  `PermissionRequest` `type:"command"` forwarder routed into the existing
-  `/hooks/codex` server route. The attach mechanism (`~/.codex/reverie.config.toml`
-  + `codex --profile reverie` vs `hooks.json`) and the `/hooks` trust-hash
-  behavior are version-sensitive (codex 0.135.0) and must be validated against a
-  live `codex` session before building, not guessed. When it lands, a per-session
-  aggregator unifies watcher + hook under one sequence (sticky `awaiting_permission`)
-  so a stale `working` cannot clobber a live approval.
+- **Lifecycle (definitive):** trusted `SessionStart`, `UserPromptSubmit`, and
+  `PermissionRequest` command hooks are injected per run with `-c` overrides and
+  forwarded to the existing `/hooks/codex` route. Clean readiness comes from the
+  external `notify` event `agent-turn-complete`, which carries the native thread
+  and turn ids as one JSON argument. Reverie chains any existing user notifier
+  after its own forwarder. `Stop` is not installed or translated because Codex
+  can use it to create a continuation prompt.
+- The per-session reconciler treats turn ids as opaque (current Codex releases
+  can mix UUID versions), ends only an exact current turn, and prevents a delayed
+  inferred rollout update from reopening a definitively completed turn.
 
 ### Cross-CLI parity: launch-time capture (landed)
 

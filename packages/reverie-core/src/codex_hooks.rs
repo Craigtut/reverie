@@ -3,8 +3,9 @@
 //!
 //! Unlike Claude (which takes a `--settings <file>` we write to disk), Codex is
 //! instrumented with **zero files written and no `CODEX_HOME` redirect**: we
-//! pass the hook definitions *and* their trust state as repeated `-c` flags on
-//! the launch. This is deliberate and load-bearing:
+//! pass the hook definitions, their trust state, and the definitive turn-complete
+//! notifier as repeated `-c` flags on the launch. This is deliberate and
+//! load-bearing:
 //!
 //! - `-c` is the highest-precedence layer, applies to interactive `codex` and
 //!   `codex resume` alike, and is **additive** to the user's own
@@ -36,10 +37,12 @@ use sha2::{Digest, Sha256};
 /// Minimal by design. We do **not** subscribe `PreToolUse`/`PostToolUse`: Codex
 /// runs command hooks synchronously inline in the turn, so a per-tool hook adds
 /// latency proportional to tool count, and the rollout watcher already supplies
-/// rich tool detail. These four are the lifecycle edges we actually drive state
+/// rich tool detail. These three are the lifecycle edges we actually drive state
 /// from: `SessionStart` captures the native id the instant the session starts;
 /// `UserPromptSubmit` = turn start; `PermissionRequest` = blocked on an approval;
-/// `Stop` = turn end.
+/// clean turn completion comes from Codex's separate `agent-turn-complete`
+/// notifier. `Stop` is deliberately absent because a Stop hook can ask Codex to
+/// continue, so it is not a terminal edge.
 ///
 /// `PermissionRequest` is matcher-bearing, but with no matcher supplied Codex's
 /// `matcher_pattern_for_event` passes `None` through, so its normalized identity
@@ -50,7 +53,6 @@ const CODEX_HOOK_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session_start"),
     ("UserPromptSubmit", "user_prompt_submit"),
     ("PermissionRequest", "permission_request"),
-    ("Stop", "stop"),
 ];
 
 /// The synthetic config-source path Codex assigns to the SessionFlags (`-c`)
@@ -74,7 +76,7 @@ const HOOK_TIMEOUT_SECS: u32 = 600;
 /// and injects `REVERIE_HOOK_TOKEN` / `REVERIE_HOOK_PORT` into the spawn env.
 pub fn codex_hook_config_args(forwarder_path: &Path) -> Vec<String> {
     let command = forwarder_path.to_string_lossy();
-    let mut args: Vec<String> = Vec::with_capacity(CODEX_HOOK_EVENTS.len() * 2 + 2);
+    let mut args: Vec<String> = Vec::with_capacity(CODEX_HOOK_EVENTS.len() * 2 + 4);
     let mut state_entries: Vec<String> = Vec::with_capacity(CODEX_HOOK_EVENTS.len());
 
     for (event_name, event_label) in CODEX_HOOK_EVENTS {
@@ -99,6 +101,14 @@ pub fn codex_hook_config_args(forwarder_path: &Path) -> Vec<String> {
     // user has in their own config; per-key fields are merged field-by-field).
     args.push("-c".to_owned());
     args.push(format!("hooks.state={{ {} }}", state_entries.join(", ")));
+
+    // Codex currently exposes `agent-turn-complete` through one external
+    // notifier command. It appends the notification JSON as a single argv
+    // value, which the same forwarder accepts alongside hook JSON on stdin.
+    // The shell preserves any user-configured notifier in an environment value
+    // so the forwarder can chain it after posting to Reverie.
+    args.push("-c".to_owned());
+    args.push(format!("notify=[{}]", toml_basic_string(&command)));
 
     args
 }
@@ -164,10 +174,6 @@ mod tests {
     fn trusted_hash_matches_codex_for_verified_commands() {
         // command = "/abs/path/forwarder" (the cross-checked fixture)
         assert_eq!(
-            trusted_hash("stop", "/abs/path/forwarder"),
-            "sha256:73f7087a195c4ba628ea67580a63dc5942ede9c1310fbe785db11ff01408d33c"
-        );
-        assert_eq!(
             trusted_hash("session_start", "/abs/path/forwarder"),
             "sha256:7052f4cf46032e30d7b56d23cd91adf72fcbdcba1d143b76d900f53e3cf84fc1"
         );
@@ -188,18 +194,14 @@ mod tests {
             trusted_hash("user_prompt_submit", "/private/tmp/rev-hook.sh"),
             "sha256:901ba38dff20ca2ea2565852cba0fb4120aecd41a0051be2d59d8a063216e1a7"
         );
-        assert_eq!(
-            trusted_hash("stop", "/private/tmp/rev-hook.sh"),
-            "sha256:80bd61d266905b1982a086a7f6552d68780350085593468a088fbd48738603e1"
-        );
     }
 
     #[test]
     fn config_args_define_and_trust_every_enabled_event() {
         let args = codex_hook_config_args(&PathBuf::from("/opt/reverie/reverie-bridge-codex-hook"));
 
-        // One `-c def` pair per event, plus one `-c hooks.state` pair.
-        assert_eq!(args.len(), (CODEX_HOOK_EVENTS.len() + 1) * 2);
+        // One `-c def` pair per event, one trust pair, and one notify pair.
+        assert_eq!(args.len(), (CODEX_HOOK_EVENTS.len() + 2) * 2);
         for chunk in args.chunks(2) {
             assert_eq!(chunk[0], "-c");
         }
@@ -220,6 +222,8 @@ mod tests {
         }
         // The trust state is collected into a single hooks.state override.
         assert!(joined.contains("hooks.state={"));
+        assert!(joined.contains("notify=[\"/opt/reverie/reverie-bridge-codex-hook\"]"));
+        assert!(!joined.contains("hooks.Stop=["));
     }
 
     #[test]
@@ -231,10 +235,10 @@ mod tests {
         // The command string is the literal forwarder path (so the trust hash,
         // which is computed over it, stays valid).
         assert!(joined.contains("command=\"/private/tmp/rev-hook.sh\""));
-        // And the Stop trust hash is the verified one for that path.
+        // And the SessionStart trust hash is the verified one for that path.
         assert!(
             joined.contains(
-                "sha256:80bd61d266905b1982a086a7f6552d68780350085593468a088fbd48738603e1"
+                "sha256:932ff9c435e0eb610421fc8bcb41e0de2d9a213ca6dc6fef60eaf00bd4bcdd6e"
             )
         );
     }

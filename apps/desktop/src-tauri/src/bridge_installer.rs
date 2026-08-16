@@ -305,6 +305,36 @@ pub(crate) fn codex_config_path() -> Result<PathBuf> {
     Ok(codex_home()?.join("config.toml"))
 }
 
+/// Read the user's existing Codex external notifier command, if configured.
+/// Reverie overrides `notify` for its launched process so it can receive the
+/// definitive `agent-turn-complete` event. The forwarder chains this command so
+/// that per-run override does not suppress the user's notifier.
+pub(crate) fn codex_notify_command() -> Result<Option<Vec<String>>> {
+    let path = codex_config_path()?;
+    let doc = read_toml_document_or_empty(&path)?;
+    codex_notify_command_from_document(&doc, &path)
+}
+
+fn codex_notify_command_from_document(
+    doc: &DocumentMut,
+    path: &PathBuf,
+) -> Result<Option<Vec<String>>> {
+    let Some(item) = doc.get("notify") else {
+        return Ok(None);
+    };
+    let array = item
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("`notify` in {} is not an array", path.display()))?;
+    let mut command = Vec::with_capacity(array.len());
+    for value in array.iter() {
+        let part = value.as_str().ok_or_else(|| {
+            anyhow::anyhow!("`notify` in {} contains a non-string value", path.display())
+        })?;
+        command.push(part.to_owned());
+    }
+    Ok((!command.is_empty()).then_some(command))
+}
+
 /// Install the bridge entry into Codex's `~/.codex/config.toml`. Idempotent.
 /// Codex's MCP server table sits under `[mcp_servers.<name>]`; we add the
 /// `reverie_bridge` namespace.
@@ -560,6 +590,31 @@ mod tests {
             reverie_bridge: reverie.clone(),
             preturn_hook: hook.clone(),
         }
+    }
+
+    #[test]
+    fn reads_codex_notify_argv_without_shell_parsing() {
+        let doc = r#"notify = ["python3", "/Users/me/notify script.py", "--quiet"]"#
+            .parse::<DocumentMut>()
+            .unwrap();
+        let path = PathBuf::from("/tmp/config.toml");
+        assert_eq!(
+            codex_notify_command_from_document(&doc, &path).unwrap(),
+            Some(vec![
+                "python3".to_owned(),
+                "/Users/me/notify script.py".to_owned(),
+                "--quiet".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn missing_codex_notify_returns_none() {
+        let doc = DocumentMut::new();
+        assert_eq!(
+            codex_notify_command_from_document(&doc, &PathBuf::from("/tmp/config.toml")).unwrap(),
+            None
+        );
     }
 
     #[test]
