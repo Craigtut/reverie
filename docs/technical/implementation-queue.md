@@ -39,7 +39,7 @@ The yardstick for "faithful to the design" is [`terminal/performance-and-accepta
 
 **Tier 1 (landed 2026-06-03, commit `8298f91`).** Agent processes used to orphan because `set_session_archived` / `remove_session` only flipped DB flags; all termination relied on the frontend calling `terminate_session(terminalId)` with an **in-memory, frontend-only** binding that an HMR/store reset, a cold reload, or a crash drops. The backend is now authoritative: `TerminalSessionRuntime::terminate_for_session(session_id)` (`terminal/runtime.rs`) filters the live `sessions` map by session id and graceful-tree-kills each controller (the same `killpg`-on-setsid-leader path as `shutdown_all`). It is wired into three commands: `set_session_archived` (reap on archive), `remove_session` (reap before delete), and `start_session` (reap any stale process for the session *before* relaunch, so a lost binding can't leave two CLIs resuming one conversation). The focus/project cascade deletes (`delete_focus` / `delete_project`) reuse the same path via the shared `reap_session_runtime` helper, so purging a subtree leaves no orphaned CLI or live hook token. Companion to the frontend view/input desync fix (commit `3d00014`).
 
-**Tier 2 (follow-up, not built).** Tier 1 only reaps processes the *current* app run still tracks. A process that survives a **crash or force-quit** (which skips the graceful `shutdown_all` / `kill_all_now` on `RunEvent::Exit`) outlives the app: after restart the in-process `sessions` map is empty, so nothing can find it. Observed in the wild: a codex `resume` from a days-old session still running after an app restart, untied to any DB row. Closing this needs **boot-time orphan reaping**: persist each spawn's process-group id plus enough identity (recorded cwd/argv) to survive PID reuse at launch, clear the record on clean exit, and on startup `SIGKILL` any survivor from a prior run whose session is gone/archived, verifying recorded identity before killing so a PID reused by an unrelated process is never hit. Related to the native-session-id collision cross-session guard still owed (two same-CLI sessions in one folder can adopt one native id via cwd+mtime discovery and both `--resume` into one conversation).
+**Tier 2 (follow-up, not built).** Tier 1 only reaps processes the *current* app run still tracks. A process that survives a **crash or force-quit** (which skips the graceful `shutdown_all` / `kill_all_now` on `RunEvent::Exit`) outlives the app: after restart the in-process `sessions` map is empty, so nothing can find it. Observed in the wild: a codex `resume` from a days-old session still running after an app restart, untied to any DB row. Closing this needs **boot-time orphan reaping**: persist each spawn's process-group id plus enough identity (recorded cwd/argv) to survive PID reuse at launch, clear the record on clean exit, and on startup `SIGKILL` any survivor from a prior run whose session is gone/archived, verifying recorded identity before killing so a PID reused by an unrelated process is never hit. The separate native-session collision path is closed: Claude and Codex identity now comes from exact per-launch signals rather than cwd + mtime discovery.
 
 ## Stack decisions now treated as settled
 
@@ -314,9 +314,10 @@ the incremental tail keeps it O(new bytes), ×N sessions on one thread).
   a terminal goal status (`complete`, `paused`, `blocked`, `usageLimited`, or
   `budgetLimited`). The
   `sequence` is the folded-record count, so each re-read after the file grows is
-  strictly newer. `discover_latest_codex_rollout_for_cwd` reads the first
-  `session_meta` (cwd-validated, launch-window bounded) so `codex resume <id>`
-  works; `CodexCliAdapter::discover_native_session` uses it.
+  strictly newer. Native identity comes only from the token-bound SessionStart
+  hook. Once that exact id is known, `find_codex_rollout_by_native_id` enriches
+  it with the matching interactive-root rollout path. Cwd + mtime discovery is
+  deliberately disabled because it can select another root session or subagent.
 - `codex_watcher` (core) + `drain_codex_activity` (shell) mirror the Cortex
   watcher: watch `~/.codex/sessions/**/rollout-*.jsonl`, fold on change, emit by
   native id through the same bridge path. Started in `main.rs` like Cortex.

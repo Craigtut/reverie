@@ -81,6 +81,10 @@ pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
                     .flatten()
             });
             if source == ActivitySourceKind::CodexCli {
+                crate::terminal::runtime::refresh_codex_rollout_path_after_activity(
+                    app,
+                    &native_session_id,
+                );
                 maybe_schedule_codex_title(app, &native_session_id, &state);
             }
             // Re-entry summary fires for every CLI when a session comes to rest;

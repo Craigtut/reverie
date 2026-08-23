@@ -1317,10 +1317,9 @@ fn persist_native_session_after_launch(
 ) {
     if let Some((service, session_id)) = workspace_service(app, session_id) {
         // Adapter-driven discovery: the service resolves the session's adapter
-        // and attaches a native ref if one is found. We pass the CLI home that
-        // matches this session's adapter so each scanner looks in the right
-        // place (Cortex `~/.cortex`, Claude `~/.claude`, Codex `~/.codex`). This
-        // is the exit-time backstop; the launch-time poll usually wins first.
+        // and attaches a native ref if one is found. Cortex uses this as an
+        // exit-time backstop. Claude and Codex deliberately decline filesystem
+        // identity discovery because their token-bound launch paths are exact.
         let _ = service.discover_and_attach_native_session(
             session_id,
             Some(launch_started_ms),
@@ -1400,35 +1399,18 @@ pub(crate) fn watch_path_for_ref(reference: &NativeSessionRef) -> Option<PathBuf
     }
 }
 
-/// Launch-time native-session capture timing. We poll frequently at first
-/// (Cortex writes its `state.json` and Claude fires its SessionStart hook
-/// immediately), then back off and keep trying for several minutes, because
-/// Codex flushes its rollout file lazily: often a minute or more into the
-/// session, when its first turn completes (observed gaps of 3s to 20min between
-/// session start and the `session_meta` record being written). A short fixed
-/// window would miss Codex entirely, so its native ref would never be captured
-/// and resume would fall back to a brand-new session. We stop early once
-/// captured; the exit-time backstop is the final catch.
+/// Launch-time native-session capture timing. We poll frequently at first, then
+/// back off and keep trying for several minutes. Codex can write its rollout
+/// long after `SessionStart`, so later hook activity also retries exact-id path
+/// binding after this bounded launch poll has ended.
 const LAUNCH_CAPTURE_INITIAL_INTERVAL: Duration = Duration::from_millis(500);
 const LAUNCH_CAPTURE_MAX_INTERVAL: Duration = Duration::from_secs(5);
 const LAUNCH_CAPTURE_TOTAL_WAIT: Duration = Duration::from_secs(300);
 
-/// Claude and Codex both report their native session id through a per-launch,
-/// token-bound SessionStart hook that is immune to how many sessions share a
-/// folder. The filesystem scan cannot tell apart several same-CLI sessions in
-/// one cwd by mtime (and would even adopt a session started outside Reverie), so
-/// we let the hook win: for this grace window after launch the poll only checks
-/// whether the hook has captured, and runs the (exclusion-guarded) scan
-/// afterward solely as a backstop for launches whose hook never fired. Claude
-/// additionally injects `--session-id` and is captured synchronously at spawn,
-/// so for it the scan is effectively never reached.
-const HOOK_CAPTURE_GRACE: Duration = Duration::from_secs(6);
-
-/// CLIs whose native id arrives over a token-bound SessionStart hook, so the
-/// folder scan must be deferred behind [`HOOK_CAPTURE_GRACE`] rather than racing
-/// it. Cortex has no such hook (it writes an authoritative per-session
-/// `meta.json`), so it is not listed and scans immediately.
-fn has_token_bound_hook(kind: AgentKind) -> bool {
+/// CLIs whose identity must come from a token-bound launch signal. Their local
+/// state directories can contain unrelated root sessions and subagents from the
+/// same cwd, so filesystem discovery may enrich an exact id but never choose it.
+fn requires_token_bound_identity(kind: AgentKind) -> bool {
     matches!(kind, AgentKind::ClaudeCode | AgentKind::CodexCli)
 }
 
@@ -1490,13 +1472,9 @@ fn spawn_launch_capture_poll(
             let Some((service, session_id)) = workspace_service(&app, Some(session_id)) else {
                 return;
             };
-            // Codex can capture its native id (via a hook, or a prior run) before
-            // the cwd scan binds the rollout file. That scan picks the newest
-            // cwd-matching rollout, so a folder with several Codex sessions can hand
-            // this one a sibling's file (then refuse to repoint) or miss it, leaving
-            // an id-only ref that can never be watched or titled. Bind the rollout by
-            // the exact native id instead, which is collision-proof, and schedule the
-            // title once it is bound.
+            // Codex captures its native id through the token-bound hook before
+            // its rollout necessarily exists. Enrich only that exact id, then
+            // register the watcher and title path once the file appears.
             if agent_kind == AgentKind::CodexCli
                 && service
                     .backfill_codex_rollout_path(session_id, &agent_home)
@@ -1507,12 +1485,10 @@ fn spawn_launch_capture_poll(
                 crate::codex_titles::maybe_schedule_codex_title_after_capture(&app, session_id);
                 return;
             }
-            // Prefer the collision-proof token-bound hook over the racy cwd scan:
-            // during the grace window only stop once the hook (or, for Claude,
-            // the synchronous `--session-id` capture) has recorded enough data
-            // for this transport. File transports need a watchable metadata path,
-            // not just a native id.
-            if has_token_bound_hook(agent_kind) && waited < HOOK_CAPTURE_GRACE {
+            // Claude and Codex identity is exact or absent. Never fall through to
+            // cwd + mtime discovery for either one. File transports need a
+            // watchable metadata path, not just a native id.
+            if requires_token_bound_identity(agent_kind) {
                 if session_activity_binding_ready(&service, session_id, agent_kind) {
                     register_active_file_watch(&app, &service, session_id, agent_kind);
                     return;
@@ -1557,14 +1533,53 @@ fn spawn_launch_capture_poll(
     });
 }
 
+/// Retry Codex's exact-id rollout-path binding after any hook activity.
+///
+/// `SessionStart` can arrive hours before Codex creates or appends the rollout.
+/// The later `UserPromptSubmit`, permission, or turn-complete edge is therefore
+/// the authoritative signal to try again after the bounded launch poll. The
+/// native id is already token-bound to the Reverie session; this only enriches
+/// that existing ref and never chooses or changes identity.
+pub(crate) fn refresh_codex_rollout_path_after_activity(app: &AppHandle, native_session_id: &str) {
+    let Some(codex_home) = codex_home_dir() else {
+        return;
+    };
+    let Some(service) = app.try_state::<WorkspaceService>() else {
+        return;
+    };
+    let Ok(snapshot) = service.snapshot() else {
+        return;
+    };
+    let Some(session_id) = snapshot.sessions.into_iter().find_map(|session| {
+        let reference = session.native_session_ref.as_ref()?;
+        let needs_path = reference.metadata_path.is_none()
+            && reference.session_id.as_deref() == Some(native_session_id);
+        (session.agent_kind == AgentKind::CodexCli && needs_path).then_some(session.id)
+    }) else {
+        return;
+    };
+
+    match service.backfill_codex_rollout_path(session_id, codex_home) {
+        Ok(true) => {
+            let _ = app.emit("session_record_changed", ());
+            register_active_file_watch(app, &service, session_id, AgentKind::CodexCli);
+        }
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!(
+                "[reverie] failed to bind Codex rollout after hook activity for {session_id}: {error:#}"
+            );
+        }
+    }
+}
+
 /// Repair Codex sessions that hold a native id but no rollout path.
 ///
-/// The launch-time cwd scan can leave a Codex session with an id-only native ref
-/// (a sibling session in the same folder won the newest-file scan, or the id was
-/// captured before the file was bound). Without the rollout path the session
-/// cannot be activity-watched and never generates a title. This binds the path by
-/// the exact native id for every such persisted session, so the next resume
-/// watches live state and titles immediately. Pure record repair: it does NOT
+/// A Codex session can hold an id-only native ref when SessionStart arrives
+/// before the rollout is written. Without the rollout path the session cannot be
+/// activity-watched and never generates a title. This binds the path by the exact
+/// native id for every such persisted session, so the next resume watches live
+/// state and titles immediately. Pure record repair: it does NOT
 /// register any file watch (boot deliberately never tails persisted state files;
 /// the launch path owns that), so it cannot resurrect a dead session as "working".
 pub(crate) fn backfill_codex_rollout_paths(app: &AppHandle) {

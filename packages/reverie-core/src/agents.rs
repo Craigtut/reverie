@@ -699,6 +699,29 @@ impl AgentAdapter for CodexCliAdapter {
             .as_deref()
             .ok_or_else(|| anyhow!("Codex CLI resume requires a native Codex session id"))?;
 
+        // Protect persisted refs created by the retired cwd + mtime scanner.
+        // Some of those can point at a subagent rollout. Never hand that id to
+        // `codex resume`, which would reopen the child conversation as if it
+        // were this Reverie session. A missing or unreadable historical path is
+        // not proof of corruption, so only reject positively identified cases.
+        if let Some(path) = native.metadata_path.as_deref() {
+            if let Some(meta) = crate::codex_rollout::read_codex_rollout_meta(path) {
+                if !meta.is_root_cli_session {
+                    bail!(
+                        "refusing to resume Codex subagent session {} as a Reverie root session",
+                        session_id
+                    );
+                }
+                if meta.session_id != session_id {
+                    bail!(
+                        "Codex rollout id {} does not match stored session id {}",
+                        meta.session_id,
+                        session_id
+                    );
+                }
+            }
+        }
+
         let mut command = CommandSpec::new(program_or_default(ctx, "codex"), &ctx.cwd)
             .with_args(["resume", session_id, "--cd"])
             .with_arg(ctx.cwd.display().to_string());
@@ -720,21 +743,14 @@ impl AgentAdapter for CodexCliAdapter {
         Some("--dangerously-bypass-approvals-and-sandbox")
     }
 
-    /// Capture the native session id from the rollout log so `codex resume <id>`
-    /// works. Codex writes append-only `session_meta` JSONL under
-    /// `$CODEX_HOME/sessions/YYYY/MM/DD/`; we read the first record, validated by
-    /// cwd + launch window. This is the capture half of the Codex phase; live
-    /// lifecycle state comes from the rollout watcher in the shell.
-    fn discover_native_session(&self, ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
-        let Some(codex_home) = ctx.agent_home.as_ref() else {
-            return Ok(None);
-        };
-        crate::codex_rollout::discover_latest_codex_rollout_for_cwd(
-            codex_home,
-            &ctx.cwd,
-            ctx.launched_after_ms,
-            &ctx.claimed_native_ids,
-        )
+    /// Codex identity is captured only from the launch's token-bound
+    /// `SessionStart` hook. A cwd + mtime rollout scan cannot distinguish this
+    /// root thread from another interactive session or a newly written subagent
+    /// in the same folder, so failing to capture is safer than resuming a guess.
+    /// Once the hook supplies the exact id, the shell resolves its rollout path
+    /// with `find_codex_rollout_by_native_id` for activity and title generation.
+    fn discover_native_session(&self, _ctx: &DiscoveryContext) -> Result<Option<NativeSessionRef>> {
+        Ok(None)
     }
     // Title normalization uses the default: Codex's `⠙ ⠹ ...` working spinner is
     // handled by `is_status_decoration`, and its folder-name-when-idle default is
@@ -1485,6 +1501,88 @@ mod tests {
             })
             .unwrap();
         assert!(discovered.is_none());
+    }
+
+    #[test]
+    fn codex_adapter_never_discovers_native_session_from_disk() {
+        // Identity comes from the token-bound SessionStart hook. Even a fresh,
+        // cwd-matching rollout is ambiguous because it may be another root or a
+        // subagent, so the adapter must not claim it.
+        let home = tempfile::TempDir::new().unwrap();
+        let day = home.path().join("sessions/2026/08/16");
+        fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            day.join("rollout-2026-08-16T17-00-00-outsider.jsonl"),
+            r#"{"type":"session_meta","payload":{"id":"outsider","cwd":"/tmp/reverie","source":"cli"}}"#,
+        )
+        .unwrap();
+
+        let discovered = CodexCliAdapter
+            .discover_native_session(&DiscoveryContext {
+                cwd: PathBuf::from("/tmp/reverie"),
+                launched_after_ms: None,
+                agent_home: Some(home.path().to_path_buf()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(discovered.is_none());
+    }
+
+    #[test]
+    fn codex_resume_refuses_a_persisted_subagent_binding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rollout = dir
+            .path()
+            .join("rollout-2026-08-16T17-00-00-child-native.jsonl");
+        std::fs::write(
+            &rollout,
+            r#"{"type":"session_meta","payload":{"id":"child-native","cwd":"/tmp/reverie","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-native","depth":1}}}}}"#,
+        )
+        .unwrap();
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: false,
+            model: None,
+            executable_path: Some(PathBuf::from("/bin/codex")),
+            new_session_id: None,
+        };
+        let native = NativeSessionRef::codex("child-native", Some(rollout));
+
+        let error = CodexCliAdapter
+            .build_resume_command(&ctx, &native)
+            .expect_err("subagent refs must fail closed");
+        assert!(error.to_string().contains("subagent"));
+    }
+
+    #[test]
+    fn codex_resume_accepts_a_verified_root_binding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let rollout = dir
+            .path()
+            .join("rollout-2026-08-16T17-00-00-root-native.jsonl");
+        std::fs::write(
+            &rollout,
+            r#"{"type":"session_meta","payload":{"id":"root-native","cwd":"/tmp/reverie","source":"cli"}}"#,
+        )
+        .unwrap();
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: false,
+            model: None,
+            executable_path: Some(PathBuf::from("/bin/codex")),
+            new_session_id: None,
+        };
+        let native = NativeSessionRef::codex("root-native", Some(rollout));
+
+        let command = CodexCliAdapter
+            .build_resume_command(&ctx, &native)
+            .expect("root refs remain resumable");
+        assert_eq!(
+            command.args,
+            vec!["resume", "root-native", "--cd", "/tmp/reverie"]
+        );
     }
 
     #[test]

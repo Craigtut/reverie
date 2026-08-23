@@ -213,8 +213,8 @@ pub trait AgentAdapter: Send + Sync {
     fn mints_new_session_id(&self) -> bool { false }
 
     // Discover the native session this CLI created for `ctx.cwd`, if any.
-    // Cortex via `meta.json`, Claude via its transcript scanner, Codex via the
-    // rollout reader. The caller only persists the returned ref.
+    // Cortex uses `meta.json`. Claude and Codex decline filesystem identity
+    // discovery and bind through exact per-launch signals instead.
     fn discover_native_session(&self, ctx: &DiscoveryContext) -> anyhow::Result<Option<NativeSessionRef>> { Ok(None) }
 }
 ```

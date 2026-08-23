@@ -1089,10 +1089,10 @@ impl WorkspaceService {
     }
 
     /// Run adapter-driven native-session discovery for a just-launched session
-    /// and attach the result if found. If a token-bound hook already captured
-    /// the same native id, discovery may still fill in that ref's metadata path
-    /// so file-transport activity can be watched. It never repoints an existing
-    /// ref to a different id from filesystem evidence.
+    /// and attach the result if found. It never repoints an existing ref to a
+    /// different id from filesystem evidence. Codex deliberately opts out of
+    /// this path because its identity comes from the token-bound SessionStart
+    /// hook; [`Self::backfill_codex_rollout_path`] enriches that exact id later.
     /// No-op (`Ok(false)`) when no matching evidence is found or the adapter has
     /// no filesystem discovery.
     /// `agent_home` is the relevant CLI home (e.g. CORTEX_HOME), resolved by the
@@ -1173,15 +1173,10 @@ impl WorkspaceService {
     }
 
     /// Bind the rollout file path onto a Codex session that captured a native id
-    /// but no metadata path.
-    ///
-    /// The launch-time cwd scan ([`Self::discover_and_attach_native_session`])
-    /// picks the newest cwd-matching rollout, so when several Codex sessions share
-    /// one folder it can hand a launching session a sibling's file (then refuse to
-    /// repoint) or never find this session's at all, leaving an id-only ref.
-    /// Without the path the rollout cannot be activity-watched and no title is ever
-    /// generated. This resolves the file by the exact native id, which is
-    /// collision-proof, and fills it in. Returns whether a path was newly bound.
+    /// but no metadata path. `SessionStart` can precede creation of the rollout
+    /// by hours, so launch polling and later hook activity both call this exact-id
+    /// resolver. Without the path the rollout cannot be activity-watched and no
+    /// title is generated. Returns whether a path was newly bound.
     /// No-op unless the session is a Codex session whose ref has a native id but no
     /// metadata path.
     pub fn backfill_codex_rollout_path(
@@ -3129,14 +3124,14 @@ mod tests {
     }
 
     #[test]
-    fn discover_refreshes_missing_metadata_path_for_existing_codex_ref() {
+    fn exact_backfill_refreshes_missing_metadata_path_for_existing_codex_ref() {
         let (_repo, service) = service();
         let focus = make_focus(&service);
         let codex_home = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
         let rollout_dir = codex_home.path().join("sessions/2026/06/16");
         std::fs::create_dir_all(&rollout_dir).unwrap();
-        let rollout_path = rollout_dir.join("rollout-same.jsonl");
+        let rollout_path = rollout_dir.join("rollout-2026-06-16T10-00-00-codex-native.jsonl");
         std::fs::write(
             &rollout_path,
             format!(
@@ -3166,8 +3161,14 @@ mod tests {
             )
             .unwrap();
 
+        assert!(
+            !service
+                .discover_and_attach_native_session(id, Some(0), Some(codex_home.path().into()))
+                .unwrap(),
+            "Codex cwd discovery is disabled even when it would find the same id"
+        );
         let refreshed = service
-            .discover_and_attach_native_session(id, Some(0), Some(codex_home.path().into()))
+            .backfill_codex_rollout_path(id, codex_home.path())
             .unwrap();
         assert!(refreshed, "same native id should fill in the rollout path");
         let native = service
@@ -3180,6 +3181,73 @@ mod tests {
             .native_session_ref
             .expect("native ref");
         assert_eq!(native.session_id.as_deref(), Some("codex-native"));
+        assert_eq!(
+            native.metadata_path.as_deref(),
+            Some(rollout_path.as_path())
+        );
+    }
+
+    #[test]
+    fn exact_backfill_recovers_when_first_turn_writes_rollout_after_launch_poll() {
+        let (_repo, service) = service();
+        let focus = make_focus(&service);
+        let codex_home = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let id = service
+            .create_session(
+                focus,
+                "Codex".to_owned(),
+                AgentKind::CodexCli,
+                cwd.path().into(),
+                None,
+            )
+            .unwrap()
+            .sessions[0]
+            .id;
+        service
+            .attach_native_session(
+                id,
+                cwd.path().into(),
+                NativeSessionRef::codex("delayed-native", None),
+                AgentKind::CodexCli,
+            )
+            .unwrap();
+
+        assert!(
+            !service
+                .backfill_codex_rollout_path(id, codex_home.path())
+                .unwrap(),
+            "SessionStart can precede the rollout by hours"
+        );
+
+        let rollout_dir = codex_home.path().join("sessions/2026/08/16");
+        std::fs::create_dir_all(&rollout_dir).unwrap();
+        let rollout_path = rollout_dir.join("rollout-2026-08-16T17-00-00-delayed-native.jsonl");
+        std::fs::write(
+            &rollout_path,
+            format!(
+                r#"{{"type":"session_meta","payload":{{"id":"delayed-native","cwd":{},"source":"cli"}}}}"#,
+                serde_json::to_string(&cwd.path().display().to_string()).unwrap()
+            ),
+        )
+        .unwrap();
+
+        assert!(
+            service
+                .backfill_codex_rollout_path(id, codex_home.path())
+                .unwrap(),
+            "a later hook edge can bind the exact rollout once it exists"
+        );
+        let native = service
+            .snapshot()
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|session| session.id == id)
+            .unwrap()
+            .native_session_ref
+            .expect("native ref");
+        assert_eq!(native.session_id.as_deref(), Some("delayed-native"));
         assert_eq!(
             native.metadata_path.as_deref(),
             Some(rollout_path.as_path())

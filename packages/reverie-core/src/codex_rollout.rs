@@ -17,7 +17,6 @@
 //! the trusted `PermissionRequest` command hook.
 
 use std::{
-    collections::BTreeSet,
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -32,8 +31,6 @@ use crate::activity::{
     PermissionRequest, TurnStatus,
 };
 use crate::activity_source::{ActivitySourceKind, Fidelity};
-use crate::agents::{file_modified_ms, same_logical_path};
-use crate::domain::NativeSessionRef;
 use crate::reentry_context::{ReentryBudget, ReentryContext, ReentryEntry};
 use crate::session_log::{LogReadMode, SessionLogFold, SessionLogSource};
 
@@ -61,6 +58,11 @@ struct RolloutLine {
 pub struct CodexRolloutMeta {
     pub session_id: String,
     pub cwd: String,
+    /// Whether this rollout belongs to an interactive root Codex CLI thread.
+    /// Current Codex versions encode roots as `source: "cli"` and subagents as
+    /// an object under `source.subagent`. Older rollout records predate the
+    /// source field, so an absent value remains eligible for exact-id backfill.
+    pub is_root_cli_session: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +95,16 @@ pub fn read_codex_rollout_meta(path: &Path) -> Option<CodexRolloutMeta> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            return Some(CodexRolloutMeta { session_id, cwd });
+            let is_root_cli_session = match record.payload.get("source") {
+                None | Some(Value::Null) => true,
+                Some(Value::String(source)) => source == "cli",
+                Some(_) => false,
+            };
+            return Some(CodexRolloutMeta {
+                session_id,
+                cwd,
+                is_root_cli_session,
+            });
         }
     }
     None
@@ -494,67 +505,13 @@ pub fn read_codex_rollout_state(path: &Path) -> Result<Option<ActivityState>> {
     Ok(CodexRolloutFold::new().push(&content))
 }
 
-/// Discover the newest Codex rollout for `cwd` written after the launch window,
-/// returned as a resume ref. Mirrors the Cortex/Claude discovery: bound the
-/// date-partitioned scan by file mtime so we only read `session_meta` for files
-/// from this launch, and validate the cwd from inside the file.
-pub fn discover_latest_codex_rollout_for_cwd(
-    codex_home: impl AsRef<Path>,
-    cwd: impl AsRef<Path>,
-    launched_after_ms: Option<i64>,
-    claimed_native_ids: &BTreeSet<String>,
-) -> Result<Option<NativeSessionRef>> {
-    let sessions_dir = codex_home.as_ref().join("sessions");
-    if !sessions_dir.exists() {
-        return Ok(None);
-    }
-    let cwd = cwd.as_ref();
-
-    let mut best: Option<(i64, NativeSessionRef)> = None;
-    for path in rollout_files(&sessions_dir) {
-        let Some(modified_ms) = file_modified_ms(&path) else {
-            continue;
-        };
-        if let Some(min) = launched_after_ms {
-            if modified_ms < min {
-                continue;
-            }
-        }
-        let Some(meta) = read_codex_rollout_meta(&path) else {
-            continue;
-        };
-        if !same_logical_path(Path::new(&meta.cwd), cwd) {
-            continue;
-        }
-        // Never adopt a native id another Reverie session already owns.
-        if claimed_native_ids.contains(&meta.session_id) {
-            continue;
-        }
-        let is_newer = best
-            .as_ref()
-            .map(|(ms, _)| modified_ms > *ms)
-            .unwrap_or(true);
-        if is_newer {
-            best = Some((
-                modified_ms,
-                NativeSessionRef::codex(meta.session_id, Some(path)),
-            ));
-        }
-    }
-
-    Ok(best.map(|(_, reference)| reference))
-}
-
 /// Find the rollout file whose `session_meta` native id equals `native_id`.
 ///
-/// Unlike [`discover_latest_codex_rollout_for_cwd`], which picks the newest
-/// cwd-matching file by mtime and so cannot disambiguate several same-CLI
-/// sessions sharing one folder, this keys on the exact native id. Codex embeds
-/// that id in the rollout filename (`rollout-<ts>-<id>.jsonl`), so the scan only
-/// reads `session_meta` for the single name-matching candidate. Used to backfill
-/// the rollout path onto a session that captured its native id before the
-/// launch-time scan bound the file, or where a sibling session in the same folder
-/// won that scan.
+/// Codex embeds that id in the rollout filename (`rollout-<ts>-<id>.jsonl`), so
+/// the scan reads `session_meta` only for the name-matching candidate. It also
+/// requires an interactive root source, rejecting subagent rollouts even if a
+/// bad upstream event presents their id. Used to enrich the exact native id
+/// captured by the token-bound SessionStart hook.
 pub fn find_codex_rollout_by_native_id(
     codex_home: impl AsRef<Path>,
     native_id: &str,
@@ -572,7 +529,8 @@ pub fn find_codex_rollout_by_native_id(
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(suffix.as_str()));
         name_matches
-            && read_codex_rollout_meta(path).is_some_and(|meta| meta.session_id == native_id)
+            && read_codex_rollout_meta(path)
+                .is_some_and(|meta| meta.session_id == native_id && meta.is_root_cli_session)
     })
 }
 
@@ -868,11 +826,6 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
-
-    /// No sibling has claimed a native id in these scanner tests.
-    fn claimed() -> BTreeSet<String> {
-        BTreeSet::new()
-    }
 
     // Empirical check of the live watcher path (not just the pure fold): start the
     // real session-log watcher, register a rollout file as the launch path does,
@@ -1268,41 +1221,51 @@ mod tests {
     }
 
     #[test]
-    fn discovers_latest_rollout_validated_by_cwd_and_window() {
+    fn exact_lookup_rejects_subagent_rollouts() {
         let home = TempDir::new().unwrap();
         let day = home
             .path()
             .join("sessions")
             .join("2026")
-            .join("05")
-            .join("30");
+            .join("08")
+            .join("16");
         fs::create_dir_all(&day).unwrap();
-
-        // Matching cwd.
-        write_rollout(&day, "rollout-match.jsonl", &[META]);
-        // Different cwd: ignored.
-        write_rollout(
+        let native_id = "01a00-subagent";
+        let path = write_rollout(
             &day,
-            "rollout-other.jsonl",
-            &[r#"{"type":"session_meta","payload":{"id":"other","cwd":"/somewhere/else"}}"#],
+            &format!("rollout-2026-08-16T17-00-00-{native_id}.jsonl"),
+            &[
+                r#"{"type":"session_meta","payload":{"id":"01a00-subagent","cwd":"/Users/dev/proj","source":{"subagent":{"thread_spawn":{"parent_thread_id":"01a00-parent","depth":1}}}}}"#,
+            ],
         );
 
-        let found =
-            discover_latest_codex_rollout_for_cwd(home.path(), "/Users/dev/proj", None, &claimed())
-                .unwrap()
-                .expect("cwd-matching rollout");
-        assert_eq!(found.session_id.as_deref(), Some("019e-codex"));
-
-        // A future launch window filters everything out.
+        let meta = read_codex_rollout_meta(&path).expect("session meta");
+        assert!(!meta.is_root_cli_session);
         assert!(
-            discover_latest_codex_rollout_for_cwd(
-                home.path(),
-                "/Users/dev/proj",
-                Some(32_503_680_000_000),
-                &claimed(),
-            )
-            .unwrap()
-            .is_none()
+            find_codex_rollout_by_native_id(home.path(), native_id).is_none(),
+            "exact-id path enrichment must also require a root CLI rollout"
+        );
+    }
+
+    #[test]
+    fn current_cli_source_is_an_eligible_root_rollout() {
+        let home = TempDir::new().unwrap();
+        let day = home.path().join("sessions/2026/08/16");
+        fs::create_dir_all(&day).unwrap();
+        let native_id = "01a00-root";
+        let path = write_rollout(
+            &day,
+            &format!("rollout-2026-08-16T17-00-00-{native_id}.jsonl"),
+            &[
+                r#"{"type":"session_meta","payload":{"id":"01a00-root","cwd":"/Users/dev/proj","originator":"codex-tui","source":"cli"}}"#,
+            ],
+        );
+
+        let meta = read_codex_rollout_meta(&path).expect("session meta");
+        assert!(meta.is_root_cli_session);
+        assert_eq!(
+            find_codex_rollout_by_native_id(home.path(), native_id).as_deref(),
+            Some(path.as_path())
         );
     }
 
