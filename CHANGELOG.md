@@ -7,6 +7,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-08-23
+
+### Fixed
+- Codex sessions now move to Ready only after Codex reports that the full agent
+  turn completed. Intermediate stop events no longer make an active session look
+  finished.
+- New Codex sessions stay paired with the exact conversation reported by their
+  launch hook. Reverie no longer guesses from the newest rollout in a project,
+  which could bind another session or one of its subagents. Sessions first used
+  long after launch also recover their rollout path and generate a name.
+- Automatic session titles no longer retain spinner glyphs emitted by agent CLIs.
+
 ## [0.6.4] - 2026-07-27
 
 ### Fixed
