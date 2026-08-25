@@ -7,6 +7,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-08-25
+
+### Fixed
+- Returning to Reverie after it has been in the background no longer leaves the
+  window black or frozen while queued terminal frames catch up. Reverie pauses
+  frame delivery while away and resumes from a fresh view of the current terminal.
+- WebView recovery now waits for an immediate focus heartbeat before reloading the
+  interface. A bounded, content-free lifecycle log records recovery decisions for
+  future production diagnosis.
+
 ## [0.6.5] - 2026-08-23
 
 ### Fixed
