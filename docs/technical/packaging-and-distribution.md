@@ -310,7 +310,9 @@ separate bundle identifier.
   bundle, so the badged Dock icon is set at runtime (`set_macos_dock_icon` in
   `main.rs`) and the window title gets a " Dev" suffix. Both are gated on
   `commands::is_dev_channel` (identifier ends in `.dev`), as are the terminal
-  renderer diagnostics.
+  renderer diagnostics. Both channels keep a bounded `webview-health.jsonl`
+  lifecycle log in their Application Support folder. It contains native start,
+  heartbeat recovery, and reload decisions only, with no terminal content.
 
 - **Helpers.** `npm run dev:reset` wipes the dev data folder (only ever the
   `.dev` path) for a clean schema slate; `npm run icon:dev` regenerates the

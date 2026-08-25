@@ -81,7 +81,8 @@ The desktop app appends terminal renderer diagnostics (dev channel only) to its 
 
 ```bash
 ~/Library/Application Support/com.muselab.reverie.dev/terminal-diagnostics.jsonl   # npm run dev
-# A production build writes no diagnostics log.
+# Production writes no terminal renderer log. It keeps a bounded, content-free
+# WKWebView lifecycle log at ~/Library/Application Support/com.muselab.reverie/webview-health.jsonl.
 ```
 
 Use this log when investigating real Tauri terminal behavior that the browser harness cannot fully show: resize flicker, blank or repeated history rows, scrollback cache misses, renderer remounts, slow paints, input focus stalls, or a running terminal that appears stuck. Each JSONL entry includes the selected session id, active terminal id, timestamp, and a payload such as `buffer_cache_miss`, `history_rows_request`, `history_jump_*`, renderer lifecycle traces, or slow paint samples. Check this file before guessing from screenshots when the running desktop app diverges from harness behavior.

@@ -37,9 +37,12 @@ export function useWebviewHeartbeat() {
     };
 
     const start = () => {
-      if (stopped || interval !== null || !isVisible()) return;
+      if (stopped || !isVisible()) return;
+      // A focus event is a native recovery handshake. Send it even when the
+      // repeating interval already exists because WebKit may have throttled
+      // that interval without changing Page Visibility while the app was away.
       beat();
-      interval = window.setInterval(beat, HEARTBEAT_INTERVAL_MS);
+      if (interval === null) interval = window.setInterval(beat, HEARTBEAT_INTERVAL_MS);
     };
 
     const handleVisibilityChange = () => {

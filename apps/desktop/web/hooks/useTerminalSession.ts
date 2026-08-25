@@ -85,6 +85,7 @@ import {
   terminalFrameBatchRenderMetrics,
 } from '../terminal/frameCoalescing';
 import { createTerminalMetricSamples, type TerminalMetricSamples } from '../terminal/metricSamples';
+import { terminalFrameBacklogAction } from '../terminal/frameBacklog';
 import {
   buildActionContext,
   buildMenuItems,
@@ -1067,6 +1068,8 @@ export function useTerminalSession(params: {
     let latestGeneration = 0;
     let pendingTerminalFramePayloads: { frame: TerminalFrame }[] = [];
     let terminalFrameRaf = 0;
+    let awaitingFullFrame = false;
+    let resyncRequested = false;
     const renderAggregate = createTerminalRenderAggregate();
     const frameBatchAggregate = createTerminalFrameBatchAggregate();
     const unlisteners: UnlistenFn[] = [];
@@ -1079,6 +1082,28 @@ export function useTerminalSession(params: {
       }
       renderSampleCollectorsRef.current.delete(terminalId);
       for (const unlisten of unlisteners.splice(0)) unlisten();
+    }
+
+    function requestTerminalFrameResync(droppedCount: number, requestBackend: boolean) {
+      droppedFrames += droppedCount;
+      pendingTerminalFramePayloads = [];
+      awaitingFullFrame = true;
+      if (terminalFrameRaf) {
+        cancelAnimationFrame(terminalFrameRaf);
+        terminalFrameRaf = 0;
+      }
+      // Native focus and terminal activation already force a Full seed. Only
+      // send an extra command for a true overflow while this terminal and page
+      // are active. This avoids accidentally promoting a stale background
+      // terminal during a session switch.
+      if (!requestBackend || resyncRequested) return;
+      resyncRequested = true;
+      void setTerminalFrontendActive(terminalId, true).catch(error => {
+        resyncRequested = false;
+        if (isTauriRuntime) {
+          writeLog(`Terminal frame resync failed: ${errorMessage(error)}`);
+        }
+      });
     }
 
     renderSampleCollectorsRef.current.set(terminalId, sample =>
@@ -1159,6 +1184,31 @@ export function useTerminalSession(params: {
     function handleDecodedFrame(decoded: DecodedTerminalFrame) {
       terminalEventDebugRef.current.frameEventsSeen += 1;
       terminalEventDebugRef.current.lastFrameTerminalId = terminalId;
+
+      const terminalActive = useTerminalStore.getState().activeTerminalId === terminalId;
+      const pageActive = document.visibilityState !== 'hidden' && document.hasFocus();
+      const backlogAction = terminalFrameBacklogAction({
+        pageActive: pageActive && terminalActive,
+        awaitingFull: awaitingFullFrame,
+        isFull: decoded.dirty === 'full',
+        pendingCount: pendingTerminalFramePayloads.length,
+      });
+      if (backlogAction === 'resync') {
+        requestTerminalFrameResync(
+          pendingTerminalFramePayloads.length + 1,
+          pageActive && terminalActive,
+        );
+        return;
+      }
+      if (backlogAction === 'drop') {
+        droppedFrames += 1;
+        return;
+      }
+      if (backlogAction === 'accept_full') {
+        pendingTerminalFramePayloads = [];
+        awaitingFullFrame = false;
+        resyncRequested = false;
+      }
 
       // Drop a frame older than the latest generation we have accepted. A Full
       // frame adopts (resets to) its generation and rebuilds the mirror; a diff

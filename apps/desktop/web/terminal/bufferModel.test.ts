@@ -804,6 +804,21 @@ describe('terminal buffer model', () => {
     expect(terminalBufferFullyCached(state)).toBe(false);
   });
 
+  it('keeps fetched blank rows covered across later live frames', () => {
+    let state = createTerminalBuffer(surface);
+    state = mergeHistoryWindowIntoBuffer(state, frame([row(0, '')]), surface, 2, 10);
+    state = applyViewportFrameToBuffer(
+      state,
+      frame([row(0, 'tail-a'), row(1, 'tail-b'), row(2, '')], {
+        scrollback: { totalRows: 10, viewportOffset: 7, viewportRows: 3, atBottom: true },
+      }),
+      surface,
+    );
+
+    expect(terminalBufferHasRows(state, 2, 1)).toBe(true);
+    expect(state.cachedRanges).toContainEqual({ start: 2, end: 3 });
+  });
+
   it('does not mark sparse merged history rows as contiguous coverage', () => {
     let state = createTerminalBuffer(surface);
     state = mergeHistoryWindowIntoBuffer(
@@ -856,6 +871,44 @@ describe('terminal buffer model', () => {
 
     expect([...state.rowsById.keys()].sort((left, right) => left - right)).toEqual([8, 9, 10]);
     expect(state.cachedRanges).toEqual([{ start: 8, end: 11 }]);
+  });
+
+  it('keeps a deep fetched band and the live tail when pruning the bounded mirror', () => {
+    let state = createTerminalBuffer(surface, { rowLimit: 6 });
+    state = mergeHistoryWindowIntoBuffer(
+      state,
+      frame([row(0, 'middle-a'), row(1, 'middle-b'), row(2, 'middle-c')]),
+      surface,
+      40,
+      100,
+    );
+    state = mergeHistoryWindowIntoBuffer(
+      state,
+      frame([row(0, 'deep-a'), row(1, 'deep-b'), row(2, 'deep-c')]),
+      surface,
+      10,
+      100,
+    );
+    state = mergeHistoryWindowIntoBuffer(
+      state,
+      frame([row(0, 'tail-a'), row(1, 'tail-b'), row(2, 'tail-c')]),
+      surface,
+      97,
+      100,
+    );
+    state = mergeHistoryWindowIntoBuffer(
+      state,
+      frame([row(0, 'deep-a'), row(1, 'deep-b'), row(2, 'deep-c')]),
+      surface,
+      10,
+      100,
+    );
+
+    expect([...state.rowsById.keys()].sort((left, right) => left - right)).toEqual([
+      10, 11, 12, 97, 98, 99,
+    ]);
+    expect(terminalBufferHasRows(state, 10, 3)).toBe(true);
+    expect(terminalBufferHasRows(state, 97, 3)).toBe(true);
   });
 
   it('merges windows into absolute cached rows', () => {

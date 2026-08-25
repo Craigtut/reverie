@@ -28,6 +28,7 @@ mod shutdown_marker;
 mod speech_commands;
 mod state;
 mod terminal;
+mod webview_health;
 #[cfg(target_os = "macos")]
 mod window_chrome;
 
@@ -51,8 +52,7 @@ use crate::state::{
 };
 use crate::terminal::runtime::{TerminalRuntimeStatus, TerminalSessionRuntime};
 
-const WEBVIEW_HEALTH_CHECK_DELAY_MS: u64 = 1_500;
-const WEBVIEW_HEARTBEAT_STALE_MS: i64 = 10_000;
+const WEBVIEW_HEALTH_CHECK_DELAY_MS: u64 = 5_000;
 const WEBVIEW_RELOAD_COOLDOWN_MS: i64 = 30_000;
 
 /// Bring the macOS keep-awake assertion in line with the current setting and
@@ -94,14 +94,7 @@ fn record_webview_health_diagnostic(
     kind: &'static str,
     payload: serde_json::Value,
 ) {
-    let _ = commands::record_terminal_diagnostics(
-        app.clone(),
-        serde_json::json!({
-            "kind": kind,
-            "wallTimeMs": unix_time_millis(),
-            "payload": payload,
-        }),
-    );
+    webview_health::record(app, kind, payload);
 }
 
 fn reload_main_webview(app: &tauri::AppHandle, reason: &'static str, payload: serde_json::Value) {
@@ -139,19 +132,59 @@ fn reload_main_webview(app: &tauri::AppHandle, reason: &'static str, payload: se
 }
 
 fn schedule_webview_recovery_check(app: tauri::AppHandle, reason: &'static str) {
+    let heartbeat_before = app
+        .try_state::<WebviewHealth>()
+        .map(|health| health.last_heartbeat_ms())
+        .unwrap_or_default();
+    record_webview_health_diagnostic(
+        &app,
+        "webview.recovery_scheduled",
+        serde_json::json!({
+            "reason": reason,
+            "heartbeatBeforeMs": heartbeat_before,
+        }),
+    );
     std::thread::Builder::new()
         .name("reverie-webview-health".to_owned())
         .spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(
                 WEBVIEW_HEALTH_CHECK_DELAY_MS,
             ));
+            let focused = app
+                .get_webview_window("main")
+                .and_then(|window| window.is_focused().ok())
+                .unwrap_or(false);
+            if !focused {
+                record_webview_health_diagnostic(
+                    &app,
+                    "webview.recovery_cancelled",
+                    serde_json::json!({
+                        "reason": reason,
+                        "result": "window_not_focused",
+                    }),
+                );
+                return;
+            }
             let Some(health) = app.try_state::<WebviewHealth>() else {
                 return;
             };
             let now = unix_time_millis();
             let last_heartbeat = health.last_heartbeat_ms();
             let stale_for = now.saturating_sub(last_heartbeat);
-            if last_heartbeat > 0 && stale_for < WEBVIEW_HEARTBEAT_STALE_MS {
+            // Focus is a handshake, not an age check. The frontend sends an
+            // immediate heartbeat on every focus/pageshow even if its interval
+            // already exists. Only reload if JavaScript failed to answer during
+            // the full recovery window.
+            if last_heartbeat > heartbeat_before {
+                record_webview_health_diagnostic(
+                    &app,
+                    "webview.recovery_healthy",
+                    serde_json::json!({
+                        "reason": reason,
+                        "heartbeatBeforeMs": heartbeat_before,
+                        "lastHeartbeatMs": last_heartbeat,
+                    }),
+                );
                 return;
             }
             if !health.claim_reload(now, WEBVIEW_RELOAD_COOLDOWN_MS) {
@@ -348,6 +381,12 @@ fn main() {
                 if let Some(control) = window.app_handle().try_state::<SessionLogControl>() {
                     control.set_foreground(*focused);
                 }
+                if let Some(runtime) = window
+                    .app_handle()
+                    .try_state::<TerminalSessionRuntime>()
+                {
+                    runtime.set_app_foreground(*focused);
+                }
                 if *focused {
                     schedule_webview_recovery_check(
                         window.app_handle().clone(),
@@ -358,6 +397,13 @@ fn main() {
         })
         .setup(|app| {
             app.state::<WebviewHealth>().mark_heartbeat();
+            record_webview_health_diagnostic(
+                app.handle(),
+                "webview.native_started",
+                serde_json::json!({
+                    "version": app.package_info().version.to_string(),
+                }),
+            );
             let store_path = app
                 .path()
                 .app_data_dir()?
@@ -828,7 +874,16 @@ fn main() {
                 crate::shutdown_marker::note_clean_shutdown(&app_handle);
             }
             tauri::RunEvent::Resumed => {
-                schedule_webview_recovery_check(app_handle.clone(), "app_resumed");
+                let focused = app_handle
+                    .get_webview_window("main")
+                    .and_then(|window| window.is_focused().ok())
+                    .unwrap_or(false);
+                app_handle
+                    .state::<TerminalSessionRuntime>()
+                    .set_app_foreground(focused);
+                if focused {
+                    schedule_webview_recovery_check(app_handle.clone(), "app_resumed");
+                }
             }
             _ => {}
         });

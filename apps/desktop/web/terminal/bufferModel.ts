@@ -15,7 +15,11 @@ import {
   terminalRowTextSlice,
 } from './cellGeometry';
 
-export const DEFAULT_TERMINAL_BUFFER_ROW_LIMIT = 100_000;
+// The frontend is a viewport cache, not the terminal's history store. A few
+// thousand rows keeps several aligned prefetch bands warm while putting a hard
+// ceiling on the Map copied during immutable frame application. libghostty owns
+// the full 100 MB scrollback and serves deeper bands on demand.
+export const DEFAULT_TERMINAL_BUFFER_ROW_LIMIT = 4_096;
 
 export interface TerminalBufferState {
   cols: number;
@@ -186,36 +190,47 @@ export function applyViewportFrameToBuffer(
         : [];
   }
   const cachedRowIds: number[] = [];
-  let removedResizeBlankRows = false;
+  const uncachedRowIds: number[] = [];
+  // A metadata-less first seed treats its one-screen rows as settled. If the
+  // next frame reveals real scrollback, clear blank provenance from that small
+  // prior viewport once so those blanks can be fetched after they drift away.
+  // This replaces the old scan over every cached range on every live frame.
+  if (cacheOnlyRowsWithCells && previous.totalRows <= previous.viewportRows) {
+    const previousEnd = previous.viewportOffset + previous.viewportRows;
+    for (let rowId = previous.viewportOffset; rowId < previousEnd; rowId += 1) {
+      const row = rowsById.get(rowId);
+      if (row && !rowHasCells(row)) uncachedRowIds.push(rowId);
+    }
+  }
 
   for (const row of normalizedRows) {
     const rowId = viewportOffset + row.index;
     if (preserveRowsThroughBlankFrame && rowIsBlank(row)) continue;
     if (skipResizeBlankRows && rowIsBlank(row)) {
-      if (!resetForShapeChange && rowsById.delete(rowId)) removedResizeBlankRows = true;
+      if (!resetForShapeChange && rowsById.delete(rowId)) uncachedRowIds.push(rowId);
       continue;
     }
     const existing = rowsById.get(rowId);
     if (shouldStoreRow(frame, row, existing)) {
       rowsById.set(rowId, rowWithId(row, rowId));
-      if (!cacheOnlyRowsWithCells || rowHasCells(row)) cachedRowIds.push(rowId);
+      if (!cacheOnlyRowsWithCells || rowHasCells(row)) {
+        cachedRowIds.push(rowId);
+      } else {
+        // A live row that was overwritten with a blank remains covered through
+        // `coverageRanges` while it is in the viewport, but must not retain old
+        // cached provenance after it drifts into scrollback. Fetched blank rows
+        // are untouched and remain valid cached history.
+        uncachedRowIds.push(rowId);
+      }
     }
   }
 
   cachedRanges = addCachedRows(cachedRanges, cachedRowIds);
-  if (removedResizeBlankRows && !preserveRowsAsFallbackOnly) {
-    cachedRanges = rangesFromRowIds(rowsById.keys());
-  }
-  if (pruneRows(rowsById, previous.rowLimit, viewportOffset, viewportOffset + viewportRows)) {
-    if (cacheOnlyRowsWithCells) {
-      cachedRanges = rangesFromCachedRowsWithCells(rowsById, cachedRanges);
-    } else if (!preserveRowsAsFallbackOnly) {
-      cachedRanges = rangesFromRowIds(rowsById.keys());
-    }
-  }
-  if (cacheOnlyRowsWithCells) {
-    cachedRanges = rangesFromCachedRowsWithCells(rowsById, cachedRanges);
-  }
+  cachedRanges = removeCachedRows(cachedRanges, uncachedRowIds);
+  const prunedRowIds = pruneRows(rowsById, previous.rowLimit, [
+    { start: viewportOffset, end: viewportOffset + viewportRows },
+  ]);
+  cachedRanges = removeCachedRows(cachedRanges, prunedRowIds);
 
   return {
     cols: surface.cols,
@@ -263,9 +278,11 @@ export function mergeHistoryWindowIntoBuffer(
 
   const viewportRows = surface.rows;
   const viewportOffset = Math.max(0, nextTotalRows - viewportRows);
-  if (pruneRows(rowsById, previous.rowLimit, viewportOffset, viewportOffset + viewportRows)) {
-    cachedRanges = rangesFromRowIds(rowsById.keys());
-  }
+  const prunedRowIds = pruneRows(rowsById, previous.rowLimit, [
+    { start: startRow, end: startRow + frame.rows.length },
+    { start: viewportOffset, end: viewportOffset + viewportRows },
+  ]);
+  cachedRanges = removeCachedRows(cachedRanges, prunedRowIds);
 
   return {
     cols: surface.cols,
@@ -543,20 +560,6 @@ function rowHasCells(row: TerminalRow): boolean {
   return row.cells.length > 0;
 }
 
-function rangesFromCachedRowsWithCells(
-  rowsById: ReadonlyMap<number, TerminalRow>,
-  cachedRanges: readonly TerminalBufferRowRange[],
-) {
-  const cachedRowIds: number[] = [];
-  for (const range of cachedRanges) {
-    for (let rowId = range.start; rowId < range.end; rowId += 1) {
-      const row = rowsById.get(rowId);
-      if (row && rowHasCells(row)) cachedRowIds.push(rowId);
-    }
-  }
-  return rangesFromRowIds(cachedRowIds);
-}
-
 function cursorWithAbsoluteRow(
   cursor: TerminalCursor | undefined,
   rowOffset: number,
@@ -667,19 +670,37 @@ function finiteNumber(value: unknown): number | undefined {
 function pruneRows(
   rowsById: Map<number, TerminalRow>,
   rowLimit: number,
-  keepStart: number,
-  keepEnd: number,
-) {
-  if (rowsById.size <= rowLimit) return false;
-  let pruned = false;
-  const ids = [...rowsById.keys()].sort((left, right) => left - right);
+  keepRanges: readonly TerminalBufferRowRange[],
+): number[] {
+  if (rowsById.size <= rowLimit) return [];
+  const pruned: number[] = [];
+  // Pruning is cold-path work, only when a live or fetched band crosses the
+  // hard cache bound. Evict rows farthest from both the requested history band
+  // and live tail, so a deep-scroll fetch is not immediately discarded merely
+  // because its ids are older than the tail.
+  const ids = [...rowsById.keys()].sort((left, right) => {
+    const distance = distanceFromRanges(right, keepRanges) - distanceFromRanges(left, keepRanges);
+    return distance || left - right;
+  });
   for (const id of ids) {
     if (rowsById.size <= rowLimit) return pruned;
-    if (id >= keepStart && id < keepEnd) continue;
+    if (distanceFromRanges(id, keepRanges) === 0) continue;
     rowsById.delete(id);
-    pruned = true;
+    pruned.push(id);
   }
   return pruned;
+}
+
+function distanceFromRanges(rowId: number, ranges: readonly TerminalBufferRowRange[]): number {
+  let distance = Number.POSITIVE_INFINITY;
+  for (const range of ranges) {
+    if (rowId >= range.start && rowId < range.end) return 0;
+    distance = Math.min(
+      distance,
+      rowId < range.start ? range.start - rowId : rowId - range.end + 1,
+    );
+  }
+  return distance;
 }
 
 // The rows the buffer can render without a fetch: coverage by provenance, never
@@ -747,6 +768,30 @@ function addCachedRows(
   let next = [...ranges];
   for (const rowId of rowIds) {
     next = addCachedRange(next, rowId, rowId + 1);
+  }
+  return next;
+}
+
+function removeCachedRows(
+  ranges: readonly TerminalBufferRowRange[],
+  rowIds: readonly number[],
+): TerminalBufferRowRange[] {
+  if (rowIds.length === 0 || ranges.length === 0) return [...ranges];
+  const removals = [...new Set(rowIds)]
+    .filter(Number.isFinite)
+    .map(rowId => Math.max(0, Math.floor(rowId)))
+    .sort((left, right) => left - right);
+  const next: TerminalBufferRowRange[] = [];
+
+  for (const range of ranges) {
+    let start = range.start;
+    for (const rowId of removals) {
+      if (rowId < start) continue;
+      if (rowId >= range.end) break;
+      if (rowId > start) next.push({ start, end: rowId });
+      start = rowId + 1;
+    }
+    if (start < range.end) next.push({ start, end: range.end });
   }
   return next;
 }

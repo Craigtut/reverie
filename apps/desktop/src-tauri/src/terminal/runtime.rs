@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -59,7 +60,7 @@ impl Default for TerminalThemeColors {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TerminalSessionRuntime {
     sessions: Arc<Mutex<HashMap<TerminalId, TerminalSessionRecord>>>,
     controllers: Arc<Mutex<HashMap<TerminalId, PtyController>>>,
@@ -72,6 +73,25 @@ pub struct TerminalSessionRuntime {
     // frontend's `set_frontend_active`. The idle-session reaper reads this so it
     // never reaps the session on screen, even when that session is idle.
     foreground_terminal: Arc<Mutex<Option<TerminalId>>>,
+    // Native window focus, kept separately from `foreground_terminal`. The
+    // selected session must remain protected from the reaper while the app is
+    // backgrounded, but no terminal frames should cross into a throttled
+    // WKWebView until the main window returns.
+    app_foreground: Arc<AtomicBool>,
+}
+
+impl Default for TerminalSessionRuntime {
+    fn default() -> Self {
+        Self {
+            sessions: Arc::default(),
+            controllers: Arc::default(),
+            command_senders: Arc::default(),
+            current_terminal_by_session: Arc::default(),
+            default_colors: Arc::new(Mutex::new(TerminalThemeColors::default())),
+            foreground_terminal: Arc::default(),
+            app_foreground: Arc::new(AtomicBool::new(true)),
+        }
+    }
 }
 
 enum TerminalRuntimeCommand {
@@ -102,6 +122,7 @@ enum TerminalRuntimeCommand {
         background: TerminalColor,
     },
     SetFrontendActive(bool),
+    SetAppForeground(bool),
 }
 
 #[derive(Debug)]
@@ -124,11 +145,13 @@ enum DeferredPtyReadEvent {
 
 // Worker-side view state. The backend no longer tracks follow-tail: scrolling is
 // frontend-driven (decisions.md D6), so the worker always keeps the VT pinned to
-// the active tail. It emits frames only while the terminal is foreground;
-// inactive sessions keep parsing PTY output and send a fresh full seed on return.
+// the active tail. It emits frames only while both the terminal and main app
+// window are foreground. Inactive sessions keep parsing PTY output and send a
+// fresh full seed on return.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalViewportState {
     frontend_active: bool,
+    app_foreground: bool,
 }
 
 // No `Debug` derive: `tauri::ipc::Channel` is not `Debug`, and the request is
@@ -419,6 +442,23 @@ impl TerminalSessionRuntime {
             .context("failed to queue terminal frontend-priority command")
     }
 
+    /// Suspend frame delivery to the main WKWebView while the app is not in the
+    /// foreground. PTY output still drains and libghostty remains authoritative.
+    /// Returning to the app forces one Full seed for the selected terminal, so
+    /// the frontend never needs to replay frames accumulated while WebKit was
+    /// timer-throttled or suspended.
+    pub fn set_app_foreground(&self, foreground: bool) {
+        self.app_foreground.store(foreground, Ordering::SeqCst);
+        let senders = self
+            .command_senders
+            .lock()
+            .map(|senders| senders.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for sender in senders {
+            let _ = sender.send(TerminalRuntimeCommand::SetAppForeground(foreground));
+        }
+    }
+
     /// The terminal the user is currently viewing, if any. Read by the reaper to
     /// protect the on-screen session from being reaped.
     pub fn foreground_terminal(&self) -> Option<TerminalId> {
@@ -610,6 +650,7 @@ impl TerminalSessionRuntime {
         let mut sync_output_started_at = None;
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: self.app_foreground.load(Ordering::SeqCst),
         };
         // Live session title: apply this CLI's OSC-title rule and push label
         // changes up to the frontend. Only for real product sessions with a
@@ -755,7 +796,7 @@ impl TerminalSessionRuntime {
             emit_frame_if_ready!();
         };
 
-        if pending_frame && viewport_state.frontend_active {
+        if pending_frame && terminal_frame_interval(&viewport_state).is_some() {
             let emit_ms = send_terminal_frame(&mut frame_channel, generation, &mut terminal)?;
             total_emit_ms += emit_ms;
             max_emit_ms = max_emit_ms.max(emit_ms);
@@ -1197,7 +1238,14 @@ fn apply_terminal_command(
         }
         TerminalRuntimeCommand::SetFrontendActive(active) => {
             viewport_state.frontend_active = active;
-            if active {
+            if active && viewport_state.app_foreground {
+                terminal.force_next_full_frame();
+                applied.needs_frame = true;
+            }
+        }
+        TerminalRuntimeCommand::SetAppForeground(foreground) => {
+            viewport_state.app_foreground = foreground;
+            if foreground && viewport_state.frontend_active {
                 terminal.force_next_full_frame();
                 applied.needs_frame = true;
             }
@@ -1233,7 +1281,7 @@ fn wait_for_terminal_worker_event(
 }
 
 fn terminal_frame_interval(state: &TerminalViewportState) -> Option<Duration> {
-    if state.frontend_active {
+    if state.frontend_active && state.app_foreground {
         Some(TERMINAL_FRAME_INTERVAL)
     } else {
         None
@@ -1931,6 +1979,7 @@ mod tests {
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: true,
         };
         let mut generation: u32 = 1;
 
@@ -1986,6 +2035,7 @@ mod tests {
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: true,
         };
         // The live generation is 2, but the request carries the stale 1.
         let mut generation: u32 = 2;
@@ -2034,6 +2084,7 @@ mod tests {
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: true,
         };
         let mut generation: u32 = 1;
 
@@ -2088,6 +2139,7 @@ mod tests {
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: true,
         };
         let mut generation: u32 = 1;
 
@@ -2135,6 +2187,7 @@ mod tests {
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let mut viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: true,
         };
         let mut generation: u32 = 1;
 
@@ -2180,6 +2233,56 @@ mod tests {
         assert_eq!(
             terminal_frame_interval(&viewport_state),
             Some(TERMINAL_FRAME_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn app_background_suspends_frames_and_foreground_forces_a_full_seed() {
+        let (sender, receiver) = unbounded();
+        let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
+        let mut viewport_state = TerminalViewportState {
+            frontend_active: true,
+            app_foreground: true,
+        };
+        let mut generation: u32 = 1;
+
+        let _ = terminal.frame().unwrap();
+        sender
+            .send(TerminalRuntimeCommand::SetAppForeground(false))
+            .unwrap();
+        let backgrounded = apply_terminal_commands(
+            TerminalId::new_v4(),
+            &receiver,
+            &mut terminal,
+            None,
+            &mut viewport_state,
+            &mut generation,
+        )
+        .unwrap();
+        assert!(!backgrounded.needs_frame);
+        assert_eq!(terminal_frame_interval(&viewport_state), None);
+
+        terminal.write(b"output while backgrounded\r\n");
+        sender
+            .send(TerminalRuntimeCommand::SetAppForeground(true))
+            .unwrap();
+        let foregrounded = apply_terminal_commands(
+            TerminalId::new_v4(),
+            &receiver,
+            &mut terminal,
+            None,
+            &mut viewport_state,
+            &mut generation,
+        )
+        .unwrap();
+        assert!(foregrounded.needs_frame);
+        assert_eq!(
+            terminal_frame_interval(&viewport_state),
+            Some(TERMINAL_FRAME_INTERVAL)
+        );
+        assert_eq!(
+            terminal.frame().unwrap().dirty,
+            reverie_core::terminal::TerminalDirtyState::Full
         );
     }
 
@@ -2233,6 +2336,7 @@ mod tests {
         let last_frame_emit = start;
         let mut viewport_state = TerminalViewportState {
             frontend_active: false,
+            app_foreground: true,
         };
         let pending_frame = true;
         let next_tick = start + Duration::from_millis(80);
@@ -2285,6 +2389,7 @@ mod tests {
         let start = Instant::now();
         let viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: true,
         };
 
         assert!(terminal_frame_wait_timeout(false, start, &viewport_state, None, start).is_none());
@@ -2315,6 +2420,7 @@ mod tests {
         let mut terminal = GhosttyTerminalState::new(10, 3).unwrap();
         let viewport_state = TerminalViewportState {
             frontend_active: true,
+            app_foreground: true,
         };
         let now = Instant::now();
         let last_frame_emit = now.checked_sub(TERMINAL_FRAME_INTERVAL).unwrap_or(now);
@@ -2367,6 +2473,7 @@ mod tests {
         let mut last_frame_emit = start.checked_sub(TERMINAL_FRAME_INTERVAL).unwrap_or(start);
         let viewport_state = TerminalViewportState {
             frontend_active: active,
+            app_foreground: true,
         };
         let mut frames = 0_usize;
         let ticks = duration_ms / tick_ms;
