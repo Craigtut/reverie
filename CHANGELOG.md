@@ -7,6 +7,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-08-25
+
+### Fixed
+- Live agent output now resumes immediately when Reverie returns to the foreground.
+  Recovery frames can no longer be discarded by a focus timing race or a second
+  burst of terminal output, and the current terminal explicitly repaints on return.
+
 ## [0.6.6] - 2026-08-25
 
 ### Fixed
