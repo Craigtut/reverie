@@ -978,14 +978,36 @@ export function useTerminalSession(params: {
         applyViewportSizeRef.current(node.clientWidth, node.clientHeight);
       });
     };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') reconcileViewport();
+    const recoverForegroundTerminal = () => {
+      if (document.visibilityState === 'hidden' || !document.hasFocus()) return;
+      const activeTerminalId = useTerminalStore.getState().activeTerminalId;
+      // Reasserting the active terminal asks the native runtime for an
+      // authoritative Full seed. This closes the ordering gap where the native
+      // window-focus event can emit its seed just before WebKit starts reporting
+      // document focus.
+      syncTerminalFrontendActivity(activeTerminalId);
+      requestAnimationFrame(() => {
+        const selectedSessionId = useNavigationStore.getState().selectedSessionId;
+        const node = surfaceViewportRef.current;
+        if (!node || !selectedSessionId) return;
+        controller.paintCurrent(selectedSessionId);
+        if (controller.isLiveFollow()) controller.scrollToTail();
+      });
     };
-    window.addEventListener('focus', reconcileViewport);
+    const onFocus = () => {
+      reconcileViewport();
+      recoverForegroundTerminal();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      reconcileViewport();
+      recoverForegroundTerminal();
+    };
+    window.addEventListener('focus', onFocus);
     window.addEventListener('resize', reconcileViewport);
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
-      window.removeEventListener('focus', reconcileViewport);
+      window.removeEventListener('focus', onFocus);
       window.removeEventListener('resize', reconcileViewport);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
@@ -1084,13 +1106,29 @@ export function useTerminalSession(params: {
       for (const unlisten of unlisteners.splice(0)) unlisten();
     }
 
-    function requestTerminalFrameResync(droppedCount: number, requestBackend: boolean) {
+    function latestPendingFullFrame() {
+      for (let index = pendingTerminalFramePayloads.length - 1; index >= 0; index -= 1) {
+        const payload = pendingTerminalFramePayloads[index];
+        if (payload?.frame.dirty === 'full') return payload;
+      }
+      return null;
+    }
+
+    function requestTerminalFrameResync(
+      droppedCount: number,
+      requestBackend: boolean,
+      preservePendingFull = false,
+    ) {
+      const pendingFull = preservePendingFull ? latestPendingFullFrame() : null;
       droppedFrames += droppedCount;
-      pendingTerminalFramePayloads = [];
+      pendingTerminalFramePayloads = pendingFull ? [pendingFull] : [];
       awaitingFullFrame = true;
-      if (terminalFrameRaf) {
+      if (!pendingFull && terminalFrameRaf) {
         cancelAnimationFrame(terminalFrameRaf);
         terminalFrameRaf = 0;
+      }
+      if (pendingFull && !terminalFrameRaf) {
+        terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrames);
       }
       // Native focus and terminal activation already force a Full seed. Only
       // send an extra command for a true overflow while this terminal and page
@@ -1191,8 +1229,22 @@ export function useTerminalSession(params: {
         pageActive: pageActive && terminalActive,
         awaitingFull: awaitingFullFrame,
         isFull: decoded.dirty === 'full',
+        hasPendingFull: pendingTerminalFramePayloads.some(
+          payload => payload.frame.dirty === 'full',
+        ),
         pendingCount: pendingTerminalFramePayloads.length,
       });
+      if (backlogAction === 'resync_preserve_full') {
+        // The triggering diff and every queued diff are unsafe to skip across,
+        // but the queued Full frame is self-contained and must still get its
+        // scheduled paint. Ask for a newer seed without cancelling that paint.
+        requestTerminalFrameResync(
+          pendingTerminalFramePayloads.length,
+          pageActive && terminalActive,
+          true,
+        );
+        return;
+      }
       if (backlogAction === 'resync') {
         requestTerminalFrameResync(
           pendingTerminalFramePayloads.length + 1,
