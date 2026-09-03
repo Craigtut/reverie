@@ -327,8 +327,23 @@ const terminalBodyClass = css({
   minWidth: 0,
   minHeight: 0,
   display: 'grid',
-  // optional permission banner | viewport
+  // The viewport is the only in-flow child (the permission banner floats), so it
+  // takes the first track. The second stays as the slot for any future in-flow
+  // row above it; changing the first track's sizing would move the terminal's
+  // whole height path, which the imperative canvas sizing is tuned against.
   gridTemplateRows: 'auto minmax(0, 1fr)',
+  // The column MUST be minmax(0, 1fr), never the implicit `auto`. An auto track
+  // sizes to its widest item's max-content contribution, and a nowrap child
+  // contributes its FULL untruncated text width however much
+  // `overflow: hidden` + `text-overflow: ellipsis` it carries. That is exactly
+  // what the permission banner's one-line command summary used to do from in
+  // here: a 264-char agent command stretched a 1000px column to 2015px, and the
+  // live terminal grid (capped to MAX_CONTENT_WIDTH_PX and centered with
+  // margin:auto inside that now-too-wide viewport) parked itself 400+px to the
+  // right with the rest past the window edge. The banner floats now, but the
+  // clamp stays: it is what keeps the viewport's measured width honest
+  // whatever ends up in this track.
+  gridTemplateColumns: 'minmax(0, 1fr)',
   overflow: 'hidden',
   // Square: rounded bottom corners were clipping the ends of the last terminal row.
   borderRadius: 0,
@@ -342,13 +357,36 @@ const diagnosticsClass = css({
   overflow: 'hidden',
 });
 
+// The permission gate: a floating amber card in the same slot the re-entry notice
+// uses. The two are mutually exclusive by design (ReentryHeader suppresses itself
+// while a permission is pending), so they never stack. Floating rather than
+// in-flow for two reasons: an in-flow row at the top of the body sat UNDER the
+// floating tab band, burying the summary and colliding the approve/deny buttons
+// with the auto-approve chip; and it shrank the terminal viewport, which
+// SIGWINCH'd the CLI and made it redraw the very prompt it had just asked.
 const permissionBannerClass = css({
+  position: 'absolute',
+  top: 'calc(var(--reverie-shell-pad) + 54px)',
+  left: '50%',
+  transform: 'translateX(-50%)',
+  width: 'min(760px, calc(100% - 32px))',
+  // Above the canvas (2), the edge fades (3) and the jump button (4); level with
+  // the tab band (5), which it clears vertically.
+  zIndex: 5,
   display: 'flex',
   alignItems: 'center',
   gap: '10px',
-  padding: '8px 14px',
-  background: 'color-mix(in srgb, var(--warn) 12%, transparent)',
-  borderBottom: '1px solid color-mix(in srgb, var(--warn) 28%, transparent)',
+  minWidth: 0,
+  padding: '9px 12px 10px 13px',
+  borderRadius: '12px',
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderLeftWidth: '3px',
+  background: 'color-mix(in srgb, var(--warn) 15%, var(--surface-1))',
+  borderColor: 'color-mix(in srgb, var(--warn) 38%, var(--line))',
+  borderLeftColor: 'var(--warn)',
+  boxShadow: '0 12px 32px color-mix(in srgb, black 38%, transparent)',
+  backdropFilter: 'blur(14px)',
   '& > svg': { color: 'var(--warn)', flexShrink: 0 },
 });
 
