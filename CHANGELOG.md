@@ -7,6 +7,18 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-09-02
+
+### Fixed
+- A pending approval notice no longer pushes the terminal off to one side of the
+  window. A long command in the notice stretched the terminal's measured width,
+  which parked the live grid past the right edge and left most of the session
+  blank until the notice cleared.
+- The approval notice now floats below the session tabs instead of sitting behind
+  them, so the command it is asking about and the approve and deny buttons stay
+  readable. It also no longer resizes the terminal as it appears, which had made
+  the agent redraw the prompt it had just asked.
+
 ## [0.6.7] - 2026-08-25
 
 ### Fixed
