@@ -699,17 +699,16 @@ impl AgentAdapter for CodexCliAdapter {
 
     /// Codex 0.157+ defaults to its fullscreen transcript (alternate screen,
     /// mouse capture, in-app scrolling and selection); `false` keeps the classic
-    /// scrollback mode. A root-level `-c` override applies to `codex resume`
-    /// too, overrides `~/.codex/config.toml`, and is one of the few overrides
-    /// Codex's fast daemon startup accepts. Older Codex ignores the unknown key.
+    /// scrollback mode. Appended after the subcommand, next to the hook `-c`
+    /// overrides the launch adds later: for `codex resume`, overrides given
+    /// after the subcommand replace any given before it (verified on 0.159.2),
+    /// so a root-level flag here would be silently dropped. Older Codex ignores
+    /// the unknown key.
     fn apply_fullscreen_preference(&self, command: &mut CommandSpec, fullscreen: bool) {
-        command.args.splice(
-            0..0,
-            [
-                "-c".to_owned(),
-                format!("tui.fullscreen_transcript={fullscreen}"),
-            ],
-        );
+        command.args.extend([
+            "-c".to_owned(),
+            format!("tui.fullscreen_transcript={fullscreen}"),
+        ]);
     }
 
     fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
@@ -1593,20 +1592,17 @@ mod tests {
             new_session_id: None,
         };
 
-        // Codex: a root-level `-c` override ahead of any subcommand, so it
-        // applies to `codex resume` as well as a new launch.
+        // Codex: appended after the subcommand, so it shares a scope with the
+        // hook `-c` overrides (Codex drops root-level `-c` once `resume` has its own).
         for fullscreen in [true, false] {
             let mut resume = CodexCliAdapter
                 .build_resume_command(&ctx, &NativeSessionRef::codex("native-1", None))
                 .unwrap();
             CodexCliAdapter.apply_fullscreen_preference(&mut resume, fullscreen);
+            assert_eq!(resume.args[0], "resume");
             assert_eq!(
-                &resume.args[..3],
-                &[
-                    "-c".to_owned(),
-                    format!("tui.fullscreen_transcript={fullscreen}"),
-                    "resume".to_owned(),
-                ]
+                &resume.args[resume.args.len() - 2..],
+                &["-c".to_owned(), format!("tui.fullscreen_transcript={fullscreen}")]
             );
         }
 
