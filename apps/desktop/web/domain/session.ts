@@ -176,6 +176,15 @@ export function supportsInlineApproval(agentKind: string): boolean {
   return agentKind === 'claude_code' || agentKind === 'codex_cli' || agentKind === 'cortex_code';
 }
 
+// How many rows a CLI's fullscreen renderer scrolls per SGR wheel report, so the
+// terminal can pace reports to pointer travel (one report per this many cells)
+// and content tracks the pointer. Codex's fullscreen transcript scrolls a fixed
+// 3 rows per wheel event; Claude Code scrolls 1 (plus its own acceleration) in
+// non-xterm.js hosts. Anything else gets one report per cell, like Ghostty.
+export function wheelRowsPerReport(agentKind: string | null | undefined): number {
+  return agentKind === 'codex_cli' ? 3 : 1;
+}
+
 export function agentTabLabel(session: ShellSession) {
   // The display name everywhere a session is shown (sidebar, tabs, dashboard
   // cards, launch overlay). Precedence: the user's pinned custom name, then the

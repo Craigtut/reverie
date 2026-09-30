@@ -35,7 +35,7 @@ import {
   terminalInputForKey,
   terminalInputForKeyUp,
   terminalWheelDeltaPixels,
-  terminalWheelDeltaRows,
+  wheelRowsPerReport,
 } from '../domain';
 import type {
   CreateSessionRecordRequest,
@@ -92,6 +92,7 @@ import {
   createTerminalInteraction,
   encodeSgrWheelEvent,
   registerDefaultInteractions,
+  WheelReportAccumulator,
   resolveTopTarget,
   terminalMouseCellFromClientPoint,
   type ActionContextDeps,
@@ -378,6 +379,11 @@ export function useTerminalSession(params: {
   const terminalTextComposingRef = useRef(false);
   const terminalWheelHandlerRef = useRef<(event: globalThis.WheelEvent) => void>(() => {});
   const terminalWheelListenerRef = useRef<((event: globalThis.WheelEvent) => void) | null>(null);
+  // Paces wheel travel into SGR reports for mouse-tracking apps, per terminal.
+  const wheelReportsRef = useRef({
+    terminalId: null as string | null,
+    accumulator: new WheelReportAccumulator(),
+  });
   const terminalInputQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
   // In-flight history-range prefetches, keyed by `terminalId:generation:start:count`,
   // so a band that is still round-tripping is never re-requested every paint (the
@@ -2031,12 +2037,12 @@ export function useTerminalSession(params: {
     ctrlKey?: boolean;
   }): boolean {
     const surface = controller.getSurface();
-    const deltaRows = terminalWheelDeltaRows(delta, surface);
     const deltaPixels = terminalWheelDeltaPixels(delta, surface);
-    if (deltaRows === 0 || deltaPixels === 0) return false;
+    if (deltaPixels === 0) return false;
     const terminalId = useTerminalStore.getState().activeTerminalId;
     const modes = controller.getLastFrameModes();
     if (!terminalId) return false;
+    const wheelReports = wheelReportsRef.current;
     if (modes?.mouseTracking && !delta.shiftKey) {
       const canvas = controller.getCanvas();
       const cell =
@@ -2044,15 +2050,30 @@ export function useTerminalSession(params: {
           ? terminalMouseCellFromClientPoint(delta.clientX, delta.clientY, canvas, surface)
           : null;
       if (!cell || !inputReady()) return false;
-      void sendTerminalInput(
-        encodeSgrWheelEvent({
+      if (wheelReports.terminalId !== terminalId) {
+        wheelReports.terminalId = terminalId;
+        wheelReports.accumulator.reset();
+      }
+      // One report per cell of pointer travel (scaled to the CLI's rows per
+      // report), not one per DOM event: a trackpad swipe is dozens of tiny
+      // events that would otherwise each scroll the app a full step.
+      const reports = wheelReports.accumulator.take({
+        deltaPixels,
+        pixelsPerReport: surface.cellHeight * wheelRowsPerReport(selectedSession?.agentKind),
+        maxReports: surface.rows,
+        now: performance.now(),
+      });
+      if (reports !== 0) {
+        const report = encodeSgrWheelEvent({
           cell,
-          direction: deltaRows < 0 ? 'up' : 'down',
+          direction: reports < 0 ? 'up' : 'down',
           modifiers: { alt: delta.altKey, ctrl: delta.ctrlKey },
-        }),
-      );
+        });
+        void sendTerminalInput(report.repeat(Math.abs(reports)));
+      }
       return true;
     }
+    wheelReports.accumulator.reset();
     if (modes?.alternateScreen) {
       // Alternate-screen apps without mouse tracking own the whole screen; there
       // is nothing to scroll back into.

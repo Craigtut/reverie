@@ -1,6 +1,7 @@
 export * from './types';
 export * from './geometry';
 export * from './mouseEncoding';
+export * from './wheelReports';
 export * from './selectionModel';
 export * from './overlayPaint';
 export * from './linkProvider';
