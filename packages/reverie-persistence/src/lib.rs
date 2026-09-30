@@ -277,6 +277,14 @@ const MIGRATIONS: &[&str] = &[
     // the conversation in Reverie's own scrollback. When on, Claude launches in
     // fullscreen instead. Read at session launch; Claude-only.
     "ALTER TABLE workspace ADD COLUMN claude_fullscreen_enabled INTEGER NOT NULL DEFAULT 0;",
+    // v27 -> v28: generalize the Claude-only fullscreen flag into a per-CLI set
+    // (Codex gained a fullscreen renderer too). JSON array of snake_case agent
+    // kinds, like `disabled_agent_kinds`; absence means inline. Carries an
+    // existing Claude opt-in over, then drops the old column.
+    "ALTER TABLE workspace ADD COLUMN fullscreen_agent_kinds TEXT NOT NULL DEFAULT '[]';
+     UPDATE workspace SET fullscreen_agent_kinds = '[\"claude_code\"]'
+       WHERE claude_fullscreen_enabled = 1;
+     ALTER TABLE workspace DROP COLUMN claude_fullscreen_enabled;",
 ];
 
 const CONNECTION_COLUMNS: &str = "id, participant_a, participant_b, initiator_json, status, \
@@ -404,7 +412,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                      crt_enabled, voice_enabled, voice_language,
                      voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
                      dispatch_window_x, dispatch_window_y, voice_input_device,
-                     claude_fullscreen_enabled)
+                     fullscreen_agent_kinds)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                      ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
@@ -412,7 +420,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     seed.name,
                     seed.general_label,
                     bool_to_int(seed.default_dangerous_mode),
-                    disabled_kinds_to_db(&seed.disabled_agent_kinds)?,
+                    agent_kinds_to_db(&seed.disabled_agent_kinds)?,
                     theme_mode_to_db(seed.theme)?,
                     agent_kind_to_db(seed.default_agent_kind)?,
                     seed.nav_state,
@@ -429,7 +437,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                     seed.dispatch_window_x.map(i64::from),
                     seed.dispatch_window_y.map(i64::from),
                     seed.voice_input_device,
-                    bool_to_int(seed.claude_fullscreen_enabled),
+                    agent_kinds_to_db(&seed.fullscreen_agent_kinds)?,
                 ],
             )
             .map_err(backend)?;
@@ -448,7 +456,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                  crt_enabled, voice_enabled, voice_language,
                  voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
                  dispatch_window_x, dispatch_window_y, voice_input_device,
-                 claude_fullscreen_enabled)
+                 fullscreen_agent_kinds)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                  ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
              ON CONFLICT(id) DO UPDATE SET
@@ -472,13 +480,13 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 dispatch_window_x = excluded.dispatch_window_x,
                 dispatch_window_y = excluded.dispatch_window_y,
                 voice_input_device = excluded.voice_input_device,
-                claude_fullscreen_enabled = excluded.claude_fullscreen_enabled",
+                fullscreen_agent_kinds = excluded.fullscreen_agent_kinds",
             params![
                 workspace.id.to_string(),
                 workspace.name,
                 workspace.general_label,
                 bool_to_int(workspace.default_dangerous_mode),
-                disabled_kinds_to_db(&workspace.disabled_agent_kinds)?,
+                agent_kinds_to_db(&workspace.disabled_agent_kinds)?,
                 theme_mode_to_db(workspace.theme)?,
                 agent_kind_to_db(workspace.default_agent_kind)?,
                 workspace.nav_state,
@@ -495,7 +503,7 @@ impl WorkspaceRepository for SqliteWorkspaceRepository {
                 workspace.dispatch_window_x.map(i64::from),
                 workspace.dispatch_window_y.map(i64::from),
                 workspace.voice_input_device,
-                bool_to_int(workspace.claude_fullscreen_enabled),
+                agent_kinds_to_db(&workspace.fullscreen_agent_kinds)?,
             ],
         )
         .map_err(backend)?;
@@ -1022,7 +1030,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 crt_enabled, voice_enabled, voice_language,
                 voice_push_to_talk, dispatch_shortcut, dispatch_default_voice,
                 dispatch_window_x, dispatch_window_y, voice_input_device,
-                claude_fullscreen_enabled
+                fullscreen_agent_kinds
          FROM workspace LIMIT 1",
         [],
         |row| {
@@ -1031,7 +1039,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                 name: row.get(1)?,
                 general_label: row.get(2)?,
                 default_dangerous_mode: int_to_bool(row.get::<_, i64>(3)?),
-                disabled_agent_kinds: disabled_kinds_from_db(&row.get::<_, String>(4)?),
+                disabled_agent_kinds: agent_kinds_from_db(&row.get::<_, String>(4)?),
                 theme: theme_mode_from_db(&row.get::<_, String>(5)?)?,
                 default_agent_kind: agent_kind_from_db(&row.get::<_, String>(6)?)?,
                 nav_state: row.get::<_, Option<String>>(7)?,
@@ -1052,7 +1060,7 @@ fn load_workspace(conn: &Connection) -> RepoResult<Workspace> {
                     .get::<_, Option<i64>>(19)?
                     .map(|value| value as i32),
                 voice_input_device: row.get::<_, Option<String>>(20)?,
-                claude_fullscreen_enabled: int_to_bool(row.get::<_, i64>(21)?),
+                fullscreen_agent_kinds: agent_kinds_from_db(&row.get::<_, String>(21)?),
             })
         },
     )
@@ -1163,17 +1171,16 @@ fn agent_kind_to_db(value: AgentKind) -> RepoResult<String> {
     string_enum(serde_json::to_value(value), "agent kind")
 }
 
-/// Serialize the disabled-CLI set as a JSON array of snake_case wire strings,
-/// e.g. `["claude_code"]`. Stored in the single `workspace.disabled_agent_kinds`
-/// column.
-fn disabled_kinds_to_db(kinds: &[AgentKind]) -> RepoResult<String> {
+/// Serialize an agent-kind set (`disabled_agent_kinds`, `fullscreen_agent_kinds`)
+/// as a JSON array of snake_case wire strings, e.g. `["claude_code"]`.
+fn agent_kinds_to_db(kinds: &[AgentKind]) -> RepoResult<String> {
     serde_json::to_string(kinds)
-        .map_err(|err| PersistenceError::Backend(format!("encoding disabled agent kinds: {err}")))
+        .map_err(|err| PersistenceError::Backend(format!("encoding agent kinds: {err}")))
 }
 
-/// Parse the disabled-CLI set. A missing/garbled value decodes to "none
-/// disabled" so a hand-edited or pre-migration row never bricks startup.
-fn disabled_kinds_from_db(value: &str) -> Vec<AgentKind> {
+/// Parse an agent-kind set. A missing/garbled value decodes to the empty set so
+/// a hand-edited or pre-migration row never bricks startup.
+fn agent_kinds_from_db(value: &str) -> Vec<AgentKind> {
     serde_json::from_str(value).unwrap_or_default()
 }
 
@@ -1791,6 +1798,47 @@ mod tests {
                 .disabled_agent_kinds
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn save_workspace_round_trips_fullscreen_agent_kinds() {
+        let repo = seeded();
+        assert!(
+            repo.load_snapshot()
+                .unwrap()
+                .workspace
+                .fullscreen_agent_kinds
+                .is_empty()
+        );
+
+        let mut workspace = repo.load_snapshot().unwrap().workspace;
+        workspace.fullscreen_agent_kinds = vec![AgentKind::CodexCli];
+        repo.save_workspace(&workspace).unwrap();
+        assert_eq!(
+            repo.load_snapshot().unwrap().workspace.fullscreen_agent_kinds,
+            vec![AgentKind::CodexCli]
+        );
+    }
+
+    #[test]
+    fn migrate_carries_the_claude_fullscreen_opt_in_into_the_per_cli_set() {
+        // A v27 database where the user had turned Claude fullscreen on.
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..27] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 27;").unwrap();
+        conn.execute(
+            "INSERT INTO workspace (id, name, general_label, default_dangerous_mode,
+                claude_fullscreen_enabled)
+             VALUES (?1, 'Local workspace', 'General', 0, 1)",
+            params![uuid::Uuid::new_v4().to_string()],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+        let workspace = load_workspace(&conn).unwrap();
+        assert_eq!(workspace.fullscreen_agent_kinds, vec![AgentKind::ClaudeCode]);
     }
 
     #[test]

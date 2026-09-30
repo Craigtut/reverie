@@ -149,6 +149,21 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Whether this CLI has its own fullscreen (alternate-screen) renderer that
+    /// Reverie can switch on or off per launch (see
+    /// [`crate::domain::Workspace::fullscreen_agent_kinds`]). Defaults to false.
+    fn supports_fullscreen_toggle(&self) -> bool {
+        false
+    }
+
+    /// Express the fullscreen choice on a launch command, new or resume. Only
+    /// called for adapters that report [`AgentAdapter::supports_fullscreen_toggle`].
+    /// Adapters set the choice in both directions so it overrides the CLI's own
+    /// saved renderer setting and the launch is deterministic.
+    fn apply_fullscreen_preference(&self, command: &mut CommandSpec, fullscreen: bool) {
+        let _ = (command, fullscreen);
+    }
+
     /// Discover the native session this CLI created for `ctx.cwd`, if any.
     /// Defaults to no discovery: adapters that record sessions on disk override
     /// this (Cortex via `meta.json`, Claude via its transcript scanner; Codex's
@@ -533,6 +548,22 @@ impl AgentAdapter for ClaudeCodeAdapter {
         &["claude"]
     }
 
+    fn supports_fullscreen_toggle(&self) -> bool {
+        true
+    }
+
+    /// Claude's fullscreen renderer drives the alternate screen buffer (the way
+    /// `vim` does). Either env var overrides Claude's own saved `tui` setting;
+    /// `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN` wins over everything.
+    fn apply_fullscreen_preference(&self, command: &mut CommandSpec, fullscreen: bool) {
+        let (key, value) = if fullscreen {
+            ("CLAUDE_CODE_NO_FLICKER", "1")
+        } else {
+            ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")
+        };
+        command.env.insert(key.to_owned(), value.to_owned());
+    }
+
     fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(program_or_default(ctx, "claude"), &ctx.cwd);
 
@@ -662,6 +693,25 @@ impl AgentAdapter for CodexCliAdapter {
         true
     }
 
+    fn supports_fullscreen_toggle(&self) -> bool {
+        true
+    }
+
+    /// Codex 0.157+ defaults to its fullscreen transcript (alternate screen,
+    /// mouse capture, in-app scrolling and selection); `false` keeps the classic
+    /// scrollback mode. A root-level `-c` override applies to `codex resume`
+    /// too, overrides `~/.codex/config.toml`, and is one of the few overrides
+    /// Codex's fast daemon startup accepts. Older Codex ignores the unknown key.
+    fn apply_fullscreen_preference(&self, command: &mut CommandSpec, fullscreen: bool) {
+        command.args.splice(
+            0..0,
+            [
+                "-c".to_owned(),
+                format!("tui.fullscreen_transcript={fullscreen}"),
+            ],
+        );
+    }
+
     fn build_new_command(&self, ctx: &LaunchContext) -> Result<CommandSpec> {
         let mut command = CommandSpec::new(program_or_default(ctx, "codex"), &ctx.cwd);
 
@@ -788,6 +838,7 @@ pub fn build_spawn_spec(
     executable_path: PathBuf,
     adapter: &dyn AgentAdapter,
     new_session_id: Option<String>,
+    fullscreen: bool,
 ) -> Result<TerminalSpawnSpec> {
     if cols == 0 || rows == 0 {
         bail!("terminal launch requires non-zero dimensions");
@@ -811,7 +862,7 @@ pub fn build_spawn_spec(
         executable_path: Some(executable_path),
         new_session_id: if should_resume { None } else { new_session_id },
     };
-    let command = if should_resume {
+    let mut command = if should_resume {
         let native = session.native_session_ref.as_ref().ok_or_else(|| {
             anyhow!(
                 "{} resume requested for session {} but no native session ref is attached",
@@ -823,6 +874,9 @@ pub fn build_spawn_spec(
     } else {
         adapter.build_new_command(&context)?
     };
+    if adapter.supports_fullscreen_toggle() {
+        adapter.apply_fullscreen_preference(&mut command, fullscreen);
+    }
 
     let mut spec = TerminalSpawnSpec::new(command);
     spec.cols = cols;
@@ -1526,6 +1580,50 @@ mod tests {
             })
             .unwrap();
         assert!(discovered.is_none());
+    }
+
+    #[test]
+    fn fullscreen_preference_is_expressed_per_cli_in_both_directions() {
+        let ctx = LaunchContext {
+            session_id: Uuid::new_v4(),
+            cwd: PathBuf::from("/tmp/reverie"),
+            dangerous_mode: false,
+            model: None,
+            executable_path: Some(PathBuf::from("/bin/codex")),
+            new_session_id: None,
+        };
+
+        // Codex: a root-level `-c` override ahead of any subcommand, so it
+        // applies to `codex resume` as well as a new launch.
+        for fullscreen in [true, false] {
+            let mut resume = CodexCliAdapter
+                .build_resume_command(&ctx, &NativeSessionRef::codex("native-1", None))
+                .unwrap();
+            CodexCliAdapter.apply_fullscreen_preference(&mut resume, fullscreen);
+            assert_eq!(
+                &resume.args[..3],
+                &[
+                    "-c".to_owned(),
+                    format!("tui.fullscreen_transcript={fullscreen}"),
+                    "resume".to_owned(),
+                ]
+            );
+        }
+
+        // Claude: an env var either way, so Claude's own saved setting never wins.
+        let mut claude = ClaudeCodeAdapter.build_new_command(&ctx).unwrap();
+        ClaudeCodeAdapter.apply_fullscreen_preference(&mut claude, true);
+        assert_eq!(claude.env.get("CLAUDE_CODE_NO_FLICKER").map(String::as_str), Some("1"));
+        let mut claude = ClaudeCodeAdapter.build_new_command(&ctx).unwrap();
+        ClaudeCodeAdapter.apply_fullscreen_preference(&mut claude, false);
+        assert_eq!(
+            claude.env.get("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN").map(String::as_str),
+            Some("1")
+        );
+
+        assert!(ClaudeCodeAdapter.supports_fullscreen_toggle());
+        assert!(CodexCliAdapter.supports_fullscreen_toggle());
+        assert!(!CortexAdapter.supports_fullscreen_toggle());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import {
+  AGENT_INSTALL_GUIDES,
   activityForSession,
   agentLabel,
   errorMessage,
@@ -8,6 +9,7 @@ import {
   shortId,
 } from '../domain';
 import type {
+  AgentKind,
   ProjectFolderSelection,
   ShellFocus,
   ShellProject,
@@ -131,24 +133,26 @@ export function useWorkspaceMutations({
     }
   }
 
-  // Persist the per-CLI "Claude fullscreen" launch setting. The backend reads it
-  // back when building a Claude launch and sets the matching env var on the
-  // spawn, so the change applies the next time a Claude session starts (the CLI
-  // reads its renderer mode at process start). No live restart here.
-  async function setClaudeFullscreenEnabled(enabled: boolean) {
-    if ((shell.workspace.claudeFullscreenEnabled ?? false) === enabled) return;
+  // Persist a CLI's fullscreen launch setting. The backend reads it back when
+  // building that CLI's launch and the adapter expresses it on the spawn (an env
+  // var for Claude, a `-c` override for Codex), so the change applies the next
+  // time a session of that CLI starts (CLIs read their renderer mode at process
+  // start). No live restart here.
+  async function setAgentFullscreenEnabled(kind: AgentKind, enabled: boolean) {
+    if ((shell.workspace.fullscreenAgentKinds ?? []).includes(kind) === enabled) return;
+    const name = AGENT_INSTALL_GUIDES[kind].displayName;
     try {
-      const snapshot = await invoke<WorkspaceShellSnapshot>('set_claude_fullscreen_enabled', {
-        request: { claudeFullscreenEnabled: enabled },
+      const snapshot = await invoke<WorkspaceShellSnapshot>('set_agent_fullscreen_enabled', {
+        request: { kind, enabled },
       });
       setShell(snapshot);
       appendLog(
         enabled
-          ? 'Claude fullscreen on; applies the next time a Claude session starts.'
-          : 'Claude fullscreen off; Claude stays inline in Reverie.',
+          ? `${name} fullscreen on; applies the next time a ${name} session starts.`
+          : `${name} fullscreen off; ${name} stays inline in Reverie.`,
       );
     } catch (error) {
-      appendLog(`Update Claude fullscreen failed: ${errorMessage(error)}`);
+      appendLog(`Update ${name} fullscreen failed: ${errorMessage(error)}`);
     }
   }
 
@@ -738,7 +742,7 @@ export function useWorkspaceMutations({
     setWorkspaceTheme,
     setWorkspaceKeepAwake,
     setCrtEnabled,
-    setClaudeFullscreenEnabled,
+    setAgentFullscreenEnabled,
     setDispatchSettings,
     setWorkspaceDefaultAgentKind,
     setWorkspaceTerminalFontSize,

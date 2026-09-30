@@ -34,8 +34,8 @@ export function AgentsSection({
   detections,
   pending,
   error,
-  claudeFullscreenEnabled,
-  onSetClaudeFullscreenEnabled,
+  fullscreenAgentKinds,
+  onSetAgentFullscreenEnabled,
   bridgeStatus,
   bridgeBusy,
   onToggle,
@@ -44,27 +44,27 @@ export function AgentsSection({
   detections: AgentCliDetection[];
   pending: AgentKind | null;
   error: string | null;
-  claudeFullscreenEnabled: boolean;
-  onSetClaudeFullscreenEnabled: (value: boolean) => void;
+  fullscreenAgentKinds: AgentKind[];
+  onSetAgentFullscreenEnabled: (kind: AgentKind, enabled: boolean) => void;
   bridgeStatus: BridgeStatusReport | null;
   bridgeBusy: AgentKind | null;
   onToggle: (kind: AgentKind, enabled: boolean) => void;
   onRetryInstall: (kind: AgentKind) => void;
 }) {
   // Per-CLI subsettings, rendered under each detected + enabled CLI's row. Keyed
-  // by AgentKind so each CLI owns its own toggles; today only Claude Code has one
-  // (its fullscreen renderer). Add a CLI's controls by giving it entries here.
+  // by AgentKind so each CLI owns its own toggles; today Claude Code and Codex
+  // each have one (their fullscreen renderer). Add a CLI's controls by giving it
+  // entries here.
+  const fullscreenSetting = (kind: AgentKind, name: string): CliSubSetting => ({
+    id: `${kind}-fullscreen`,
+    label: 'Fullscreen rendering',
+    description: `Let ${name} take over the terminal with its own fullscreen renderer. Off keeps ${name} inline in Reverie's scrollback. Takes effect the next time a ${name} session starts.`,
+    checked: fullscreenAgentKinds.includes(kind),
+    onChange: next => onSetAgentFullscreenEnabled(kind, next),
+  });
   const subSettingsByKind: Partial<Record<AgentKind, CliSubSetting[]>> = {
-    claude_code: [
-      {
-        id: 'claude-fullscreen',
-        label: 'Fullscreen rendering',
-        description:
-          "Let Claude take over the terminal with its own fullscreen renderer. Off keeps Claude inline in Reverie's scrollback. Takes effect the next time a Claude session starts.",
-        checked: claudeFullscreenEnabled,
-        onChange: onSetClaudeFullscreenEnabled,
-      },
-    ],
+    claude_code: [fullscreenSetting('claude_code', 'Claude')],
+    codex_cli: [fullscreenSetting('codex_cli', 'Codex')],
   };
   return (
     <section className={sectionClass} aria-labelledby="settings-agents-label">

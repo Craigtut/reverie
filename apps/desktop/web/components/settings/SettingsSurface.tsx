@@ -3,7 +3,7 @@ import { CaretRight, Minus, Moon, Plus, Sun } from '@phosphor-icons/react';
 
 import { css } from '../../styled-system/css';
 import { AGENT_KIND_TO_BRIDGE_CLI } from '../../domain';
-import type { CreateSessionRecordRequest, ShellProject } from '../../domain';
+import type { AgentKind, CreateSessionRecordRequest, ShellProject } from '../../domain';
 import { useAgentCliEnablement } from '../../hooks/useAgentClis';
 import { useBridgeInstallationStatus } from '../../hooks/useConnectionsState';
 import { useShellStore } from '../../store';
@@ -40,8 +40,8 @@ export function SettingsSurface({
   onSetTerminalFontSize,
   crtEnabled,
   onSetCrtEnabled,
-  claudeFullscreenEnabled,
-  onSetClaudeFullscreenEnabled,
+  fullscreenAgentKinds,
+  onSetAgentFullscreenEnabled,
   dispatchShortcut,
   dispatchDefaultVoice,
   dispatchWindowX,
@@ -81,8 +81,8 @@ export function SettingsSurface({
   // The persisted per-CLI "Claude fullscreen" launch setting and its handler.
   // Surfaced as a subsetting under Claude Code on the Agents tab; reflects and
   // writes the workspace value, which the backend reads when launching Claude.
-  claudeFullscreenEnabled: boolean;
-  onSetClaudeFullscreenEnabled: (value: boolean) => void;
+  fullscreenAgentKinds: AgentKind[];
+  onSetAgentFullscreenEnabled: (kind: AgentKind, enabled: boolean) => void;
   // The persisted dispatch settings: the global-shortcut accelerator, whether
   // the popup opens in voice mode, and the saved window position. The Dispatch
   // section reflects and writes these; the popup reads them back.
@@ -492,8 +492,8 @@ export function SettingsSurface({
               detections={detections}
               pending={enablement.pending}
               error={enablement.error}
-              claudeFullscreenEnabled={claudeFullscreenEnabled}
-              onSetClaudeFullscreenEnabled={onSetClaudeFullscreenEnabled}
+              fullscreenAgentKinds={fullscreenAgentKinds}
+              onSetAgentFullscreenEnabled={onSetAgentFullscreenEnabled}
               bridgeStatus={bridge.status}
               bridgeBusy={
                 bridge.busyCli

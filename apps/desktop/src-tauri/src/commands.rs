@@ -208,8 +208,9 @@ pub(crate) struct SetCrtEnabledRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SetClaudeFullscreenEnabledRequest {
-    claude_fullscreen_enabled: bool,
+pub(crate) struct SetAgentFullscreenEnabledRequest {
+    kind: AgentKind,
+    enabled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1195,12 +1196,12 @@ pub(crate) fn set_crt_enabled(
 }
 
 #[tauri::command]
-pub(crate) fn set_claude_fullscreen_enabled(
+pub(crate) fn set_agent_fullscreen_enabled(
     service: State<'_, WorkspaceService>,
-    request: SetClaudeFullscreenEnabledRequest,
+    request: SetAgentFullscreenEnabledRequest,
 ) -> Result<WorkspaceSnapshot, String> {
     service
-        .set_claude_fullscreen_enabled(request.claude_fullscreen_enabled)
+        .set_agent_fullscreen_enabled(request.kind, request.enabled)
         .map_err(|err| err.to_string())
 }
 

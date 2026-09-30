@@ -757,7 +757,7 @@ fn main() {
             commands::set_workspace_default_agent_kind,
             commands::set_terminal_font_size,
             commands::set_crt_enabled,
-            commands::set_claude_fullscreen_enabled,
+            commands::set_agent_fullscreen_enabled,
             commands::set_dispatch_settings,
             commands::classify_dispatch,
             speech_commands::speech_engine_status,

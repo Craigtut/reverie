@@ -118,15 +118,16 @@ pub struct Workspace {
     /// name and falls back to the default if it is gone. macOS / Apple Silicon.
     #[serde(default)]
     pub voice_input_device: Option<String>,
-    /// Whether the Claude Code CLI runs in its fullscreen (alternate-screen)
-    /// renderer inside Reverie's embedded terminal. Off by default: Reverie
-    /// forces Claude's classic inline renderer so the conversation stays in
-    /// Reverie's own scrollback, which the fullscreen takeover would otherwise
-    /// fight. When on, Reverie launches Claude in fullscreen instead. The launch
-    /// sets the matching Claude env var either way, so the choice overrides
-    /// Claude's own saved renderer setting. Claude-only; read at launch.
+    /// Agent CLIs the user has switched into their own fullscreen
+    /// (alternate-screen) renderer inside Reverie's embedded terminal. Absence
+    /// means inline: Reverie forces the CLI's classic renderer so the
+    /// conversation stays in Reverie's own scrollback, which a fullscreen
+    /// takeover would otherwise fight. Each adapter owns how it expresses the
+    /// choice at launch (Claude an env var, Codex a `-c` override), and sets it
+    /// either way so it overrides the CLI's own saved renderer setting. Only
+    /// adapters that report `supports_fullscreen_toggle` honor it; read at launch.
     #[serde(default)]
-    pub claude_fullscreen_enabled: bool,
+    pub fullscreen_agent_kinds: Vec<AgentKind>,
 }
 
 impl Workspace {
@@ -153,7 +154,7 @@ impl Workspace {
             dispatch_window_x: None,
             dispatch_window_y: None,
             voice_input_device: None,
-            claude_fullscreen_enabled: false,
+            fullscreen_agent_kinds: Vec::new(),
         }
     }
 }

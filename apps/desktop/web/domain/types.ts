@@ -214,12 +214,12 @@ export interface ShellWorkspace {
   // Saved dispatch-window position (physical px, top-left). Absent centers it.
   dispatchWindowX?: number | null;
   dispatchWindowY?: number | null;
-  // Per-CLI launch setting: whether Claude Code runs in its fullscreen
-  // (alternate-screen) renderer inside Reverie's terminal. Off by default
-  // (absent/pre-migration means off): Reverie forces Claude's classic inline
-  // renderer so the conversation stays in Reverie's own scrollback. Read at
-  // launch; takes effect the next time a Claude session starts.
-  claudeFullscreenEnabled?: boolean;
+  // Per-CLI launch setting: the CLIs that run in their own fullscreen
+  // (alternate-screen) renderer inside Reverie's terminal (Claude Code, Codex).
+  // Absent from the set means inline: Reverie forces the CLI's classic renderer
+  // so the conversation stays in Reverie's own scrollback. Read at launch; takes
+  // effect the next time a session of that CLI starts.
+  fullscreenAgentKinds?: AgentKind[];
 }
 
 // The navigation we persist so a reload or relaunch reopens the last view

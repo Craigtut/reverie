@@ -162,7 +162,7 @@ impl WorkspaceService {
             dispatch_window_x: None,
             dispatch_window_y: None,
             voice_input_device: None,
-            claude_fullscreen_enabled: false,
+            fullscreen_agent_kinds: Vec::new(),
         };
         self.repo.ensure_seeded(&seed)?;
         self.ensure_general_focus(&seed.general_label)?;
@@ -576,13 +576,22 @@ impl WorkspaceService {
         self.snapshot()
     }
 
-    /// Persist whether the Claude Code CLI launches in its fullscreen
-    /// (alternate-screen) renderer. `build_agent_launch` reads this back and
-    /// sets the matching Claude env var on the spawn, so the change applies the
-    /// next time a Claude session starts. Claude-only; other CLIs ignore it.
-    pub fn set_claude_fullscreen_enabled(&self, enabled: bool) -> Result<WorkspaceSnapshot> {
+    /// Persist whether an agent CLI launches in its fullscreen (alternate-screen)
+    /// renderer. `build_agent_launch` reads this back and hands it to the
+    /// adapter, so the change applies the next time a session of that CLI
+    /// starts. CLIs without a fullscreen toggle ignore it.
+    pub fn set_agent_fullscreen_enabled(
+        &self,
+        kind: AgentKind,
+        enabled: bool,
+    ) -> Result<WorkspaceSnapshot> {
         let mut workspace = self.repo.load_snapshot()?.workspace;
-        workspace.claude_fullscreen_enabled = enabled;
+        let fullscreen = &mut workspace.fullscreen_agent_kinds;
+        if !enabled {
+            fullscreen.retain(|existing| *existing != kind);
+        } else if !fullscreen.contains(&kind) {
+            fullscreen.push(kind);
+        }
         self.repo.save_workspace(&workspace)?;
         self.snapshot()
     }
@@ -1510,21 +1519,11 @@ impl WorkspaceService {
             executable_path,
             adapter.as_ref(),
             injected_native_id.clone(),
+            // Absent from the set means inline: the adapter forces the CLI's
+            // classic renderer so the conversation stays in Reverie's own
+            // scrollback/search/viewport model.
+            snapshot.workspace.fullscreen_agent_kinds.contains(&agent_kind),
         )?;
-        // Claude Code's fullscreen renderer drives the terminal's alternate
-        // screen buffer (the way `vim` does), which fights Reverie's own
-        // scrollback/search/viewport model. Force the classic inline renderer by
-        // default; honor the per-CLI setting when the user opts into fullscreen.
-        // Either env var overrides Claude's own saved renderer setting, so
-        // Reverie's choice is deterministic. Claude-only.
-        if agent_kind == AgentKind::ClaudeCode {
-            let (key, value) = if snapshot.workspace.claude_fullscreen_enabled {
-                ("CLAUDE_CODE_NO_FLICKER", "1")
-            } else {
-                ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")
-            };
-            spec.command.env.insert(key.to_owned(), value.to_owned());
-        }
         // Deliver the dispatch initial prompt on a brand-new launch only. CLIs
         // that take a trailing positional prompt get it appended (it submits on
         // startup); the rest receive it as deferred PTY input the runtime types
