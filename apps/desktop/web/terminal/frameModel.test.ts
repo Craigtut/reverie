@@ -8,6 +8,7 @@ import {
   buildSessionTerminalView,
   computePaintWindow,
   emptyTerminalView,
+  frameCoveringRendererRows,
 } from './frameModel';
 
 const surface: TerminalSurface = {
@@ -231,5 +232,33 @@ describe('computePaintWindow', () => {
       lastStartRow: null,
     });
     expect(hidden.windowFrame.cursor?.visible).toBe(false); // row 0 < startRow 7
+  });
+});
+
+describe('frameCoveringRendererRows', () => {
+  const content = (index: number): TerminalRow => ({
+    index,
+    dirty: true,
+    cells: [{ text: 'x', width: 1 }] as TerminalRow['cells'],
+  });
+  const windowFrame = (dirty: TerminalFrame['dirty'], rows: TerminalRow[]): TerminalFrame => ({
+    dirty,
+    cols: 10,
+    rows,
+    cursor: { visible: false, row: 0, col: 0 },
+  });
+
+  it('pads a full paint with blank dirty rows up to the renderer height', () => {
+    const padded = frameCoveringRendererRows(windowFrame('full', [content(0), content(1)]), 5);
+    expect(padded.rows.map(row => row.index)).toEqual([0, 1, 2, 3, 4]);
+    expect(padded.rows.slice(2).every(row => row.dirty && row.cells.length === 0)).toBe(true);
+    expect(padded.rows[0].cells.length).toBe(1);
+  });
+
+  it('leaves partial paints and already-covering frames untouched', () => {
+    const partial = windowFrame('partial', [content(1)]);
+    expect(frameCoveringRendererRows(partial, 5)).toBe(partial);
+    const full = windowFrame('full', [content(0), content(1)]);
+    expect(frameCoveringRendererRows(full, 2)).toBe(full);
   });
 });

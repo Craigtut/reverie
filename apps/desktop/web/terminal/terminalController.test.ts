@@ -2626,12 +2626,13 @@ describe('createTerminalController', () => {
       true,
     );
 
-    expect((paintFrame.mock.calls[0]?.[0] as TerminalFrame).rows.map(rowText)).toEqual([
-      'alternate',
-      '',
-      '',
-      '',
-    ]);
+    // The primary paint mounted the shared renderer ~3 screens tall (12 rows);
+    // the alt-screen paint covers all of it so no primary pixels survive below
+    // the 4-row grid.
+    const altPaint = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
+    expect(altPaint.rows.map(rowText)).toEqual(['alternate', ...Array(11).fill('')]);
+    expect(altPaint.rows.map(r => r.index)).toEqual([...Array(12).keys()]);
+    expect(altPaint.rows.every(r => r.dirty)).toBe(true);
 
     paintFrame.mockClear();
     controller.ingestFrame(
@@ -2739,7 +2740,9 @@ describe('createTerminalController', () => {
     expect(clear).not.toHaveBeenCalled();
     const painted = paintFrame.mock.calls[0]?.[0] as TerminalFrame;
     expect(painted.dirty).toBe('full');
-    expect(painted.rows.map(rowText)).toEqual(['', '', '', 'alternate prompt']);
+    expect(painted.rows.slice(0, 4).map(rowText)).toEqual(['', '', '', 'alternate prompt']);
+    // Rows below the grid are cleared too, not left holding the primary paint.
+    expect(painted.rows.slice(4).every(r => r.dirty && rowText(r) === '')).toBe(true);
   });
 
   it('preserves alternate-screen clean rows across partial redraws', () => {

@@ -28,6 +28,7 @@ import {
   buildSessionTerminalView,
   computePaintWindow,
   emptyTerminalView,
+  frameCoveringRendererRows,
 } from './frameModel';
 import {
   applyViewportFrameToBuffer,
@@ -1221,7 +1222,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
           dirtyRowsInWindow(dirtyAbsoluteRows, startRow),
           cursorLocalRowInWindow(lastPaintedCursorAbsoluteRow, startRow, displayRows),
         )
-      : windowFrame;
+      : frameCoveringRendererRows(windowFrame, activeRenderer?.rows ?? 0);
 
     if (els.canvas) {
       // The canvas sits below the top inset (the injected blank scroll space), so

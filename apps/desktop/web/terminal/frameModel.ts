@@ -170,3 +170,24 @@ export function computePaintWindow(args: {
 
   return { startRow, displayRows, forceFullPaint, windowFrame };
 }
+
+// Pad a full-paint window with blank rows so it covers every row of the
+// renderer. The canvas and renderer are shared across sessions and paint modes,
+// and a buffer-backed paint mounts them about three screens tall, so an
+// alternate-screen window (capped at the grid height) can be shorter than the
+// renderer. With `preserveDrawingBuffer`, rows a full paint does not list keep
+// whatever was drawn there last, which showed another session's rows beneath a
+// fullscreen app. Partial paints and windows already as tall pass through.
+export function frameCoveringRendererRows(
+  frame: TerminalFrame,
+  rendererRows: number,
+): TerminalFrame {
+  if (frame.dirty !== 'full' || frame.rows.length >= rendererRows) return frame;
+  const present = new Set(frame.rows.map(row => row.index));
+  const rows = [...frame.rows];
+  for (let index = 0; index < rendererRows; index += 1) {
+    if (!present.has(index)) rows.push({ index, dirty: true, cells: [] });
+  }
+  rows.sort((a, b) => a.index - b.index);
+  return { ...frame, rows };
+}
