@@ -1192,8 +1192,13 @@ export function useTerminalSession(params: {
 
     function clearActiveTerminal() {
       const currentStore = useTerminalStore.getState();
+      // A newer terminal may already own this session: a restart relaunches it
+      // while this one's exit is still in flight. Only release what this
+      // terminal still owns, or the late exit unbinds the live relaunch.
+      const binding = currentStore.sessionTerminalBindings[session.id];
+      const superseded = Boolean(binding) && binding?.terminalId !== terminalId;
       const nextBindings = { ...currentStore.sessionTerminalBindings };
-      delete nextBindings[session.id];
+      if (!superseded) delete nextBindings[session.id];
       const nextActiveTerminalId =
         currentStore.activeTerminalId === terminalId ? null : currentStore.activeTerminalId;
       store.setSessionTerminalBindings(nextBindings);
@@ -1201,9 +1206,11 @@ export function useTerminalSession(params: {
       store.setTerminalInputArmed(
         terminalInputArmedForActiveId(nextBindings, nextActiveTerminalId),
       );
-      store.setRunningSessionId(current => (current === session.id ? null : current));
-      store.setLaunchingSessionId(current => (current === session.id ? null : current));
-      store.clearSessionTerminalContentReady(session.id);
+      if (!superseded) {
+        store.setRunningSessionId(current => (current === session.id ? null : current));
+        store.setLaunchingSessionId(current => (current === session.id ? null : current));
+        store.clearSessionTerminalContentReady(session.id);
+      }
       syncTerminalFrontendActivity(nextActiveTerminalId);
     }
 

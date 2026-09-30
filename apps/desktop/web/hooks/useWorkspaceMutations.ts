@@ -42,6 +42,9 @@ interface WorkspaceMutationsOptions {
 // (terminate + relaunch), tab show/hide, session deletion, and focus/project
 // archival (terminating any bound CLIs first). Each reads the live terminal
 // bindings via getState so it sees processes started after this render.
+// How long a restart waits for the old process's exit before detaching it anyway.
+const RELAUNCH_EXIT_WAIT_MS = 3_000;
+
 export function useWorkspaceMutations({
   model,
   terminal,
@@ -151,9 +154,94 @@ export function useWorkspaceMutations({
           ? `${name} fullscreen on; applies the next time a ${name} session starts.`
           : `${name} fullscreen off; ${name} stays inline in Reverie.`,
       );
+      offerFullscreenRestart(snapshot, kind, name);
     } catch (error) {
       appendLog(`Update ${name} fullscreen failed: ${errorMessage(error)}`);
     }
+  }
+
+  // Open sessions of the CLI keep the renderer they started with, so offer to
+  // restart them. Only idle ones are touched: a session mid-turn or waiting on
+  // the user is never stopped. Restarting stops each process (the conversation
+  // is saved) and resumes the one being viewed right away; the rest resume in
+  // the new mode when next opened, since opening a stopped session launches it.
+  // Launching several at once would fight over the single shared terminal view.
+  function offerFullscreenRestart(snapshot: WorkspaceShellSnapshot, kind: AgentKind, name: string) {
+    const bindings = useTerminalStore.getState().sessionTerminalBindings;
+    const cortexActivity = useActivityStore.getState().cortexActivity;
+    const open = snapshot.sessions.filter(
+      session => session.agentKind === kind && bindings[session.id],
+    );
+    if (open.length === 0) return;
+    const busy = (session: ShellSession) => {
+      const status = activityForSession(session, cortexActivity)?.status;
+      return (
+        status === 'working' || status === 'awaiting_permission' || status === 'awaiting_response'
+      );
+    };
+    const idle = open.filter(session => !busy(session));
+    const busyCount = open.length - idle.length;
+    const busyNote =
+      busyCount > 0
+        ? ` ${busyCount === 1 ? 'One session is' : `${busyCount} sessions are`} busy and will switch the next time ${busyCount === 1 ? 'it starts' : 'they start'}.`
+        : '';
+    if (idle.length === 0) {
+      useOverlayStore.getState().pushToast({
+        message: `Open ${name} sessions are busy; they switch the next time they start.`,
+      });
+      return;
+    }
+    const count =
+      idle.length === 1 ? `1 open ${name} session` : `${idle.length} open ${name} sessions`;
+    useOverlayStore.getState().requestConfirm({
+      title: `Restart ${count}?`,
+      body: `They still use the old view. Restarting resumes each conversation where it left off.${busyNote}`,
+      confirmLabel: 'Restart',
+      onConfirm: () => void restartSessions(idle),
+    });
+  }
+
+  // Stop a session's process so it can be relaunched with new launch settings.
+  // Waits for its exit to land (the exit handler releases the binding), since
+  // a relaunch started first would find the old binding and do nothing. Falls
+  // back to detaching if the exit is slow, so a stuck process cannot block.
+  async function stopSessionForRelaunch(session: ShellSession) {
+    const binding = useTerminalStore.getState().sessionTerminalBindings[session.id];
+    if (!binding) return;
+    await terminateSession(binding.terminalId).catch(error => {
+      appendLog(`Restart stop failed for ${session.title}: ${errorMessage(error)}`);
+    });
+    const released = () =>
+      useTerminalStore.getState().sessionTerminalBindings[session.id]?.terminalId !==
+      binding.terminalId;
+    if (!released()) {
+      await new Promise<void>(resolve => {
+        const timeout = window.setTimeout(done, RELAUNCH_EXIT_WAIT_MS);
+        const unsubscribe = useTerminalStore.subscribe(() => {
+          if (released()) done();
+        });
+        function done() {
+          window.clearTimeout(timeout);
+          unsubscribe();
+          resolve();
+        }
+      });
+    }
+    if (!released()) terminal.detachSession(session.id);
+  }
+
+  async function restartSessions(sessions: ShellSession[]) {
+    const viewed = useNavigationStore.getState().selectedSessionId;
+    for (const session of sessions) {
+      await stopSessionForRelaunch(session);
+    }
+    const relaunch = sessions.find(session => session.id === viewed);
+    if (relaunch) {
+      await terminal.launchSession(relaunch).catch(error => {
+        appendLog(`Restart failed for ${relaunch.title}: ${errorMessage(error)}`);
+      });
+    }
+    appendLog(`Restarted ${sessions.length} session(s) to apply the renderer setting.`);
   }
 
   async function setDispatchSettings(next: {
@@ -241,11 +329,7 @@ export function useWorkspaceMutations({
 
     setBusy(true);
     try {
-      if (binding) {
-        await terminateSession(binding.terminalId).catch(error => {
-          appendLog(`Restart terminate failed: ${errorMessage(error)}`);
-        });
-      }
+      if (binding) await stopSessionForRelaunch(selectedSession);
       const snapshot = await invoke<WorkspaceShellSnapshot>('set_session_dangerous_mode', {
         request: { sessionId: selectedSession.id, dangerousModeOverride: next },
       });
