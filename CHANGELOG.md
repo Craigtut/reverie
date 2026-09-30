@@ -7,6 +7,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-09-29
+
+### Added
+- A fullscreen rendering toggle for Codex in Settings, next to the existing one
+  for Claude Code. When on, Codex runs its own fullscreen transcript view; when
+  off, Codex stays inline in Reverie's scrollback. It applies the next time a
+  Codex session starts, including resumed ones.
+
+### Changed
+- Codex sessions now start inline by default. Codex 0.157 made its fullscreen
+  view the default, so Codex sessions had been switching to it on their own. Turn
+  on the new toggle to keep the fullscreen view.
+
+### Fixed
+- Scrolling in fullscreen agent sessions (Claude Code and Codex fullscreen, and
+  other apps that capture the mouse) is no longer jumpy on a trackpad. Reverie
+  now scrolls by how far you move instead of sending a full scroll step for
+  every tiny trackpad event, and matches each CLI's step size so the content
+  follows your fingers.
+- Rows from another session no longer show through at the bottom of a
+  fullscreen session such as Codex. Leftover pixels below the fullscreen app's
+  grid are now cleared when it paints.
+
 ## [0.6.8] - 2026-09-02
 
 ### Fixed
