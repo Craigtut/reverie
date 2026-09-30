@@ -235,6 +235,10 @@ pub struct CodexRolloutFold {
     /// ordinary `task_complete` can be followed by another automatic goal turn,
     /// so an active goal stays working until a terminal goal update arrives.
     goal_active: bool,
+    /// Whether a turn is open: set by `task_started`, cleared by the records
+    /// that end one. `task_complete` still reads as working (see below), but it
+    /// closes the turn, so a later resume marker can tell the session is idle.
+    turn_open: bool,
     sequence: u64,
     // Best-effort approval signal: Codex records the approval-triggering moment
     // as a `function_call` carrying `with_escalated_permissions: true`. While
@@ -257,6 +261,7 @@ impl CodexRolloutFold {
             last_timestamp: None,
             current_turn_id: None,
             goal_active: false,
+            turn_open: false,
             sequence: 0,
             pending_escalation: None,
         }
@@ -295,6 +300,7 @@ impl CodexRolloutFold {
             // tools, pending approval, and any prior error.
             (_, "task_started") => {
                 self.status = ActivityStatus::Working;
+                self.turn_open = true;
                 self.current_turn_id = turn_id_from(&record.payload);
                 self.active.clear();
                 self.pending_escalation = None;
@@ -345,6 +351,7 @@ impl CodexRolloutFold {
             // notification or an explicit terminal goal update arrives.
             (_, "task_complete") => {
                 self.status = ActivityStatus::Working;
+                self.turn_open = false;
                 if let Some(id) = turn_id_from(&record.payload) {
                     self.current_turn_id = Some(id);
                 }
@@ -355,6 +362,7 @@ impl CodexRolloutFold {
             // `turn_aborted` is itself an explicit terminal edge.
             (_, "turn_aborted") => {
                 self.status = ActivityStatus::AwaitingInput;
+                self.turn_open = false;
                 if let Some(id) = turn_id_from(&record.payload) {
                     self.current_turn_id = Some(id);
                 }
@@ -379,6 +387,7 @@ impl CodexRolloutFold {
                 | Some("paused")
                 | Some("blocked") => {
                     self.goal_active = false;
+                    self.turn_open = false;
                     self.status = ActivityStatus::AwaitingInput;
                     if let Some(id) = turn_id_from(&record.payload) {
                         self.current_turn_id = Some(id);
@@ -388,6 +397,18 @@ impl CodexRolloutFold {
                 }
                 _ => {}
             },
+            // Codex appends this when a thread is (re)opened, e.g. on every
+            // `codex resume`, and when settings change between turns. With no
+            // turn open and no goal running, the agent is idle at its prompt.
+            // Without this, a resumed session whose history ends in
+            // `task_complete` reads as working forever: that turn's completion
+            // notification fired long ago and never repeats.
+            (_, "thread_settings_applied") => {
+                if !self.turn_open && !self.goal_active && self.pending_escalation.is_none() {
+                    self.status = ActivityStatus::AwaitingInput;
+                    self.active.clear();
+                }
+            }
             (_, "error") => {
                 self.status = ActivityStatus::Error;
                 let message = record
@@ -1080,6 +1101,57 @@ mod tests {
         let state = read_codex_rollout_state(&path).unwrap().expect("state");
         assert_eq!(state.status, ActivityStatus::Working);
         assert!(state.awaiting_permission.is_none());
+    }
+
+    #[test]
+    fn resume_marker_after_a_finished_turn_reads_idle() {
+        let dir = TempDir::new().unwrap();
+        let path = write_rollout(
+            dir.path(),
+            "rollout-resumed-idle.jsonl",
+            &[
+                META,
+                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#,
+                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"a"}}"#,
+                r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"thread-1"}}"#,
+            ],
+        );
+
+        let state = read_codex_rollout_state(&path).unwrap().expect("state");
+        assert_eq!(state.status, ActivityStatus::AwaitingInput);
+        assert_eq!(
+            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
+            TurnStatus::Completed
+        );
+    }
+
+    #[test]
+    fn resume_marker_does_not_end_an_open_turn_or_active_goal() {
+        let dir = TempDir::new().unwrap();
+        let open_turn = write_rollout(
+            dir.path(),
+            "rollout-open-turn.jsonl",
+            &[
+                META,
+                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#,
+                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"thread-1"}}"#,
+            ],
+        );
+        let state = read_codex_rollout_state(&open_turn).unwrap().expect("state");
+        assert_eq!(state.status, ActivityStatus::Working);
+
+        let goal = write_rollout(
+            dir.path(),
+            "rollout-goal-resume.jsonl",
+            &[
+                META,
+                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"g","goal":{"status":"active"}}}"#,
+                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"g"}}"#,
+                r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"thread-1"}}"#,
+            ],
+        );
+        let state = read_codex_rollout_state(&goal).unwrap().expect("state");
+        assert_eq!(state.status, ActivityStatus::Working);
     }
 
     #[test]
