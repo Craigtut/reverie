@@ -3,7 +3,7 @@ import { AnimatePresence } from 'motion/react';
 import { useEffect, useRef, useState } from 'react';
 import { css } from '../../styled-system/css';
 import { agentLabel, isResumeLaunch } from '../../domain';
-import { useUiStore } from '../../store';
+import { useTerminalStore, useUiStore } from '../../store';
 import type { ActivityPermissionRequest, SessionTerminalBinding, ShellSession } from '../../domain';
 import type { TerminalSession } from '../../hooks';
 import { Typography } from '../primitives/Typography';
@@ -84,6 +84,8 @@ export function TerminalSurface({
   // the boot still covers the screen still gets its moment afterward); `dwellDone`
   // marks the minimum on-screen time, so an instant wake still reads as a moment.
   const bootSequenceActive = useUiStore(s => s.bootSequenceActive);
+  // The grid is fitted for a fullscreen (alternate-screen) app; see terminalInsetPx.
+  const fullscreenApp = useTerminalStore(s => Boolean(s.terminalSurface.fullscreenApp));
   const waking = showLaunchOverlay && launchOverlayLaunching;
   const [oweResume, setOweResume] = useState(false);
   const [dwellDone, setDwellDone] = useState(false);
@@ -283,9 +285,10 @@ export function TerminalSurface({
           band and hides scrolled-back rows showing through the gaps between the
           pills; the bottom fade lets the live tail trail off the bottom edge.
           Both fade from the terminal background, so the blend is seamless, and
-          are click-through. */}
+          are click-through. A fullscreen app never scrolls and its grid runs
+          down into that band, so it gets no bottom fade. */}
         <div className={topFadeClass} aria-hidden="true" />
-        <div className={bottomFadeClass} aria-hidden="true" />
+        {fullscreenApp ? null : <div className={bottomFadeClass} aria-hidden="true" />}
         {/* Floating "jump to latest": only present once the user has scrolled up
           off the live tail. Anchored to the panel's bottom-right, it drops them
           back to the newest output. */}

@@ -37,9 +37,17 @@ export const SCROLL_FOLLOW_EPSILON_PX = 4;
 // TUI is never clipped under the chrome. It never changes `cols`.
 export const TERMINAL_TOP_INSET_PX = 64;
 export const TERMINAL_BOTTOM_INSET_PX = 64;
+// A fullscreen app (alternate screen: Claude Code or Codex fullscreen, vim) owns
+// the whole grid and never scrolls, so the inline scroll padding and the bottom
+// fade only cost it rows. It keeps a slim margin that lines up with the bottom
+// of the sidebar card instead. The top inset stays: the tabs still float there.
+export const FULLSCREEN_APP_BOTTOM_INSET_PX = 20;
 
-export function terminalInsetPx(_surface: TerminalSurface) {
-  return { top: TERMINAL_TOP_INSET_PX, bottom: TERMINAL_BOTTOM_INSET_PX };
+export function terminalInsetPx(surface: TerminalSurface) {
+  return {
+    top: TERMINAL_TOP_INSET_PX,
+    bottom: surface.fullscreenApp ? FULLSCREEN_APP_BOTTOM_INSET_PX : TERMINAL_BOTTOM_INSET_PX,
+  };
 }
 
 // Cap the live terminal grid width so it keeps a calm, readable measure and a
@@ -62,6 +70,10 @@ export interface TerminalSurface {
   // The monospace font stack the cell + glyphs use. Kept on the surface so a
   // single source of truth flows to both renderers and the measurement.
   fontFamily: string;
+  // Whether the grid is fitted for a fullscreen (alternate-screen) app, which
+  // trades the inline bottom scroll padding for rows. Follows the active
+  // terminal's screen mode; absent means inline.
+  fullscreenApp?: boolean;
 }
 
 // Derive the base surface (cell + metrics) for a font size at a given DPR,

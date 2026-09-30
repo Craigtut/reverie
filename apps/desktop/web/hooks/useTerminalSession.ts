@@ -38,6 +38,7 @@ import {
   wheelRowsPerReport,
 } from '../domain';
 import type {
+  AgentKind,
   CreateSessionRecordRequest,
   RenderMetrics,
   ShellSession,
@@ -150,6 +151,10 @@ const SURFACE_RESIZE_SETTLE_MS = 80;
 // immediately (no default-size flash).
 const SURFACE_STARTUP_SETTLE_MS = 200;
 const SURFACE_STARTUP_GRACE_MS = 1_200;
+// How long the active terminal must hold a new screen mode (alternate or not)
+// before the grid refits for it. Long enough to ride out a CLI's inline startup
+// frame before it enters the alternate screen.
+const SCREEN_MODE_SETTLE_MS = 750;
 const TERMINAL_DIAGNOSTIC_FLUSH_MS = 500;
 const TERMINAL_DIAGNOSTIC_BATCH_LIMIT = 100;
 const TERMINAL_SLOW_PAINT_MS = 24;
@@ -429,6 +434,9 @@ export function useTerminalSession(params: {
     capturedAnchor?: { anchor: { id: number; col: number } | null };
   } | null>(null);
   const backendResizeTimerRef = useRef(0);
+  // Debounces a live screen-mode change before refitting the grid (see
+  // noteActiveScreenMode).
+  const screenModeTimerRef = useRef(0);
   const terminalDiagnosticEventsRef = useRef<unknown[]>([]);
   const terminalDiagnosticTimerRef = useRef(0);
 
@@ -890,6 +898,52 @@ export function useTerminalSession(params: {
     return true;
   }
 
+  // Refit the grid for a fullscreen (alternate-screen) app or an inline one: a
+  // fullscreen app gets the rows the inline bottom scroll padding would take
+  // (see FULLSCREEN_APP_BOTTOM_INSET_PX). With `resizeBackend`, the active
+  // terminal is resized to match. Each session's PTY settles at the size for its
+  // own mode, so switching between an inline and a fullscreen session resizes
+  // only the one being activated, and only if it has not settled yet.
+  function applySurfaceScreenMode(fullscreenApp: boolean, resizeBackend: boolean) {
+    const previous = controller.getSurface();
+    if (Boolean(previous.fullscreenApp) === fullscreenApp) return;
+    const flagged = { ...previous, fullscreenApp };
+    const viewport = surfaceViewportRef.current;
+    const next =
+      viewport && viewport.clientWidth > 0 && viewport.clientHeight > 0
+        ? terminalSurfaceForBounds(viewport.clientWidth, viewport.clientHeight, flagged)
+        : flagged;
+    controller.setSurface(next);
+    useTerminalStore.getState().setTerminalSurface(next);
+    if (!resizeBackend) return;
+    controller.paintCurrent(useNavigationStore.getState().selectedSessionId, next);
+    const terminalId = useTerminalStore.getState().activeTerminalId;
+    if (terminalId && (next.rows !== previous.rows || next.cols !== previous.cols)) {
+      scheduleBackendTerminalResize(terminalId, next.cols, next.rows);
+    }
+  }
+
+  // Follow the active terminal's screen mode as frames arrive. Debounced, so a
+  // CLI that paints an inline startup frame before entering the alternate
+  // screen (Codex) does not bounce the grid, and a brief mode flip settles
+  // before the PTY is resized. The mode is re-read when the timer fires.
+  function noteActiveScreenMode(alternateScreen: boolean) {
+    const current = Boolean(controller.getSurface().fullscreenApp);
+    if (alternateScreen === current) {
+      if (screenModeTimerRef.current !== 0) {
+        window.clearTimeout(screenModeTimerRef.current);
+        screenModeTimerRef.current = 0;
+      }
+      return;
+    }
+    if (screenModeTimerRef.current !== 0) return;
+    screenModeTimerRef.current = window.setTimeout(() => {
+      screenModeTimerRef.current = 0;
+      const modes = controller.getLastFrameModes();
+      if (modes) applySurfaceScreenMode(Boolean(modes.alternateScreen), true);
+    }, SCREEN_MODE_SETTLE_MS);
+  }
+
   function flushSettledViewportSize() {
     if (surfaceResizeSettleTimerRef.current !== 0) {
       window.clearTimeout(surfaceResizeSettleTimerRef.current);
@@ -1311,6 +1365,8 @@ export function useTerminalSession(params: {
       lastEventAt = now;
 
       framesReceived += 1;
+      const alternateScreen = decoded.frame.modes?.alternateScreen;
+      if (terminalActive && alternateScreen !== undefined) noteActiveScreenMode(alternateScreen);
       pendingTerminalFramePayloads.push({ frame: decoded.frame });
       if (!terminalFrameRaf) terminalFrameRaf = requestAnimationFrame(paintPendingTerminalFrames);
     }
@@ -1448,6 +1504,8 @@ export function useTerminalSession(params: {
     ensureBackendTerminalSurface(binding.terminalId);
     if (view) {
       controller.applyView(view);
+      // Fit the grid to this session's own screen mode right away.
+      applySurfaceScreenMode(Boolean(view.lastFrame?.modes?.alternateScreen), true);
       markSessionTerminalContentReadyIfPainted(session.id);
     } else {
       controller.clear();
@@ -1494,6 +1552,13 @@ export function useTerminalSession(params: {
       // Spawn at the live viewport geometry when it is already measured, so the CLI
       // renders its first frame at the final size instead of being resized off the
       // default moments later (avoids the leading edge of the startup resize storm).
+      // Predict the screen mode from the CLI's fullscreen setting, so a
+      // fullscreen launch spawns at its final grid instead of being resized once
+      // it enters the alternate screen.
+      const fullscreenLaunch = (
+        useShellStore.getState().shell.workspace.fullscreenAgentKinds ?? []
+      ).includes(session.agentKind as AgentKind);
+      applySurfaceScreenMode(fullscreenLaunch, false);
       fitSurfaceToViewport();
       const surface = controller.getSurface();
       const request: StartSessionRequest = {
