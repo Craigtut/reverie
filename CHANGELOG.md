@@ -7,6 +7,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-09-30
+
+### Added
+- Changing the fullscreen rendering setting for Claude Code or Codex now offers
+  to restart that CLI's open sessions so the change applies right away. The
+  session you are viewing resumes immediately in the new view; the others switch
+  the next time you open them. Sessions that are working or waiting on you are
+  left alone.
+
+### Changed
+- Fullscreen agent sessions use more of the window. The scroll padding and fade
+  at the bottom of the terminal only help inline sessions, so a fullscreen app
+  now gets that space as extra rows.
+
+### Fixed
+- Turning Codex fullscreen off now works for resumed sessions. Codex ignored the
+  setting on resume and came back fullscreen, leaving empty space at the bottom
+  of the terminal.
+- Resumed Codex sessions no longer show as working when they are idle. A session
+  whose last turn had finished read as working again every time it resumed.
+- Restarting a session (for example after toggling auto-approve) no longer loses
+  track of the new process, which could leave it running with no terminal shown.
+
 ## [0.6.9] - 2026-09-29
 
 ### Added
