@@ -386,7 +386,12 @@ impl TerminalSessionRuntime {
             bail!("terminal resize requires non-zero cols and rows");
         }
 
-        self.controller_for(terminal_id)?.resize(cols, rows)?;
+        // Fail fast on a session with no live PTY. The worker resizes the PTY
+        // itself, right after the VT (see the Resize command): resizing it here
+        // first would SIGWINCH the CLI before the VT grew, and a fullscreen
+        // app's redraw for the new size would be clamped into the old grid,
+        // leaving blank rows below it.
+        self.controller_for(terminal_id)?;
         self.command_sender_for(terminal_id)?
             .send(TerminalRuntimeCommand::Resize { cols, rows, anchor })
             .context("failed to queue terminal resize command")?;
@@ -1166,6 +1171,12 @@ fn apply_terminal_command(
     match command {
         TerminalRuntimeCommand::Resize { cols, rows, anchor } => {
             terminal.resize_with_anchor(cols, rows, anchor)?;
+            // Resize the PTY only once the VT has the new size. The CLI redraws
+            // on the SIGWINCH this sends, and its output is read on this same
+            // worker after this command, so it always lands in the resized VT.
+            if let Some(controller) = controller {
+                controller.resize(cols, rows)?;
+            }
             // Reflow renumbers rows, so bump the generation immediately; the
             // forced Full frame that follows carries the new generation, and
             // a history-range request drained after this resize is served at
