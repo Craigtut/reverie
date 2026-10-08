@@ -330,11 +330,15 @@ const terminalBodyClass = css({
   minWidth: 0,
   minHeight: 0,
   display: 'grid',
-  // The viewport is the only in-flow child (the permission banner floats), so it
-  // takes the first track. The second stays as the slot for any future in-flow
-  // row above it; changing the first track's sizing would move the terminal's
-  // whole height path, which the imperative canvas sizing is tuned against.
-  gridTemplateRows: 'auto minmax(0, 1fr)',
+  // The viewport is the only in-flow child (the permission banner floats), so
+  // the body is one track and it MUST be minmax(0, 1fr), never `auto`. An auto
+  // track sizes to its content capped at the available space, and the
+  // viewport's content is the spacer, which is sized from the current grid. For
+  // inline output the scrollback runs taller than the window so the cap hid the
+  // problem, but a fullscreen app's spacer is exactly its grid: when the window
+  // grew, the viewport kept its old height, the resize observer never fired, and
+  // the app stayed stuck at the old row count with empty space below.
+  gridTemplateRows: 'minmax(0, 1fr)',
   // The column MUST be minmax(0, 1fr), never the implicit `auto`. An auto track
   // sizes to its widest item's max-content contribution, and a nowrap child
   // contributes its FULL untruncated text width however much
