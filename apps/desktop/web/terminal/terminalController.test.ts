@@ -3144,6 +3144,95 @@ describe('createTerminalController', () => {
     ]);
   });
 
+  it('asks for a fresh frame when the resize guard expires after carrying rows over', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+    vi.stubGlobal('window', {
+      devicePixelRatio: 1,
+      setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+      clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
+    });
+    try {
+      const onResizeGuardExpired = vi.fn();
+      const controller = createTerminalController({
+        surface,
+        insetPx: { top: surface.cellHeight, bottom: 0 },
+        onScrollbackRowCount: vi.fn(),
+        onLiveFollow: vi.fn(),
+        onResizeGuardExpired,
+        createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+      });
+      const canvas = { style: {} } as HTMLCanvasElement;
+      const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+      const spacer = { style: {} } as HTMLDivElement;
+      controller.attach({ canvas, viewport, spacer });
+
+      controller.ingestFrame(
+        'session-1',
+        {
+          ...frame([row(0, 'header'), row(1, 'old prompt'), row(2, 'old footer')]),
+          modes: { alternateScreen: true },
+        },
+        true,
+      );
+      controller.setSurface({ ...surface, cols: 100 });
+      // The CLI cleared the screen and redrew only its header: the guard
+      // carries the old rows over, which may be stale.
+      controller.ingestFrame(
+        'session-1',
+        { ...frame([row(0, 'header')]), modes: { alternateScreen: true } },
+        true,
+      );
+      expect(onResizeGuardExpired).not.toHaveBeenCalled();
+      vi.runAllTimers();
+      expect(onResizeGuardExpired).toHaveBeenCalledWith('session-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not ask for a fresh frame when the resize guard carried nothing over', () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('requestAnimationFrame', vi.fn());
+    vi.stubGlobal('window', {
+      devicePixelRatio: 1,
+      setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+      clearTimeout: (id: ReturnType<typeof setTimeout>) => clearTimeout(id),
+    });
+    try {
+      const onResizeGuardExpired = vi.fn();
+      const controller = createTerminalController({
+        surface,
+        insetPx: { top: surface.cellHeight, bottom: 0 },
+        onScrollbackRowCount: vi.fn(),
+        onLiveFollow: vi.fn(),
+        onResizeGuardExpired,
+        createRenderer: (_canvas, _surface, displayRows) => fakeRenderer(displayRows),
+      });
+      const canvas = { style: {} } as HTMLCanvasElement;
+      const viewport = { clientHeight: 40, scrollHeight: 40, scrollTop: 0 } as HTMLDivElement;
+      const spacer = { style: {} } as HTMLDivElement;
+      controller.attach({ canvas, viewport, spacer });
+
+      const full = [row(0, 'header'), row(1, 'prompt'), row(2, 'footer')];
+      controller.ingestFrame(
+        'session-1',
+        { ...frame(full), modes: { alternateScreen: true } },
+        true,
+      );
+      controller.setSurface({ ...surface, cols: 100 });
+      controller.ingestFrame(
+        'session-1',
+        { ...frame(full), modes: { alternateScreen: true } },
+        true,
+      );
+      vi.runAllTimers();
+      expect(onResizeGuardExpired).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('preserves background alternate-screen state for later activation', () => {
     vi.stubGlobal('requestAnimationFrame', vi.fn());
 

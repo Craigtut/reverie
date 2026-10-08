@@ -111,6 +111,11 @@ export interface TerminalControllerOptions {
   // Fired when live scroll lands on rows the frontend cache does not have yet.
   // The hook fetches that range from libghostty's live buffer and merges it.
   onMissingLiveRows?: (request: TerminalHistoryRowsRequest) => boolean | undefined;
+  // Fired when a session's resize guard expires after it carried rows over
+  // from the previous screen. The guard cannot tell a transient mid-redraw
+  // frame from a row the CLI deliberately cleared and will never rewrite, so
+  // the hook asks the backend for a fresh Full frame and the real screen wins.
+  onResizeGuardExpired?: (sessionId: string) => void;
   // Lightweight paint-loop instrumentation. The hook aggregates this into the
   // runtime metrics payload, so renderer tuning has real scroll/frame evidence.
   onPaintSample?: (sample: TerminalPaintSample) => void;
@@ -253,6 +258,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
     onComposite,
     onScrollMetrics,
     onMissingLiveRows,
+    onResizeGuardExpired,
     onPaintSample,
     onTrace,
   } = options;
@@ -343,6 +349,8 @@ export function createTerminalController(options: TerminalControllerOptions) {
   const sessionCursorFallbacks: Record<string, SessionCursorFallback> = {};
   const resizeReflowPendingSessions: Record<string, boolean> = {};
   const resizeReflowGuardTimers: Record<string, number> = {};
+  // Sessions whose resize guard carried rows over from the previous screen.
+  const resizeGuardCarriedRows: Record<string, boolean> = {};
 
   function trace(event: TerminalControllerTraceEvent) {
     const timed: TimedTerminalControllerTraceEvent = { ...event, timestampMs: nowMs() };
@@ -1787,6 +1795,7 @@ export function createTerminalController(options: TerminalControllerOptions) {
         forSurface,
         resizeReflowPendingSessions[sessionId] === true,
       );
+      if (alternateFrame !== frame) resizeGuardCarriedRows[sessionId] = true;
       const view = viewWithLiveFollow(
         buildSessionTerminalView(previousView, alternateFrame, forSurface),
         sessionId,
@@ -1904,7 +1913,10 @@ export function createTerminalController(options: TerminalControllerOptions) {
           alternateSurface,
           resizeReflowPendingSessions[sessionId] === true,
         );
-        if (alternateFrame !== frame) alternateNeedsFullPaint = true;
+        if (alternateFrame !== frame) {
+          alternateNeedsFullPaint = true;
+          resizeGuardCarriedRows[sessionId] = true;
+        }
         if (frame.dirty === 'full') alternateNeedsFullPaint = true;
         if (alternateFrame.dirty === 'partial') {
           addCursorRowsToDirtySet(
@@ -2209,12 +2221,15 @@ export function createTerminalController(options: TerminalControllerOptions) {
     const existing = resizeReflowGuardTimers[sessionId];
     if (existing) window.clearTimeout(existing);
     resizeReflowGuardTimers[sessionId] = window.setTimeout(() => {
+      const carriedRows = resizeGuardCarriedRows[sessionId] === true;
       clearSessionResizeReflowPending(sessionId);
+      if (carriedRows) onResizeGuardExpired?.(sessionId);
     }, RESIZE_REFLOW_BLANK_FRAME_GUARD_MS);
   }
 
   function clearSessionResizeReflowPending(sessionId: string) {
     delete resizeReflowPendingSessions[sessionId];
+    delete resizeGuardCarriedRows[sessionId];
     if (typeof window === 'undefined') return;
     const existing = resizeReflowGuardTimers[sessionId];
     if (existing) window.clearTimeout(existing);

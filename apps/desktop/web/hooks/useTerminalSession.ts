@@ -467,6 +467,15 @@ export function useTerminalSession(params: {
         useTerminalStore.getState().setTerminalLiveFollow(live);
       },
       onMissingLiveRows: request => requestMissingLiveRowsRef.current(request),
+      // The resize guard carried rows over from the previous screen; ask the
+      // backend for a fresh Full frame so a row the CLI cleared on purpose does
+      // not stay stale. Background sessions get a Full seed when activated.
+      onResizeGuardExpired: sessionId => {
+        const store = useTerminalStore.getState();
+        const terminalId = store.sessionTerminalBindings[sessionId]?.terminalId;
+        if (!terminalId || store.activeTerminalId !== terminalId) return;
+        void setTerminalFrontendActive(terminalId, true).catch(() => {});
+      },
       onScrollMetrics: metrics => useTerminalStore.getState().setTerminalScroll(metrics),
       onPaintSample: sample => {
         const activeTerminalId = useTerminalStore.getState().activeTerminalId;
