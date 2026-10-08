@@ -7,6 +7,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.11] - 2026-10-08
+
+### Fixed
+- Fullscreen Claude Code and Codex sessions now fill the window after you resize
+  it. A session started before the window was enlarged kept its original height
+  and left empty space below, because the terminal never measured the taller
+  window.
+- A fullscreen app redraws cleanly after a resize. Reverie told the app about the
+  new size before its own terminal had grown, so the redraw could be squashed
+  into the old size.
+- Claude Code no longer leaves a stale copy of its prompt on screen after a
+  resize. A safeguard against resize flicker could restore rows Claude had just
+  cleared; it now refreshes the screen once the resize settles.
+
 ## [0.6.10] - 2026-09-30
 
 ### Added
