@@ -7,6 +7,20 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.12] - 2026-10-10
+
+### Fixed
+- Opening or resuming Claude Code and Codex sessions now leaves them idle until
+  work starts, without creating a false ready-for-review notification.
+- Completed Codex turns no longer remain marked active when a completion
+  notification is missed. Delayed events from older turns cannot overwrite the
+  current turn, and active goals continue to show as working between turns.
+- Claude Code startup hooks now use a supported transport. Session status checks
+  recover missed interruptions, and approval requests remain distinct from
+  questions that need an answer.
+- Dashboard status and timeline updates now match the accepted, saved activity
+  state. Stale events cannot roll back the display or resurface reviewed results.
+
 ## [0.6.11] - 2026-10-08
 
 ### Fixed
@@ -356,7 +370,8 @@ Targets macOS (Apple Silicon).
 - Pre-commit linting/formatting (Biome, rustfmt) and Conventional Commit
   validation (commitlint) via Husky.
 
-[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Craigtut/reverie/compare/v0.6.12...HEAD
+[0.6.12]: https://github.com/Craigtut/reverie/compare/v0.6.11...v0.6.12
 [0.5.1]: https://github.com/Craigtut/reverie/compare/v0.4.0...v0.5.1
 [0.4.0]: https://github.com/Craigtut/reverie/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/Craigtut/reverie/compare/v0.2.0...v0.3.0
