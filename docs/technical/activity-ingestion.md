@@ -8,7 +8,7 @@ is normalized, and how to add the Nth CLI.
 
 The normalized model is [`ActivityState`](../../packages/reverie-core/src/activity.rs)
 (status, sequence, cwd, active tools, awaiting-permission, last error, final exit).
-The status taxonomy is `working`, `awaiting_input`, `awaiting_permission`,
+The status taxonomy is `working`, `idle`, `awaiting_input`, `awaiting_permission`,
 `awaiting_response`, `done`, `error`. Two of those are first-class blocking UI
 states every adapter must be able to produce rather than degrade:
 `awaiting_permission` (blocked on a tool-permission decision, suppressed under
@@ -16,6 +16,11 @@ auto-approve) and `awaiting_response` (blocked mid-turn waiting for the user to
 answer a question or approve a plan: Claude's AskUserQuestion / ExitPlanMode
 pickers or an MCP elicitation dialog, and unlike `awaiting_permission` it is not
 suppressed by auto-approve, so a "yolo" session can still sit on a question).
+
+`idle` is Reverie's neutral prompt state after startup, resume, or interruption.
+It carries no new result to review. `awaiting_input` means a turn completed, so
+it can produce the unseen-result indicator. Opening a conversation never creates
+a completion timestamp.
 
 ## The spine
 
@@ -26,10 +31,10 @@ varies per CLI; everything downstream is shared and never per-CLI.
  transport engines (Sources)                       universal spine (never per-CLI)
  ───────────────────────────                       ─────────────────────────────────
  hook server  (PUSH)      ─┐
- session_log  (FILE)      ─┼─► ActivityUpdate ─► correlate() ─► WorkspaceService.persist
+ session_log  (FILE)      ─┼─► ActivityUpdate ─► correlate() ─► ActivityPersistence.record
    ├─ Codex  (append-fold)│      { source,        - resolve SessionKey -> Reverie session
    └─ Cortex (snapshot)   │        key,            - capture native id on first sight
- [future: poll / in-band] ┘        fidelity,       - reconcile dual-source by turn + fidelity
+ Claude agents JSON (POLL) ┘        fidelity,       - reconcile dual-source by turn + fidelity
                                     state }         - emit session_activity_changed
                                                     - emit session_record_changed on capture
 ```
@@ -77,11 +82,11 @@ exactly why one engine serves both.
 
 | CLI    | Transport  | Derivation | Binding   | Fidelity     | Engine |
 | ------ | ---------- | ---------- | --------- | ------------ | ------ |
-| Claude | push       | (event)    | token     | Definitive   | `hook_server` |
+| Claude | push + poll | event + snapshot | token + exact native id | Definitive hooks, Coarse status fallback | `hook_server` + `claude_activity` |
 | Codex  | file-watch + push | fold | native-id | Inferred\* (+ Definitive hooks) | `session_log` (`CodexLogSource`, Append) + `hook_server` |
 | Cortex | file-watch | snapshot   | native-id | Definitive   | `session_log` (`CortexStateSource`, Snapshot) |
 
-\* Codex is the one dual-source CLI. Its rollout records are not first-class
+\* Codex combines turn-level sources. Its rollout records are not first-class
 lifecycle transitions (`awaiting_permission` is folded heuristically from
 `with_escalated_permissions`, so the watcher is `Inferred`), so Reverie layers a
 second source on the same session: per-session Codex lifecycle hooks injected via
@@ -106,8 +111,7 @@ The captured native id is **not immutable**. A CLI can switch the active
 conversation inside one running process (Claude `/resume` of an externally
 started session, or `/clear`), which surfaces as a `SessionStart` edge carrying a
 *new* native id under the same token. The translator flags such edges with
-`session_boundary: true` on the `ActivityUpdate::State`, and the correlator's
-`record_session_activity_by_id_at_boundary` **re-points** the session's
+`session_boundary: true` on the `ActivityUpdate::State`, and `ActivityPersistence.record` at that boundary re-points the session's
 `native_session_ref` to follow them. This is safe (not a folder-scan guess)
 because the token authenticates the owning Reverie session directly, so the edge
 is the live process telling us, authenticated, which conversation it now holds.
@@ -134,9 +138,9 @@ the bytes since the last read. Cost scales with new output, not accumulated hist
   Append) and [`CortexStateSource`](../../packages/reverie-core/src/cortex_state.rs)
   (`activity/state.json`, Snapshot).
 
-The launch path registers a session's watch file shortly after launch and at
-boot for already-running persisted sessions (the old Cortex startup scan, now
-scoped to sessions Reverie owns). `watch_path_for_ref` derives the file per CLI:
+The launch path registers a session's watch file shortly after launch, scoped
+to sessions Reverie owns. It does not register inactive historical files at boot,
+because replaying a dead process's last record would falsely revive its status. `watch_path_for_ref` derives the file per CLI:
 Codex's native ref points straight at the rollout; Cortex's points at `meta.json`,
 so the engine watches the sibling `activity/state.json`.
 
@@ -145,28 +149,68 @@ so the engine watches the sibling `activity/state.json`.
 [`correlate(app, update)`](../../apps/desktop/src-tauri/src/correlator.rs) is the
 single consumer of `ActivityUpdate`. It:
 
-- binds by `key`: `Reverie(id)` persists via `record_session_activity_by_id` (and
-  captures the native id into `native_session_ref` on first sight); `Native(id)`
-  persists via `record_session_activity` (which binds to whichever session carries
-  that native ref).
-- emits `session_activity_changed` for the frontend (`native_session_id` =
-  the key's id for native-keyed updates, or `state.session_id` for hook updates;
-  the payload is camelCase to match the web layer's `nativeSessionId`).
-- emits `session_record_changed` on first native-id capture, so the dashboard
-  refetches the snapshot and can bind the (native-id-keyed) live activity stream.
-- runs the **multi-source reconciliation** for the one dual-source CLI. Codex's
-  updates (lifecycle hooks + rollout watcher) pass through a live
-  [`ActivityReconciler`](../../packages/reverie-core/src/activity_reconciler.rs)
-  before persistence: it is the single writer for that session, merging the two
-  sources turn-by-turn so the cross-source sequence fight is resolved. Codex's
-  `agent-turn-complete` notification is the definitive clean ready edge, while
-  the rollout's explicit `turn_aborted` handles interruption. `Stop` is ignored
-  because it is a continuation gate, not a terminal edge. A `Definitive` hook or
-  notification edge wins over the `Inferred` log-tail. The single-source CLIs
-  (Claude hooks, Cortex snapshots) take the direct path with no reconciler, since
-  they have no second source; `record_session_activity*` still drops out-of-order
-  updates by sequence (for Codex, a monotonic dedup on the reconciler's own
-  sequence). The `fidelity` carried on each update drives the merge precedence.
+- serializes reduction, persistence, and publication across source threads.
+- binds `SessionKey` to one session through
+  [`ActivityPersistence`](../../packages/reverie-core/src/activity_persistence.rs),
+  which owns native-id capture, stale-update rejection, and timeline transitions.
+- publishes only the accepted, persisted snapshot. Rejected, unbound, and
+  duplicate updates emit no event and schedule no title or re-entry summary.
+- emits `session_record_changed` when native identity is captured or changed.
+- applies Codex turn ordering through
+  [`ActivityReconciler`](../../packages/reverie-core/src/activity_reconciler.rs).
+  It tracks source cursors and retired turn ids. Delayed activity from an old
+  turn cannot replace current work, and a completed turn cannot be reopened by
+  ordinary trailing log records. Explicit goal continuation remains active until
+  a terminal goal update.
+
+The launch path publishes an `idle` baseline before spawning a resumed CLI and
+resets Codex reduction at that boundary. Records older than the launch cannot
+replay as live work. The existing timeline is preserved. Claude and Codex
+`SessionStart` also mean idle, except a compaction event, which keeps the current
+turn alive and does not rebind identity.
+
+The frontend store applies activity and its timeline atomically. Rejecting a
+stale event also rejects its timeline, so status and dashboard ordering agree.
+
+## CLI signals verified in October 2026
+
+Verified against Claude Code 2.1.296 and Codex CLI 0.162.1.
+
+Claude:
+
+- `SessionStart` uses a bounded command hook that forwards stdin to the local
+  HTTP receiver. HTTP hooks are unsupported for this event. Other subscribed
+  events use HTTP hooks. User settings and credential homes remain untouched.
+- `UserPromptSubmit` starts work, `Stop` certifies a completed turn, and
+  `PermissionRequest`, asking tools, and `Elicitation` identify blocked states.
+- `StopFailure` reads `error` and `error_details`. Interrupted tool failures go
+  idle. Subagent and unknown hook events do not reopen the parent conversation.
+- A capability-checked `claude agents --json` poll runs every three seconds while
+  Reverie owns running Claude sessions. It matches exact native ids, preserves
+  hook detail when status agrees, and cannot overwrite a hook received during
+  the query. Missing sessions, unknown values, and command failures change no
+  state. Queries have time/output bounds and retry backoff.
+- Interactive `idle` does not distinguish an interrupted turn from a completed
+  one. Recovery therefore reports neutral idle; only `Stop` creates a new review
+  result. Repeated idle notifications preserve an existing completion timestamp.
+
+Codex:
+
+- `UserPromptSubmit` starts a turn. Either the `agent-turn-complete` notification
+  or rollout `task_complete` can finish an ordinary turn. Completion no longer
+  depends on notification delivery. `Stop` remains a continuation gate and is
+  ignored as a completion signal.
+- `turn_aborted` ends activity without claiming a review result. Active goals
+  survive intermediate task completions. Rollout turn start/end timestamps are
+  stable, and `request_user_input` remains distinct from a permission request.
+- Existing injected hooks and their trusted hash were verified with the installed
+  CLI. The shared app-server daemon reported these independently launched PTY
+  sessions as `notLoaded`, so its status is not used as evidence that they are idle.
+
+Primary references: [Claude hooks](https://code.claude.com/docs/en/hooks),
+[Claude session status](https://code.claude.com/docs/en/agent-view#list-sessions-as-json),
+[Codex hooks](https://learn.chatgpt.com/docs/hooks), and
+[Codex app server](https://learn.chatgpt.com/docs/app-server).
 
 ## How to add a new CLI
 
@@ -176,8 +220,9 @@ single consumer of `ActivityUpdate`. It:
      Bind a per-session token at launch.
    - It writes a session file → **file-watch**. Continue to step 2.
    - It only has an API to poll, or only terminal output → **poll** / **in-band**.
-     These transports are designed for but not built; see Deferred. Either still
-     emits `ActivityUpdate` into `correlate`, so only the engine is new.
+     Model polling on `claude_activity`, with capability checks, bounded queries,
+     exact identity matching, and timestamps captured before each query.
+     Either transport emits `ActivityUpdate` into `correlate`.
 2. **Is the file a snapshot or an append-log?**
    - Snapshot (the file is the current state) → a `Snapshot` `SessionLogFold` that
      parses the whole file (model on `CortexStateFold`).
@@ -209,7 +254,7 @@ a `Definitive` approval signal wins over the `Inferred` log-tail. See
 
 ## Deferred (designed for, not built)
 
-- **Poll and in-band transports.** Their only constraints are already satisfied:
+- **In-band transport.** Its constraints are already satisfied:
   `ActivityState` tolerates low fidelity, and the correlator merges by fidelity.
   In-band would reuse the existing Ghostty/PTY stream and OSC parsing
   (`derive_session_title` already reads OSC titles from it).

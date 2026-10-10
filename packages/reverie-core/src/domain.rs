@@ -557,7 +557,9 @@ impl StateClass {
     fn of(activity: &ActivityState) -> Self {
         match activity.status {
             ActivityStatus::Working => Self::Working,
-            ActivityStatus::AwaitingInput | ActivityStatus::Done => Self::Resting,
+            ActivityStatus::Idle | ActivityStatus::AwaitingInput | ActivityStatus::Done => {
+                Self::Resting
+            }
             ActivityStatus::AwaitingPermission | ActivityStatus::AwaitingResponse => Self::Blocked,
             // A recoverable error reads as a rest state (idle), a hard one as
             // attention, mirroring the dashboard's classification.

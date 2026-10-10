@@ -28,31 +28,6 @@ use crate::domain::{
 use crate::repository::WorkspaceRepository;
 use crate::terminal::TerminalSpawnSpec;
 
-/// Whether `incoming` is an out-of-order (stale) activity update relative to the
-/// `existing` one and must be dropped to keep the dashboard from rolling
-/// backwards.
-///
-/// Ordering is by wall-clock `updated_at` first. A CLI process can restart
-/// mid-session (a crash-resume, a post-error continuation, an external
-/// `/resume`) while Reverie keeps running, and on restart its per-run `sequence`
-/// counter resets to 1. A sequence-only guard would then drop every post-restart
-/// event as "older" and strand a genuinely working session showing its
-/// pre-restart state. Real wall-clock time only moves forward across that
-/// restart, so the timestamp distinguishes a restarted stream (newer time, lower
-/// sequence: kept) from a true straggler (older time: dropped). `sequence` is
-/// the tiebreaker within one run, where it is authoritative and the timestamps
-/// match or are unparseable (e.g. a source that does not stamp one, or a
-/// hand-built fixture). Equal sequence is kept, matching the prior guard.
-fn activity_is_out_of_order(existing: &ActivityState, incoming: &ActivityState) -> bool {
-    match (
-        crate::time::iso8601_to_epoch_millis(&existing.updated_at),
-        crate::time::iso8601_to_epoch_millis(&incoming.updated_at),
-    ) {
-        (Some(prev), Some(next)) if prev != next => next < prev,
-        _ => incoming.sequence < existing.sequence,
-    }
-}
-
 /// Stable id for the single local workspace, so it is identical across restarts
 /// regardless of which backend seeded it.
 const SEED_WORKSPACE_ID: &str = "0f70f21f-55c0-4e2a-923e-73360342db80";
@@ -1220,210 +1195,64 @@ impl WorkspaceService {
         Ok(self.repo.claim_native_session(session_id, reference)?)
     }
 
-    /// Persist the latest activity for whichever session owns `native_session_id`.
-    /// Drops out-of-order updates by sequence. Returns whether a session matched.
-    pub fn record_session_activity(
-        &self,
-        native_session_id: &str,
-        activity: ActivityState,
-    ) -> Result<bool> {
-        let Some(mut session) = self.repo.find_session_by_native_id(native_session_id)? else {
-            return Ok(false);
-        };
-        if let Some(existing) = &session.latest_activity {
-            if activity_is_out_of_order(existing, &activity) {
-                return Ok(false);
-            }
-        }
-        session.note_activity_transition(&activity);
-        session.latest_activity = Some(activity);
-        self.repo.upsert_session(&session)?;
-        Ok(true)
+    /// Activity persistence owns identity binding, ordering, and accepted snapshots.
+    pub fn activity(&self) -> crate::activity_persistence::ActivityPersistence {
+        crate::activity_persistence::ActivityPersistence::new(Arc::clone(&self.repo))
     }
 
-    pub fn clear_session_activity(&self, native_session_id: &str) -> Result<bool> {
-        let Some(mut session) = self.repo.find_session_by_native_id(native_session_id)? else {
-            return Ok(false);
-        };
-        if session.latest_activity.is_none() {
-            return Ok(false);
-        }
-        session.latest_activity = None;
-        self.repo.upsert_session(&session)?;
-        Ok(true)
-    }
-
-    /// The current state timeline for whichever session owns `native_session_id`,
-    /// if any. The activity correlator reads this right after persisting an
-    /// update so it can ride the freshly-stamped timeline on the live event,
-    /// letting the dashboards reorder a status group without a snapshot refetch.
-    pub fn session_timeline_by_native_id(
-        &self,
-        native_session_id: &str,
-    ) -> Result<Option<SessionStateTimeline>> {
+    pub fn record_session_activity(&self, native: &str, state: ActivityState) -> Result<bool> {
         Ok(self
-            .repo
-            .find_session_by_native_id(native_session_id)?
-            .map(|session| session.state_timeline))
+            .activity()
+            .record(&crate::SessionKey::Native(native.to_owned()), state, false)?
+            .is_some())
     }
 
-    /// Persist activity for a session looked up by its Reverie id, capturing the
-    /// CLI's native session id into `native_session_ref` the first time it is
-    /// seen so future launches use the adapter's resume path.
-    ///
-    /// Returns `true` only when this call captured the native session id into the
-    /// record for the first time. The caller uses that to nudge the frontend to
-    /// refetch the session record: until the record carries the native ref, the
-    /// dashboard cannot bind the (native-id-keyed) activity to the session.
-    /// A stale (out-of-order) update or an unknown session returns `false`.
     pub fn record_session_activity_by_id(
         &self,
-        reverie_session_id: SessionId,
-        native_session_id: &str,
-        activity: ActivityState,
+        id: SessionId,
+        native: &str,
+        state: ActivityState,
     ) -> Result<bool> {
-        // Not a session-(re)start boundary: identity is captured on first sight
-        // and never re-pointed. This is the path for ordinary turn/tool events.
-        self.record_session_activity_by_id_at_boundary(
-            reverie_session_id,
-            native_session_id,
-            activity,
-            false,
-        )
+        self.record_session_activity_by_id_at_boundary(id, native, state, false)
     }
 
-    /// Boundary-aware variant of [`Self::record_session_activity_by_id`].
-    ///
-    /// `session_boundary` is true when the update is a session (re)start edge
-    /// (Claude / Codex `SessionStart`). A CLI changes the active native session id
-    /// inside one running process when the user switches conversations from the
-    /// TUI (`/resume` an externally-started session, or `/clear`), and that switch
-    /// surfaces as a boundary edge carrying the *new* native id under the same
-    /// token. Because the token authenticates the owning Reverie session directly,
-    /// such an edge is not a guess like a folder scan: it is the live process
-    /// telling us, authenticated, which conversation it now holds. So at a boundary
-    /// we **re-point** the session's `native_session_ref` to the new id, which is
-    /// what keeps the dashboard bound and a later Reverie resume targeting the
-    /// conversation the user actually worked in.
-    ///
-    /// Returns `true` when this call captured (first sight) or re-pointed the
-    /// native id, so the caller refetches the record and rebinds the activity feed.
     pub fn record_session_activity_by_id_at_boundary(
         &self,
-        reverie_session_id: SessionId,
-        native_session_id: &str,
-        activity: ActivityState,
-        session_boundary: bool,
+        id: SessionId,
+        native: &str,
+        state: ActivityState,
+        boundary: bool,
     ) -> Result<bool> {
-        let Some(mut session) = self.repo.get_session(reverie_session_id)? else {
-            return Ok(false);
-        };
-
-        let stored_native = session
-            .native_session_ref
-            .as_ref()
-            .and_then(|reference| reference.session_id.as_deref());
-        let native_changed = matches!(stored_native, Some(stored) if stored != native_session_id);
-        // Follow the live process onto a new conversation only at a start boundary.
-        let repoint = native_changed && session_boundary;
-
-        // A differing native id outside a boundary is a stale edge from a
-        // conversation this session has already moved off (e.g. a late event from
-        // the pre-`/resume` stream). Ignore it so it can neither overwrite the
-        // current state nor mis-bind under the wrong id.
-        if native_changed && !repoint {
+        if state.session_id != native {
             return Ok(false);
         }
-
-        // The out-of-order guard compares sequences within ONE native stream. A
-        // re-point begins a fresh stream with its own counter (the hook server
-        // numbers sequences per native id), so the previous stream's high-water
-        // sequence must not drop the new stream's opening events. Skip the guard
-        // exactly when re-pointing.
-        if !repoint {
-            if let Some(existing) = &session.latest_activity {
-                if activity_is_out_of_order(existing, &activity) {
-                    return Ok(false);
-                }
-            }
-        }
-
-        let captured_native_session = session.native_session_ref.is_none() || repoint;
-        if captured_native_session {
-            let native_session_ref = NativeSessionRef {
-                kind: session.agent_kind,
-                session_id: Some(native_session_id.to_owned()),
-                metadata_path: None,
-                adapter_payload: serde_json::Value::Null,
-            };
-            if !self
-                .repo
-                .claim_native_session(reverie_session_id, native_session_ref)?
-            {
-                // Another Reverie session already owns this native id (e.g. the
-                // same external conversation is open in another tab). Don't steal
-                // it; leave this session as it was rather than corrupt the pairing.
-                if repoint {
-                    eprintln!(
-                        "[reverie] session {reverie_session_id} tried to re-point to native id \
-                         {native_session_id}, but another session already owns it; leaving as-is"
-                    );
-                }
-                return Ok(false);
-            }
-            session = match self.repo.get_session(reverie_session_id)? {
-                Some(session) => session,
-                None => return Ok(false),
-            };
-        }
-        session.note_activity_transition(&activity);
-        session.latest_activity = Some(activity);
-        self.repo.upsert_session(&session)?;
-        Ok(captured_native_session)
+        Ok(self
+            .activity()
+            .record(&crate::SessionKey::Reverie(id), state, boundary)?
+            .is_some_and(|saved| saved.captured_native_session))
     }
 
-    pub fn clear_session_activity_by_id(&self, reverie_session_id: SessionId) -> Result<bool> {
-        let Some(mut session) = self.repo.get_session(reverie_session_id)? else {
-            return Ok(false);
-        };
-        if session.latest_activity.is_none() {
-            return Ok(false);
-        }
-        session.latest_activity = None;
-        self.repo.upsert_session(&session)?;
-        Ok(true)
+    pub fn clear_session_activity(&self, native: &str) -> Result<bool> {
+        self.activity()
+            .clear(&crate::SessionKey::Native(native.to_owned()))
     }
 
-    /// Reset the activity ordering baseline for a session that is about to be
-    /// (re)launched. A launch begins a fresh activity stream whose sequence
-    /// numbering is independent of the previous run's:
-    ///
-    /// - The Claude hook server counts sequences in a per-process map that resets
-    ///   to zero on every app restart, so after a restart the first hook events of
-    ///   a resumed session arrive as sequence 1, 2, 3...
-    /// - A resumed file-log CLI may open a fresh transcript that the fold re-counts
-    ///   from the start.
-    ///
-    /// Either way the persisted sequence (e.g. 23) is larger than the new stream's
-    /// first events, so [`record_session_activity`]'s out-of-order guard would drop
-    /// them and the session would be stranded showing its pre-relaunch state (the
-    /// "resumed Claude session never re-enters working" bug). Zeroing the stored
-    /// sequence makes the next event win while leaving the last snapshot on screen
-    /// until it arrives. No-op when there is no stored activity or it is already at
-    /// zero.
-    pub fn reset_session_activity_sequence(&self, reverie_session_id: SessionId) -> Result<bool> {
-        let Some(mut session) = self.repo.get_session(reverie_session_id)? else {
-            return Ok(false);
-        };
-        let Some(activity) = session.latest_activity.as_mut() else {
-            return Ok(false);
-        };
-        if activity.sequence == 0 {
-            return Ok(false);
-        }
-        activity.sequence = 0;
-        self.repo.upsert_session(&session)?;
-        Ok(true)
+    pub fn clear_session_activity_by_id(&self, id: SessionId) -> Result<bool> {
+        self.activity().clear(&crate::SessionKey::Reverie(id))
+    }
+
+    pub fn session_timeline_by_native_id(
+        &self,
+        native: &str,
+    ) -> Result<Option<SessionStateTimeline>> {
+        Ok(self
+            .activity()
+            .session(&crate::SessionKey::Native(native.to_owned()))?
+            .map(|s| s.state_timeline))
+    }
+
+    pub fn reset_session_activity_sequence(&self, id: SessionId) -> Result<bool> {
+        self.activity().reset_sequence(id)
     }
 
     /// Resolve the adapter for a session and build its terminal spawn spec.
@@ -1522,7 +1351,10 @@ impl WorkspaceService {
             // Absent from the set means inline: the adapter forces the CLI's
             // classic renderer so the conversation stays in Reverie's own
             // scrollback/search/viewport model.
-            snapshot.workspace.fullscreen_agent_kinds.contains(&agent_kind),
+            snapshot
+                .workspace
+                .fullscreen_agent_kinds
+                .contains(&agent_kind),
         )?;
         // Deliver the dispatch initial prompt on a brand-new launch only. CLIs
         // that take a trailing positional prompt get it appended (it submits on
@@ -1759,7 +1591,7 @@ fn normalize_session(session: &mut Session) -> bool {
 /// question, or pick the turn back up, so a persisted "needs your approval",
 /// "needs your answer", or "working" snapshot is stale and would mislead the
 /// dashboard into showing attention/active for a session that is really just
-/// waiting for you. Reset those statuses to the at-rest `AwaitingInput` and
+/// waiting for you. Reset those statuses to neutral `Idle` and
 /// drop the now-meaningless pending permission, running turn, and active tools.
 /// Other statuses (`AwaitingInput`, `Done`, `Error`) describe an outcome, not a
 /// live process, so they are left untouched. Returns whether anything changed.
@@ -1772,7 +1604,7 @@ fn normalize_stale_activity(activity: &mut ActivityState) -> bool {
     ) {
         return false;
     }
-    activity.status = ActivityStatus::AwaitingInput;
+    activity.status = ActivityStatus::Idle;
     activity.awaiting_permission = None;
     activity.active_tools.clear();
     if let Some(turn) = activity.turn.as_mut() {
@@ -2533,7 +2365,7 @@ mod tests {
             .latest_activity
             .as_ref()
             .unwrap();
-        assert_eq!(perm.status, ActivityStatus::AwaitingInput);
+        assert_eq!(perm.status, ActivityStatus::Idle);
         assert!(perm.awaiting_permission.is_none());
         assert!(perm.active_tools.is_empty());
         assert_eq!(perm.turn.as_ref().unwrap().status, TurnStatus::Aborted);
@@ -2546,7 +2378,7 @@ mod tests {
             .latest_activity
             .as_ref()
             .unwrap();
-        assert_eq!(work.status, ActivityStatus::AwaitingInput);
+        assert_eq!(work.status, ActivityStatus::Idle);
         assert!(work.active_tools.is_empty());
         assert_eq!(work.turn.as_ref().unwrap().status, TurnStatus::Aborted);
 

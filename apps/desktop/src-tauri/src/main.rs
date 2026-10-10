@@ -10,6 +10,7 @@ mod bookmark;
 mod bridge;
 #[cfg(unix)]
 mod bridge_installer;
+mod claude_activity_poll;
 mod clipboard;
 mod codex_titles;
 mod commands;
@@ -35,8 +36,8 @@ mod window_chrome;
 #[cfg(debug_assertions)]
 use std::{env, fs::OpenOptions, io::Write};
 
+use crate::correlator::ActivityIngestion;
 use reverie_core::WorkspaceService;
-use reverie_core::activity_reconciler::ActivityReconciler;
 use reverie_core::hook_server::{HookPushSource, start_hook_server, start_hook_server_with};
 use reverie_core::session_log::{SessionLogControl, start_session_log_watcher};
 use reverie_core::{CodexLogSource, CompositeLogSource, CortexStateSource};
@@ -622,6 +623,8 @@ fn main() {
                 }
             }
 
+            crate::claude_activity_poll::spawn(app.handle().clone());
+
             // Start the idle-session reaper. It always parks archived sessions,
             // parks long-idle off-screen sessions on a bounded grace period, and
             // shortens that grace under memory pressure or battery power.
@@ -724,7 +727,7 @@ fn main() {
         .manage(GitWatch::default())
         // Shared cross-source merge for Codex (hooks + rollout), read by the
         // correlator on every Codex activity update.
-        .manage(ActivityReconciler::new())
+        .manage(ActivityIngestion::default())
         .invoke_handler(tauri::generate_handler![
             set_window_chrome_theme,
             commands::app_status,

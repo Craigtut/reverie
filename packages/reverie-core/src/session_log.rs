@@ -527,7 +527,7 @@ mod tests {
         poll_changed_tails(&mut tails, &tx);
         match rx.recv().unwrap() {
             ActivityUpdate::State { state, .. } => {
-                assert_eq!(state.status, ActivityStatus::AwaitingInput)
+                assert_eq!(state.status, ActivityStatus::Idle)
             }
             other => panic!("unexpected: {other:?}"),
         }

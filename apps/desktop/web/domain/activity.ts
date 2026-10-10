@@ -52,7 +52,8 @@ export function classifyForDashboard(
       return 'attention';
     if (activity.lastError && !activity.lastError.recoverable) return 'attention';
     if (activity.status === 'working') return 'live';
-    if (activity.status === 'awaiting_input') return isBound ? 'live' : 'recent';
+    if (activity.status === 'idle' || activity.status === 'awaiting_input')
+      return isBound ? 'live' : 'recent';
     return 'recent'; // done | error (recoverable)
   }
   if (session.status === 'restore_failed') return 'attention';
@@ -520,6 +521,7 @@ export function plainLanguageStatus(
         if (tool?.toolName) return `Running ${tool.toolName}`;
         return 'Working';
       }
+      case 'idle':
       case 'awaiting_input':
       case 'done':
         // A turn that came to rest off-screen and unseen reads as an invitation,

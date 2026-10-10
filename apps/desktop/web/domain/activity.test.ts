@@ -870,3 +870,23 @@ describe('sortGroupByRecency', () => {
     expect(ordered.map(s => s.id)).toEqual(['with', 'a', 'b']);
   });
 });
+
+describe('neutral prompt state', () => {
+  it('opening a conversation stays idle without creating a review notification', () => {
+    const session = makeSession({
+      status: 'running',
+      launchMode: 'resume',
+      nativeSessionRef: { kind: 'codex_cli', sessionId: 'native-1', adapterPayload: null },
+      lastViewedAt: '2026-10-10T12:00:00.000Z',
+    });
+    const opened = makeActivity({ status: 'idle', updatedAt: '2026-10-10T12:00:01.000Z' });
+    expect(lastTurnCompletedAtMs(opened)).toBeNull();
+    expect(deriveSessionState(session, true, opened, false)).toBe('idle');
+    expect(cellStateFor(session, true, opened, false)).toBe('idle');
+    const complete = makeActivity({
+      status: 'awaiting_input',
+      updatedAt: '2026-10-10T12:00:02.000Z',
+    });
+    expect(deriveSessionState(session, true, complete, false)).toBe('finished');
+  });
+});

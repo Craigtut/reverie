@@ -12,8 +12,8 @@
 //!
 //! Pure parsing + discovery only. Filesystem watching lives in the shell. Codex
 //! has no HTTP hook type and trust-gates command hooks, so this file watcher is
-//! the baseline detail source. Definitive clean completion comes from Codex's
-//! `agent-turn-complete` notifier; definitive `awaiting_permission` comes from
+//! the baseline detail source. Explicit task completion works independently of
+//! Codex's `agent-turn-complete` notifier; definitive `awaiting_permission` comes from
 //! the trusted `PermissionRequest` command hook.
 
 use std::{
@@ -231,13 +231,14 @@ pub struct CodexRolloutFold {
     // can match exact turn edges without assuming the opaque ids are ordered,
     // and so the rollout's `turn_aborted` can end the interrupted turn.
     current_turn_id: Option<String>,
+    turn_started_at: Option<String>,
+    turn_ended_at: Option<String>,
+    turn_aborted: bool,
     /// Long-running goal liveness is independent from a single task record. An
     /// ordinary `task_complete` can be followed by another automatic goal turn,
     /// so an active goal stays working until a terminal goal update arrives.
     goal_active: bool,
-    /// Whether a turn is open: set by `task_started`, cleared by the records
-    /// that end one. `task_complete` still reads as working (see below), but it
-    /// closes the turn, so a later resume marker can tell the session is idle.
+    /// Whether a turn is open, independently of goal continuation.
     turn_open: bool,
     sequence: u64,
     // Best-effort approval signal: Codex records the approval-triggering moment
@@ -255,11 +256,14 @@ impl CodexRolloutFold {
             partial: String::new(),
             session_id: None,
             cwd: String::new(),
-            status: ActivityStatus::Working,
+            status: ActivityStatus::Idle,
             active: Vec::new(),
             last_error: None,
             last_timestamp: None,
             current_turn_id: None,
+            turn_started_at: None,
+            turn_ended_at: None,
+            turn_aborted: false,
             goal_active: false,
             turn_open: false,
             sequence: 0,
@@ -301,6 +305,9 @@ impl CodexRolloutFold {
             (_, "task_started") => {
                 self.status = ActivityStatus::Working;
                 self.turn_open = true;
+                self.turn_started_at = self.last_timestamp.clone();
+                self.turn_ended_at = None;
+                self.turn_aborted = false;
                 self.current_turn_id = turn_id_from(&record.payload);
                 self.active.clear();
                 self.pending_escalation = None;
@@ -309,6 +316,12 @@ impl CodexRolloutFold {
             // A tool call begins: still working, surface it as the active tool.
             // An escalated call also records a pending approval.
             (_, "function_call") | (_, "custom_tool_call") => {
+                // A late/background tool record does not reopen a closed turn.
+                // Working with a completed turn is reserved for explicit goal
+                // continuation, which the cross-source reducer preserves.
+                if self.current_turn_id.is_some() && !self.turn_open && !self.goal_active {
+                    return;
+                }
                 self.status = ActivityStatus::Working;
                 if let Some(tool) = active_tool_from_call(
                     &record.payload,
@@ -345,13 +358,12 @@ impl CodexRolloutFold {
                     }
                 }
             }
-            // `task_complete` is not our clean ready edge. Codex can complete a
-            // task and then automatically begin another goal turn. Keep the
-            // session working until the external `agent-turn-complete`
-            // notification or an explicit terminal goal update arrives.
+            // Completion is explicit evidence even if the notifier is lost.
+            // An active goal independently keeps the overall session working.
             (_, "task_complete") => {
-                self.status = ActivityStatus::Working;
+                self.status = ActivityStatus::AwaitingInput;
                 self.turn_open = false;
+                self.turn_ended_at = self.last_timestamp.clone();
                 if let Some(id) = turn_id_from(&record.payload) {
                     self.current_turn_id = Some(id);
                 }
@@ -361,8 +373,11 @@ impl CodexRolloutFold {
             // An interrupted turn may not emit the clean completion notifier.
             // `turn_aborted` is itself an explicit terminal edge.
             (_, "turn_aborted") => {
-                self.status = ActivityStatus::AwaitingInput;
+                self.status = ActivityStatus::Idle;
                 self.turn_open = false;
+                self.goal_active = false;
+                self.turn_aborted = true;
+                self.turn_ended_at = self.last_timestamp.clone();
                 if let Some(id) = turn_id_from(&record.payload) {
                     self.current_turn_id = Some(id);
                 }
@@ -375,6 +390,11 @@ impl CodexRolloutFold {
             (_, "thread_goal_updated") => match goal_status_from(&record.payload).as_deref() {
                 Some("active") => {
                     self.goal_active = true;
+                    if self.current_turn_id.as_deref() != turn_id_from(&record.payload).as_deref() {
+                        self.turn_started_at = self.last_timestamp.clone();
+                        self.turn_ended_at = None;
+                    }
+                    self.turn_aborted = false;
                     self.status = ActivityStatus::Working;
                     if let Some(id) = turn_id_from(&record.payload) {
                         self.current_turn_id = Some(id);
@@ -387,6 +407,7 @@ impl CodexRolloutFold {
                 | Some("paused")
                 | Some("blocked") => {
                     self.goal_active = false;
+                    self.turn_ended_at = self.last_timestamp.clone();
                     self.turn_open = false;
                     self.status = ActivityStatus::AwaitingInput;
                     if let Some(id) = turn_id_from(&record.payload) {
@@ -400,12 +421,10 @@ impl CodexRolloutFold {
             // Codex appends this when a thread is (re)opened, e.g. on every
             // `codex resume`, and when settings change between turns. With no
             // turn open and no goal running, the agent is idle at its prompt.
-            // Without this, a resumed session whose history ends in
-            // `task_complete` reads as working forever: that turn's completion
-            // notification fired long ago and never repeats.
             (_, "thread_settings_applied") => {
                 if !self.turn_open && !self.goal_active && self.pending_escalation.is_none() {
-                    self.status = ActivityStatus::AwaitingInput;
+                    // Settings changes do not create a new completion.
+                    self.status = ActivityStatus::Idle;
                     self.active.clear();
                 }
             }
@@ -438,7 +457,14 @@ impl CodexRolloutFold {
         let session_id = self.session_id.clone()?;
         // A still-pending escalation wins the status: the agent is blocked on the
         // user's approval, which the dashboard surfaces as a first-class state.
-        let status = if self.pending_escalation.is_some() {
+        let status = if self.active.iter().any(|tool| {
+            matches!(
+                tool.tool_name.as_str(),
+                "request_user_input" | "functions.request_user_input"
+            )
+        }) {
+            ActivityStatus::AwaitingResponse
+        } else if self.pending_escalation.is_some() {
             ActivityStatus::AwaitingPermission
         } else if self.goal_active && self.status != ActivityStatus::Error {
             ActivityStatus::Working
@@ -449,14 +475,15 @@ impl CodexRolloutFold {
         // the hook's exact turn id. Its `status` reflects whether it is running.
         let turn = self.current_turn_id.as_ref().map(|id| ActivityTurn {
             id: id.clone(),
-            status: match status {
-                ActivityStatus::AwaitingInput | ActivityStatus::Done | ActivityStatus::Error => {
-                    TurnStatus::Completed
-                }
-                _ => TurnStatus::Running,
+            status: if self.turn_aborted {
+                TurnStatus::Aborted
+            } else if self.turn_open {
+                TurnStatus::Running
+            } else {
+                TurnStatus::Completed
             },
-            started_at: self.last_timestamp.clone().unwrap_or_default(),
-            ended_at: None,
+            started_at: self.turn_started_at.clone().unwrap_or_default(),
+            ended_at: self.turn_ended_at.clone(),
         });
         Some(ActivityState {
             version: ACTIVITY_VERSION,
@@ -843,542 +870,4 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::TempDir;
-
-    // Empirical check of the live watcher path (not just the pure fold): start the
-    // real session-log watcher, register a rollout file as the launch path does,
-    // then append `turn_aborted` and assert the watcher folds the explicit
-    // interruption through to `AwaitingInput`.
-    #[test]
-    fn watcher_detects_appended_turn_aborted() {
-        use crate::activity_source::ActivityUpdate;
-        use crate::session_log::start_session_log_watcher;
-        use std::sync::Arc;
-        use std::time::{Duration, Instant};
-
-        let dir = TempDir::new().unwrap();
-        // Deliberately the raw (possibly symlinked, e.g. /tmp -> /private/tmp)
-        // path: the watcher must canonicalize internally so its keys match the
-        // resolved paths FSEvents reports, or every append event is dropped.
-        let path = dir.path().join("rollout-live.jsonl");
-        {
-            let mut f = fs::File::create(&path).unwrap();
-            writeln!(f, "{META}").unwrap();
-            writeln!(
-                f,
-                r#"{{"type":"event_msg","payload":{{"type":"task_started"}}}}"#
-            )
-            .unwrap();
-            f.flush().unwrap();
-        }
-
-        let watcher = start_session_log_watcher(Arc::new(CodexLogSource)).unwrap();
-        watcher.control.register(path.clone());
-
-        // Registration triggers an immediate read: we should see Working.
-        let first = watcher
-            .events
-            .recv_timeout(Duration::from_secs(2))
-            .expect("initial state on register");
-        match first {
-            ActivityUpdate::State { state, .. } => {
-                assert_eq!(state.status, ActivityStatus::Working)
-            }
-            other => panic!("unexpected first update: {other:?}"),
-        }
-
-        // Append the explicit interruption record, then wait for the watcher to
-        // deliver the AwaitingInput fold.
-        {
-            let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-            writeln!(
-                f,
-                r#"{{"type":"event_msg","payload":{{"type":"turn_aborted"}}}}"#
-            )
-            .unwrap();
-            f.flush().unwrap();
-        }
-
-        let deadline = Instant::now() + Duration::from_secs(6);
-        let mut got_awaiting = false;
-        while Instant::now() < deadline {
-            match watcher.events.recv_timeout(Duration::from_millis(500)) {
-                Ok(ActivityUpdate::State { state, .. }) => {
-                    if state.status == ActivityStatus::AwaitingInput {
-                        got_awaiting = true;
-                        break;
-                    }
-                }
-                Ok(_) => {}
-                Err(_) => {}
-            }
-        }
-        assert!(
-            got_awaiting,
-            "watcher never delivered AwaitingInput after turn_aborted was appended"
-        );
-    }
-
-    fn write_rollout(dir: &Path, name: &str, lines: &[&str]) -> PathBuf {
-        let path = dir.join(name);
-        let mut file = fs::File::create(&path).unwrap();
-        for line in lines {
-            writeln!(file, "{line}").unwrap();
-        }
-        path
-    }
-
-    const META: &str = r#"{"timestamp":"2026-05-30T02:35:54.030Z","type":"session_meta","payload":{"id":"019e-codex","cwd":"/Users/dev/proj","cli_version":"0.135.0"}}"#;
-
-    #[test]
-    fn title_context_reads_recent_user_messages_and_skips_context_injections() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-title.jsonl",
-            &[
-                META,
-                r##"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions\n<INSTRUCTIONS>ignore</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n<cwd>/tmp</cwd>"}]}}"##,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the parser tests"}]}}"#,
-                r#"{"type":"event_msg","payload":{"type":"user_message","text_elements":[{"text":"Add Codex title generation"}]}}"#,
-            ],
-        );
-
-        let context = read_codex_title_context(&path, 4, 10_000)
-            .unwrap()
-            .expect("title context");
-        assert_eq!(context.user_message_count, 2);
-        assert_eq!(
-            context.user_messages,
-            vec![
-                "Fix the parser tests".to_owned(),
-                "Add Codex title generation".to_owned(),
-            ]
-        );
-        assert_eq!(context.sequence, 4);
-    }
-
-    #[test]
-    fn reentry_context_keeps_users_assistants_and_tools_in_order() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-reentry.jsonl",
-            &[
-                META,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the failing parser test"}]}}"#,
-                r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"command\":[\"bash\",\"-lc\",\"npm test\"]}"}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The parser test passes now."}]}}"#,
-            ],
-        );
-
-        let context = read_codex_reentry_context(&path, ReentryBudget::default())
-            .unwrap()
-            .expect("reentry context");
-        assert_eq!(context.entries.len(), 3);
-        assert_eq!(
-            context.entries[0].role,
-            crate::reentry_context::ReentryRole::User
-        );
-        assert_eq!(context.entries[0].text, "Fix the failing parser test");
-        assert_eq!(
-            context.entries[1].role,
-            crate::reentry_context::ReentryRole::Tool
-        );
-        assert_eq!(context.entries[1].text, "Run shell: bash -lc npm test");
-        assert_eq!(
-            context.entries[2].role,
-            crate::reentry_context::ReentryRole::Assistant
-        );
-        assert_eq!(context.entries[2].text, "The parser test passes now.");
-    }
-
-    #[test]
-    fn reentry_context_is_none_for_an_empty_rollout() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(dir.path(), "rollout-empty.jsonl", &[META]);
-        let context = read_codex_reentry_context(&path, ReentryBudget::default()).unwrap();
-        assert!(context.is_none());
-    }
-
-    #[test]
-    fn title_context_applies_message_and_char_budgets_from_the_end() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-title-budget.jsonl",
-            &[
-                META,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"first message"}]}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"second message"}]}}"#,
-                r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"third message with extra detail"}]}}"#,
-            ],
-        );
-
-        let context = read_codex_title_context(&path, 2, 20)
-            .unwrap()
-            .expect("title context");
-        assert_eq!(context.user_message_count, 3);
-        assert_eq!(
-            context.user_messages,
-            vec!["third message wit...".to_owned()]
-        );
-    }
-
-    #[test]
-    fn task_complete_clears_tool_detail_but_waits_for_notification() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-x.jsonl",
-            &[
-                META,
-                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#,
-                r#"{"timestamp":"t2","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"command\":[\"bash\",\"-lc\",\"npm test\"]}"}}"#,
-            ],
-        );
-
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.session_id, "019e-codex");
-        assert_eq!(state.cwd, "/Users/dev/proj");
-        assert_eq!(state.status, ActivityStatus::Working);
-        assert_eq!(state.active_tools.len(), 1);
-        assert_eq!(
-            state.active_tools[0].display_summary.as_deref(),
-            Some("Run shell: bash -lc npm test")
-        );
-        let working_seq = state.sequence;
-
-        // Append the tool output + task_complete. The tool clears and sequence
-        // advances, but clean readiness belongs to agent-turn-complete.
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(
-            file,
-            r#"{{"timestamp":"t3","type":"response_item","payload":{{"type":"function_call_output","call_id":"c1","output":"ok"}}}}"#
-        )
-        .unwrap();
-        writeln!(
-            file,
-            r#"{{"timestamp":"t4","type":"event_msg","payload":{{"type":"task_complete","turn_id":"a"}}}}"#
-        )
-        .unwrap();
-
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::Working);
-        assert!(state.active_tools.is_empty());
-        assert!(state.sequence > working_seq);
-    }
-
-    #[test]
-    fn escalated_call_surfaces_awaiting_permission_until_resolved() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-esc.jsonl",
-            &[
-                META,
-                r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
-                r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"e1","arguments":"{\"command\":[\"bash\",\"-lc\",\"npm i\"],\"with_escalated_permissions\":true,\"justification\":\"network\"}"}}"#,
-            ],
-        );
-
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::AwaitingPermission);
-        let perm = state.awaiting_permission.expect("approval detail");
-        assert_eq!(perm.id, "e1");
-        assert_eq!(perm.tool_name, "shell");
-
-        // Once the call resolves, the approval clears and we are working again.
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(
-            file,
-            r#"{{"type":"response_item","payload":{{"type":"function_call_output","call_id":"e1","output":"ok"}}}}"#
-        )
-        .unwrap();
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::Working);
-        assert!(state.awaiting_permission.is_none());
-    }
-
-    #[test]
-    fn resume_marker_after_a_finished_turn_reads_idle() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-resumed-idle.jsonl",
-            &[
-                META,
-                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#,
-                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"a"}}"#,
-                r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"thread-1"}}"#,
-            ],
-        );
-
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::AwaitingInput);
-        assert_eq!(
-            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
-            TurnStatus::Completed
-        );
-    }
-
-    #[test]
-    fn resume_marker_does_not_end_an_open_turn_or_active_goal() {
-        let dir = TempDir::new().unwrap();
-        let open_turn = write_rollout(
-            dir.path(),
-            "rollout-open-turn.jsonl",
-            &[
-                META,
-                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#,
-                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"thread-1"}}"#,
-            ],
-        );
-        let state = read_codex_rollout_state(&open_turn).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::Working);
-
-        let goal = write_rollout(
-            dir.path(),
-            "rollout-goal-resume.jsonl",
-            &[
-                META,
-                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"g","goal":{"status":"active"}}}"#,
-                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"g"}}"#,
-                r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"thread-1"}}"#,
-            ],
-        );
-        let state = read_codex_rollout_state(&goal).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::Working);
-    }
-
-    #[test]
-    fn active_goal_update_keeps_resumed_goal_working_after_turn_complete() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-goal-active.jsonl",
-            &[
-                META,
-                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"task_started","turn_id":"a"}}"#,
-                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"a"}}"#,
-                r#"{"timestamp":"t3","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"b","threadId":"thread-1","goal":{"status":"active","objective":"private","createdAt":"t0","updatedAt":"t3","tokensUsed":10,"timeUsedSeconds":1}}}"#,
-            ],
-        );
-
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::Working);
-        assert_eq!(state.turn.as_ref().map(|turn| turn.id.as_str()), Some("b"));
-        assert_eq!(
-            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
-            TurnStatus::Running
-        );
-    }
-
-    #[test]
-    fn active_goal_stays_working_across_an_intermediate_task_complete() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-goal-latched.jsonl",
-            &[
-                META,
-                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"goal-turn","goal":{"status":"active"}}}"#,
-                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"task_complete","turn_id":"goal-turn"}}"#,
-            ],
-        );
-
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::Working);
-        assert_eq!(
-            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
-            TurnStatus::Running
-        );
-    }
-
-    #[test]
-    fn terminal_goal_update_returns_to_input_waiting() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-goal-complete.jsonl",
-            &[
-                META,
-                r#"{"timestamp":"t1","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"a","threadId":"thread-1","goal":{"status":"active","objective":"private","createdAt":"t0","updatedAt":"t1","tokensUsed":10,"timeUsedSeconds":1}}}"#,
-                r#"{"timestamp":"t2","type":"event_msg","payload":{"type":"thread_goal_updated","turnId":"a","threadId":"thread-1","goal":{"status":"complete","objective":"private","createdAt":"t0","updatedAt":"t2","tokensUsed":20,"timeUsedSeconds":2}}}"#,
-            ],
-        );
-
-        let state = read_codex_rollout_state(&path).unwrap().expect("state");
-        assert_eq!(state.status, ActivityStatus::AwaitingInput);
-        assert_eq!(state.turn.as_ref().map(|turn| turn.id.as_str()), Some("a"));
-        assert_eq!(
-            state.turn.as_ref().map(|turn| turn.status).expect("turn"),
-            TurnStatus::Completed
-        );
-    }
-
-    #[test]
-    fn every_current_terminal_goal_status_returns_to_input_waiting() {
-        for terminal in [
-            "complete",
-            "usageLimited",
-            "budgetLimited",
-            "paused",
-            "blocked",
-        ] {
-            let mut fold = CodexRolloutFold::new();
-            let input = format!(
-                "{META}\n{{\"timestamp\":\"t1\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"thread_goal_updated\",\"turnId\":\"a\",\"goal\":{{\"status\":\"active\"}}}}}}\n{{\"timestamp\":\"t2\",\"type\":\"event_msg\",\"payload\":{{\"type\":\"thread_goal_updated\",\"turnId\":\"a\",\"goal\":{{\"status\":\"{terminal}\"}}}}}}\n"
-            );
-            let state = fold.push(&input).expect("state");
-            assert_eq!(
-                state.status,
-                ActivityStatus::AwaitingInput,
-                "terminal goal status {terminal}"
-            );
-        }
-    }
-
-    #[test]
-    fn incremental_fold_handles_chunks_split_mid_line_and_only_folds_new_records() {
-        let mut fold = CodexRolloutFold::new();
-        // task_started before any session_meta: processed, but no id to bind yet.
-        assert!(
-            fold.push("{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n")
-                .is_none()
-        );
-
-        // session_meta arrives split mid-line across two pushes (an appended tail
-        // can end anywhere). The partial line must buffer until its newline.
-        let meta = r#"{"type":"session_meta","payload":{"id":"c9","cwd":"/p"}}"#;
-        let (head, rest) = meta.split_at(24);
-        assert!(
-            fold.push(head).is_none(),
-            "partial line: nothing to emit yet"
-        );
-        let state = fold.push(&format!("{rest}\n")).expect("id now known");
-        assert_eq!(state.session_id, "c9");
-        assert_eq!(state.status, ActivityStatus::Working);
-        let seq_after_meta = state.sequence;
-
-        // An incomplete trailing record (no newline yet) buffers without being
-        // folded: status and sequence are unchanged from the last complete line.
-        let state = fold
-            .push(r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#)
-            .expect("id known");
-        assert_eq!(state.status, ActivityStatus::Working);
-        assert_eq!(state.sequence, seq_after_meta);
-
-        // The newline completes it; only the one new record is folded (we never
-        // re-read history), and the sequence advances so the consumer applies it.
-        let state = fold
-            .push("\n")
-            .expect("newline completes the buffered record");
-        assert_eq!(state.status, ActivityStatus::Working);
-        assert_eq!(state.sequence, seq_after_meta + 1);
-    }
-
-    #[test]
-    fn returns_none_without_session_meta() {
-        let dir = TempDir::new().unwrap();
-        let path = write_rollout(
-            dir.path(),
-            "rollout-y.jsonl",
-            &[r#"{"type":"event_msg","payload":{"type":"task_started"}}"#],
-        );
-        assert!(read_codex_rollout_state(&path).unwrap().is_none());
-    }
-
-    #[test]
-    fn exact_lookup_rejects_subagent_rollouts() {
-        let home = TempDir::new().unwrap();
-        let day = home
-            .path()
-            .join("sessions")
-            .join("2026")
-            .join("08")
-            .join("16");
-        fs::create_dir_all(&day).unwrap();
-        let native_id = "01a00-subagent";
-        let path = write_rollout(
-            &day,
-            &format!("rollout-2026-08-16T17-00-00-{native_id}.jsonl"),
-            &[
-                r#"{"type":"session_meta","payload":{"id":"01a00-subagent","cwd":"/Users/dev/proj","source":{"subagent":{"thread_spawn":{"parent_thread_id":"01a00-parent","depth":1}}}}}"#,
-            ],
-        );
-
-        let meta = read_codex_rollout_meta(&path).expect("session meta");
-        assert!(!meta.is_root_cli_session);
-        assert!(
-            find_codex_rollout_by_native_id(home.path(), native_id).is_none(),
-            "exact-id path enrichment must also require a root CLI rollout"
-        );
-    }
-
-    #[test]
-    fn current_cli_source_is_an_eligible_root_rollout() {
-        let home = TempDir::new().unwrap();
-        let day = home.path().join("sessions/2026/08/16");
-        fs::create_dir_all(&day).unwrap();
-        let native_id = "01a00-root";
-        let path = write_rollout(
-            &day,
-            &format!("rollout-2026-08-16T17-00-00-{native_id}.jsonl"),
-            &[
-                r#"{"type":"session_meta","payload":{"id":"01a00-root","cwd":"/Users/dev/proj","originator":"codex-tui","source":"cli"}}"#,
-            ],
-        );
-
-        let meta = read_codex_rollout_meta(&path).expect("session meta");
-        assert!(meta.is_root_cli_session);
-        assert_eq!(
-            find_codex_rollout_by_native_id(home.path(), native_id).as_deref(),
-            Some(path.as_path())
-        );
-    }
-
-    #[test]
-    fn finds_rollout_by_native_id_across_sibling_sessions_in_one_cwd() {
-        let home = TempDir::new().unwrap();
-        let day = home
-            .path()
-            .join("sessions")
-            .join("2026")
-            .join("06")
-            .join("16");
-        fs::create_dir_all(&day).unwrap();
-
-        // Two sessions in the SAME cwd: the cwd scan cannot tell them apart, but an
-        // id lookup must return the file whose `session_meta` carries that id.
-        write_rollout(
-            &day,
-            "rollout-2026-06-16T10-00-00-019ec4f2-aaaa.jsonl",
-            &[
-                r#"{"type":"session_meta","payload":{"id":"019ec4f2-aaaa","cwd":"/Users/dev/proj"}}"#,
-            ],
-        );
-        write_rollout(
-            &day,
-            "rollout-2026-06-16T11-00-00-019ed136-bbbb.jsonl",
-            &[
-                r#"{"type":"session_meta","payload":{"id":"019ed136-bbbb","cwd":"/Users/dev/proj"}}"#,
-            ],
-        );
-
-        let found = find_codex_rollout_by_native_id(home.path(), "019ec4f2-aaaa")
-            .expect("rollout for the requested id");
-        assert!(
-            found
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap()
-                .ends_with("019ec4f2-aaaa.jsonl")
-        );
-
-        assert!(find_codex_rollout_by_native_id(home.path(), "missing-id").is_none());
-    }
-}
+mod tests;

@@ -418,6 +418,7 @@ export interface SessionStateTimeline {
 //     cannot proceed until you answer, and auto-approve does NOT clear it.
 export type ActivityStatus =
   | 'working'
+  | 'idle'
   | 'awaiting_input'
   | 'awaiting_permission'
   | 'awaiting_response'

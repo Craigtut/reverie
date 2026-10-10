@@ -320,6 +320,7 @@ fn rollout_is_at_rest(target: &CodexTitleTarget) -> bool {
 fn title_schedule_timing(state: &ActivityState) -> Option<TitleScheduleTiming> {
     state.turn.as_ref()?;
     match state.status {
+        ActivityStatus::Idle => None,
         ActivityStatus::Working
         | ActivityStatus::AwaitingPermission
         | ActivityStatus::AwaitingResponse => Some(TitleScheduleTiming::Early),

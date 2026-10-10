@@ -1,8 +1,8 @@
 //! Per-session hook config writer for Claude Code.
 //!
 //! Each launched Claude session gets a private settings file (under Reverie's
-//! CLI-readable home, never the user's `~/.claude`) declaring HTTP lifecycle
-//! hooks that point at Reverie's localhost hook server. The launch path attaches
+//! CLI-readable home, never the user's `~/.claude`) declaring lifecycle
+//! hooks (command for SessionStart, HTTP otherwise) that point at Reverie's localhost hook server. The launch path attaches
 //! it with `claude --settings <file>`, which merges additively on top of the
 //! user's own settings and leaves `~/.claude` (credentials/auth) untouched, so
 //! no credential-home redirect is needed and the CLI never re-prompts to sign
@@ -39,6 +39,9 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
     "PermissionRequest",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
+    "Elicitation",
+    "ElicitationResult",
     "Stop",
     "StopFailure",
     "SessionStart",
@@ -59,7 +62,12 @@ const CLAUDE_HOOK_EVENTS: &[&str] = &[
 /// `SessionStart` deliberately stays out of this list: giving it a matcher
 /// like `"startup"` would suppress the hook on `resume`, and Reverie resumes
 /// sessions constantly, so it must fire for every start source.
-const CLAUDE_TOOL_MATCHED_EVENTS: &[&str] = &["PermissionRequest", "PreToolUse", "PostToolUse"];
+const CLAUDE_TOOL_MATCHED_EVENTS: &[&str] = &[
+    "PermissionRequest",
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+];
 
 /// Outcome of a successful config write. The launch path attaches
 /// `config_file` to the spawn (Claude: `--settings <config_file>`). We do not
@@ -118,15 +126,17 @@ struct ClaudeMatcherGroup<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct ClaudeHookEntry<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    url: &'a str,
-    /// Per-hook timeout in seconds. Omitted for most events (Claude's defaults
-    /// apply); set for PermissionRequest so the hook waits while the user answers
-    /// the native approval card. See [`claude_hook_timeout`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    timeout: Option<u64>,
+#[serde(tag = "type", rename_all = "lowercase")]
+enum ClaudeHookEntry<'a> {
+    Http {
+        url: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
+    },
+    Command {
+        command: String,
+        timeout: u64,
+    },
 }
 
 /// Per-event hook timeout override, in seconds. PermissionRequest holds its HTTP
@@ -155,10 +165,17 @@ fn build_claude_settings(hook_url: &str) -> ClaudeSettings<'_> {
             *event,
             vec![ClaudeMatcherGroup {
                 matcher,
-                hooks: vec![ClaudeHookEntry {
-                    kind: "http",
-                    url: hook_url,
-                    timeout: claude_hook_timeout(event),
+                hooks: vec![if *event == "SessionStart" {
+                    // Claude 2.1.296 ignores HTTP SessionStart hooks. macOS curl
+                    // forwards stdin without a shell-expanded payload or a new
+                    // runtime dependency. Startup is observational and fail-open.
+                    let quoted_url = format!("'{}'", hook_url.replace('\'', "'\"'\"'"));
+                    ClaudeHookEntry::Command {
+                        command: format!("/usr/bin/curl --silent --max-time 2 --header 'Content-Type: application/json' --data-binary @- -- {quoted_url} >/dev/null 2>&1 || true"),
+                        timeout: 3,
+                    }
+                } else {
+                    ClaudeHookEntry::Http { url: hook_url, timeout: claude_hook_timeout(event) }
                 }],
             }],
         );
@@ -208,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn write_claude_settings_produces_matcher_wrapped_http_hooks_for_every_event() {
+    fn write_claude_settings_uses_supported_transport_for_every_event() {
         let dir = TempDir::new().unwrap();
         let url = "http://127.0.0.1:9000/hooks/claude/tok-1";
         let written = write_claude_settings(dir.path(), url).expect("writes");
@@ -235,8 +252,13 @@ mod tests {
                 .and_then(|v| v.as_array())
                 .unwrap_or_else(|| panic!("{event} group missing nested hooks array"));
             assert_eq!(entries.len(), 1, "{event} should declare one HTTP hook");
-            assert_eq!(entries[0]["type"], "http");
-            assert_eq!(entries[0]["url"], url);
+            if *event == "SessionStart" {
+                assert_eq!(entries[0]["type"], "command");
+                assert!(entries[0]["command"].as_str().unwrap().contains(url));
+            } else {
+                assert_eq!(entries[0]["type"], "http");
+                assert_eq!(entries[0]["url"], url);
+            }
 
             // Tool-keyed events carry a matcher; lifecycle events must not, and
             // SessionStart in particular must stay matcher-free so it fires on
@@ -257,6 +279,8 @@ mod tests {
                     entries[0]["timeout"], 900,
                     "PermissionRequest should hold open for the approval card"
                 );
+            } else if *event == "SessionStart" {
+                assert_eq!(entries[0]["timeout"], 3);
             } else {
                 assert!(
                     entries[0].get("timeout").is_none(),

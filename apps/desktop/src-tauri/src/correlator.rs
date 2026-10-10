@@ -55,72 +55,88 @@ enum SessionActivityEvent {
     },
 }
 
-/// Bind one update to its Reverie session, persist it, and emit the frontend
-/// event. Persistence is best-effort: the event still fires if the service is
-/// momentarily unavailable, because the frontend keys on the native id either
-/// way.
-pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
-    let service = app.try_state::<WorkspaceService>();
-    let reconciler = app.try_state::<ActivityReconciler>();
-    let captured = service
-        .as_ref()
-        .map(|service| apply_update(service, reconciler.as_deref(), &update))
-        .unwrap_or(false);
+/// Serializes reduction, persistence, and publication across transport drains.
+#[derive(Default)]
+pub(crate) struct ActivityIngestion {
+    order: std::sync::Mutex<()>,
+    reconciler: ActivityReconciler,
+}
 
-    match update {
-        ActivityUpdate::State {
-            source, key, state, ..
-        } => {
-            let native_session_id = native_id_for(&key, &state);
-            // Read back the timeline the apply just stamped so it rides the live
-            // event (the session is bound by now, even on a first-sight capture).
-            let state_timeline = service.as_ref().and_then(|service| {
-                service
-                    .session_timeline_by_native_id(&native_session_id)
-                    .ok()
-                    .flatten()
-            });
-            if source == ActivitySourceKind::CodexCli {
-                crate::terminal::runtime::refresh_codex_rollout_path_after_activity(
-                    app,
-                    &native_session_id,
-                );
-                maybe_schedule_codex_title(app, &native_session_id, &state);
-            }
-            // Re-entry summary fires for every CLI when a session comes to rest;
-            // eligibility (unseen, still resting, not already summarized) is
-            // re-checked after a settle delay inside the scheduler.
-            maybe_schedule_reentry_summary(app, &native_session_id, &state);
-            emit(
-                app,
-                SessionActivityEvent::Updated {
-                    source,
-                    native_session_id: native_session_id.clone(),
-                    state,
-                    state_timeline,
-                },
-            );
-            // First sight of this session's native id: the record only now
-            // carries the ref the dashboard binds activity against, so prompt a
-            // snapshot refetch.
-            if captured {
-                if let Err(error) = app.emit(SESSION_RECORD_CHANGED_EVENT, ()) {
-                    eprintln!("[reverie] failed to emit session record change: {error}");
-                }
-            }
+pub(crate) fn correlate(app: &AppHandle, update: ActivityUpdate) {
+    let (Some(service), Some(ingestion)) = (
+        app.try_state::<WorkspaceService>(),
+        app.try_state::<ActivityIngestion>(),
+    ) else {
+        return;
+    };
+    let _ordered = ingestion.order.lock().unwrap_or_else(|e| e.into_inner());
+    match accept_update(&service, Some(&ingestion.reconciler), &update) {
+        Ok(Some((event, captured))) => publish(app, event, captured),
+        Ok(None) => {}
+        Err(error) => eprintln!("[reverie] activity update failed: {error:#}"),
+    }
+}
+
+/// Called before spawn, while old hooks are being revoked. The new baseline
+/// prevents history replay and old reducer state from marking a resume active.
+pub(crate) fn begin_run(app: &AppHandle, id: reverie_core::domain::SessionId) {
+    let (Some(service), Some(ingestion)) = (
+        app.try_state::<WorkspaceService>(),
+        app.try_state::<ActivityIngestion>(),
+    ) else {
+        return;
+    };
+    let _ordered = ingestion.order.lock().unwrap_or_else(|e| e.into_inner());
+    let result = (|| -> anyhow::Result<_> {
+        let Some(session) = service.activity().session(&SessionKey::Reverie(id))? else {
+            return Ok(None);
+        };
+        let source = match session.agent_kind {
+            reverie_core::AgentKind::ClaudeCode => ActivitySourceKind::ClaudeCode,
+            reverie_core::AgentKind::CodexCli => ActivitySourceKind::CodexCli,
+            reverie_core::AgentKind::CortexCode => return Ok(None),
+        };
+        let Some(saved) = service.activity().begin_run(id)? else {
+            return Ok(None);
+        };
+        if source == ActivitySourceKind::CodexCli {
+            ingestion.reconciler.begin_run(&saved.state);
         }
-        ActivityUpdate::Removed {
+        Ok(Some(SessionActivityEvent::Updated {
             source,
-            native_session_id,
-            ..
-        } => {
-            emit(
+            native_session_id: saved.state.session_id.clone(),
+            state: saved.state,
+            state_timeline: Some(saved.timeline),
+        }))
+    })();
+    match result {
+        Ok(Some(event)) => publish(app, event, false),
+        Ok(None) => {}
+        Err(error) => eprintln!("[reverie] activity launch boundary failed: {error:#}"),
+    }
+}
+
+fn publish(app: &AppHandle, event: SessionActivityEvent, captured: bool) {
+    if let SessionActivityEvent::Updated {
+        source,
+        native_session_id,
+        state,
+        ..
+    } = &event
+    {
+        if *source == ActivitySourceKind::CodexCli {
+            crate::terminal::runtime::refresh_codex_rollout_path_after_activity(
                 app,
-                SessionActivityEvent::Removed {
-                    source,
-                    native_session_id,
-                },
+                native_session_id,
             );
+            maybe_schedule_codex_title(app, native_session_id, state);
+        }
+        maybe_schedule_reentry_summary(app, native_session_id, state);
+    }
+    emit(app, event);
+    if captured {
+        if let Err(error) = app.emit(SESSION_RECORD_CHANGED_EVENT, ()) {
+            eprintln!("[reverie] failed to emit session record change: {error}");
         }
     }
 }
@@ -135,137 +151,138 @@ fn native_id_for(key: &SessionKey, state: &ActivityState) -> String {
     }
 }
 
-/// Persist an update by its binding key. Returns `true` only when a Reverie-keyed
-/// update captured the CLI's native session id into the record for the first
-/// time (which the caller turns into a `session_record_changed`). Pure of Tauri,
-/// so it is unit-testable against an in-memory [`WorkspaceService`].
-///
-/// Codex is the one dual-source CLI (lifecycle hooks + rollout watcher), so its
-/// updates run through the [`ActivityReconciler`] first: that turn-ordered merge
-/// is the single writer, which both fixes the cross-source sequence fight and
-/// lets the rollout's `turn_aborted` backstop the `Stop` hook on Esc/error. The
-/// single-source CLIs (Claude hooks, Cortex snapshots) take the direct path, as
-/// they have no second source to reconcile against. `record_session_activity*`
-/// still drops out-of-order updates by sequence, which for Codex is now a plain
-/// monotonic dedup on the reconciler's own sequence.
-fn apply_update(
+/// Returns exactly the accepted snapshot, or nothing for an unbound/stale
+/// update. Event consumers never see the original, unmerged observation.
+fn accept_update(
     service: &WorkspaceService,
     reconciler: Option<&ActivityReconciler>,
     update: &ActivityUpdate,
-) -> bool {
+) -> anyhow::Result<Option<(SessionActivityEvent, bool)>> {
+    let persistence = service.activity();
     match update {
-        // Codex: merge both sources, then persist. Reverie-keyed (hook) updates
-        // still capture the native id on first sight via record_session_activity_by_id.
         ActivityUpdate::State {
-            source: ActivitySourceKind::CodexCli,
+            source,
             key,
             state,
             fidelity,
             session_boundary,
         } => {
-            let native_id = match key {
-                SessionKey::Native(native_id) => native_id.clone(),
-                SessionKey::Reverie(_) => state.session_id.clone(),
+            let Some(owner) = persistence.session(key)? else {
+                return Ok(None);
             };
-            let merged = match reconciler {
-                Some(reconciler) => reconciler.merge(&native_id, *fidelity, state),
-                None => state.clone(),
-            };
-            match key {
-                SessionKey::Reverie(reverie_id) => {
-                    match service.record_session_activity_by_id_at_boundary(
-                        *reverie_id,
-                        &native_id,
-                        merged,
-                        *session_boundary,
-                    ) {
-                        Ok(captured) => captured,
-                        Err(error) => {
-                            eprintln!(
-                                "[reverie] failed to persist Codex hook activity for {reverie_id}: {error:#}"
-                            );
-                            false
+            // A poll cannot update a process that exited or overwrite a hook
+            // received while the snapshot command was running.
+            if *source == ActivitySourceKind::ClaudeCode
+                && *fidelity == reverie_core::activity_source::Fidelity::Coarse
+            {
+                if owner.status != reverie_core::domain::SessionStatus::Running {
+                    return Ok(None);
+                }
+                if owner.latest_activity.as_ref().is_some_and(|old| {
+                    reverie_core::time::iso8601_to_epoch_millis(&old.updated_at)
+                        .zip(reverie_core::time::iso8601_to_epoch_millis(
+                            &state.updated_at,
+                        ))
+                        .is_some_and(|(old, observed)| old >= observed)
+                }) {
+                    return Ok(None);
+                }
+            }
+            let native = native_id_for(key, state);
+            if persistence
+                .session(&SessionKey::Native(native.clone()))?
+                .is_some_and(|bound| bound.id != owner.id)
+            {
+                return Ok(None);
+            }
+            let stored_native = owner
+                .native_session_ref
+                .as_ref()
+                .and_then(|r| r.session_id.as_deref());
+            if stored_native.is_some_and(|old| old != native) && !session_boundary {
+                return Ok(None);
+            }
+            if *source != ActivitySourceKind::CodexCli
+                && !session_boundary
+                && owner.latest_activity.as_ref().is_some_and(|old| {
+                    reverie_core::activity_persistence::activity_is_out_of_order(old, state)
+                })
+            {
+                return Ok(None);
+            }
+            let merged = if *source == ActivitySourceKind::CodexCli {
+                match reconciler {
+                    Some(reconciler) => {
+                        if *session_boundary && state.status == reverie_core::ActivityStatus::Idle {
+                            // Reject an obsolete boundary before resetting merge state.
+                            if owner.latest_activity.as_ref().is_some_and(|old| {
+                                reverie_core::activity_persistence::activity_is_out_of_order(
+                                    old, state,
+                                )
+                            }) {
+                                return Ok(None);
+                            }
+                            reconciler.begin_run(state);
                         }
+                        reconciler.merge(&native, *fidelity, state)
                     }
+                    None => state.clone(),
                 }
-                SessionKey::Native(_) => {
-                    if let Err(error) = service.record_session_activity(&native_id, merged) {
-                        eprintln!(
-                            "[reverie] failed to persist Codex activity for {native_id}: {error:#}"
-                        );
-                    }
-                    false
-                }
-            }
+            } else if *source == ActivitySourceKind::ClaudeCode {
+                reverie_core::claude_activity::normalize_rest(
+                    owner.latest_activity.as_ref(),
+                    state.clone(),
+                    *session_boundary,
+                )
+            } else {
+                state.clone()
+            };
+            let Some(saved) = persistence.record(key, merged, *session_boundary)? else {
+                return Ok(None);
+            };
+            Ok(Some((
+                SessionActivityEvent::Updated {
+                    source: *source,
+                    native_session_id: native,
+                    state: saved.state,
+                    state_timeline: Some(saved.timeline),
+                },
+                saved.captured_native_session,
+            )))
         }
-        ActivityUpdate::State {
-            key: SessionKey::Reverie(reverie_id),
-            state,
-            session_boundary,
-            ..
-        } => match service.record_session_activity_by_id_at_boundary(
-            *reverie_id,
-            &state.session_id,
-            state.clone(),
-            *session_boundary,
-        ) {
-            Ok(captured) => captured,
-            Err(error) => {
-                eprintln!("[reverie] failed to persist hook activity for {reverie_id}: {error:#}");
-                false
-            }
-        },
-        ActivityUpdate::State {
-            key: SessionKey::Native(native_id),
-            state,
-            ..
-        } => {
-            if let Err(error) = service.record_session_activity(native_id, state.clone()) {
-                eprintln!("[reverie] failed to persist activity for {native_id}: {error:#}");
-            }
-            false
-        }
-        // Codex source removed: drop the merge state, then clear the record.
         ActivityUpdate::Removed {
-            source: ActivitySourceKind::CodexCli,
+            source,
             key,
             native_session_id,
         } => {
-            if let Some(reconciler) = reconciler {
-                reconciler.forget(native_session_id);
-            }
-            let cleared = match key {
-                SessionKey::Reverie(reverie_id) => {
-                    service.clear_session_activity_by_id(*reverie_id)
+            if *source == ActivitySourceKind::CodexCli {
+                if let Some(reconciler) = reconciler {
+                    reconciler.forget(native_session_id);
                 }
-                SessionKey::Native(native_id) => service.clear_session_activity(native_id),
-            };
-            if let Err(error) = cleared {
-                eprintln!(
-                    "[reverie] failed to clear Codex activity for {native_session_id}: {error:#}"
-                );
             }
-            false
-        }
-        ActivityUpdate::Removed {
-            key: SessionKey::Reverie(reverie_id),
-            ..
-        } => {
-            if let Err(error) = service.clear_session_activity_by_id(*reverie_id) {
-                eprintln!("[reverie] failed to clear hook activity for {reverie_id}: {error:#}");
+            if !persistence.clear(key)? {
+                return Ok(None);
             }
-            false
-        }
-        ActivityUpdate::Removed {
-            key: SessionKey::Native(native_id),
-            ..
-        } => {
-            if let Err(error) = service.clear_session_activity(native_id) {
-                eprintln!("[reverie] failed to clear activity for {native_id}: {error:#}");
-            }
-            false
+            Ok(Some((
+                SessionActivityEvent::Removed {
+                    source: *source,
+                    native_session_id: native_session_id.clone(),
+                },
+                false,
+            )))
         }
     }
+}
+
+#[cfg(test)]
+fn apply_update(
+    service: &WorkspaceService,
+    reconciler: Option<&ActivityReconciler>,
+    update: &ActivityUpdate,
+) -> bool {
+    accept_update(service, reconciler, update)
+        .unwrap()
+        .is_some_and(|(_, captured)| captured)
 }
 
 fn emit(app: &AppHandle, payload: SessionActivityEvent) {
@@ -565,5 +582,234 @@ mod tests {
         assert_eq!(json["kind"], "removed");
         assert_eq!(json["payload"]["source"], "cortex_code");
         assert_eq!(json["payload"]["nativeSessionId"], "n");
+    }
+    fn turn_update(
+        id: SessionId,
+        turn: &str,
+        status: ActivityStatus,
+        started: u8,
+        at: u8,
+        fidelity: Fidelity,
+    ) -> ActivityUpdate {
+        let mut value = state("native-1", u64::from(at), status);
+        value.updated_at = format!("2026-10-10T12:00:{at:02}.000Z");
+        value.turn = Some(reverie_core::activity::ActivityTurn {
+            id: turn.into(),
+            status: reverie_core::activity::TurnStatus::Running,
+            started_at: format!("2026-10-10T12:00:{started:02}.000Z"),
+            ended_at: None,
+        });
+        ActivityUpdate::State {
+            source: ActivitySourceKind::CodexCli,
+            key: SessionKey::Reverie(id),
+            state: value,
+            fidelity,
+            session_boundary: false,
+        }
+    }
+
+    #[test]
+    fn emitted_state_is_the_persisted_merge_and_stale_events_emit_nothing() {
+        let (service, id) = service_with_session();
+        let reducer = ActivityReconciler::new();
+        for (turn, time) in [("a", 1), ("b", 2)] {
+            accept_update(
+                &service,
+                Some(&reducer),
+                &turn_update(
+                    id,
+                    turn,
+                    ActivityStatus::Working,
+                    time,
+                    time,
+                    Fidelity::Definitive,
+                ),
+            )
+            .unwrap()
+            .unwrap();
+        }
+        // A delayed start for A previously stole the reducer's current turn.
+        assert!(
+            accept_update(
+                &service,
+                Some(&reducer),
+                &turn_update(id, "a", ActivityStatus::Working, 1, 3, Fidelity::Inferred)
+            )
+            .unwrap()
+            .is_none()
+        );
+        let (
+            SessionActivityEvent::Updated {
+                state,
+                state_timeline,
+                ..
+            },
+            _,
+        ) = accept_update(
+            &service,
+            Some(&reducer),
+            &turn_update(
+                id,
+                "b",
+                ActivityStatus::AwaitingInput,
+                2,
+                4,
+                Fidelity::Inferred,
+            ),
+        )
+        .unwrap()
+        .unwrap()
+        else {
+            panic!("updated")
+        };
+        let persisted = service
+            .activity()
+            .session(&SessionKey::Reverie(id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some(&state), persisted.latest_activity.as_ref());
+        assert_eq!(state.status, ActivityStatus::AwaitingInput);
+        assert_eq!(state.turn.unwrap().started_at, "2026-10-10T12:00:02.000Z");
+        assert_eq!(
+            serde_json::to_value(state_timeline.unwrap()).unwrap(),
+            serde_json::to_value(persisted.state_timeline).unwrap()
+        );
+    }
+
+    #[test]
+    fn unbound_and_stale_claude_updates_are_not_published() {
+        let (service, id) = service_with_session();
+        accept_update(
+            &service,
+            None,
+            &reverie_state(id, "native-1", 2, ActivityStatus::AwaitingInput),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            accept_update(
+                &service,
+                None,
+                &reverie_state(id, "native-1", 1, ActivityStatus::Working)
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            accept_update(
+                &service,
+                None,
+                &reverie_state(
+                    SessionId::from_bytes([9; 16]),
+                    "unbound",
+                    3,
+                    ActivityStatus::Working
+                )
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn launch_baseline_preserves_timeline_without_claiming_a_completed_turn() {
+        let (service, id) = service_with_session();
+        accept_update(
+            &service,
+            None,
+            &reverie_state(id, "native-1", 1, ActivityStatus::Working),
+        )
+        .unwrap()
+        .unwrap();
+        let before = service
+            .activity()
+            .session(&SessionKey::Reverie(id))
+            .unwrap()
+            .unwrap();
+        let launched = service.activity().begin_run(id).unwrap().unwrap();
+        assert_eq!(launched.state.status, ActivityStatus::Idle);
+        assert!(launched.state.turn.is_none());
+        assert_eq!(
+            serde_json::to_value(&launched.timeline).unwrap(),
+            serde_json::to_value(before.state_timeline).unwrap()
+        );
+        let mut end = launched.state.clone();
+        end.sequence += 1;
+        end.status = ActivityStatus::Done;
+        accept_update(
+            &service,
+            None,
+            &ActivityUpdate::State {
+                source: ActivitySourceKind::ClaudeCode,
+                key: SessionKey::Reverie(id),
+                fidelity: Fidelity::Definitive,
+                state: end,
+                session_boundary: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            service
+                .activity()
+                .session(&SessionKey::Reverie(id))
+                .unwrap()
+                .unwrap()
+                .latest_activity
+                .unwrap()
+                .status,
+            ActivityStatus::Idle
+        );
+    }
+
+    #[test]
+    fn claude_idle_notification_preserves_a_reviewed_completion_time() {
+        let (service, id) = service_with_session();
+        accept_update(
+            &service,
+            None,
+            &reverie_state(id, "native-1", 1, ActivityStatus::AwaitingInput),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            accept_update(
+                &service,
+                None,
+                &reverie_state(id, "native-1", 2, ActivityStatus::Idle)
+            )
+            .unwrap()
+            .is_none()
+        );
+        let saved = service
+            .activity()
+            .session(&SessionKey::Reverie(id))
+            .unwrap()
+            .unwrap()
+            .latest_activity
+            .unwrap();
+        assert_eq!(saved.status, ActivityStatus::AwaitingInput);
+        assert_eq!(saved.sequence, 1);
+    }
+
+    #[test]
+    fn a_hook_during_a_claude_poll_wins_over_the_snapshot() {
+        let (service, id) = service_with_session();
+        service.mark_session_running(id).unwrap();
+        let mut hook = reverie_state(id, "native-1", 1, ActivityStatus::AwaitingPermission);
+        let ActivityUpdate::State { state, .. } = &mut hook else {
+            unreachable!()
+        };
+        state.updated_at = "2026-10-10T12:00:03.000Z".into();
+        accept_update(&service, None, &hook).unwrap().unwrap();
+        let mut poll = reverie_state(id, "native-1", 2, ActivityStatus::Idle);
+        let ActivityUpdate::State {
+            state, fidelity, ..
+        } = &mut poll
+        else {
+            unreachable!()
+        };
+        *fidelity = Fidelity::Coarse;
+        state.updated_at = "2026-10-10T12:00:02.000Z".into();
+        assert!(accept_update(&service, None, &poll).unwrap().is_none());
     }
 }

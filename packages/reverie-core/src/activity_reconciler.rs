@@ -1,44 +1,14 @@
-//! Per-session merge of Codex's two activity sources into one coherent state.
-//!
-//! Codex is the only CLI Reverie observes through **two** sources at once: the
-//! lifecycle hooks and notifier (Definitive: instant native-id capture, turn
-//! start/completion, the approval gate) and the rollout-JSONL watcher (Inferred:
-//! rich tool detail and the explicit `turn_aborted` edge). Their
-//! sequence counters are independent and incomparable, so writing both straight
-//! into `latest_activity` (each guarded only by its own sequence) makes them
-//! clobber each other. This reconciler is the single writer that resolves them.
-//!
-//! The merge is a small per-session **turn state machine** keyed by the native
-//! session id (both sources carry it). Codex `turn_id`s are opaque. Current
-//! releases can mix UUID versions, so they must never be ordered lexically.
-//! Either source may supply the start or end edge of a turn:
-//!
-//! - a turn is **running** once any source reports a start for it (and not yet an
-//!   end), so a long silent turn never reads as idle (the cull-safety guarantee);
-//! - a turn **ends** only when an end edge names *that* turn, so a late
-//!   `task_complete` for turn N can't flip a newer `UserPromptSubmit` for N+1
-//!   back to idle;
-//! - an inferred edge cannot reopen the same turn after its definitive
-//!   `agent-turn-complete` notification;
-//! - the rollout's explicit `turn_aborted` edge covers Esc/interrupt.
-//!
-//! Single-source CLIs (Claude hooks, Cortex snapshots) do not go through here:
-//! they have no second source to fight, and the correlator keeps them on the
-//! direct path.
+//! Orders Codex hook and rollout observations before any consumer sees them.
+//! Turn ids are opaque. Retired turns, source cursors, and the launch boundary
+//! prevent delayed history from replacing current work. A completed turn cannot
+//! be reopened by a later snapshot of that same turn.
 
-use std::collections::HashMap;
+use crate::activity::{ActivityState, ActivityStatus, TurnStatus};
+use crate::activity_source::Fidelity;
+use crate::time::iso8601_to_epoch_millis;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
-use crate::activity::{
-    ActiveTool, ActivityError, ActivityState, ActivityStatus, ActivityTurn, PermissionRequest,
-    TurnStatus,
-};
-use crate::activity_source::Fidelity;
-
-const ACTIVITY_VERSION: u32 = 1;
-
-/// Shared, in-memory merge state for every live Codex session, keyed by native
-/// session id. Cheap: one small struct per session, dropped on removal.
 #[derive(Default)]
 pub struct ActivityReconciler {
     sessions: Mutex<HashMap<String, SessionMerge>>,
@@ -49,206 +19,245 @@ impl ActivityReconciler {
         Self::default()
     }
 
-    /// Fold one source update into the session's merged state and return the
-    /// reconciled snapshot to persist. The caller writes it through the workspace
-    /// service; because this reconciler is the sole writer for a Codex session,
-    /// its monotonic `sequence` makes the service's out-of-order guard a simple
-    /// dedup again.
     pub fn merge(
         &self,
-        native_session_id: &str,
+        native: &str,
         fidelity: Fidelity,
         incoming: &ActivityState,
     ) -> ActivityState {
-        let mut guard = self.sessions.lock().unwrap_or_else(|err| err.into_inner());
-        let merge = guard.entry(native_session_id.to_owned()).or_default();
-        merge.apply(native_session_id, fidelity, incoming);
-        merge.snapshot()
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let merge = sessions.entry(native.to_owned()).or_default();
+        merge.apply(fidelity, incoming);
+        merge
+            .state
+            .clone()
+            .expect("first observation establishes state")
     }
 
-    /// Drop a session's merge state (its source was removed). Idempotent.
-    pub fn forget(&self, native_session_id: &str) {
+    /// A new process starts at its prompt. History before this boundary can
+    /// enrich neither the current turn nor the completion timestamp.
+    pub fn begin_run(&self, state: &ActivityState) {
         self.sessions
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .remove(native_session_id);
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                state.session_id.clone(),
+                SessionMerge {
+                    state: Some(state.clone()),
+                    launched_at: iso8601_to_epoch_millis(&state.updated_at),
+                    ..SessionMerge::default()
+                },
+            );
+    }
+
+    pub fn forget(&self, native: &str) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(native);
     }
 }
 
-/// The merge machine for one session.
 #[derive(Default)]
 struct SessionMerge {
-    /// Newest turn we've seen a start for. `None` before the first turn (a fresh
-    /// or just-resumed session sitting at the prompt).
-    current_turn: Option<String>,
-    /// Whether `current_turn` has ended. Meaningless when `current_turn` is None.
-    turn_ended: bool,
-    /// Fidelity of the edge that ended `current_turn`. Prevents a delayed
-    /// inferred rollout snapshot from reopening a definitively completed turn.
-    end_fidelity: Option<Fidelity>,
-    /// Whether the agent is blocked on an approval for the current turn. Sticky
-    /// until forward progress (a later working edge) or the turn ends.
-    permission_pending: bool,
-    /// The approval detail, when a source provided one (the hook does; the
-    /// rollout heuristic may not).
-    permission: Option<PermissionRequest>,
-    /// Whether the session is in an error state.
-    errored: bool,
-    last_error: Option<ActivityError>,
-    /// Latest tool detail (enrichment), kept across sources, cleared on turn end.
-    active_tools: Vec<ActiveTool>,
-    native_id: String,
-    cwd: String,
-    updated_at: String,
-    /// Reconciler-owned monotonic output sequence.
-    sequence: u64,
+    state: Option<ActivityState>,
+    launched_at: Option<i64>,
+    cursors: [Option<(i64, u64)>; 3],
+    retired: HashSet<String>,
+    retirement_order: VecDeque<String>,
+    goal_active: bool,
+    permission_fidelity: Option<Fidelity>,
+}
+
+fn at_rest(state: &ActivityState) -> bool {
+    matches!(
+        state.status,
+        ActivityStatus::Idle | ActivityStatus::AwaitingInput | ActivityStatus::Done
+    )
 }
 
 impl SessionMerge {
-    fn apply(&mut self, native_session_id: &str, fidelity: Fidelity, incoming: &ActivityState) {
-        self.native_id = native_session_id.to_owned();
-        if !incoming.cwd.is_empty() {
-            self.cwd = incoming.cwd.clone();
+    fn retire(&mut self, id: &str) {
+        if self.retired.insert(id.to_owned()) {
+            self.retirement_order.push_back(id.to_owned());
         }
-        if !incoming.updated_at.is_empty() {
-            self.updated_at = incoming.updated_at.clone();
-        }
-        // Tool detail is enrichment: keep the latest non-empty list, and let an
-        // end edge clear it below.
-        if !incoming.active_tools.is_empty() {
-            self.active_tools = incoming.active_tools.clone();
-        }
-
-        let turn_id = incoming.turn.as_ref().map(|turn| turn.id.as_str());
-
-        match incoming.status {
-            ActivityStatus::Working => {
-                self.errored = false;
-                match turn_id {
-                    Some(id) => {
-                        let same_turn = self.current_turn.as_deref() == Some(id);
-                        let weaker_than_end = same_turn
-                            && self.turn_ended
-                            && self.end_fidelity.is_some_and(|ended| fidelity < ended);
-                        if !weaker_than_end {
-                            self.start_turn(id);
-                        }
-                    }
-                    // A turn-less working pulse: keep whatever turn we have live.
-                    None => {
-                        self.turn_ended = false;
-                        // Forward progress clears a resolved approval gate.
-                        self.clear_permission();
-                    }
-                }
-            }
-            // Codex never emits `Done` for an in-flight session, but treat it as
-            // a clean end defensively.
-            ActivityStatus::AwaitingInput | ActivityStatus::Done => match turn_id {
-                // End only the named current turn. A late end for a different
-                // turn is stale, regardless of how its opaque id sorts.
-                Some(id)
-                    if self
-                        .current_turn
-                        .as_deref()
-                        .is_none_or(|current| current == id) =>
-                {
-                    self.current_turn = Some(id.to_owned());
-                    self.end_turn(fidelity);
-                }
-                Some(_) => {}
-                // Turn-less idle (e.g. SessionStart): a baseline only. Never end
-                // a turn we already know is running on a turn-less idle.
-                None => {
-                    if self.current_turn.is_none() {
-                        self.end_turn(fidelity);
-                    }
-                }
-            },
-            ActivityStatus::AwaitingPermission | ActivityStatus::AwaitingResponse => {
-                self.errored = false;
-                match turn_id {
-                    Some(id) => self.start_turn(id),
-                    None => self.turn_ended = false,
-                }
-                self.permission_pending = true;
-                // Keep an existing detail if this edge didn't carry one.
-                if incoming.awaiting_permission.is_some() {
-                    self.permission = incoming.awaiting_permission.clone();
-                }
-            }
-            ActivityStatus::Error => {
-                self.errored = true;
-                self.last_error = incoming.last_error.clone();
+        // Older history is also excluded by source cursors and turn start time.
+        while self.retirement_order.len() > 128 {
+            if let Some(old) = self.retirement_order.pop_front() {
+                self.retired.remove(&old);
             }
         }
-
-        self.sequence += 1;
     }
 
-    /// Begin (or continue) turn `id` as the live turn.
-    fn start_turn(&mut self, id: &str) {
-        self.current_turn = Some(id.to_owned());
-        self.turn_ended = false;
-        self.end_fidelity = None;
-        // A working edge for the current/newer turn is forward progress, which
-        // resolves any approval gate that was pending.
-        self.clear_permission();
-    }
-
-    fn end_turn(&mut self, fidelity: Fidelity) {
-        self.turn_ended = true;
-        self.end_fidelity = Some(fidelity);
-        self.clear_permission();
-        self.active_tools.clear();
-    }
-
-    fn clear_permission(&mut self) {
-        self.permission_pending = false;
-        self.permission = None;
-    }
-
-    fn snapshot(&self) -> ActivityState {
-        let status = if self.errored {
-            ActivityStatus::Error
-        } else if self.permission_pending {
-            ActivityStatus::AwaitingPermission
-        } else if self.current_turn.is_some() && !self.turn_ended {
-            ActivityStatus::Working
-        } else {
-            ActivityStatus::AwaitingInput
+    fn apply(&mut self, fidelity: Fidelity, incoming: &ActivityState) {
+        let timestamp = iso8601_to_epoch_millis(&incoming.updated_at);
+        if let Some(at) = timestamp {
+            if self.launched_at.is_some_and(|start| at < start) {
+                return;
+            }
+            let cursor = &mut self.cursors[fidelity as usize];
+            if cursor
+                .is_some_and(|(time, seq)| at < time || (at == time && incoming.sequence < seq))
+            {
+                return;
+            }
+        }
+        let Some(previous) = self.state.clone() else {
+            let mut first = incoming.clone();
+            first.sequence = 1;
+            self.permission_fidelity = first.awaiting_permission.as_ref().map(|_| fidelity);
+            self.goal_active = fidelity == Fidelity::Inferred
+                && first.status == ActivityStatus::Working
+                && first
+                    .turn
+                    .as_ref()
+                    .is_some_and(|t| t.status == TurnStatus::Completed);
+            if let Some(at) = timestamp {
+                self.cursors[fidelity as usize] = Some((at, incoming.sequence));
+            }
+            self.state = Some(first);
+            return;
         };
-
-        let turn = self.current_turn.as_ref().map(|id| ActivityTurn {
-            id: id.clone(),
-            status: if self.turn_ended {
-                TurnStatus::Completed
-            } else {
-                TurnStatus::Running
-            },
-            started_at: self.updated_at.clone(),
-            ended_at: None,
-        });
-
-        ActivityState {
-            version: ACTIVITY_VERSION,
-            session_id: self.native_id.clone(),
-            status,
-            updated_at: self.updated_at.clone(),
-            sequence: self.sequence,
-            cwd: self.cwd.clone(),
-            turn,
-            active_tools: self.active_tools.clone(),
-            awaiting_permission: self.permission.clone(),
-            last_error: self.last_error.clone(),
-            final_exit: None,
+        // A folded completed task that is still working represents an active
+        // goal between automatic turns. Its liveness is independent of notify.
+        let goal_continuation = fidelity == Fidelity::Inferred
+            && incoming.status == ActivityStatus::Working
+            && incoming
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.status == TurnStatus::Completed);
+        let old_turn = previous.turn.as_ref();
+        let new_turn = incoming.turn.as_ref();
+        let same_turn = old_turn.zip(new_turn).is_some_and(|(a, b)| a.id == b.id);
+        if let Some(turn) = new_turn {
+            if self.retired.contains(&turn.id) {
+                return;
+            }
+            if same_turn && at_rest(&previous) && !at_rest(incoming) && !goal_continuation {
+                return;
+            }
+            if !same_turn {
+                if let Some(old) = old_turn {
+                    let newer = iso8601_to_epoch_millis(&turn.started_at)
+                        .zip(iso8601_to_epoch_millis(&old.started_at))
+                        .map(|(new, old)| new > old);
+                    if newer == Some(false) && turn.started_at != old.started_at {
+                        return;
+                    }
+                    // An end for another turn cannot end known live work unless
+                    // its start time proves that it is a later turn.
+                    if at_rest(incoming)
+                        && !at_rest(&previous)
+                        && (newer != Some(true) || fidelity == Fidelity::Definitive)
+                    {
+                        return;
+                    }
+                }
+            }
+        } else if at_rest(incoming) && !at_rest(&previous) {
+            // SessionStart has no turn. Explicit begin_run owns process resets.
+            return;
         }
+        if same_turn && at_rest(&previous) && at_rest(incoming) {
+            // Duplicate completion, including notify after the log: keep the
+            // original completion time so a viewed result never becomes unseen.
+            return;
+        }
+        if fidelity == Fidelity::Inferred
+            && (same_turn || new_turn.is_none())
+            && matches!(
+                previous.status,
+                ActivityStatus::AwaitingPermission | ActivityStatus::AwaitingResponse
+            )
+            && incoming.status == ActivityStatus::Working
+            && timestamp
+                .zip(iso8601_to_epoch_millis(&previous.updated_at))
+                .is_some_and(|(a, b)| a <= b)
+        {
+            return;
+        }
+
+        if !same_turn && new_turn.is_some() {
+            if let Some(old) = old_turn {
+                self.retire(&old.id);
+            }
+        }
+        if fidelity == Fidelity::Inferred && at_rest(incoming) {
+            self.goal_active = false;
+        }
+        if goal_continuation {
+            self.goal_active = true;
+        }
+        if let Some(at) = timestamp {
+            self.cursors[fidelity as usize] = Some((at, incoming.sequence));
+        }
+        let mut next = incoming.clone();
+        if self.goal_active
+            && fidelity == Fidelity::Definitive
+            && next.status == ActivityStatus::AwaitingInput
+        {
+            next.status = ActivityStatus::Working;
+        }
+        if new_turn.is_none() && !at_rest(&next) {
+            next.turn = previous.turn.clone();
+        }
+        next.sequence = previous.sequence + 1;
+        if next.cwd.is_empty() {
+            next.cwd = previous.cwd.clone();
+        }
+        if next.status == ActivityStatus::AwaitingPermission {
+            // Inferred escalation detail must not replace the hook request id
+            // used by the live Approve/Deny card.
+            let keep_detail = same_turn
+                && previous.status == ActivityStatus::AwaitingPermission
+                && (next.awaiting_permission.is_none()
+                    || self
+                        .permission_fidelity
+                        .is_some_and(|known| known > fidelity));
+            if keep_detail {
+                next.awaiting_permission = previous.awaiting_permission.clone();
+            } else {
+                self.permission_fidelity = next.awaiting_permission.as_ref().map(|_| fidelity);
+            }
+        } else {
+            self.permission_fidelity = None;
+        }
+        // The accepted sequence is global; its publication clock cannot move
+        // backwards when a valid completion was flushed late by a file source.
+        if timestamp
+            .zip(iso8601_to_epoch_millis(&previous.updated_at))
+            .is_some_and(|(a, b)| a < b)
+        {
+            next.updated_at = previous.updated_at.clone();
+        }
+        if same_turn {
+            if let (Some(turn), Some(old)) = (&mut next.turn, old_turn) {
+                turn.started_at = old.started_at.clone();
+            }
+        }
+        if at_rest(&next) {
+            next.active_tools.clear();
+            next.awaiting_permission = None;
+            if let Some(turn) = &mut next.turn {
+                if turn.status == TurnStatus::Running {
+                    turn.status = TurnStatus::Completed;
+                }
+                turn.ended_at
+                    .get_or_insert_with(|| incoming.updated_at.clone());
+            }
+        } else if fidelity == Fidelity::Definitive && same_turn && next.active_tools.is_empty() {
+            // Hooks provide edges; the rollout owns the full active-tool set,
+            // including an empty set when a tool finishes.
+            next.active_tools = previous.active_tools;
+        }
+        self.state = Some(next);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{ActivityTurn, PermissionRequest};
 
     fn state(status: ActivityStatus, turn_id: Option<&str>) -> ActivityState {
         ActivityState {
@@ -480,5 +489,170 @@ mod tests {
         );
         assert_eq!(s.status, ActivityStatus::AwaitingInput);
         assert_eq!(s.sequence, 1, "sequence restarts after forget");
+    }
+    fn timed(status: ActivityStatus, id: Option<&str>, started: u8, updated: u8) -> ActivityState {
+        let mut s = state(status, id);
+        s.updated_at = format!("2026-10-10T12:00:{updated:02}.000Z");
+        if let Some(turn) = &mut s.turn {
+            turn.started_at = format!("2026-10-10T12:00:{started:02}.000Z");
+        }
+        s
+    }
+
+    #[test]
+    fn delayed_start_for_retired_turn_cannot_steal_current_turn() {
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 1),
+        );
+        r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, Some(TURN_B), 2, 2),
+        );
+        let late = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 3),
+        );
+        assert_eq!(late.turn.unwrap().id, TURN_B);
+        let done = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::AwaitingInput, Some(TURN_B), 2, 4),
+        );
+        assert_eq!(done.status, ActivityStatus::AwaitingInput);
+        assert_eq!(
+            done.turn.unwrap().ended_at.as_deref(),
+            Some("2026-10-10T12:00:04.000Z")
+        );
+    }
+
+    #[test]
+    fn resume_discards_old_activity_and_allows_the_first_new_prompt() {
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 1),
+        );
+        r.begin_run(&timed(ActivityStatus::Idle, None, 3, 3));
+        let replay = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 2),
+        );
+        assert_eq!(replay.status, ActivityStatus::Idle);
+        let working = r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, Some(TURN_B), 4, 4),
+        );
+        assert_eq!(working.status, ActivityStatus::Working);
+    }
+
+    #[test]
+    fn user_question_remains_distinct_from_tool_permission() {
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 1),
+        );
+        let question = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::AwaitingResponse, Some(TURN_A), 1, 2),
+        );
+        assert_eq!(question.status, ActivityStatus::AwaitingResponse);
+        assert!(question.awaiting_permission.is_none());
+    }
+
+    #[test]
+    fn duplicate_notify_preserves_completion_time_and_sequence() {
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 1),
+        );
+        let first = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::AwaitingInput, Some(TURN_A), 1, 2),
+        );
+        let duplicate = r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::AwaitingInput, Some(TURN_A), 3, 3),
+        );
+        assert_eq!(duplicate, first);
+    }
+
+    #[test]
+    fn turnless_compaction_keeps_turn_identity_for_its_completion() {
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 1),
+        );
+        let compact = r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, None, 2, 2),
+        );
+        assert_eq!(compact.turn.as_ref().unwrap().id, TURN_A);
+        let done = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::AwaitingInput, Some(TURN_A), 1, 3),
+        );
+        assert_eq!(done.status, ActivityStatus::AwaitingInput);
+    }
+
+    #[test]
+    fn active_goal_continuation_survives_notify_until_terminal_goal_update() {
+        let r = ActivityReconciler::new();
+        r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::Working, Some(TURN_A), 1, 1),
+        );
+        let mut continuation = timed(ActivityStatus::Working, Some(TURN_A), 1, 2);
+        continuation.turn.as_mut().unwrap().status = TurnStatus::Completed;
+        r.merge("native-1", Fidelity::Inferred, &continuation);
+        let notify = r.merge(
+            "native-1",
+            Fidelity::Definitive,
+            &timed(ActivityStatus::AwaitingInput, Some(TURN_A), 3, 3),
+        );
+        assert_eq!(notify.status, ActivityStatus::Working);
+        let done = r.merge(
+            "native-1",
+            Fidelity::Inferred,
+            &timed(ActivityStatus::AwaitingInput, Some(TURN_A), 1, 4),
+        );
+        assert_eq!(done.status, ActivityStatus::AwaitingInput);
+    }
+    #[test]
+    fn inferred_permission_detail_cannot_replace_a_live_hook_approval_id() {
+        let r = ActivityReconciler::new();
+        let mut hook = timed(ActivityStatus::AwaitingPermission, Some(TURN_A), 1, 2);
+        hook.awaiting_permission = Some(PermissionRequest {
+            id: "hook-request".into(),
+            tool_name: "shell".into(),
+            display_summary: "Run tests".into(),
+            args: None,
+            requested_at: hook.updated_at.clone(),
+        });
+        r.merge("native-1", Fidelity::Definitive, &hook);
+        let mut inferred = hook.clone();
+        inferred.updated_at = "2026-10-10T12:00:03.000Z".into();
+        inferred.awaiting_permission.as_mut().unwrap().id = "rollout-call".into();
+        let merged = r.merge("native-1", Fidelity::Inferred, &inferred);
+        assert_eq!(merged.awaiting_permission.unwrap().id, "hook-request");
     }
 }

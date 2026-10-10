@@ -5,6 +5,7 @@
 //! testable and independent from whichever terminal renderer wins the v1 spike.
 
 pub mod activity;
+pub mod activity_persistence;
 pub mod activity_reconciler;
 pub mod activity_source;
 pub mod agents;
@@ -12,6 +13,7 @@ pub mod approval;
 pub mod bookmark;
 pub mod bridge_protocol;
 pub mod bridge_server;
+pub mod claude_activity;
 pub mod codex_hooks;
 pub mod codex_rollout;
 pub mod completion;
@@ -31,7 +33,7 @@ pub mod repository;
 pub mod session_log;
 pub mod speech;
 pub mod terminal;
-mod time;
+pub mod time;
 pub mod workspace_service;
 
 pub use activity::{
@@ -42,12 +44,12 @@ pub use activity::{
     parse_events, parse_state,
 };
 pub use activity_source::{ActivitySourceKind, ActivityUpdate, Fidelity, SessionKey};
-pub use approval::{ApprovalCapability, ApprovalDecision, ApprovalKey, ApprovalRegistry};
 pub use agents::{
     AdapterDetection, AgentAdapter, CommandSpec, CortexAdapter, CortexSessionDiscovery,
     CortexSessionMetadata, DiscoveryContext, LaunchContext, find_claude_transcript_by_native_id,
     read_claude_reentry_context,
 };
+pub use approval::{ApprovalCapability, ApprovalDecision, ApprovalKey, ApprovalRegistry};
 pub use bookmark::{BookmarkProvider, NoopBookmarkProvider};
 pub use bridge_server::{
     BridgeSession, Clock, FixedClock, HandshakeOutcome, PROTOCOL_VERSION, SystemClock,
@@ -55,11 +57,6 @@ pub use bridge_server::{
 };
 pub use codex_rollout::CodexLogSource;
 pub use completion::{CompletionRequest, complete_structured, string_object_schema};
-pub use dispatch::{
-    DISPATCH_CLASSIFY_TIMEOUT, DispatchRouting, DispatchScope, classify_dispatch, utility_model,
-};
-pub use cortex_transcript::{cortex_transcript_path, read_cortex_reentry_context};
-pub use reentry_context::{ReentryBudget, ReentryContext, ReentryEntry, ReentryRole};
 pub use connection::{
     Connection, ConnectionClosedBy, ConnectionId, ConnectionInitiator, ConnectionMessage,
     ConnectionPolicy, ConnectionStatus, ConnectionTransitionError, MessageId, PendingRequest,
@@ -72,6 +69,10 @@ pub use connection_service::{
     WaitOutcome,
 };
 pub use cortex_state::CortexStateSource;
+pub use cortex_transcript::{cortex_transcript_path, read_cortex_reentry_context};
+pub use dispatch::{
+    DISPATCH_CLASSIFY_TIMEOUT, DispatchRouting, DispatchScope, classify_dispatch, utility_model,
+};
 pub use domain::{
     AgentKind, Focus, NativeSessionRef, Project, ReentrySummary, ReentrySummaryFields, Session,
     SessionStateTimeline, SessionStatus, Workspace, WorkspaceSnapshot,
@@ -79,6 +80,7 @@ pub use domain::{
 pub use git_status::{CommitSummary, DirtyStat, RepoStatus, compute_repo_status};
 pub use hook_config::{WrittenHookConfig, hook_url, write_claude_settings};
 pub use hook_server::{HookServerControl, HookServerHandle, HookSource, start_hook_server};
+pub use reentry_context::{ReentryBudget, ReentryContext, ReentryEntry, ReentryRole};
 pub use repository::{
     InMemoryWorkspaceRepository, PersistenceError, RepoResult, WorkspaceRepository,
 };

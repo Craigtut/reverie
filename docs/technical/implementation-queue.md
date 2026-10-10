@@ -309,8 +309,8 @@ the incremental tail keeps it O(new bytes), ×N sessions on one thread).
 - `codex_rollout` (core) folds the append-only rollout JSONL into `ActivityState`
   (`session_meta`→id+cwd, `task_started`→working, `function_call`→working+tool,
   `*_output`→clear, `turn_aborted`→idle, `error`→error). `task_complete` clears
-  turn detail but remains working until the definitive notification because a
-  goal can automatically begin another turn. Active goal status is latched until
+  turn detail and completes an ordinary turn even when its notification is lost.
+  An active goal can automatically begin another turn, so goal status is latched until
   a terminal goal status (`complete`, `paused`, `blocked`, `usageLimited`, or
   `budgetLimited`). The
   `sequence` is the folded-record count, so each re-read after the file grows is
@@ -328,8 +328,8 @@ the incremental tail keeps it O(new bytes), ×N sessions on one thread).
   definitive signal is still the command hook below.
 - **Lifecycle (definitive):** trusted `SessionStart`, `UserPromptSubmit`, and
   `PermissionRequest` command hooks are injected per run with `-c` overrides and
-  forwarded to the existing `/hooks/codex` route. Clean readiness comes from the
-  external `notify` event `agent-turn-complete`, which carries the native thread
+  forwarded to the existing `/hooks/codex` route. Clean readiness comes from either
+  rollout `task_complete` or the external `notify` event `agent-turn-complete`, which carries the native thread
   and turn ids as one JSON argument. Reverie chains any existing user notifier
   after its own forwarder. `Stop` is not installed or translated because Codex
   can use it to create a continuation prompt.

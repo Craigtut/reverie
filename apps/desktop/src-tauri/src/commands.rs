@@ -1601,15 +1601,7 @@ pub(crate) fn start_session(
     if let Some(shell_session_id) = session_id {
         keep_cli_auth_env_unmodified(&service, shell_session_id, &spawn_spec)
             .map_err(|err| err.to_string())?;
-        // This launch starts a fresh activity stream whose sequence numbering is
-        // independent of any prior run (the hook server's counter resets across app
-        // restarts; a resumed CLI may open a new transcript). Reset the persisted
-        // ordering baseline so the new stream's first events are not dropped as
-        // stale, which would strand a resumed session showing its pre-restart state
-        // (e.g. a working Claude session that never re-enters the active state).
-        if let Err(err) = service.reset_session_activity_sequence(shell_session_id) {
-            eprintln!("[reverie] failed to reset activity sequence baseline: {err:#}");
-        }
+        crate::correlator::begin_run(&app, shell_session_id);
         if agent_kind == Some(AgentKind::ClaudeCode) {
             attach_claude_hooks(&app, shell_session_id, &mut spawn_spec);
         } else if agent_kind == Some(AgentKind::CodexCli) {

@@ -10,7 +10,7 @@
 //! and sorts lexicographically in the same order as chronologically.
 
 /// Current UTC time as an ISO 8601 string with millisecond precision.
-pub(crate) fn now_iso8601() -> String {
+pub fn now_iso8601() -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
     let (secs, millis) = match now {
         Ok(d) => (d.as_secs(), d.subsec_millis()),
@@ -27,7 +27,7 @@ pub(crate) fn now_iso8601() -> String {
 /// misread a timestamp it cannot compare like-for-like. Only an optional `Z` is
 /// accepted after the seconds/fraction; a numeric offset or trailing junk yields
 /// `None` rather than a wall-clock read that ignores the offset.
-pub(crate) fn iso8601_to_epoch_millis(s: &str) -> Option<i64> {
+pub fn iso8601_to_epoch_millis(s: &str) -> Option<i64> {
     let bytes = s.as_bytes();
     // Fixed-width core: `YYYY-MM-DDTHH:MM:SS` is 19 bytes.
     if bytes.len() < 19 {

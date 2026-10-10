@@ -5,9 +5,9 @@
 //! and the consumer (this crate) are built against it. If a field changes here,
 //! it changes there first.
 //!
-//! The types are intentionally generic over which CLI wrote the file — the same
-//! shape is expected to serve Claude Code's `~/.claude/jobs/{id}/state.json`
-//! once that integration lands. Keep this module CLI-agnostic.
+//! The types also normalize Claude hooks/status queries and Codex rollout events.
+//! Neutral `Idle` is a consumer extension for startup, resume, and interruption.
+//! Keep this model independent of any CLI's storage layout.
 //!
 //! Parsing is the only thing this module does. Filesystem watching, discovery
 //! across `~/.cortex/sessions/*/activity/`, and pushing state changes to the
@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// One of these is written atomically (temp file + rename) by the producer on
 /// every state transition. Reverie reads this file on startup to learn the
 /// current state without having to replay events.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityState {
     pub version: u32,
@@ -49,6 +49,8 @@ pub struct ActivityState {
 #[serde(rename_all = "snake_case")]
 pub enum ActivityStatus {
     Working,
+    /// Open at the prompt, with no newly completed turn (startup or resume).
+    Idle,
     /// The turn ended and the agent is back at the prompt, waiting for your
     /// next message whenever you get to it. A resting state, not a blocking ask.
     AwaitingInput,
@@ -66,7 +68,7 @@ pub enum ActivityStatus {
     Error,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityTurn {
     pub id: String,
@@ -84,7 +86,7 @@ pub enum TurnStatus {
     Aborted,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActiveTool {
     pub tool_call_id: String,
@@ -104,7 +106,7 @@ pub struct ActiveTool {
 /// A pending permission request. Reverie shows `display_summary` by default;
 /// the raw `args` are available for tools where the full input is useful and
 /// safe to show.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequest {
     pub id: String,
@@ -115,7 +117,7 @@ pub struct PermissionRequest {
     pub requested_at: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityError {
     pub category: ErrorCategory,
@@ -135,7 +137,7 @@ pub enum ErrorCategory {
     Other,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalExit {
     #[serde(default)]

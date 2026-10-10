@@ -1,5 +1,10 @@
 # Cortex Code activity-state contract
 
+Reverie's normalized model additionally accepts `idle` for startup, resume, and
+interruption without a newly completed turn. Consumer snapshots can retain `finalExit` alongside that resting state. These
+extensions do not require Cortex to change its producer schema. See [activity ingestion](activity-ingestion.md).
+
+
 > Authoritative spec for the per-session activity-state surface that Cortex Code writes and Reverie reads. This document is the single source of truth: cortex-mono is the producer, Reverie is the consumer. Either side changing the shape requires updating this file first.
 
 ## Goal
