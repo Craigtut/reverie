@@ -30,7 +30,12 @@
 //   - The loop stops when no cell is animating and when the tab is hidden.
 //   - prefers-reduced-motion renders a single representative still per state and
 //     skips transitions entirely.
+//
+// When WebKit restarts its GPU process, every cell loses its pixels and the
+// cached gradients start filling black, so the cells drop their gradient caches
+// and repaint (gpuProcessWatch.ts).
 
+import { onGpuProcessRestart } from './gpuProcessWatch';
 import {
   type CellState,
   DOT_ALPHA_STOPS,
@@ -218,8 +223,18 @@ function renderCell(cell: Cell, now: number) {
   ctx.globalAlpha = 1;
 }
 
-function frame() {
+// Repaint every cell from fresh gradients: after a theme change or a GPU process
+// restart, the cached ones carry stale colors or no longer paint at all.
+function repaintAllCells() {
   const now = performance.now();
+  for (const cell of cells.values()) {
+    cell.gradients.clear();
+    renderCell(cell, now);
+  }
+}
+
+// Paint one frame; true while any cell still animates.
+function paintFrame(now: number): boolean {
   let stillAnimating = false;
   for (const cell of cells.values()) {
     if (isAnimating(cell, now)) {
@@ -236,12 +251,24 @@ function frame() {
       renderCell(cell, now);
     }
   }
-  if (stillAnimating && !document.hidden) {
-    scheduleFrame(nextFrameDelay(now));
-  } else {
-    running = false;
-    rafId = 0;
-    frameTimerId = 0;
+  return stillAnimating;
+}
+
+function frame() {
+  const now = performance.now();
+  let stillAnimating = false;
+  try {
+    stillAnimating = paintFrame(now);
+  } finally {
+    // Even if a paint throws, leave the loop either scheduled or marked stopped,
+    // so the next state change can restart it.
+    if (stillAnimating && !document.hidden) {
+      scheduleFrame(nextFrameDelay(now));
+    } else {
+      running = false;
+      rafId = 0;
+      frameTimerId = 0;
+    }
   }
 }
 
@@ -290,6 +317,7 @@ if (typeof document !== 'undefined') {
 }
 
 let colorsResolved = false;
+let watchingGpuProcess = false;
 
 export function registerStateCell(
   canvas: HTMLCanvasElement,
@@ -299,6 +327,10 @@ export function registerStateCell(
   if (!colorsResolved) {
     refreshStateFieldColors();
     colorsResolved = true;
+  }
+  if (!watchingGpuProcess) {
+    onGpuProcessRestart(repaintAllCells);
+    watchingGpuProcess = true;
   }
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const cssSize = canvas.clientWidth || parseFloat(canvas.style.width) || 22;
@@ -321,10 +353,6 @@ export function registerStateCell(
     gradients: new Map(),
   };
   cells.set(key, cell);
-  // WebKit may drop a canvas's backing store when its GPU process restarts.
-  // Animating cells repaint on the next frame anyway; this restores the stills.
-  const repaint = () => renderCell(cell, performance.now());
-  canvas.addEventListener('contextrestored', repaint);
   renderCell(cell, performance.now()); // immediate first paint
   if (isAnimating(cell, performance.now())) startLoop();
 
@@ -342,7 +370,6 @@ export function registerStateCell(
       if (isAnimating(cell, now)) startLoop();
     },
     destroy() {
-      canvas.removeEventListener('contextrestored', repaint);
       cells.delete(key);
     },
   };
@@ -384,11 +411,7 @@ export function refreshStateFieldColors() {
     // distinct hue, is what marks it present. Monochrome guardrail.
     finished: read('--text-2', colors.finished),
   };
-  const now = performance.now();
-  for (const cell of cells.values()) {
-    cell.gradients.clear();
-    renderCell(cell, now);
-  }
+  repaintAllCells();
 }
 
 // Dev aid: manually drive a render at an arbitrary time so the motion can be
