@@ -47,14 +47,9 @@ use tauri::{Emitter, Listener, Manager, Url};
 use crate::activity_bridge::{drain_file_activity, drain_hook_activity};
 use crate::git_watch::GitWatch;
 use crate::keep_awake::KeepAwakeManager;
-use crate::state::{
-    HookServerInfo, HookTokenRegistry, ShutdownState, WebviewHealth, WorkspaceBoot,
-    unix_time_millis,
-};
+use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
 use crate::terminal::runtime::{TerminalRuntimeStatus, TerminalSessionRuntime};
-
-const WEBVIEW_HEALTH_CHECK_DELAY_MS: u64 = 5_000;
-const WEBVIEW_RELOAD_COOLDOWN_MS: i64 = 30_000;
+use crate::webview_health::WebviewHealth;
 
 /// Bring the macOS keep-awake assertion in line with the current setting and
 /// live-session count. Cheap and idempotent: call it whenever a session starts
@@ -88,119 +83,6 @@ pub(crate) fn reconcile_keep_awake(app: &tauri::AppHandle) {
         snapshot.workspace.keep_display_awake,
         has_live_session,
     );
-}
-
-fn record_webview_health_diagnostic(
-    app: &tauri::AppHandle,
-    kind: &'static str,
-    payload: serde_json::Value,
-) {
-    webview_health::record(app, kind, payload);
-}
-
-fn reload_main_webview(app: &tauri::AppHandle, reason: &'static str, payload: serde_json::Value) {
-    record_webview_health_diagnostic(
-        app,
-        "webview.reload",
-        serde_json::json!({
-            "reason": reason,
-            "payload": payload,
-        }),
-    );
-    let Some(window) = app.get_webview_window("main") else {
-        eprintln!("[reverie] main webview reload skipped after {reason}: window missing");
-        record_webview_health_diagnostic(
-            app,
-            "webview.reload_missing",
-            serde_json::json!({
-                "reason": reason,
-            }),
-        );
-        return;
-    };
-    eprintln!("[reverie] reloading main webview after {reason}");
-    if let Err(error) = window.reload() {
-        eprintln!("[reverie] failed to reload main webview after {reason}: {error}");
-        record_webview_health_diagnostic(
-            app,
-            "webview.reload_failed",
-            serde_json::json!({
-                "reason": reason,
-                "error": error.to_string(),
-            }),
-        );
-    }
-}
-
-fn schedule_webview_recovery_check(app: tauri::AppHandle, reason: &'static str) {
-    let heartbeat_before = app
-        .try_state::<WebviewHealth>()
-        .map(|health| health.last_heartbeat_ms())
-        .unwrap_or_default();
-    record_webview_health_diagnostic(
-        &app,
-        "webview.recovery_scheduled",
-        serde_json::json!({
-            "reason": reason,
-            "heartbeatBeforeMs": heartbeat_before,
-        }),
-    );
-    std::thread::Builder::new()
-        .name("reverie-webview-health".to_owned())
-        .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(
-                WEBVIEW_HEALTH_CHECK_DELAY_MS,
-            ));
-            let focused = app
-                .get_webview_window("main")
-                .and_then(|window| window.is_focused().ok())
-                .unwrap_or(false);
-            if !focused {
-                record_webview_health_diagnostic(
-                    &app,
-                    "webview.recovery_cancelled",
-                    serde_json::json!({
-                        "reason": reason,
-                        "result": "window_not_focused",
-                    }),
-                );
-                return;
-            }
-            let Some(health) = app.try_state::<WebviewHealth>() else {
-                return;
-            };
-            let now = unix_time_millis();
-            let last_heartbeat = health.last_heartbeat_ms();
-            let stale_for = now.saturating_sub(last_heartbeat);
-            // Focus is a handshake, not an age check. The frontend sends an
-            // immediate heartbeat on every focus/pageshow even if its interval
-            // already exists. Only reload if JavaScript failed to answer during
-            // the full recovery window.
-            if last_heartbeat > heartbeat_before {
-                record_webview_health_diagnostic(
-                    &app,
-                    "webview.recovery_healthy",
-                    serde_json::json!({
-                        "reason": reason,
-                        "heartbeatBeforeMs": heartbeat_before,
-                        "lastHeartbeatMs": last_heartbeat,
-                    }),
-                );
-                return;
-            }
-            if !health.claim_reload(now, WEBVIEW_RELOAD_COOLDOWN_MS) {
-                return;
-            }
-            reload_main_webview(
-                &app,
-                reason,
-                serde_json::json!({
-                    "lastHeartbeatMs": last_heartbeat,
-                    "staleForMs": stale_for,
-                }),
-            );
-        })
-        .ok();
 }
 
 /// Re-apply the native window chrome for the shell's current theme.
@@ -313,31 +195,7 @@ fn main() {
         // itself is created hidden in `setup`; the accelerator is registered
         // there too. See `dispatch.rs`.
         .plugin(dispatch::global_shortcut_plugin())
-        .on_web_content_process_terminate(|webview| {
-            let app = webview.app_handle().clone();
-            let label = webview.label().to_owned();
-            if let Some(health) = app.try_state::<WebviewHealth>() {
-                let _ = health.claim_reload(unix_time_millis(), 0);
-            }
-            record_webview_health_diagnostic(
-                &app,
-                "webview.content_terminated",
-                serde_json::json!({ "label": label.clone() }),
-            );
-            eprintln!("[reverie] web content process terminated for webview {label}; reloading");
-            if let Err(error) = webview.reload() {
-                eprintln!("[reverie] failed to reload terminated webview {label}: {error}");
-                record_webview_health_diagnostic(
-                    &app,
-                    "webview.content_terminate_reload_failed",
-                    serde_json::json!({
-                        "label": label.clone(),
-                        "error": error.to_string(),
-                    }),
-                );
-            }
-            schedule_webview_recovery_check(app, "web_content_terminated");
-        })
+        .on_web_content_process_terminate(webview_health::on_content_process_terminated)
         .on_window_event(|window, event| {
             // The dispatch popup is a secondary window. Closing it must not quit
             // the app, and its focus changes must not drive the main window's
@@ -389,7 +247,7 @@ fn main() {
                     runtime.set_app_foreground(*focused);
                 }
                 if *focused {
-                    schedule_webview_recovery_check(
+                    webview_health::schedule_recovery_check(
                         window.app_handle().clone(),
                         "window_focused",
                     );
@@ -398,7 +256,7 @@ fn main() {
         })
         .setup(|app| {
             app.state::<WebviewHealth>().mark_heartbeat();
-            record_webview_health_diagnostic(
+            webview_health::record(
                 app.handle(),
                 "webview.native_started",
                 serde_json::json!({
@@ -885,7 +743,7 @@ fn main() {
                     .state::<TerminalSessionRuntime>()
                     .set_app_foreground(focused);
                 if focused {
-                    schedule_webview_recovery_check(app_handle.clone(), "app_resumed");
+                    webview_health::schedule_recovery_check(app_handle.clone(), "app_resumed");
                 }
             }
             _ => {}

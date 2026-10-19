@@ -1,8 +1,9 @@
 //! Small production-safe lifecycle log for WKWebView recovery.
 //!
 //! Terminal renderer diagnostics remain dev-only because they are verbose. This
-//! log records only native process, heartbeat, and reload decisions, with no
-//! terminal content, so a production black-window report has durable evidence.
+//! log records only native process, heartbeat, probe, and recovery decisions,
+//! with no terminal content, so a production black-window report has durable
+//! evidence.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};

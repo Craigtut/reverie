@@ -30,13 +30,12 @@ use tauri_plugin_opener::OpenerExt;
 
 #[cfg(unix)]
 use crate::bridge::{BridgeInfo, mint_session_secret};
-use crate::state::{
-    HookServerInfo, HookTokenRegistry, ShutdownState, WebviewHealth, WorkspaceBoot,
-};
+use crate::state::{HookServerInfo, HookTokenRegistry, ShutdownState, WorkspaceBoot};
 use crate::terminal::ghostty::{GhosttyTerminalState, TerminalResizeAnchor};
 use crate::terminal::runtime::{
     TerminalSessionRecord, TerminalSessionRuntime, TerminalStreamRequest,
 };
+use crate::webview_health::WebviewHealth;
 
 const PROOF_COLS: u16 = 120;
 const PROOF_ROWS: u16 = 36;
