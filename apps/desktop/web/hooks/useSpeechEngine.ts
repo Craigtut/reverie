@@ -11,12 +11,14 @@ import {
 // current engine state + mic permission on mount, then follows the
 // `speech_engine_state` event. Mount once near the app root (alongside
 // useGitStatus) so future voice surfaces can read live readiness from the store
-// without each owning a subscription.
-export function useSpeechEngine(): void {
+// without each owning a subscription. `enabled: false` drops the subscription
+// (the store keeps its last state) and re-seeds when it turns back on.
+export function useSpeechEngine(enabled = true): void {
   const setEngine = useSpeechEngineStore(s => s.setEngine);
   const setMicPermission = useSpeechEngineStore(s => s.setMicPermission);
 
   useEffect(() => {
+    if (!enabled) return;
     let active = true;
     let unlisten: (() => void) | undefined;
 
@@ -46,5 +48,5 @@ export function useSpeechEngine(): void {
       active = false;
       unlisten?.();
     };
-  }, [setEngine, setMicPermission]);
+  }, [enabled, setEngine, setMicPermission]);
 }

@@ -52,7 +52,15 @@ function generalRouting(text: string): DispatchRouting {
 }
 
 export function DispatchOverlay() {
-  useSpeechEngine();
+  // Whether the popup is showing. The window stays alive while hidden (pre-warmed),
+  // and a hidden page must hold no event subscriptions beyond `dispatch:trigger`.
+  // Tauri runs script in every webview subscribed to an event name, even one
+  // filtered to another window, so a subscription here to window focus/blur/move
+  // wakes this suspended page on every main-window focus change. WebKit can then
+  // misread the suspended page as a hung GPU process and kill the GPU process,
+  // which wipes every canvas in the main window.
+  const [open, setOpen] = useState(false);
+  useSpeechEngine(open);
   const engine = useSpeechEngineStore(state => state.engine);
   const micPermission = useSpeechEngineStore(state => state.micPermission);
   const capture = useSpeechCapture();
@@ -151,6 +159,7 @@ export function DispatchOverlay() {
   // location"). Debounced; saving also re-registers the unchanged shortcut, which
   // is cheap. No-op outside the desktop runtime.
   useEffect(() => {
+    if (!open) return;
     const globals = window as Window & {
       __TAURI_INTERNALS__?: unknown;
       __TAURI__?: unknown;
@@ -159,31 +168,40 @@ export function DispatchOverlay() {
     if (globals.__REVERIE_BROWSER_FIXTURE__) return;
     if (!globals.__TAURI_INTERNALS__ && !globals.__TAURI__) return;
     let unlisten: (() => void) | undefined;
+    let active = true;
     let timer: number | undefined;
+    const save = () => {
+      timer = undefined;
+      const workspace = snapshotRef.current?.workspace;
+      void saveDispatchWindowPosition({
+        dispatchShortcut: workspace?.dispatchShortcut ?? 'CommandOrControl+Shift+Space',
+        dispatchDefaultVoice: workspace?.dispatchDefaultVoice !== false,
+      });
+    };
     void import('@tauri-apps/api/window')
       .then(mod =>
         mod.getCurrentWindow().onMoved(() => {
           if (timer) window.clearTimeout(timer);
-          timer = window.setTimeout(() => {
-            const workspace = snapshotRef.current?.workspace;
-            void saveDispatchWindowPosition({
-              dispatchShortcut: workspace?.dispatchShortcut ?? 'CommandOrControl+Shift+Space',
-              dispatchDefaultVoice: workspace?.dispatchDefaultVoice !== false,
-            });
-          }, 600);
+          timer = window.setTimeout(save, 600);
         }),
       )
       .then(fn => {
-        unlisten = fn;
+        if (active) unlisten = fn;
+        else fn();
       })
       .catch(() => {
         /* no window move events available */
       });
     return () => {
+      active = false;
       unlisten?.();
-      if (timer) window.clearTimeout(timer);
+      // Closing inside the debounce still saves where the popup was dropped.
+      if (timer) {
+        window.clearTimeout(timer);
+        save();
+      }
     };
-  }, []);
+  }, [open]);
 
   // Size the window to the panel: it grows as the input grows, and opens extra
   // room below when a dropdown is showing (menus render into that space). A
@@ -267,7 +285,9 @@ export function DispatchOverlay() {
   // keeps a stale/foreign error from tearing down a healthy recording or
   // stamping an error onto a transcript that actually succeeded.
   useEffect(() => {
+    if (!open) return;
     let unlisten: (() => void) | undefined;
+    let active = true;
     void onSpeechError(payload => {
       const current = capture.currentId();
       if (payload.captureId && current && payload.captureId !== current) return;
@@ -276,11 +296,15 @@ export function DispatchOverlay() {
       setTranscribing(false);
       void capture.cancel();
     }).then(fn => {
-      unlisten = fn;
+      if (active) unlisten = fn;
+      else fn();
     });
-    return () => unlisten?.();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [open]);
 
   // Begin listening. `start` is a synchronous no-op if a capture is live or
   // already starting (the hook's in-flight guard).
@@ -324,6 +348,7 @@ export function DispatchOverlay() {
   // click-outside dismiss). Subscribed once; always runs the latest closure.
   const triggerRef = useRef<() => void>(() => {});
   triggerRef.current = () => {
+    setOpen(true);
     inputRef.current?.focus();
     if (transcribing || capture.isStarting()) return;
     if (capture.isActive()) {
@@ -369,12 +394,18 @@ export function DispatchOverlay() {
     void dismiss();
   };
   useEffect(() => {
+    if (!open) return;
     let unlisten: (() => void) | undefined;
+    let active = true;
     void onDispatchWindowBlur(() => blurRef.current()).then(fn => {
-      unlisten = fn;
+      if (active) unlisten = fn;
+      else fn();
     });
-    return () => unlisten?.();
-  }, []);
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [open]);
 
   // Resolve routing in the background whenever the (non-manual) text settles. A
   // voice transcript is final, so classify it immediately; typed text is
@@ -438,12 +469,14 @@ export function DispatchOverlay() {
     await emitDispatchLaunch({ routing: finalRouting, agentKind, prompt });
     resetCapture();
     await hideDispatchWindow();
+    setOpen(false);
   }
 
   async function dismiss() {
     // resetCapture cancels any live/starting capture; then hide.
     resetCapture();
     await hideDispatchWindow();
+    setOpen(false);
   }
 
   function onKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
