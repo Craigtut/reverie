@@ -7,6 +7,24 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.13] - 2026-10-19
+
+### Fixed
+- Reverie no longer turns black and stops responding after a few minutes when
+  several agents are working at once. Each working session's status indicator
+  made WebKit copy a fresh image on every frame, and with a few agents busy that
+  overloaded the window's renderer. The indicators now draw directly, with the
+  same look at about half the cost.
+- If the window does stop responding, Reverie now checks why, records what it
+  found, and restarts the window's web process within seconds. Before, it
+  reloaded the page into the same stuck process, which never recovered. Your
+  agent sessions keep running throughout.
+- The window's liveness check no longer goes quiet for good when a single
+  response is lost, which could make a healthy window look frozen.
+- Opening Reverie with a very long-running Codex session no longer keeps a CPU
+  core busy for many minutes. Reading a large Codex transcript now takes time in
+  proportion to its size.
+
 ## [0.6.12] - 2026-10-10
 
 ### Fixed
