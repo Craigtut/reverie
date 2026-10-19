@@ -525,13 +525,20 @@ impl SessionLogFold for CodexRolloutFold {
     }
 
     fn push(&mut self, chunk: &str) -> Option<ActivityState> {
-        self.partial.push_str(chunk);
+        let mut buffer = std::mem::take(&mut self.partial);
+        buffer.push_str(chunk);
         // Process every complete line; keep an incomplete trailing line (a record
-        // still being written) buffered for the next chunk.
-        while let Some(newline) = self.partial.find('\n') {
-            let line: String = self.partial.drain(..=newline).collect();
-            self.process_line(&line);
+        // still being written) buffered for the next chunk. Lines are read in
+        // place and the consumed prefix is dropped once: draining line by line
+        // shifted the rest of the buffer each time, which made the watcher's
+        // initial read of a large rollout quadratic (a 500 MB rollout pinned a
+        // core for many minutes).
+        let consumed = buffer.rfind('\n').map_or(0, |newline| newline + 1);
+        for line in buffer[..consumed].split_inclusive('\n') {
+            self.process_line(line);
         }
+        buffer.drain(..consumed);
+        self.partial = buffer;
         self.current_state()
     }
 

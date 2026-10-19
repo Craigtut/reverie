@@ -438,6 +438,60 @@ fn incremental_fold_handles_chunks_split_mid_line_and_only_folds_new_records() {
 }
 
 #[test]
+fn one_large_chunk_folds_like_line_by_line_and_stays_linear() {
+    const TURNS: usize = 200_000;
+    let meta = r#"{"type":"session_meta","payload":{"id":"big","cwd":"/p"}}"#;
+    let started = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+    let complete = r#"{"type":"event_msg","payload":{"type":"task_complete"}}"#;
+    let mut body = format!("{meta}\n");
+    for _ in 0..TURNS {
+        body.push_str(started);
+        body.push('\n');
+        body.push_str(complete);
+        body.push('\n');
+    }
+
+    // Line by line, the way an appending tail is usually fed.
+    let mut incremental = CodexRolloutFold::new();
+    let mut expected = None;
+    for line in body.split_inclusive('\n').take(201) {
+        expected = incremental.push(line);
+    }
+
+    // The watcher's initial read hands the whole file over as one chunk, plus a
+    // record still being written. Draining this line by line used to shift the
+    // remaining buffer each time, so the budget here is far above the linear
+    // cost and far below the quadratic one.
+    let mut whole = CodexRolloutFold::new();
+    let clock = std::time::Instant::now();
+    let state = whole
+        .push(&format!("{body}{started}"))
+        .expect("session id known");
+    assert!(
+        clock.elapsed() < std::time::Duration::from_secs(30),
+        "folding {TURNS} turns in one chunk took {:?}",
+        clock.elapsed()
+    );
+    assert_eq!(state.status, ActivityStatus::AwaitingInput);
+    // Every record counts, session_meta included.
+    assert_eq!(state.sequence, (TURNS * 2 + 1) as u64);
+
+    // The trailing partial record stayed buffered and folds once completed.
+    let state = whole.push("\n").expect("completed record folds");
+    assert_eq!(state.status, ActivityStatus::Working);
+    assert_eq!(state.sequence, (TURNS * 2 + 2) as u64);
+
+    // The first 200 lines agree with the line-by-line fold.
+    let mut prefix = CodexRolloutFold::new();
+    let prefix_state = prefix
+        .push(&body.split_inclusive('\n').take(201).collect::<String>())
+        .expect("session id known");
+    let expected = expected.expect("session id known");
+    assert_eq!(prefix_state.status, expected.status);
+    assert_eq!(prefix_state.sequence, expected.sequence);
+}
+
+#[test]
 fn returns_none_without_session_meta() {
     let dir = TempDir::new().unwrap();
     let path = write_rollout(
