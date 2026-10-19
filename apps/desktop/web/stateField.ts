@@ -1,10 +1,10 @@
-// Shared WebGL renderer for per-session state cells.
+// Shared renderer for per-session state cells.
 //
 // The product's signature texture is dots; this draws the *live* version of it:
 // a small dot constellation whose size + glow are a function of a per-state
-// motion field, evaluated in a fragment shader so the falloff is smooth and
-// analog rather than a mechanical CSS pulse. The four session states read by
-// motion *type*, not just color:
+// motion field (stateFieldMotion.ts), so the falloff is smooth and analog rather
+// than a mechanical CSS pulse. The four session states read by motion *type*,
+// not just color:
 //
 //   fresh     - a still, dim seed (no animation)
 //   active    - a soft gaussian "presence" gliding across the lattice (green)
@@ -16,10 +16,14 @@
 // energy outward and settles it, so finishing a turn reads as a small moment.
 //
 // Performance is non-negotiable (this can appear on dozens of cards at once), so:
-//   - There is exactly ONE WebGL context, an offscreen canvas reused per cell.
-//     Each cell owns a cheap 2D <canvas> in the DOM (clipped + scrolled for free
-//     by its container); we render a cell in GL then drawImage it onto that 2D
-//     canvas. No N contexts, no overlay-positioning math.
+//   - Each cell owns a cheap 2D <canvas> in the DOM (clipped + scrolled for free
+//     by its container) and its 25 dots are painted straight into it. There is
+//     no WebGL and no cross-canvas copy: WebKit renders canvases in a separate
+//     GPU process, and the old shared-WebGL-canvas-then-drawImage design made a
+//     fresh cross-process image copy per cell per frame.
+//   - The paint loop does not allocate: dot samples are reused, and each cell
+//     caches one unit-radius gradient per tint that every dot reuses through a
+//     per-dot transform.
 //   - Only animating cells drive the rAF loop: the continuously-animated states
 //     (active/attention/error), and any cell mid-transition or in the finished
 //     settle. Static states stamp exactly once.
@@ -27,16 +31,15 @@
 //   - prefers-reduced-motion renders a single representative still per state and
 //     skips transitions entirely.
 
-export type CellState = 'fresh' | 'active' | 'idle' | 'attention' | 'error' | 'finished';
+import {
+  type CellState,
+  DOT_ALPHA_STOPS,
+  type DotSample,
+  type TransitionKind,
+  sampleLattice,
+} from './stateFieldMotion';
 
-const STATE_CODE: Record<CellState, number> = {
-  fresh: 0,
-  active: 1,
-  attention: 2,
-  error: 3,
-  finished: 4,
-  idle: 5,
-};
+export type { CellState, TransitionKind } from './stateFieldMotion';
 
 // --- Transition moments -------------------------------------------------------
 // Most state changes are an instant swap. A few are worth a one-shot motion
@@ -46,20 +49,13 @@ const STATE_CODE: Record<CellState, number> = {
 // progress. That keeps moments composable and cheap to add.
 //
 // To author a new moment:
-//   1. add a `TransitionKind` + a code in `TRANSITION_CODE`,
-//   2. add a branch to `transitionOverlay()` in the vertex shader,
+//   1. add a `TransitionKind` in stateFieldMotion.ts,
+//   2. add a branch to `transitionOverlay()` there,
 //   3. map the `from>to` pair(s) to it in `TRANSITIONS`.
-export type TransitionKind = 'settle';
-
 interface TransitionDef {
   kind: TransitionKind;
   durationMs: number;
 }
-
-// Shader codes for each kind. 0 is reserved for "no transition".
-const TRANSITION_CODE: Record<TransitionKind, number> = {
-  settle: 1,
-};
 
 // Keyed `${from}>${to}`. Pairs not listed here swap instantly with no overlay.
 const TRANSITIONS: Partial<Record<`${CellState}>${CellState}`, TransitionDef>> = {
@@ -70,9 +66,17 @@ const TRANSITIONS: Partial<Record<`${CellState}>${CellState}`, TransitionDef>> =
 
 // How long the finished bloom plays before the cell goes static.
 const FINISHED_SETTLE_MS = 1500;
-const TILE = 256; // offscreen GL render size in device px; downscaled per cell
-const GRID = 5; // 5x5 dot lattice
 const BATTERY_ANIMATION_INTERVAL_MS = 1000 / 15;
+// Dots below these are invisible at any cell size; skip their draw calls.
+const MIN_DOT_RADIUS_PX = 0.05;
+const MIN_DOT_ALPHA = 0.003;
+// Transition tints are quantized so a cell caches a handful of gradients, not one
+// per frame. 16 steps is finer than the eye can track on a 1.4s dissolve.
+const TINT_STEPS = 16;
+// Ceiling on cached gradients per cell (a theme flip mid-transition is the only
+// way to approach it); past it the cache is simply rebuilt.
+const MAX_CACHED_GRADIENTS = 48;
+const FULL_TURN = Math.PI * 2;
 
 export interface StateCellHandle {
   update(state: CellState): void;
@@ -96,163 +100,14 @@ interface Cell {
   seed: number;
   stateChangedAt: number;
   transition: ActiveTransition | null;
+  // Unit-radius dot gradients keyed by tint. A canvas gradient is defined in the
+  // coordinate space current at fill time, so one gradient at the origin serves
+  // every dot of that tint through a per-dot transform.
+  gradients: Map<string, CanvasGradient>;
 }
-
-interface GlProgram {
-  gl: WebGL2RenderingContext;
-  program: WebGLProgram;
-  vao: WebGLVertexArrayObject;
-  uState: WebGLUniformLocation | null;
-  uTime: WebGLUniformLocation | null;
-  uAge: WebGLUniformLocation | null;
-  uSeed: WebGLUniformLocation | null;
-  uColor: WebGLUniformLocation | null;
-  uColorFrom: WebGLUniformLocation | null;
-  uTransition: WebGLUniformLocation | null;
-  uTransProgress: WebGLUniformLocation | null;
-}
-
-const VERT = `#version 300 es
-precision highp float;
-layout(location=0) in vec2 aQuad;   // unit quad corner in [-1,1]
-layout(location=1) in vec2 aGrid;   // per-dot lattice position in [-1,1]
-uniform int uState;
-uniform float uTime;
-uniform float uAge;
-uniform float uSeed;
-uniform int uTransition;      // active transition kind (0 = none)
-uniform float uTransProgress; // 0..1 across the transition (1 = done)
-out vec2 vUv;
-out float vBright;
-out float vTrans;             // overlay weight, also tints the dot toward FROM color
-
-float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float vnoise(vec2 p){
-  vec2 i = floor(p); vec2 f = fract(p);
-  float a = hash(i), b = hash(i+vec2(1,0)), c = hash(i+vec2(0,1)), d = hash(i+vec2(1,1));
-  vec2 u = f*f*(3.0-2.0*f);
-  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
-}
-
-void field(vec2 g, out float s, out float b){
-  float r = length(g);
-  float core = smoothstep(1.1, 0.0, r);
-  if (uState == 0) {            // fresh: still, dim seed (corners fade out)
-    s = 0.18 + 0.48 * core;
-    b = 0.13 + 0.40 * core;
-  } else if (uState == 1) {     // active: drifting gaussian presence
-    vec2 c = 0.52 * vec2(sin(uTime*0.55 + uSeed), sin(uTime*0.43 + uSeed*1.7 + 1.0));
-    float d = length(g - c);
-    float blob = exp(-d*d / 0.30);
-    float n = 0.07 * (vnoise(g*1.6 + uTime*0.35 + uSeed) - 0.5);
-    // Low base so dots far from the moving presence shrink toward transparent
-    // (the far corner nearly vanishes when the blob sits in the opposite one),
-    // so the lattice never reads as a hard square.
-    s = clamp(0.10 + 0.90*blob + n, 0.0, 1.0);
-    b = clamp(0.14 + 0.86*blob, 0.0, 1.0);
-  } else if (uState == 2 || uState == 3) { // attention / error: pinging rings
-    float speed = uState == 3 ? 4.6 : 3.2;
-    float sharp = uState == 3 ? 5.0 : 4.0;
-    float pulse = 0.80 + 0.20 * sin(uTime * speed);
-    float coreLit = smoothstep(0.72, 0.0, r);
-    float wave = 0.5 + 0.5 * sin(r*6.3 - uTime*speed);
-    float ring = pow(wave, sharp) * smoothstep(1.25, 0.1, r);
-    float m = max(coreLit, ring);
-    s = clamp(0.30 + 0.70*m, 0.0, 1.0);
-    b = clamp((0.50 + 0.50*m) * pulse, 0.20, 1.0);
-  } else if (uState == 4) {     // finished: bloom once, settle to a present, even lattice
-    float settle = smoothstep(0.0, 1.1, uAge);
-    float bloomR = uAge * 1.35;
-    float bloom = pow(0.5 + 0.5*sin((r - bloomR)*6.0), 6.0) * (1.0 - settle);
-    // The settled rest state is a full, evenly-lit constellation that holds
-    // until the session is seen: brighter and fuller than idle's dim center dot
-    // so "ready for you" reads as present and invitational, not at-rest. The
-    // four corners stay a touch dimmer so it is a dot cluster, not a square.
-    float even = 0.32 + 0.50 * smoothstep(1.5, 0.0, r);
-    s = clamp(mix(0.24, even, settle) + bloom*0.5, 0.0, 1.0);
-    b = clamp(mix(0.26, even, settle) + bloom*0.5, 0.0, 1.0);
-  } else {                      // idle (5): alive, resting, waiting on you
-    // A still, center-weighted presence: brighter than fresh/finished and
-    // clearly concentrated at the core (not the green drift of "working").
-    float glow = smoothstep(1.0, 0.0, r);
-    s = 0.16 + 0.56 * glow;
-    b = 0.20 + 0.52 * glow;
-  }
-}
-
-// One-shot transition overlays, layered over the target state's resting field and
-// faded out by progress p in [0,1]. Returns the overlay weight, which the
-// fragment stage uses to tint the dot toward the FROM color.
-float transitionOverlay(vec2 g, float p, inout float s, inout float b){
-  float r = length(g);
-  float t = 0.0;
-  if (uTransition == 1) {            // settle: working energy releases, then rests
-    float ringR = (1.0 - pow(1.0 - p, 2.0)) * 1.5;   // ease-out expansion
-    float fade  = pow(1.0 - p, 1.4);                 // soft, lingering tail
-    float ring  = pow(0.5 + 0.5 * sin((r - ringR) * 5.5), 6.0);
-    float flash = smoothstep(0.6, 0.0, r) * pow(1.0 - p, 3.0) * 0.45; // release instant
-    t = max(ring * fade, flash);
-    s = clamp(s + t * 0.5, 0.0, 1.0);
-    b = clamp(b + t * 0.7, 0.0, 1.0);
-  }
-  return t;
-}
-
-void main(){
-  float s; float b;
-  field(aGrid, s, b);
-  // No-ops (returns 0, leaves s/b) when uTransition == 0.
-  float t = transitionOverlay(aGrid, uTransProgress, s, b);
-  // Round the square lattice into a soft disc. The dots sit on a 5x5 grid, so at
-  // full strength the constellation reads as a hard square; attenuate each dot by
-  // its distance from the lattice center so the four corners drop away and the
-  // edge midpoints dim a touch, leaving a rounded cluster. Applied once here,
-  // after the per-state field and any transition overlay, so every state and
-  // moment rounds the same way (corner rl ~1.41, edge-mid rl 1.0, center 0).
-  float env = smoothstep(1.5, 0.82, length(aGrid));
-  s *= env;
-  b *= env;
-  vBright = b;
-  vTrans = t;
-  vUv = aQuad;
-  float spread = 0.66;            // how far the lattice fills the tile
-  float dotRadius = 0.2 * s;      // half-size of a dot in tile space
-  vec2 center = aGrid * spread;
-  vec2 pos = center + aQuad * dotRadius;
-  gl_Position = vec4(pos, 0.0, 1.0);
-}`;
-
-const FRAG = `#version 300 es
-precision highp float;
-in vec2 vUv;
-in float vBright;
-in float vTrans;
-uniform vec3 uColor;
-uniform vec3 uColorFrom;
-out vec4 outColor;
-void main(){
-  float d = length(vUv);
-  // A crisp dot with only a faint halo. The old single wide smoothstep put ~2/3
-  // of the dot radius into soft falloff, which read as blur once the cells grew;
-  // keep a mostly-solid disc with a thin shoulder, plus a faint low-weight glow so
-  // the rim still softens rather than hard-cutting. The 256px tile is downscaled
-  // per cell on stamp, which adds the final gentle anti-aliasing.
-  float disc = smoothstep(0.82, 0.56, d);
-  float glow = smoothstep(1.0, 0.5, d) * 0.13;
-  float a = clamp(disc + glow, 0.0, 1.0) * vBright;
-  // During a transition the overlay reads in the FROM color (e.g. green work
-  // energy) and dissolves toward the target color as the moment settles.
-  vec3 col = mix(uColor, uColorFrom, clamp(vTrans, 0.0, 1.0));
-  // Premultiplied alpha so overlapping soft dots bloom gently over any card bg.
-  outColor = vec4(col * a, a);
-}`;
-
-let gl: WebGL2RenderingContext | null = null;
-let prog: GlProgram | null = null;
-let glCanvas: HTMLCanvasElement | null = null;
-let glUnavailable = false;
 
 const cells = new Map<symbol, Cell>();
+const samples: DotSample[] = [];
 let rafId = 0;
 let frameTimerId = 0;
 let running = false;
@@ -269,99 +124,9 @@ let colors: Record<CellState, [number, number, number]> = {
   attention: [0.85, 0.65, 0.3],
   error: [0.85, 0.4, 0.4],
   // Same neutral family as idle (no status hue); the brighter, fuller lattice in
-  // the shader is what sets "finished" apart, so it reads as present, not alarming.
+  // the motion field is what sets "finished" apart, so it reads as present, not alarming.
   finished: [0.72, 0.74, 0.8],
 };
-
-function ensureGl(): GlProgram | null {
-  if (prog) return prog;
-  if (glUnavailable) return null;
-  try {
-    glCanvas = document.createElement('canvas');
-    glCanvas.width = TILE;
-    glCanvas.height = TILE;
-    const context = glCanvas.getContext('webgl2', {
-      premultipliedAlpha: true,
-      alpha: true,
-      antialias: true,
-    });
-    if (!context) throw new Error('no webgl2');
-    gl = context;
-    const program = linkProgram(gl, VERT, FRAG);
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-
-    // Unit quad (triangle strip) shared by every dot instance.
-    const quad = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
-    const quadBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-    // Per-instance lattice positions.
-    const lattice: number[] = [];
-    for (let row = 0; row < GRID; row += 1) {
-      for (let col = 0; col < GRID; col += 1) {
-        lattice.push((col / (GRID - 1)) * 2 - 1, (row / (GRID - 1)) * 2 - 1);
-      }
-    }
-    const gridBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, gridBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(lattice), gl.STATIC_DRAW);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
-    gl.vertexAttribDivisor(1, 1);
-
-    gl.bindVertexArray(null);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-
-    prog = {
-      gl,
-      program,
-      vao: vao as WebGLVertexArrayObject,
-      uState: gl.getUniformLocation(program, 'uState'),
-      uTime: gl.getUniformLocation(program, 'uTime'),
-      uAge: gl.getUniformLocation(program, 'uAge'),
-      uSeed: gl.getUniformLocation(program, 'uSeed'),
-      uColor: gl.getUniformLocation(program, 'uColor'),
-      uColorFrom: gl.getUniformLocation(program, 'uColorFrom'),
-      uTransition: gl.getUniformLocation(program, 'uTransition'),
-      uTransProgress: gl.getUniformLocation(program, 'uTransProgress'),
-    };
-    return prog;
-  } catch {
-    glUnavailable = true;
-    gl = null;
-    glCanvas = null;
-    return null;
-  }
-}
-
-function linkProgram(context: WebGL2RenderingContext, vsrc: string, fsrc: string): WebGLProgram {
-  const compile = (type: number, src: string) => {
-    const shader = context.createShader(type);
-    if (!shader) throw new Error('shader alloc failed');
-    context.shaderSource(shader, src);
-    context.compileShader(shader);
-    if (!context.getShaderParameter(shader, context.COMPILE_STATUS)) {
-      const log = context.getShaderInfoLog(shader);
-      context.deleteShader(shader);
-      throw new Error(`shader compile failed: ${log}`);
-    }
-    return shader;
-  };
-  const program = context.createProgram();
-  if (!program) throw new Error('program alloc failed');
-  context.attachShader(program, compile(context.VERTEX_SHADER, vsrc));
-  context.attachShader(program, compile(context.FRAGMENT_SHADER, fsrc));
-  context.linkProgram(program);
-  if (!context.getProgramParameter(program, context.LINK_STATUS)) {
-    throw new Error(`program link failed: ${context.getProgramInfoLog(program)}`);
-  }
-  return program;
-}
 
 function cellAge(cell: Cell, now: number): number {
   return Math.max(0, (now - cell.stateChangedAt) / 1000);
@@ -384,71 +149,73 @@ function isAnimating(cell: Cell, now: number): boolean {
   return transitionFrac(cell, now) !== null;
 }
 
-// Render one cell into the shared GL canvas, then stamp it onto the cell's 2D
-// canvas. `now` drives time; for static frames we pass a fixed phase so the
-// representative still is stable.
-function renderCell(cell: Cell, now: number) {
-  const ctx2d = cell.ctx;
-  ctx2d.clearRect(0, 0, cell.dprSize, cell.dprSize);
-  const p = ensureGl();
-  if (!p || !glCanvas) {
-    draw2dFallback(cell);
-    return;
+// The dot gradient for a tint `weight` of the way from `to` toward `from`.
+function dotGradient(
+  cell: Cell,
+  to: readonly [number, number, number],
+  from: readonly [number, number, number],
+  weight: number,
+): CanvasGradient {
+  const step = Math.round(weight * TINT_STEPS) / TINT_STEPS;
+  const r = Math.round((to[0] + (from[0] - to[0]) * step) * 255);
+  const g = Math.round((to[1] + (from[1] - to[1]) * step) * 255);
+  const b = Math.round((to[2] + (from[2] - to[2]) * step) * 255);
+  const key = `${r},${g},${b}`;
+  const cached = cell.gradients.get(key);
+  if (cached) return cached;
+  if (cell.gradients.size >= MAX_CACHED_GRADIENTS) cell.gradients.clear();
+  const gradient = cell.ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+  for (const [offset, alpha] of DOT_ALPHA_STOPS) {
+    gradient.addColorStop(offset, `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`);
   }
-  const g = p.gl;
-  g.viewport(0, 0, TILE, TILE);
-  g.clearColor(0, 0, 0, 0);
-  g.clear(g.COLOR_BUFFER_BIT);
-  // biome-ignore lint/correctness/useHookAtTopLevel: WebGL useProgram is a GL call, not a React hook.
-  g.useProgram(p.program);
-  g.bindVertexArray(p.vao);
-  g.uniform1i(p.uState, STATE_CODE[cell.state]);
+  cell.gradients.set(key, gradient);
+  return gradient;
+}
+
+// Paint one cell. `now` drives time; for static frames we pass a fixed phase so
+// the representative still is stable.
+function renderCell(cell: Cell, now: number) {
+  const { ctx, dprSize } = cell;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.clearRect(0, 0, dprSize, dprSize);
+
   // Reduced motion / static states use a fixed, calm phase.
   const animating = isAnimating(cell, now);
   const time = reduceMotion ? cell.seed : now / 1000 + cell.seed;
-  g.uniform1f(p.uTime, animating || cell.state === 'finished' ? time : cell.seed);
-  g.uniform1f(p.uAge, reduceMotion ? 2.0 : cellAge(cell, now));
-  g.uniform1f(p.uSeed, cell.seed);
-  const c = colors[cell.state];
-  g.uniform3f(p.uColor, c[0], c[1], c[2]);
   // Transition overlay: tinted toward the FROM state's color while it plays.
   const frac = transitionFrac(cell, now);
   const overlay = frac !== null ? cell.transition : null;
-  const from = overlay ? colors[overlay.from] : c;
-  g.uniform3f(p.uColorFrom, from[0], from[1], from[2]);
-  g.uniform1i(p.uTransition, overlay ? TRANSITION_CODE[overlay.def.kind] : 0);
-  g.uniform1f(p.uTransProgress, frac ?? 1.0);
-  g.drawArraysInstanced(g.TRIANGLE_STRIP, 0, 4, GRID * GRID);
-  g.bindVertexArray(null);
-  ctx2d.drawImage(glCanvas, 0, 0, TILE, TILE, 0, 0, cell.dprSize, cell.dprSize);
-}
+  sampleLattice(
+    {
+      state: cell.state,
+      time: animating || cell.state === 'finished' ? time : cell.seed,
+      age: reduceMotion ? 2 : cellAge(cell, now),
+      seed: cell.seed,
+      transition: overlay ? overlay.def.kind : null,
+      progress: frac ?? 1,
+    },
+    samples,
+  );
 
-// Tiny dependency-free still used when WebGL2 is unavailable: a graded dot grid.
-function draw2dFallback(cell: Cell) {
-  const ctx = cell.ctx;
-  const c = colors[cell.state];
-  const rgb = `${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ${Math.round(c[2] * 255)}`;
-  const n = GRID;
-  const gap = cell.dprSize / n;
-  for (let row = 0; row < n; row += 1) {
-    for (let col = 0; col < n; col += 1) {
-      const gx = (col / (n - 1)) * 2 - 1;
-      const gy = (row / (n - 1)) * 2 - 1;
-      const r = Math.hypot(gx, gy);
-      const core = Math.max(0, 1 - r / 1.1);
-      // Same circular envelope as the GL path: corners recede so the grid reads
-      // round, not square (smoothstep(1.5, 0.82, r)).
-      const et = Math.min(1, Math.max(0, (r - 1.5) / (0.82 - 1.5)));
-      const env = et * et * (3 - 2 * et);
-      const lit = cell.state === 'fresh' || cell.state === 'finished' ? 0.35 : 0.7;
-      const size = (0.28 + 0.4 * core) * gap * 0.7 * env;
-      const alpha = (0.2 + lit * core) * env;
-      ctx.beginPath();
-      ctx.fillStyle = `rgba(${rgb}, ${alpha.toFixed(3)})`;
-      ctx.arc(gap * (col + 0.5), gap * (row + 0.5), size, 0, Math.PI * 2);
-      ctx.fill();
-    }
+  const to = colors[cell.state];
+  const from = overlay ? colors[overlay.from] : to;
+  // Lattice space is [-1, 1] with +y up; map it onto the cell's device pixels.
+  const half = dprSize / 2;
+  for (const dot of samples) {
+    const radius = dot.radius * half;
+    if (radius < MIN_DOT_RADIUS_PX || dot.bright < MIN_DOT_ALPHA) continue;
+    // Source-over at the dot's peak alpha matches the old premultiplied blend,
+    // so overlapping soft dots still bloom gently over any card background.
+    ctx.globalAlpha = dot.bright;
+    ctx.fillStyle = dotGradient(cell, to, from, dot.trans);
+    ctx.setTransform(radius, 0, 0, radius, half + dot.x * half, half - dot.y * half);
+    ctx.beginPath();
+    ctx.arc(0, 0, 1, 0, FULL_TURN);
+    ctx.fill();
   }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
 }
 
 function frame() {
@@ -551,8 +318,13 @@ export function registerStateCell(
     seed,
     stateChangedAt: performance.now(),
     transition: null,
+    gradients: new Map(),
   };
   cells.set(key, cell);
+  // WebKit may drop a canvas's backing store when its GPU process restarts.
+  // Animating cells repaint on the next frame anyway; this restores the stills.
+  const repaint = () => renderCell(cell, performance.now());
+  canvas.addEventListener('contextrestored', repaint);
   renderCell(cell, performance.now()); // immediate first paint
   if (isAnimating(cell, performance.now())) startLoop();
 
@@ -570,6 +342,7 @@ export function registerStateCell(
       if (isAnimating(cell, now)) startLoop();
     },
     destroy() {
+      canvas.removeEventListener('contextrestored', repaint);
       cells.delete(key);
     },
   };
@@ -607,12 +380,15 @@ export function refreshStateFieldColors() {
     idle: read('--text-2', colors.idle),
     attention: read('--warn', colors.attention),
     error: read('--bad', colors.error),
-    // Neutral, same family as idle (--text-2); the shader's brighter lattice, not
-    // a distinct hue, is what marks it present. Monochrome guardrail.
+    // Neutral, same family as idle (--text-2); the brighter lattice, not a
+    // distinct hue, is what marks it present. Monochrome guardrail.
     finished: read('--text-2', colors.finished),
   };
   const now = performance.now();
-  for (const cell of cells.values()) renderCell(cell, now);
+  for (const cell of cells.values()) {
+    cell.gradients.clear();
+    renderCell(cell, now);
+  }
 }
 
 // Dev aid: manually drive a render at an arbitrary time so the motion can be

@@ -2,11 +2,11 @@ import { useEffect, useRef } from 'react';
 
 import { registerStateCell, type CellState, type StateCellHandle } from '../../stateField';
 
-// The live session-state glyph: a dot constellation drawn by the shared WebGL
-// renderer (stateField.ts), whose motion encodes the state. Each instance owns a
-// small 2D <canvas> that the renderer stamps into; the canvas is clipped and
-// scrolled by its container for free. Replaces the CSS-pulsed SessionStatusGlyph
-// on cards, sidebar rows, and tabs.
+// The live session-state glyph: a dot constellation drawn by the shared renderer
+// (stateField.ts), whose motion encodes the state. Each instance owns a small 2D
+// <canvas> that the renderer paints into; the canvas is clipped and scrolled by
+// its container for free. Replaces the CSS-pulsed SessionStatusGlyph on cards,
+// sidebar rows, and tabs.
 export function StateCell({
   state,
   size = 22,

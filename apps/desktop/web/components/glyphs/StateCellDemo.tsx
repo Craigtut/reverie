@@ -68,8 +68,8 @@ export function StateCellDemo() {
           Session state cells
         </Typography>
         <Typography as="p" variant="smallBody" tone="inherit" style={{ opacity: 0.6 }}>
-          WebGL dot-field motion per state. Large for tuning; card (22) / row (14) / tab (10) sizes
-          on the right.
+          Dot-field motion per state. Large for tuning; card (22) / row (14) / tab (10) sizes on the
+          right.
         </Typography>
       </div>
       <div className={gridClass}>
