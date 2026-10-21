@@ -103,7 +103,7 @@ jobs:
       - name: Build web assets
         run: npm run build:web
       - name: Build and publish the desktop app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Declare the macOS 26 SDK in LC_BUILD_VERSION without compiling
