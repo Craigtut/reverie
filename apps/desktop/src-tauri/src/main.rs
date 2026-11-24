@@ -17,6 +17,7 @@ mod commands;
 #[cfg(unix)]
 mod connection_commands;
 mod correlator;
+mod crash_log;
 mod dispatch;
 #[cfg(target_os = "macos")]
 mod dispatch_tap;
@@ -32,9 +33,6 @@ mod terminal;
 mod webview_health;
 #[cfg(target_os = "macos")]
 mod window_chrome;
-
-#[cfg(debug_assertions)]
-use std::{env, fs::OpenOptions, io::Write};
 
 use crate::correlator::ActivityIngestion;
 use reverie_core::WorkspaceService;
@@ -145,36 +143,6 @@ fn set_macos_dock_icon(png_bytes: &[u8]) {
     }
 }
 
-#[cfg(debug_assertions)]
-fn install_dev_panic_logger() {
-    let log_path = env::current_dir()
-        .unwrap_or_else(|_| env::temp_dir())
-        .join("reverie-dev-crashes.log");
-    eprintln!("[reverie] development panic log: {}", log_path.display());
-    std::panic::set_hook(Box::new(move |panic_info| {
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let message = format!(
-            "\n=== Reverie panic ===\nwhen: {}\ninfo: {panic_info}\nbacktrace:\n{backtrace}\n",
-            unix_time_millis_for_log(),
-        );
-        eprintln!("{message}");
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = file.write_all(message.as_bytes());
-        }
-    }));
-}
-
-#[cfg(not(debug_assertions))]
-fn install_dev_panic_logger() {}
-
-#[cfg(debug_assertions)]
-fn unix_time_millis_for_log() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-        .unwrap_or_default()
-}
-
 fn main() {
     // Must run before anything spawns a thread: a GUI launch (Finder/Dock) only
     // carries launchd's minimal PATH, so without this neither agent detection
@@ -182,7 +150,7 @@ fn main() {
     // PATH from the user's login shell. See `path_env` for the full rationale.
     path_env::hydrate_path_from_login_shell();
 
-    install_dev_panic_logger();
+    crate::crash_log::install_dev();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -255,6 +223,13 @@ fn main() {
             }
         })
         .setup(|app| {
+            match app.path().app_data_dir() {
+                Ok(dir) => crate::crash_log::install_release(
+                    dir,
+                    app.package_info().version.to_string(),
+                ),
+                Err(error) => eprintln!("[reverie] crash log disabled: {error}"),
+            }
             app.state::<WebviewHealth>().mark_heartbeat();
             webview_health::record(
                 app.handle(),
