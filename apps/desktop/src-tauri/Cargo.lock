@@ -4916,7 +4916,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-core"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "anyhow",
  "gix",
@@ -4935,7 +4935,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-desktop"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "anyhow",
  "block2",
@@ -4971,7 +4971,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-persistence"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "reverie-core",
  "rusqlite",
@@ -4981,7 +4981,7 @@ dependencies = [
 
 [[package]]
 name = "reverie-speech"
-version = "0.6.13"
+version = "0.6.14"
 dependencies = [
  "cpal",
  "fluidaudio-rs",
