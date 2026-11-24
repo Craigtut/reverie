@@ -7,6 +7,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+## [0.6.14] - 2026-11-23
+
+### Added
+- If Reverie ever hits an internal error, it now writes the details to
+  `crash.log` in its data folder
+  (`~/Library/Application Support/com.muselab.reverie/`), so a crash leaves a
+  readable cause behind.
+
+### Fixed
+- Reverie no longer quits without warning when macOS raises an internal error
+  while handling the mouse or keyboard (seen on macOS 27 when the pointer moved
+  over a system UI element). Other Mac apps log that error and carry on, but
+  Reverie's windowing layer turned it into a crash. Updating to Tauri 2.12 lets
+  macOS handle it the same way it does for every other app.
+- Session status indicators and the background dot field no longer go blank or
+  turn solid black after macOS restarts WebKit's graphics process. Reverie now
+  notices the restart and repaints them.
+- The hidden Dispatch popup no longer wakes up every time the main window gains
+  or loses focus. Those background wake-ups could make WebKit restart its
+  graphics process.
+
 ## [0.6.13] - 2026-10-19
 
 ### Fixed
